@@ -15,7 +15,7 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 1;
+constexpr std::uint32_t kProjectVersion = 2;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 
 std::string WideToUtf8(const std::wstring& value) {
@@ -213,11 +213,6 @@ bool ReadImage(ByteReader& reader, PageImage& image) {
     return reader.ReadBlob(image.pixels);
 }
 
-void OverlayPageContent(Page& destination, const Page& source) {
-    destination.strokes = source.strokes;
-    destination.images = source.images;
-}
-
 }  // namespace
 
 std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBackend& pdfBackend) {
@@ -239,7 +234,7 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
         && (std::memcmp(magic, kCnoteMagic, sizeof(kCnoteMagic)) == 0
             || std::memcmp(magic, kLegacyProjectMagic, sizeof(kLegacyProjectMagic)) == 0);
     if (!validMagic
-        || !reader.Read(version) || version != kProjectVersion || !reader.Read(flags)
+        || !reader.Read(version) || (version != 1U && version != kProjectVersion) || !reader.Read(flags)
         || !reader.Read(currentPageIndex) || !reader.Read(pageCount) || !reader.ReadString(sourcePath)
         || !reader.ReadBlob(pdfBytes)) {
         return std::nullopt;
@@ -251,7 +246,17 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
         Page page {};
         std::uint32_t strokeCount = 0;
         std::uint32_t imageCount = 0;
-        if (!reader.Read(page.width) || !reader.Read(page.height) || !reader.Read(strokeCount) || !reader.Read(imageCount)) {
+        if (!reader.Read(page.width) || !reader.Read(page.height)) {
+            return std::nullopt;
+        }
+        if (version >= 2U) {
+            if (!reader.Read(page.sourcePdfPageIndex)) {
+                return std::nullopt;
+            }
+        } else {
+            page.sourcePdfPageIndex = (flags & kProjectFlagHasPdf) != 0U ? static_cast<std::int32_t>(pageIndex) : -1;
+        }
+        if (!reader.Read(strokeCount) || !reader.Read(imageCount)) {
             return std::nullopt;
         }
 
@@ -282,16 +287,24 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
         if (!opened.has_value()) {
             return std::nullopt;
         }
-        if (opened->PageCount() != savedPages.size()) {
-            return std::nullopt;
+
+        std::vector<Page> pages;
+        pages.reserve(savedPages.size());
+        for (Page& savedPage : savedPages) {
+            if (savedPage.sourcePdfPageIndex >= 0
+                && static_cast<std::size_t>(savedPage.sourcePdfPageIndex) < opened->PageCount()) {
+                const Page& sourcePage = opened->PageAt(static_cast<std::size_t>(savedPage.sourcePdfPageIndex));
+                savedPage.width = sourcePage.width;
+                savedPage.height = sourcePage.height;
+                savedPage.raster = sourcePage.raster;
+            } else {
+                savedPage.sourcePdfPageIndex = -1;
+                savedPage.raster = {};
+            }
+            pages.push_back(std::move(savedPage));
         }
 
-        for (std::size_t pageIndex = 0; pageIndex < savedPages.size(); ++pageIndex) {
-            OverlayPageContent(opened->PageAt(pageIndex), savedPages[pageIndex]);
-        }
-        opened->SetFilePath(filePath);
-        static_cast<void>(opened->SetCurrentPageIndex(currentPageIndex));
-        return opened;
+        return Document::CreateProjectDocument(filePath, sourcePath, sharedPdfBytes, std::move(pages), currentPageIndex);
     }
 
     return Document::CreateEditable(filePath, std::move(savedPages), currentPageIndex);
@@ -319,6 +332,7 @@ bool ProjectFile::Save(const Document& document, const std::wstring& filePath) {
         const auto imageCount = static_cast<std::uint32_t>(page.images.size());
         AppendValue(bytes, page.width);
         AppendValue(bytes, page.height);
+        AppendValue(bytes, page.sourcePdfPageIndex);
         AppendValue(bytes, strokeCount);
         AppendValue(bytes, imageCount);
         for (const Stroke& stroke : page.strokes) {

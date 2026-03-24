@@ -214,9 +214,16 @@ RasterImage ComposePageRaster(
     float strokeSmoothing,
     bool includeStrokes) {
     const Page& page = document.PageAt(pageIndex);
-    RasterImage raster = document.HasPdfData()
-        ? backend.RenderPage(document.PdfData(), pageIndex, renderScale).value_or(CreateBlankRaster(page.width, page.height, renderScale))
-        : CreateBlankRaster(page.width, page.height, renderScale);
+    std::optional<RasterImage> pdfRaster;
+    if (document.HasPdfData() && page.sourcePdfPageIndex >= 0) {
+        pdfRaster = backend.RenderPage(document.PdfData(), static_cast<std::size_t>(page.sourcePdfPageIndex), renderScale);
+    }
+
+    const bool useStoredRaster = !pdfRaster.has_value()
+        && !page.raster.pixels.empty()
+        && page.raster.width > 0
+        && page.raster.height > 0;
+    RasterImage raster = pdfRaster.value_or(CreateBlankRaster(page.width, page.height, renderScale));
 
     Gdiplus::Bitmap bitmap(
         raster.width,
@@ -230,6 +237,22 @@ RasterImage ComposePageRaster(
     graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
     graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
     graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+
+    if (useStoredRaster) {
+        Gdiplus::Bitmap sourceBitmap(
+            page.raster.width,
+            page.raster.height,
+            page.raster.stride,
+            PixelFormat32bppARGB,
+            const_cast<BYTE*>(reinterpret_cast<const BYTE*>(page.raster.pixels.data())));
+        graphics.DrawImage(
+            &sourceBitmap,
+            Gdiplus::RectF(
+                0.0f,
+                0.0f,
+                static_cast<Gdiplus::REAL>(raster.width),
+                static_cast<Gdiplus::REAL>(raster.height)));
+    }
 
     for (const PageImage& image : page.images) {
         DrawPageImage(graphics, image, renderScale);
@@ -362,6 +385,7 @@ std::optional<Document> PdfiumBackend::OpenFromMemory(
         Page page {};
         page.width = std::max(1.0f, FPDF_GetPageWidthF(pageHandle));
         page.height = std::max(1.0f, FPDF_GetPageHeightF(pageHandle));
+        page.sourcePdfPageIndex = pageIndex;
 
         if (const auto raster = RenderPageBitmap(pageHandle, kInitialRenderScale); raster.has_value()) {
             page.raster = std::move(*raster);

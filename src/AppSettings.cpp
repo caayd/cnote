@@ -192,7 +192,7 @@ void App::ToggleBrushSettings() {
 }
 
 void App::TogglePdfSidebar() {
-    if (!document_.IsPdfDocument() || document_.PageCount() == 0U) {
+    if (document_.PageCount() == 0U) {
         pdfSidebarOpen_ = false;
         pdfSidebarScrollY_ = 0;
         CancelPageJumpInput();
@@ -581,10 +581,17 @@ void App::ExecuteShortcutAction(ShortcutAction action) {
         static_cast<void>(ExportAsPdf());
         break;
     case ShortcutAction::Copy:
-        static_cast<void>(CopySelectionToClipboard());
+        if (SidebarOwnsKeyboardShortcuts()) {
+            CopyCurrentPageToSidebarBuffer();
+            InvalidateRect(window_, nullptr, FALSE);
+        } else {
+            static_cast<void>(CopySelectionToClipboard());
+        }
         break;
     case ShortcutAction::Paste:
-        if (!PasteSelectionFromClipboard()) {
+        if (SidebarOwnsKeyboardShortcuts()) {
+            static_cast<void>(PasteSidebarPageAfterCurrent());
+        } else if (!PasteSelectionFromClipboard()) {
             static_cast<void>(PasteImageFromClipboard());
         }
         break;

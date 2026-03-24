@@ -75,6 +75,7 @@ struct SidebarHeaderLayout {
     RECT previousPageRect {};
     RECT pageLabelRect {};
     RECT nextPageRect {};
+    RECT addPageRect {};
     RECT contentRect {};
 };
 
@@ -782,11 +783,14 @@ SidebarHeaderLayout BuildSidebarHeaderLayout(RECT sidebarRect) {
     const int padding = 12;
     const int buttonSize = 26;
     const int gap = 8;
-    const int headerHeight = 44;
+    const int actionHeight = 24;
+    const int headerHeight = 76;
     layout.headerRect = MakeRect(sidebarRect.left + padding, sidebarRect.top + padding, sidebarRect.right - padding, sidebarRect.top + padding + headerHeight);
-    layout.previousPageRect = MakeRect(layout.headerRect.left, layout.headerRect.top + 9, layout.headerRect.left + buttonSize, layout.headerRect.top + 9 + buttonSize);
-    layout.nextPageRect = MakeRect(layout.headerRect.right - buttonSize, layout.headerRect.top + 9, layout.headerRect.right, layout.headerRect.top + 9 + buttonSize);
-    layout.pageLabelRect = MakeRect(layout.previousPageRect.right + gap, layout.headerRect.top + 7, layout.nextPageRect.left - gap, layout.headerRect.bottom - 7);
+    layout.previousPageRect = MakeRect(layout.headerRect.left, layout.headerRect.top + 8, layout.headerRect.left + buttonSize, layout.headerRect.top + 8 + buttonSize);
+    layout.nextPageRect = MakeRect(layout.headerRect.right - buttonSize, layout.headerRect.top + 8, layout.headerRect.right, layout.headerRect.top + 8 + buttonSize);
+    layout.pageLabelRect = MakeRect(layout.previousPageRect.right + gap, layout.headerRect.top + 6, layout.nextPageRect.left - gap, layout.previousPageRect.bottom + 2);
+    const int actionTop = layout.headerRect.bottom - actionHeight - 10;
+    layout.addPageRect = MakeRect(layout.headerRect.left, actionTop, layout.headerRect.right, actionTop + actionHeight);
     layout.contentRect = MakeRect(sidebarRect.left, layout.headerRect.bottom + 8, sidebarRect.right, sidebarRect.bottom);
     return layout;
 }
@@ -1476,7 +1480,12 @@ void App::StartRenderWorker() {
             result.pageIndex = request.pageIndex;
             result.renderScale = request.renderScale;
             result.generation = request.generation;
-            result.raster = workerBackend.RenderPage(request.pdfData, request.pageIndex, request.renderScale);
+            if (request.sourcePdfPageIndex >= 0) {
+                result.raster = workerBackend.RenderPage(
+                    request.pdfData,
+                    static_cast<std::size_t>(request.sourcePdfPageIndex),
+                    request.renderScale);
+            }
 
             {
                 std::lock_guard lock(renderMutex_);
@@ -1598,8 +1607,9 @@ void App::PrepareForDocumentSwitch() {
 
 void App::ApplyDocument(Document document, bool resetBrushWidth) {
     document_ = std::move(document);
-    pdfSidebarOpen_ = pdfSidebarOpen_ && document_.IsPdfDocument();
+    pdfSidebarOpen_ = pdfSidebarOpen_ && document_.PageCount() > 0U;
     pdfSidebarScrollY_ = 0;
+    copiedSidebarPage_.reset();
     CancelPageJumpInput();
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
@@ -1656,6 +1666,17 @@ std::wstring App::SuggestedPdfExportPath() const {
 void App::ClearHistory() {
     undoActions_.clear();
     redoActions_.clear();
+}
+
+void App::ResetPendingRasterWork() {
+    CancelDeferredRasterRefresh();
+    ++renderGeneration_;
+    pendingRenderScales_.clear();
+    {
+        std::lock_guard lock(renderMutex_);
+        renderRequests_.clear();
+        renderResults_.clear();
+    }
 }
 
 void App::ClosePaletteOverlays() {
@@ -1777,6 +1798,7 @@ void App::InvalidatePageSurfaceCache(std::size_t pageIndex) {
     cache.rasterScale = 0.0f;
     cache.pageScale = 0.0f;
     cache.strokeCount = 0;
+    InvalidateSidebarThumbnailCache(pageIndex);
 }
 
 void App::InvalidateAllPageSurfaceCaches() {
@@ -1918,6 +1940,73 @@ void App::FocusPage(std::size_t index) {
     const int desiredCenterY = canvasTop + (canvasHeight / 2);
     panY_ += static_cast<float>(desiredCenterY - pageCenterY);
     InvalidateRect(window_, nullptr, FALSE);
+}
+
+void App::AddBlankPageAfterCurrent() {
+    if (document_.PageCount() == 0U) {
+        return;
+    }
+
+    const Page& currentPage = document_.CurrentPage();
+    Page newPage {};
+    newPage.width = currentPage.width;
+    newPage.height = currentPage.height;
+
+    ResetPendingRasterWork();
+    ClearSelection();
+    ClearHistory();
+    const std::size_t insertIndex = document_.InsertPage(document_.CurrentPageIndex() + 1U, std::move(newPage));
+    pageSurfaceCaches_.assign(document_.PageCount(), {});
+    sidebarThumbnailCaches_.assign(document_.PageCount(), {});
+    document_.SetCurrentPageIndex(insertIndex);
+    EnsureSidebarCurrentPageVisible();
+    EnsureVisiblePageRasterQuality();
+    FocusPage(insertIndex);
+}
+
+void App::CopyCurrentPageToSidebarBuffer() {
+    if (document_.PageCount() == 0U) {
+        copiedSidebarPage_.reset();
+        return;
+    }
+
+    copiedSidebarPage_ = document_.CurrentPage();
+}
+
+bool App::PasteSidebarPageAfterCurrent() {
+    if (!copiedSidebarPage_.has_value() || document_.PageCount() == 0U) {
+        return false;
+    }
+
+    ResetPendingRasterWork();
+    ClearSelection();
+    ClearHistory();
+    const std::size_t insertIndex = document_.InsertPage(document_.CurrentPageIndex() + 1U, *copiedSidebarPage_);
+    pageSurfaceCaches_.assign(document_.PageCount(), {});
+    sidebarThumbnailCaches_.assign(document_.PageCount(), {});
+    document_.SetCurrentPageIndex(insertIndex);
+    EnsureSidebarCurrentPageVisible();
+    EnsureVisiblePageRasterQuality();
+    FocusPage(insertIndex);
+    return true;
+}
+
+bool App::DeleteCurrentPage() {
+    if (document_.PageCount() <= 1U) {
+        return false;
+    }
+
+    ResetPendingRasterWork();
+    ClearSelection();
+    ClearHistory();
+    const std::size_t currentIndex = document_.CurrentPageIndex();
+    const std::size_t focusIndex = document_.RemovePage(currentIndex);
+    pageSurfaceCaches_.assign(document_.PageCount(), {});
+    sidebarThumbnailCaches_.assign(document_.PageCount(), {});
+    EnsureSidebarCurrentPageVisible();
+    EnsureVisiblePageRasterQuality();
+    FocusPage(focusIndex);
+    return true;
 }
 
 void App::ClearSelection() {
@@ -2402,7 +2491,21 @@ std::wstring App::PageIndicatorLabel() const {
 }
 
 bool App::IsPdfSidebarVisible() const {
-    return pdfSidebarOpen_ && document_.IsPdfDocument() && document_.PageCount() > 0U;
+    return pdfSidebarOpen_ && document_.PageCount() > 0U;
+}
+
+bool App::SidebarOwnsKeyboardShortcuts() const {
+    if (!IsPdfSidebarVisible() || window_ == nullptr) {
+        return false;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const RECT sidebarRect = PdfSidebarRect(clientRect);
+    POINT cursor {};
+    GetCursorPos(&cursor);
+    ScreenToClient(window_, &cursor);
+    return PtInRect(&sidebarRect, cursor) != 0;
 }
 
 int App::PdfSidebarWidth() const {
@@ -2509,11 +2612,6 @@ void App::EnsureSidebarThumbnailCache(std::size_t pageIndex, int width, int heig
     }
 
     const Page& page = document_.PageAt(pageIndex);
-    if (page.raster.pixels.empty() || page.raster.width <= 0 || page.raster.height <= 0) {
-        InvalidateSidebarThumbnailCache(pageIndex);
-        return;
-    }
-
     SidebarThumbnailCache& cache = sidebarThumbnailCaches_[pageIndex];
     if (cache.valid
         && cache.width == width
@@ -2532,20 +2630,106 @@ void App::EnsureSidebarThumbnailCache(std::size_t pageIndex, int width, int heig
     cache.sourceScale = page.raster.scale;
     cache.pixels.assign(static_cast<std::size_t>(cache.stride * cache.height), 255);
 
-    for (int y = 0; y < height; ++y) {
-        const int sourceY = std::clamp((y * page.raster.height) / height, 0, page.raster.height - 1);
-        const std::uint8_t* sourceRow = page.raster.pixels.data() + (sourceY * page.raster.stride);
-        std::uint8_t* outputRow = cache.pixels.data() + (y * cache.stride);
-        for (int x = 0; x < width; ++x) {
-            const int sourceX = std::clamp((x * page.raster.width) / width, 0, page.raster.width - 1);
-            const std::uint8_t* sourcePixel = sourceRow + (sourceX * 4);
-            std::uint8_t* outputPixel = outputRow + (x * 4);
-            outputPixel[0] = sourcePixel[0];
-            outputPixel[1] = sourcePixel[1];
-            outputPixel[2] = sourcePixel[2];
-            outputPixel[3] = sourcePixel[3];
-        }
+    BITMAPINFO bitmapInfo {};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = width;
+    bitmapInfo.bmiHeader.biHeight = -height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    HDC cacheDc = CreateCompatibleDC(nullptr);
+    if (cacheDc == nullptr) {
+        InvalidateSidebarThumbnailCache(pageIndex);
+        return;
     }
+
+    void* bits = nullptr;
+    HBITMAP cacheBitmap = CreateDIBSection(cacheDc, &bitmapInfo, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (cacheBitmap == nullptr || bits == nullptr) {
+        if (cacheBitmap != nullptr) {
+            DeleteObject(cacheBitmap);
+        }
+        DeleteDC(cacheDc);
+        InvalidateSidebarThumbnailCache(pageIndex);
+        return;
+    }
+
+    HGDIOBJ previousBitmap = SelectObject(cacheDc, cacheBitmap);
+    RECT cacheRect = MakeRect(0, 0, width, height);
+    HBRUSH pageBrush = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(cacheDc, &cacheRect, pageBrush);
+    DeleteObject(pageBrush);
+
+    if (!page.raster.pixels.empty() && page.raster.width > 0 && page.raster.height > 0) {
+        BITMAPINFO pageBitmapInfo {};
+        pageBitmapInfo.bmiHeader.biSize = sizeof(pageBitmapInfo.bmiHeader);
+        pageBitmapInfo.bmiHeader.biWidth = page.raster.width;
+        pageBitmapInfo.bmiHeader.biHeight = -page.raster.height;
+        pageBitmapInfo.bmiHeader.biPlanes = 1;
+        pageBitmapInfo.bmiHeader.biBitCount = 32;
+        pageBitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+        SetStretchBltMode(cacheDc, HALFTONE);
+        StretchDIBits(
+            cacheDc,
+            0,
+            0,
+            width,
+            height,
+            0,
+            0,
+            page.raster.width,
+            page.raster.height,
+            page.raster.pixels.data(),
+            &pageBitmapInfo,
+            DIB_RGB_COLORS,
+            SRCCOPY);
+    }
+
+    const float scaleX = width > 0 ? static_cast<float>(width) / std::max(1.0f, page.width) : 1.0f;
+    const float scaleY = height > 0 ? static_cast<float>(height) / std::max(1.0f, page.height) : 1.0f;
+    const PageView cacheView {
+        MakeRect(0, 0, width, height),
+        pageIndex,
+        std::min(scaleX, scaleY),
+        true,
+    };
+
+    Gdiplus::Graphics imageGraphics(cacheDc);
+    imageGraphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    imageGraphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+    imageGraphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+    for (const PageImage& image : page.images) {
+        if (image.pixels.empty() || image.pixelWidth <= 0 || image.pixelHeight <= 0) {
+            continue;
+        }
+
+        Gdiplus::Bitmap bitmap(
+            image.pixelWidth,
+            image.pixelHeight,
+            image.stride,
+            PixelFormat32bppRGB,
+            const_cast<BYTE*>(reinterpret_cast<const BYTE*>(image.pixels.data())));
+        const Gdiplus::REAL centerX = static_cast<Gdiplus::REAL>((image.x + (image.width * 0.5f)) * cacheView.scale);
+        const Gdiplus::REAL centerY = static_cast<Gdiplus::REAL>((image.y + (image.height * 0.5f)) * cacheView.scale);
+        const Gdiplus::REAL drawWidth = static_cast<Gdiplus::REAL>(image.width * cacheView.scale);
+        const Gdiplus::REAL drawHeight = static_cast<Gdiplus::REAL>(image.height * cacheView.scale);
+
+        imageGraphics.ResetTransform();
+        imageGraphics.TranslateTransform(centerX, centerY);
+        imageGraphics.RotateTransform(image.rotationDegrees);
+        imageGraphics.DrawImage(&bitmap, -drawWidth * 0.5f, -drawHeight * 0.5f, drawWidth, drawHeight);
+    }
+    imageGraphics.ResetTransform();
+    for (const Stroke& stroke : page.strokes) {
+        PaintStroke(cacheDc, stroke, cacheView, false);
+    }
+
+    std::copy_n(static_cast<const std::uint8_t*>(bits), cache.pixels.size(), cache.pixels.data());
+    SelectObject(cacheDc, previousBitmap);
+    DeleteObject(cacheBitmap);
+    DeleteDC(cacheDc);
 
     cache.valid = true;
 }
@@ -4157,6 +4341,11 @@ bool App::HandleSidebarClick(POINT cursor) {
         return true;
     }
 
+    if (PtInRect(&headerLayout.addPageRect, cursor) != 0) {
+        AddBlankPageAfterCurrent();
+        return true;
+    }
+
     if (const auto sidebarPage = HitTestSidebarPage(cursor); sidebarPage.has_value()) {
         FocusPage(*sidebarPage);
     }
@@ -4440,6 +4629,9 @@ void App::QueuePageRasterRequest(const PageView& pageView) {
     }
 
     Page& page = document_.PageAt(pageView.pageIndex);
+    if (page.sourcePdfPageIndex < 0) {
+        return;
+    }
     const float desiredScale = DesiredRenderScale(pageView);
     const float currentScale = page.raster.scale;
     const bool missingRaster = page.raster.pixels.empty() || page.raster.width <= 0 || page.raster.height <= 0;
@@ -4466,7 +4658,7 @@ void App::QueuePageRasterRequest(const PageView& pageView) {
                         && request.renderScale <= desiredScale + 0.001f;
                 }),
             renderRequests_.end());
-        renderRequests_.push_back({ document_.PdfData(), pageView.pageIndex, desiredScale, renderGeneration_ });
+        renderRequests_.push_back({ document_.PdfData(), pageView.pageIndex, page.sourcePdfPageIndex, desiredScale, renderGeneration_ });
     }
     renderCv_.notify_one();
 }
@@ -5166,8 +5358,16 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
         RECT labelRect = rect;
         DrawTextW(hdc, label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     };
+    const auto paintActionButton = [&](RECT rect, const wchar_t* label, bool enabled, bool accentFill) {
+        FillRoundedRect(hdc, rect, accentFill ? RGB(32, 63, 102) : RGB(27, 34, 43));
+        StrokeRoundedRect(hdc, rect, enabled ? panelBorder : RGB(55, 63, 75), 1);
+        SetTextColor(hdc, enabled ? primaryText : RGB(102, 111, 124));
+        RECT labelRect = rect;
+        DrawTextW(hdc, label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    };
     paintHeaderButton(headerLayout.previousPageRect, L"<", CanGoToPreviousPage());
     paintHeaderButton(headerLayout.nextPageRect, L">", CanGoToNextPage());
+    paintActionButton(headerLayout.addPageRect, L"New Page", true, true);
 
     const std::wstring pageLabel = PageIndicatorLabel();
     RECT pageLabelRect = headerLayout.pageLabelRect;
@@ -5219,32 +5419,30 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
         FillRect(hdc, &thumbRect, pageBrush);
         DeleteObject(pageBrush);
 
-        if (!page.raster.pixels.empty() && page.raster.width > 0 && page.raster.height > 0) {
-            EnsureSidebarThumbnailCache(pageIndex, thumbRect.right - thumbRect.left, thumbRect.bottom - thumbRect.top);
-            const SidebarThumbnailCache* cache = pageIndex < sidebarThumbnailCaches_.size() ? &sidebarThumbnailCaches_[pageIndex] : nullptr;
-            if (cache != nullptr && cache->valid && !cache->pixels.empty()) {
-                BITMAPINFO bitmapInfo {};
-                bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
-                bitmapInfo.bmiHeader.biWidth = cache->width;
-                bitmapInfo.bmiHeader.biHeight = -cache->height;
-                bitmapInfo.bmiHeader.biPlanes = 1;
-                bitmapInfo.bmiHeader.biBitCount = 32;
-                bitmapInfo.bmiHeader.biCompression = BI_RGB;
+        EnsureSidebarThumbnailCache(pageIndex, thumbRect.right - thumbRect.left, thumbRect.bottom - thumbRect.top);
+        const SidebarThumbnailCache* cache = pageIndex < sidebarThumbnailCaches_.size() ? &sidebarThumbnailCaches_[pageIndex] : nullptr;
+        if (cache != nullptr && cache->valid && !cache->pixels.empty()) {
+            BITMAPINFO bitmapInfo {};
+            bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+            bitmapInfo.bmiHeader.biWidth = cache->width;
+            bitmapInfo.bmiHeader.biHeight = -cache->height;
+            bitmapInfo.bmiHeader.biPlanes = 1;
+            bitmapInfo.bmiHeader.biBitCount = 32;
+            bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
-                SetDIBitsToDevice(
-                    hdc,
-                    thumbRect.left,
-                    thumbRect.top,
-                    static_cast<DWORD>(cache->width),
-                    static_cast<DWORD>(cache->height),
-                    0,
-                    0,
-                    0,
-                    static_cast<UINT>(cache->height),
-                    cache->pixels.data(),
-                    &bitmapInfo,
-                    DIB_RGB_COLORS);
-            }
+            SetDIBitsToDevice(
+                hdc,
+                thumbRect.left,
+                thumbRect.top,
+                static_cast<DWORD>(cache->width),
+                static_cast<DWORD>(cache->height),
+                0,
+                0,
+                0,
+                static_cast<UINT>(cache->height),
+                cache->pixels.data(),
+                &bitmapInfo,
+                DIB_RGB_COLORS);
         } else {
             HPEN placeholderPen = CreatePen(PS_SOLID, 1, RGB(205, 211, 220));
             HGDIOBJ oldPlaceholderPen = SelectObject(hdc, placeholderPen);
@@ -6331,7 +6529,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
 
         if (wParam == VK_DELETE) {
-            DeleteSelection();
+            if (SidebarOwnsKeyboardShortcuts()) {
+                static_cast<void>(DeleteCurrentPage());
+            } else {
+                DeleteSelection();
+            }
             return 0;
         }
 

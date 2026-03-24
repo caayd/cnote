@@ -124,6 +124,7 @@ public:
     struct RenderRequest {
         std::shared_ptr<std::vector<std::uint8_t>> pdfData {};
         std::size_t pageIndex = 0;
+        std::int32_t sourcePdfPageIndex = -1;
         float renderScale = 0.0f;
         std::uint64_t generation = 0;
     };
@@ -182,6 +183,10 @@ private:
     void NextPage();
     void SetCurrentPageIndex(std::size_t index);
     void FocusPage(std::size_t index);
+    void AddBlankPageAfterCurrent();
+    void CopyCurrentPageToSidebarBuffer();
+    bool PasteSidebarPageAfterCurrent();
+    bool DeleteCurrentPage();
     void ToggleBrushSettings();
     void TogglePdfSidebar();
     void Undo();
@@ -244,6 +249,8 @@ private:
     void HandleDeferredRasterRefresh();
     void HandleCompletedRenderResults();
     void QueuePageRasterRequest(const PageView& pageView);
+    void ResetPendingRasterWork();
+    [[nodiscard]] bool SidebarOwnsKeyboardShortcuts() const;
     void ClearSelection();
     [[nodiscard]] bool HasSelection() const;
     [[nodiscard]] bool HasSelectedStrokes() const;
@@ -406,6 +413,7 @@ private:
     HCURSOR eraserCursor_ = nullptr;
     bool pdfSidebarOpen_ = false;
     int pdfSidebarScrollY_ = 0;
+    std::optional<Page> copiedSidebarPage_ {};
     bool pageJumpEditing_ = false;
     bool pageJumpReplaceOnType_ = false;
     std::wstring pageJumpText_ {};

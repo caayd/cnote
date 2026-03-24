@@ -45,6 +45,7 @@ struct RasterImage {
 struct Page {
     float width = 612.0f;
     float height = 792.0f;
+    std::int32_t sourcePdfPageIndex = -1;
     RasterImage raster {};
     std::vector<PageImage> images;
     std::vector<Stroke> strokes;
@@ -79,6 +80,8 @@ public:
     [[nodiscard]] const Page& PageAt(std::size_t index) const noexcept;
 
     bool SetCurrentPageIndex(std::size_t index);
+    std::size_t InsertPage(std::size_t index, Page page);
+    std::size_t RemovePage(std::size_t index);
     void SetFilePath(std::wstring filePath);
     void ResetToBlank();
     void ReplaceWithEditable(std::wstring filePath, std::vector<Page> pages, std::size_t currentPageIndex = 0);

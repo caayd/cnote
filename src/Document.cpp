@@ -94,6 +94,29 @@ bool Document::SetCurrentPageIndex(std::size_t index) {
     return true;
 }
 
+std::size_t Document::InsertPage(std::size_t index, Page page) {
+    const std::size_t insertIndex = std::min(index, pages_.size());
+    pages_.insert(pages_.begin() + static_cast<std::ptrdiff_t>(insertIndex), std::move(page));
+    if (insertIndex <= currentPageIndex_ && pages_.size() > 1U) {
+        ++currentPageIndex_;
+    }
+    return insertIndex;
+}
+
+std::size_t Document::RemovePage(std::size_t index) {
+    if (pages_.size() <= 1U || index >= pages_.size()) {
+        return currentPageIndex_;
+    }
+
+    pages_.erase(pages_.begin() + static_cast<std::ptrdiff_t>(index));
+    if (currentPageIndex_ > index) {
+        --currentPageIndex_;
+    } else if (currentPageIndex_ >= pages_.size()) {
+        currentPageIndex_ = pages_.size() - 1U;
+    }
+    return currentPageIndex_;
+}
+
 void Document::SetFilePath(std::wstring filePath) {
     filePath_ = std::move(filePath);
 }
