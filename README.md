@@ -1,4 +1,4 @@
-# ctrainer
+# cnote
 
 Native C++ prototype for a PDF-oriented drawing and annotation app.
 
@@ -23,6 +23,8 @@ What it does today:
 - supports zooming, panning, brush sizing, and color switching
 - renders opened PDFs in a stacked multi-page document view and lets you ink on top of each page
 - dynamically upgrades raster quality and caches visible page surfaces to keep scrolling and drawing responsive
+- saves editable note files as `.cnote`, embedding the source PDF and all overlays for later editing
+- reopens `.cnote` files directly from the app or from a shell file association/command-line launch
 
 What it does not do yet:
 
@@ -39,7 +41,7 @@ cmake --build build
 Run:
 
 ```powershell
-.\build\ctrainer.exe
+.\build\cnote.exe
 ```
 
 ## Controls
@@ -53,7 +55,8 @@ Run:
 - `Page Up` / `Page Down`: jump focus to the previous or next PDF page
 - `Arrow Keys`: pan
 - `Ctrl+N`: new blank document
-- `Ctrl+O`: open and render a PDF
+- `Ctrl+O`: open a `.pdf` or `.cnote`
+- `Ctrl+S`: choose a save location and write a `.cnote` file
 - `Ctrl+Z`: undo
 - `Ctrl+Y` or `Ctrl+Shift+Z`: redo
 - `[` or `-`: smaller brush
@@ -65,6 +68,14 @@ Run:
 ## PDF backend
 
 The app now uses PDFium behind `IPdfBackend` in [src/PdfBackend.h](C:\Users\Cayd\Documents\Projects\ctrainer\src\PdfBackend.h) to rasterize PDF pages into bitmaps for display.
+
+## Cnote files
+
+The editor-native note format is `.cnote`.
+
+- If you open a PDF and save a note, the `.cnote` file embeds the PDF bytes plus strokes and pasted images so the note stays editable even if the original PDF moves.
+- If you start from a blank document, the `.cnote` file stores the editable page content without requiring a PDF source.
+- Use `File > Export as PDF...` to write a flattened PDF version of the current note.
 
 The next natural steps are:
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(ctrainer VERSION 0.1.0 LANGUAGES CXX)
+project(cnote VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,14 +10,15 @@ set(PDFIUM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium")
 set(PDFIUM_DLL "${PDFIUM_ROOT}/bin/pdfium.dll")
 set(PDFIUM_IMPLIB "${PDFIUM_ROOT}/lib/libpdfium.dll.a")
 
-add_executable(ctrainer WIN32
+add_executable(cnote WIN32
     src/App.cpp
     src/Document.cpp
     src/PdfBackend.cpp
+    src/ProjectFile.cpp
     src/main.cpp
 )
 
-target_include_directories(ctrainer PRIVATE src)
+target_include_directories(cnote PRIVATE src)
 
 if(MINGW AND EXISTS "${PDFIUM_DLL}" AND NOT EXISTS "${PDFIUM_IMPLIB}")
     find_program(GENDEF_EXECUTABLE gendef REQUIRED)
@@ -42,13 +43,13 @@ set_target_properties(pdfium PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${PDFIUM_ROOT}/include;${PDFIUM_ROOT}/include/cpp"
 )
 
-target_compile_definitions(ctrainer PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(cnote PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 
-target_compile_options(ctrainer PRIVATE
+target_compile_options(cnote PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
 
-target_link_libraries(ctrainer PRIVATE
+target_link_libraries(cnote PRIVATE
     comdlg32
     dwmapi
     gdi32
@@ -57,8 +58,8 @@ target_link_libraries(ctrainer PRIVATE
     user32
 )
 
-add_custom_command(TARGET ctrainer POST_BUILD
+add_custom_command(TARGET cnote POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
         "${PDFIUM_DLL}"
-        "$<TARGET_FILE_DIR:ctrainer>/pdfium.dll"
+        "$<TARGET_FILE_DIR:cnote>/pdfium.dll"
 )

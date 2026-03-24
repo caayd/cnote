@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
+#include <filesystem>
 #include <utility>
 
 #include <commdlg.h>
@@ -14,12 +15,12 @@
 #include <gdiplus.h>
 #include <windowsx.h>
 
-namespace ctrainer {
+namespace cnote {
 
 namespace {
 
-constexpr wchar_t kWindowClassName[] = L"CTrainerPrototypeWindow";
-constexpr wchar_t kWindowTitle[] = L"ctrainer - PDF Drawing Prototype";
+constexpr wchar_t kWindowClassName[] = L"CnoteWindow";
+constexpr wchar_t kWindowTitle[] = L"cnote";
 constexpr int kToolbarPadding = 18;
 constexpr int kToolButtonWidth = 92;
 constexpr int kToolButtonHeight = 34;
@@ -27,7 +28,9 @@ constexpr int kColorSwatchSize = 26;
 constexpr int kColorSwatchGap = 10;
 constexpr unsigned int kCommandFileNew = 1001;
 constexpr unsigned int kCommandFileOpen = 1002;
-constexpr unsigned int kCommandFileExit = 1003;
+constexpr unsigned int kCommandFileSaveCnote = 1003;
+constexpr unsigned int kCommandFileExportPdf = 1004;
+constexpr unsigned int kCommandFileExit = 1005;
 constexpr unsigned int kCommandEditUndo = 1101;
 constexpr unsigned int kCommandEditRedo = 1102;
 constexpr unsigned int kCommandEditBrushSettings = 1103;
@@ -86,6 +89,26 @@ std::wstring BaseName(const std::wstring& path) {
     }
 
     return path.substr(slash + 1);
+}
+
+std::wstring Lowercase(std::wstring value) {
+    std::transform(
+        value.begin(),
+        value.end(),
+        value.begin(),
+        [](wchar_t ch) {
+            return static_cast<wchar_t>(std::towlower(ch));
+        });
+    return value;
+}
+
+bool HasExtension(const std::wstring& path, const wchar_t* extension) {
+    const std::wstring normalizedPath = Lowercase(path);
+    const std::wstring normalizedExtension = Lowercase(extension == nullptr ? L"" : extension);
+    if (normalizedExtension.empty() || normalizedPath.size() < normalizedExtension.size()) {
+        return false;
+    }
+    return normalizedPath.ends_with(normalizedExtension);
 }
 
 ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount) {
@@ -586,7 +609,7 @@ bool ImageIntersectsPolygonSelection(const PageImage& image, const std::vector<V
 }
 
 UINT SelectionClipboardFormat() {
-    static const UINT format = RegisterClipboardFormatW(L"ctrainer.selection.v1");
+    static const UINT format = RegisterClipboardFormatW(L"cnote.selection.v1");
     return format;
 }
 
@@ -629,7 +652,7 @@ void App::StartRenderWorker() {
             result.pageIndex = request.pageIndex;
             result.renderScale = request.renderScale;
             result.generation = request.generation;
-            result.raster = workerBackend.RenderPage(request.sourcePath, request.pageIndex, request.renderScale);
+            result.raster = workerBackend.RenderPage(request.pdfData, request.pageIndex, request.renderScale);
 
             {
                 std::lock_guard lock(renderMutex_);
@@ -655,9 +678,13 @@ void App::StopRenderWorker() {
     }
 }
 
-int App::Run(int showCommand) {
+int App::Run(int showCommand, std::optional<std::wstring> startupPath) {
     if (!CreateMainWindow(showCommand)) {
         return 1;
+    }
+
+    if (startupPath.has_value() && !startupPath->empty()) {
+        static_cast<void>(OpenDocumentPath(*startupPath));
     }
 
     MSG message {};
@@ -720,11 +747,15 @@ bool App::CreateMainWindow(int showCommand) {
 }
 
 void App::CreateBlankDocument() {
+    PrepareForDocumentSwitch();
+    ApplyDocument(Document::CreateBlank(), true);
+}
+
+void App::PrepareForDocumentSwitch() {
     CancelDeferredRasterRefresh();
     KillTimer(window_, kZoomSessionTimerId);
     zoomSessionActive_ = false;
     zoomAnchorValid_ = false;
-    document_.ResetToBlank();
     ++renderGeneration_;
     pendingRenderScales_.clear();
     {
@@ -732,16 +763,57 @@ void App::CreateBlankDocument() {
         renderRequests_.clear();
         renderResults_.clear();
     }
+}
+
+void App::ApplyDocument(Document document, bool resetBrushWidth) {
+    document_ = std::move(document);
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     ClearSelection();
     selectionPageIndex_.reset();
     selectionLassoPoints_.clear();
     isSelecting_ = false;
     ClearHistory();
-    brushWidth_ = 3.0f;
+    if (resetBrushWidth) {
+        brushWidth_ = 3.0f;
+    }
     ResetView();
+    EnsureVisiblePageRasterQuality();
     UpdateWindowTitle();
     InvalidateRect(window_, nullptr, FALSE);
+}
+
+std::wstring App::SuggestedCnotePath() const {
+    std::wstring basePath = document_.FilePath();
+    if (basePath.empty()) {
+        basePath = document_.SourcePath();
+    }
+
+    std::filesystem::path suggestion;
+    if (!basePath.empty()) {
+        suggestion = std::filesystem::path(basePath);
+        suggestion.replace_extension(kCnoteFileExtension);
+    } else {
+        suggestion = std::filesystem::path(L"Untitled").replace_extension(kCnoteFileExtension);
+    }
+
+    return suggestion.native();
+}
+
+std::wstring App::SuggestedPdfExportPath() const {
+    std::wstring basePath = document_.FilePath();
+    if (basePath.empty()) {
+        basePath = document_.SourcePath();
+    }
+
+    std::filesystem::path suggestion;
+    if (!basePath.empty()) {
+        suggestion = std::filesystem::path(basePath);
+        suggestion.replace_extension(L".pdf");
+    } else {
+        suggestion = std::filesystem::path(L"Untitled").replace_extension(L".pdf");
+    }
+
+    return suggestion.native();
 }
 
 void App::ClearHistory() {
@@ -1432,6 +1504,10 @@ bool App::ApplyHexColorFromClipboard() {
 }
 
 std::wstring App::CurrentWindowTitle() const {
+    if (!document_.FilePath().empty()) {
+        return BaseName(document_.FilePath());
+    }
+
     if (!document_.SourcePath().empty()) {
         return BaseName(document_.SourcePath());
     }
@@ -2687,7 +2763,13 @@ void App::ExecuteCommand(unsigned int commandId) {
         CreateBlankDocument();
         break;
     case kCommandFileOpen:
-        OpenPdf();
+        OpenDocument();
+        break;
+    case kCommandFileSaveCnote:
+        static_cast<void>(SaveAsCnote());
+        break;
+    case kCommandFileExportPdf:
+        static_cast<void>(ExportAsPdf());
         break;
     case kCommandFileExit:
         PostMessageW(window_, WM_CLOSE, 0, 0);
@@ -2748,7 +2830,9 @@ bool App::HandleToolbarClick(POINT cursor) {
         switch (kind) {
         case 0:
             AppendMenuW(menu, MF_STRING, kCommandFileNew, L"New");
-            AppendMenuW(menu, MF_STRING, kCommandFileOpen, L"Open PDF...");
+            AppendMenuW(menu, MF_STRING, kCommandFileOpen, L"Open...");
+            AppendMenuW(menu, MF_STRING, kCommandFileSaveCnote, L"Save as Cnote...");
+            AppendMenuW(menu, MF_STRING, kCommandFileExportPdf, L"Export as PDF...");
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(menu, MF_STRING, kCommandFileExit, L"Exit");
             break;
@@ -3114,7 +3198,7 @@ void App::HandleCompletedRenderResults() {
 }
 
 void App::QueuePageRasterRequest(const PageView& pageView) {
-    if (!document_.IsPdfDocument() || document_.SourcePath().empty() || !pageView.valid) {
+    if (!document_.IsPdfDocument() || !document_.HasPdfData() || !pageView.valid) {
         return;
     }
 
@@ -3145,7 +3229,7 @@ void App::QueuePageRasterRequest(const PageView& pageView) {
                         && request.renderScale <= desiredScale + 0.001f;
                 }),
             renderRequests_.end());
-        renderRequests_.push_back({ document_.SourcePath(), pageView.pageIndex, desiredScale, renderGeneration_ });
+        renderRequests_.push_back({ document_.PdfData(), pageView.pageIndex, desiredScale, renderGeneration_ });
     }
     renderCv_.notify_one();
 }
@@ -3190,53 +3274,122 @@ void App::SetColorIndex(std::size_t index) {
     InvalidateRect(window_, nullptr, FALSE);
 }
 
-void App::OpenPdf() {
-    CancelDeferredRasterRefresh();
-    KillTimer(window_, kZoomSessionTimerId);
-    zoomSessionActive_ = false;
-    zoomAnchorValid_ = false;
+void App::OpenDocument() {
     wchar_t fileBuffer[MAX_PATH] = {};
+    OPENFILENAMEW dialog {};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = window_;
+    dialog.lpstrFilter =
+        L"All Supported Files\0*.cnote;*.pdf\0"
+        L"Cnote Files\0*.cnote\0"
+        L"PDF Files\0*.pdf\0"
+        L"All Files\0*.*\0";
+    dialog.lpstrFile = fileBuffer;
+    dialog.nMaxFile = MAX_PATH;
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    dialog.lpstrDefExt = L"cnote";
+
+    if (!GetOpenFileNameW(&dialog)) {
+        return;
+    }
+
+    static_cast<void>(OpenDocumentPath(fileBuffer));
+}
+
+bool App::OpenDocumentPath(const std::wstring& filePath) {
+    if (HasExtension(filePath, kCnoteFileExtension)) {
+        return OpenProject(filePath);
+    }
+
+    if (HasExtension(filePath, L".pdf")) {
+        return OpenPdf(filePath);
+    }
+
+    MessageBoxW(window_, L"Unsupported file type. Open a PDF or a .cnote file.", L"Open Document", MB_OK | MB_ICONERROR);
+    return false;
+}
+
+bool App::OpenProject(const std::wstring& filePath) {
+    const auto opened = ProjectFile::Load(filePath, pdfBackend_);
+    if (!opened.has_value()) {
+        MessageBoxW(window_, L"Failed to open the cnote file.", L"Open Cnote", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    PrepareForDocumentSwitch();
+    ApplyDocument(*opened);
+    return true;
+}
+
+bool App::OpenPdf(const std::wstring& filePath) {
+    const auto opened = pdfBackend_.Open(filePath);
+    if (!opened.has_value()) {
+        MessageBoxW(window_, L"Failed to open or render the PDF.", L"Open PDF", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    PrepareForDocumentSwitch();
+    ApplyDocument(*opened);
+    return true;
+}
+
+bool App::SaveAsCnote() {
+    wchar_t fileBuffer[MAX_PATH] = {};
+    const std::wstring suggested = SuggestedCnotePath();
+    std::wcsncpy(fileBuffer, suggested.c_str(), std::size(fileBuffer) - 1U);
+
+    OPENFILENAMEW dialog {};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = window_;
+    dialog.lpstrFilter = L"Cnote Files\0*.cnote\0All Files\0*.*\0";
+    dialog.lpstrFile = fileBuffer;
+    dialog.nMaxFile = MAX_PATH;
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    dialog.lpstrDefExt = L"cnote";
+
+    if (!GetSaveFileNameW(&dialog)) {
+        return false;
+    }
+
+    if (!ProjectFile::Save(document_, fileBuffer)) {
+        MessageBoxW(window_, L"Failed to save the cnote file.", L"Save as Cnote", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    document_.SetFilePath(fileBuffer);
+    UpdateWindowTitle();
+    InvalidateRect(window_, nullptr, FALSE);
+    return true;
+}
+
+bool App::ExportAsPdf() {
+    wchar_t fileBuffer[MAX_PATH] = {};
+    const std::wstring suggested = SuggestedPdfExportPath();
+    std::wcsncpy(fileBuffer, suggested.c_str(), std::size(fileBuffer) - 1U);
+
     OPENFILENAMEW dialog {};
     dialog.lStructSize = sizeof(dialog);
     dialog.hwndOwner = window_;
     dialog.lpstrFilter = L"PDF Files\0*.pdf\0All Files\0*.*\0";
     dialog.lpstrFile = fileBuffer;
     dialog.nMaxFile = MAX_PATH;
-    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
     dialog.lpstrDefExt = L"pdf";
 
-    if (!GetOpenFileNameW(&dialog)) {
-        return;
+    if (!GetSaveFileNameW(&dialog)) {
+        return false;
     }
 
-    const auto opened = pdfBackend_.Open(fileBuffer);
-    if (!opened.has_value()) {
-        MessageBoxW(window_, L"Failed to open or render the PDF.", L"Open PDF", MB_OK | MB_ICONERROR);
-        return;
+    if (!pdfBackend_.ExportPdf(document_, fileBuffer, 2.0f, strokeSmoothing_)) {
+        MessageBoxW(window_, L"Failed to export the PDF.", L"Export as PDF", MB_OK | MB_ICONERROR);
+        return false;
     }
 
-    document_ = *opened;
-    ++renderGeneration_;
-    pendingRenderScales_.clear();
-    {
-        std::lock_guard lock(renderMutex_);
-        renderRequests_.clear();
-        renderResults_.clear();
-    }
-    pageSurfaceCaches_.assign(document_.PageCount(), {});
-    ClearSelection();
-    selectionPageIndex_.reset();
-    selectionLassoPoints_.clear();
-    isSelecting_ = false;
-    ClearHistory();
-    ResetView();
-    EnsureVisiblePageRasterQuality();
-    UpdateWindowTitle();
-    InvalidateRect(window_, nullptr, FALSE);
+    return true;
 }
 
 void App::EnsureVisiblePageRasterQuality() {
-    if (!document_.IsPdfDocument() || document_.SourcePath().empty()) {
+    if (!document_.IsPdfDocument() || !document_.HasPdfData()) {
         return;
     }
 
@@ -4337,7 +4490,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
             if (wParam == 'O') {
-                OpenPdf();
+                OpenDocument();
+                return 0;
+            }
+            if (wParam == 'S') {
+                static_cast<void>(SaveAsCnote());
                 return 0;
             }
             if (wParam == 'B') {
@@ -4445,4 +4602,4 @@ LRESULT CALLBACK App::WindowProc(HWND window, UINT message, WPARAM wParam, LPARA
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
-}  // namespace ctrainer
+}  // namespace cnote

@@ -1,11 +1,13 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "Document.h"
 
-namespace ctrainer {
+namespace cnote {
 
 class IPdfBackend {
 public:
@@ -20,10 +22,21 @@ public:
     ~PdfiumBackend() override;
 
     [[nodiscard]] std::optional<Document> Open(const std::wstring& filePath) override;
-    [[nodiscard]] std::optional<RasterImage> RenderPage(const std::wstring& filePath, std::size_t pageIndex, float renderScale) const;
+    [[nodiscard]] std::optional<Document> OpenFromMemory(
+        const std::wstring& sourcePath,
+        std::shared_ptr<std::vector<std::uint8_t>> pdfBytes) const;
+    [[nodiscard]] std::optional<RasterImage> RenderPage(
+        const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
+        std::size_t pageIndex,
+        float renderScale) const;
+    [[nodiscard]] bool ExportPdf(
+        const Document& document,
+        const std::wstring& filePath,
+        float renderScale,
+        float strokeSmoothing) const;
 
 private:
     bool initialized_ = false;
 };
 
-}  // namespace ctrainer
+}  // namespace cnote

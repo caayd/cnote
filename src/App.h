@@ -2,6 +2,7 @@
 
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -14,15 +15,16 @@
 
 #include "Document.h"
 #include "PdfBackend.h"
+#include "ProjectFile.h"
 
-namespace ctrainer {
+namespace cnote {
 
 class App {
 public:
     explicit App(HINSTANCE instance);
     ~App();
 
-    int Run(int showCommand);
+    int Run(int showCommand, std::optional<std::wstring> startupPath = std::nullopt);
 
 private:
     enum class Tool {
@@ -97,7 +99,7 @@ private:
     };
 
     struct RenderRequest {
-        std::wstring sourcePath {};
+        std::shared_ptr<std::vector<std::uint8_t>> pdfData {};
         std::size_t pageIndex = 0;
         float renderScale = 0.0f;
         std::uint64_t generation = 0;
@@ -193,7 +195,16 @@ private:
     void ChangeBrushSize(float delta);
     void CycleColor();
     void SetColorIndex(std::size_t index);
-    void OpenPdf();
+    void OpenDocument();
+    [[nodiscard]] bool OpenDocumentPath(const std::wstring& filePath);
+    [[nodiscard]] bool OpenProject(const std::wstring& filePath);
+    [[nodiscard]] bool OpenPdf(const std::wstring& filePath);
+    [[nodiscard]] bool SaveAsCnote();
+    [[nodiscard]] bool ExportAsPdf();
+    void PrepareForDocumentSwitch();
+    void ApplyDocument(Document document, bool resetBrushWidth = false);
+    [[nodiscard]] std::wstring SuggestedCnotePath() const;
+    [[nodiscard]] std::wstring SuggestedPdfExportPath() const;
     void EnsureVisiblePageRasterQuality();
     void EnsurePageRasterQuality(const PageView& pageView);
 
@@ -313,4 +324,4 @@ private:
     static constexpr float kMaxZoom = 4.0f;
 };
 
-}  // namespace ctrainer
+}  // namespace cnote

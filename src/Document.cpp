@@ -1,6 +1,8 @@
 #include "Document.h"
 
-namespace ctrainer {
+#include <algorithm>
+
+namespace cnote {
 
 Document Document::CreateBlank() {
     Document document;
@@ -8,9 +10,34 @@ Document Document::CreateBlank() {
     return document;
 }
 
-Document Document::CreatePdfDocument(std::wstring sourcePath, std::vector<Page> pages) {
+Document Document::CreateEditable(std::wstring filePath, std::vector<Page> pages, std::size_t currentPageIndex) {
     Document document;
-    document.ReplaceWithPdf(std::move(sourcePath), std::move(pages));
+    document.ReplaceWithEditable(std::move(filePath), std::move(pages), currentPageIndex);
+    return document;
+}
+
+Document Document::CreatePdfDocument(
+    std::wstring sourcePath,
+    std::shared_ptr<std::vector<std::uint8_t>> pdfData,
+    std::vector<Page> pages,
+    std::size_t currentPageIndex) {
+    Document document;
+    document.ReplaceWithPdf(sourcePath, std::move(sourcePath), std::move(pdfData), std::move(pages), currentPageIndex);
+    return document;
+}
+
+Document Document::CreateProjectDocument(
+    std::wstring filePath,
+    std::wstring sourcePath,
+    std::shared_ptr<std::vector<std::uint8_t>> pdfData,
+    std::vector<Page> pages,
+    std::size_t currentPageIndex) {
+    Document document;
+    if (pdfData && !pdfData->empty()) {
+        document.ReplaceWithPdf(std::move(filePath), std::move(sourcePath), std::move(pdfData), std::move(pages), currentPageIndex);
+    } else {
+        document.ReplaceWithEditable(std::move(filePath), std::move(pages), currentPageIndex);
+    }
     return document;
 }
 
@@ -18,8 +45,20 @@ bool Document::IsPdfDocument() const noexcept {
     return pdfDocument_;
 }
 
+const std::wstring& Document::FilePath() const noexcept {
+    return filePath_;
+}
+
 const std::wstring& Document::SourcePath() const noexcept {
     return sourcePath_;
+}
+
+const std::shared_ptr<std::vector<std::uint8_t>>& Document::PdfData() const noexcept {
+    return pdfData_;
+}
+
+bool Document::HasPdfData() const noexcept {
+    return pdfData_ && !pdfData_->empty();
 }
 
 std::size_t Document::PageCount() const noexcept {
@@ -55,23 +94,50 @@ bool Document::SetCurrentPageIndex(std::size_t index) {
     return true;
 }
 
+void Document::SetFilePath(std::wstring filePath) {
+    filePath_ = std::move(filePath);
+}
+
 void Document::ResetToBlank() {
+    filePath_.clear();
     sourcePath_.clear();
     pdfDocument_ = false;
+    pdfData_.reset();
     pages_ = { Page {} };
     currentPageIndex_ = 0;
 }
 
-void Document::ReplaceWithPdf(std::wstring sourcePath, std::vector<Page> pages) {
-    sourcePath_ = std::move(sourcePath);
-    pdfDocument_ = true;
+void Document::ReplaceWithEditable(std::wstring filePath, std::vector<Page> pages, std::size_t currentPageIndex) {
+    filePath_ = std::move(filePath);
+    sourcePath_.clear();
+    pdfDocument_ = false;
+    pdfData_.reset();
     if (pages.empty()) {
         pages_ = { Page {} };
-        pdfDocument_ = false;
     } else {
         pages_ = std::move(pages);
     }
-    currentPageIndex_ = 0;
+    currentPageIndex_ = pages_.empty() ? 0 : std::min(currentPageIndex, pages_.size() - 1U);
 }
 
-}  // namespace ctrainer
+void Document::ReplaceWithPdf(
+    std::wstring filePath,
+    std::wstring sourcePath,
+    std::shared_ptr<std::vector<std::uint8_t>> pdfData,
+    std::vector<Page> pages,
+    std::size_t currentPageIndex) {
+    filePath_ = std::move(filePath);
+    sourcePath_ = std::move(sourcePath);
+    pdfDocument_ = true;
+    pdfData_ = std::move(pdfData);
+    if (pages.empty()) {
+        pages_ = { Page {} };
+        pdfDocument_ = false;
+        pdfData_.reset();
+    } else {
+        pages_ = std::move(pages);
+    }
+    currentPageIndex_ = pages_.empty() ? 0 : std::min(currentPageIndex, pages_.size() - 1U);
+}
+
+}  // namespace cnote

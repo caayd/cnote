@@ -1,10 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
-namespace ctrainer {
+namespace cnote {
 
 struct Vec2 {
     float x = 0.0f;
@@ -52,10 +53,24 @@ struct Page {
 class Document {
 public:
     static Document CreateBlank();
-    static Document CreatePdfDocument(std::wstring sourcePath, std::vector<Page> pages);
+    static Document CreateEditable(std::wstring filePath, std::vector<Page> pages, std::size_t currentPageIndex = 0);
+    static Document CreatePdfDocument(
+        std::wstring sourcePath,
+        std::shared_ptr<std::vector<std::uint8_t>> pdfData,
+        std::vector<Page> pages,
+        std::size_t currentPageIndex = 0);
+    static Document CreateProjectDocument(
+        std::wstring filePath,
+        std::wstring sourcePath,
+        std::shared_ptr<std::vector<std::uint8_t>> pdfData,
+        std::vector<Page> pages,
+        std::size_t currentPageIndex = 0);
 
     [[nodiscard]] bool IsPdfDocument() const noexcept;
+    [[nodiscard]] const std::wstring& FilePath() const noexcept;
     [[nodiscard]] const std::wstring& SourcePath() const noexcept;
+    [[nodiscard]] const std::shared_ptr<std::vector<std::uint8_t>>& PdfData() const noexcept;
+    [[nodiscard]] bool HasPdfData() const noexcept;
     [[nodiscard]] std::size_t PageCount() const noexcept;
     [[nodiscard]] std::size_t CurrentPageIndex() const noexcept;
     [[nodiscard]] Page& CurrentPage() noexcept;
@@ -64,14 +79,23 @@ public:
     [[nodiscard]] const Page& PageAt(std::size_t index) const noexcept;
 
     bool SetCurrentPageIndex(std::size_t index);
+    void SetFilePath(std::wstring filePath);
     void ResetToBlank();
-    void ReplaceWithPdf(std::wstring sourcePath, std::vector<Page> pages);
+    void ReplaceWithEditable(std::wstring filePath, std::vector<Page> pages, std::size_t currentPageIndex = 0);
+    void ReplaceWithPdf(
+        std::wstring filePath,
+        std::wstring sourcePath,
+        std::shared_ptr<std::vector<std::uint8_t>> pdfData,
+        std::vector<Page> pages,
+        std::size_t currentPageIndex = 0);
 
 private:
+    std::wstring filePath_;
     std::wstring sourcePath_;
     bool pdfDocument_ = false;
+    std::shared_ptr<std::vector<std::uint8_t>> pdfData_ {};
     std::vector<Page> pages_ { Page {} };
     std::size_t currentPageIndex_ = 0;
 };
 
-}  // namespace ctrainer
+}  // namespace cnote
