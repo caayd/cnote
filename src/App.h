@@ -62,6 +62,7 @@ public:
         ResetView,
         ToggleSettings,
         TogglePdfSidebar,
+        ToggleQuickSize,
         ToggleWheel,
         PreviousPage,
         NextPage,
@@ -216,10 +217,14 @@ private:
     void EndPan();
     void UpdateCaptureState();
     void ExecuteCommand(unsigned int commandId);
+    [[nodiscard]] bool HandleSidebarClick(POINT cursor);
     [[nodiscard]] bool HandleToolbarClick(POINT cursor);
+    [[nodiscard]] bool HandleQuickSizePopupClick(POINT cursor);
     [[nodiscard]] bool HandleToolbarRightClick(POINT cursor);
     [[nodiscard]] bool HandlePaletteClick(POINT cursor);
     void TogglePaletteWheel();
+    void ToggleQuickSizePopup();
+    void CancelQuickSizePopup(bool cancelInput = true);
     void ClosePaletteOverlays();
     void ToggleToolInWheel(Tool tool);
     [[nodiscard]] bool IsToolInWheel(Tool tool) const;
@@ -310,6 +315,7 @@ private:
     void Paint();
     void PaintToolbar(HDC hdc, RECT clientRect) const;
     void PaintPdfSidebar(HDC hdc, RECT clientRect);
+    void PaintQuickSizePopup(HDC hdc, RECT clientRect) const;
     void PaintPaletteMenu(HDC hdc, RECT clientRect) const;
     void PaintPaletteWheel(HDC hdc, RECT clientRect) const;
     void PaintCanvas(HDC hdc, RECT clientRect);
@@ -403,6 +409,8 @@ private:
     bool pageJumpEditing_ = false;
     bool pageJumpReplaceOnType_ = false;
     std::wstring pageJumpText_ {};
+    std::optional<Tool> quickSizePopupTool_ {};
+    POINT quickSizePopupAnchor_ {};
     bool toolbarBrushSizeEditing_ = false;
     bool toolbarBrushSizeReplaceOnType_ = false;
     std::optional<Tool> toolbarBrushSizeEditTool_ {};
@@ -419,8 +427,10 @@ private:
     static constexpr UINT_PTR kZoomSessionTimerId = 3;
     static constexpr UINT kRasterRefreshDelayMs = 120;
     static constexpr UINT kZoomSessionDelayMs = 100;
+    static constexpr float kWheelScrollPixels = 72.0f;
     static constexpr float kMinZoom = 0.35f;
     static constexpr float kMaxZoom = 4.0f;
+    int sidebarWheelScrollRemainder_ = 0;
 };
 
 }  // namespace cnote

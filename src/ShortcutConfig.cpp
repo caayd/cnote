@@ -7,7 +7,7 @@ namespace cnote {
 
 namespace {
 
-constexpr std::array<ShortcutDefinition, 19> kShortcutDefinitions {{
+constexpr std::array<ShortcutDefinition, 20> kShortcutDefinitions {{
     { App::ShortcutAction::ToolDraw, L"Draw Tool", { 'D', false, false, false } },
     { App::ShortcutAction::ToolSelect, L"Select Tool", { 'S', false, false, false } },
     { App::ShortcutAction::ToolMove, L"Move Tool", { 'M', false, false, false } },
@@ -24,6 +24,7 @@ constexpr std::array<ShortcutDefinition, 19> kShortcutDefinitions {{
     { App::ShortcutAction::ResetView, L"Reset View", { '0', false, false, false } },
     { App::ShortcutAction::ToggleSettings, L"Settings", { 0, false, false, false } },
     { App::ShortcutAction::TogglePdfSidebar, L"PDF Sidebar", { 'B', true, false, false } },
+    { App::ShortcutAction::ToggleQuickSize, L"Quick Size", { 'W', true, false, false } },
     { App::ShortcutAction::ToggleWheel, L"Wheel", { 'Q', true, false, false } },
     { App::ShortcutAction::PreviousPage, L"Prev Page", { VK_PRIOR, false, false, false } },
     { App::ShortcutAction::NextPage, L"Next Page", { VK_NEXT, false, false, false } },
@@ -78,6 +79,8 @@ const char* ShortcutActionConfigName(App::ShortcutAction action) {
         return "ToggleSettings";
     case App::ShortcutAction::TogglePdfSidebar:
         return "TogglePdfSidebar";
+    case App::ShortcutAction::ToggleQuickSize:
+        return "ToggleQuickSize";
     case App::ShortcutAction::ToggleWheel:
         return "ToggleWheel";
     case App::ShortcutAction::PreviousPage:

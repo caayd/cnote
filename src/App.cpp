@@ -60,11 +60,6 @@ struct ToolbarLayout {
     RECT minimizeRect {};
     RECT maximizeRect {};
     RECT closeRect {};
-    RECT previousPageRect {};
-    RECT nextPageRect {};
-    RECT pageLabelRect {};
-    RECT brushSliderRect {};
-    RECT brushValueRect {};
     RECT undoRect {};
     RECT redoRect {};
     RECT selectToolRect {};
@@ -73,6 +68,21 @@ struct ToolbarLayout {
     RECT panToolRect {};
     RECT eraseToolRect {};
     RECT currentColorRect {};
+};
+
+struct SidebarHeaderLayout {
+    RECT headerRect {};
+    RECT previousPageRect {};
+    RECT pageLabelRect {};
+    RECT nextPageRect {};
+    RECT contentRect {};
+};
+
+struct QuickSizePopupLayout {
+    RECT panelRect {};
+    RECT previewRect {};
+    RECT sliderRect {};
+    RECT valueRect {};
 };
 
 struct PaletteMenuLayout {
@@ -88,6 +98,33 @@ struct PaletteWheelLayout {
 
 RECT MakeRect(int left, int top, int right, int bottom) {
     RECT rect { left, top, right, bottom };
+    return rect;
+}
+
+bool HasRect(const RECT& rect) {
+    return rect.right > rect.left && rect.bottom > rect.top;
+}
+
+RECT UnionRectangles(RECT a, RECT b) {
+    if (!HasRect(a)) {
+        return b;
+    }
+    if (!HasRect(b)) {
+        return a;
+    }
+
+    return MakeRect(
+        std::min(a.left, b.left),
+        std::min(a.top, b.top),
+        std::max(a.right, b.right),
+        std::max(a.bottom, b.bottom));
+}
+
+RECT InflateRectCopy(RECT rect, int amount) {
+    rect.left -= amount;
+    rect.top -= amount;
+    rect.right += amount;
+    rect.bottom += amount;
     return rect;
 }
 
@@ -673,11 +710,17 @@ void PaintSvgIcon(HDC hdc, RECT rect, const SvgIconData& icon, COLORREF color) {
 ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool maximized, App::Tool activeTool) {
     ToolbarLayout layout;
     static_cast<void>(colorCount);
+    static_cast<void>(activeTool);
 
     const int toolbarHeight = ToolbarHeight(maximized);
     const int topInset = ToolbarTopInset(maximized);
     const int titleBarInset = maximized ? WindowFrameThicknessX() : 0;
     const int buttonStripRight = clientRect.right - titleBarInset;
+    const int availableWidth = clientRect.right - clientRect.left;
+    const bool compactMenus = availableWidth < 760;
+    const int menuGap = compactMenus ? 2 : 4;
+    const int toolGap = compactMenus ? 8 : 10;
+    const int outerGap = compactMenus ? 12 : 18;
 
     layout.closeRect = MakeRect(buttonStripRight - 46, topInset, buttonStripRight, toolbarHeight);
     layout.maximizeRect = MakeRect(layout.closeRect.left - 46, topInset, layout.closeRect.left, toolbarHeight);
@@ -688,74 +731,94 @@ ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool m
     const int colorButtonSize = kIconButtonSize;
     const int colorsLeft = rightEdge - colorButtonSize;
 
-    layout.menu.fileRect = MakeRect(12, topInset, 52, toolbarHeight);
-    layout.menu.editRect = MakeRect(layout.menu.fileRect.right + 4, topInset, layout.menu.fileRect.right + 46, toolbarHeight);
-    layout.menu.viewRect = MakeRect(layout.menu.editRect.right + 4, topInset, layout.menu.editRect.right + 48, toolbarHeight);
-    layout.previousPageRect = MakeRect(layout.menu.viewRect.right + 14, toolbarTop, layout.menu.viewRect.right + 14 + kIconButtonSize, toolbarTop + kIconButtonSize);
-    layout.pageLabelRect = MakeRect(layout.previousPageRect.right + 7, toolbarTop + 2, layout.previousPageRect.right + 78, toolbarTop + kIconButtonSize - 2);
-    layout.nextPageRect = MakeRect(layout.pageLabelRect.right + 7, toolbarTop, layout.pageLabelRect.right + 7 + kIconButtonSize, toolbarTop + kIconButtonSize);
+    const int fileWidth = compactMenus ? 34 : 40;
+    const int editWidth = compactMenus ? 36 : 42;
+    const int viewWidth = compactMenus ? 38 : 44;
+    layout.menu.fileRect = MakeRect(12, topInset, 12 + fileWidth, toolbarHeight);
+    layout.menu.editRect = MakeRect(layout.menu.fileRect.right + menuGap, topInset, layout.menu.fileRect.right + menuGap + editWidth, toolbarHeight);
+    layout.menu.viewRect = MakeRect(layout.menu.editRect.right + menuGap, topInset, layout.menu.editRect.right + menuGap + viewWidth, toolbarHeight);
     layout.currentColorRect = MakeRect(colorsLeft, toolbarTop, colorsLeft + colorButtonSize, toolbarTop + colorButtonSize);
 
-    const int toolBandRight = colorsLeft - 18;
+    const int toolBandRight = colorsLeft - outerGap;
     layout.panToolRect = MakeRect(
         toolBandRight - kIconButtonSize,
         toolbarTop,
         toolBandRight,
         toolbarTop + kIconButtonSize);
     layout.drawToolRect = MakeRect(
-        layout.panToolRect.left - 10 - kIconButtonSize,
+        layout.panToolRect.left - toolGap - kIconButtonSize,
         toolbarTop,
-        layout.panToolRect.left - 10,
+        layout.panToolRect.left - toolGap,
         toolbarTop + kIconButtonSize);
     layout.eraseToolRect = MakeRect(
-        layout.drawToolRect.left - 10 - kIconButtonSize,
+        layout.drawToolRect.left - toolGap - kIconButtonSize,
         toolbarTop,
-        layout.drawToolRect.left - 10,
+        layout.drawToolRect.left - toolGap,
         toolbarTop + kIconButtonSize);
     layout.selectToolRect = MakeRect(
-        layout.eraseToolRect.left - 10 - kIconButtonSize,
+        layout.eraseToolRect.left - toolGap - kIconButtonSize,
         toolbarTop,
-        layout.eraseToolRect.left - 10,
+        layout.eraseToolRect.left - toolGap,
         toolbarTop + kIconButtonSize);
     layout.moveToolRect = MakeRect(
-        layout.selectToolRect.left - 10 - kIconButtonSize,
+        layout.selectToolRect.left - toolGap - kIconButtonSize,
         toolbarTop,
-        layout.selectToolRect.left - 10,
+        layout.selectToolRect.left - toolGap,
         toolbarTop + kIconButtonSize);
-    layout.redoRect = MakeRect(
-        layout.moveToolRect.left - 16 - kIconButtonSize,
-        toolbarTop,
-        layout.moveToolRect.left - 16,
-        toolbarTop + kIconButtonSize);
-    layout.undoRect = MakeRect(
-        layout.redoRect.left - 10 - kIconButtonSize,
-        toolbarTop,
-        layout.redoRect.left - 10,
-        toolbarTop + kIconButtonSize);
-
-    if (activeTool == App::Tool::Draw || activeTool == App::Tool::Erase) {
-        const int clusterRight = layout.undoRect.left - 16;
-        const int valueWidth = 28;
-        const int labelWidth = activeTool == App::Tool::Erase ? 42 : 36;
-        const int sliderWidth = 84;
-        const int valueGap = 8;
-        const int clusterWidth = labelWidth + 8 + sliderWidth + valueGap + valueWidth;
-        const int clusterLeft = clusterRight - clusterWidth;
-        if (clusterLeft >= layout.nextPageRect.right + 16) {
-            layout.brushSliderRect = MakeRect(
-                clusterLeft + labelWidth + 8,
-                toolbarTop + 8,
-                clusterLeft + labelWidth + 8 + sliderWidth,
-                toolbarTop + kIconButtonSize - 8);
-            layout.brushValueRect = MakeRect(
-                layout.brushSliderRect.right + valueGap,
-                toolbarTop,
-                layout.brushSliderRect.right + valueGap + valueWidth,
-                toolbarTop + kIconButtonSize);
-        }
+    const int redoRight = layout.moveToolRect.left - (compactMenus ? 12 : 16);
+    const RECT candidateRedoRect = MakeRect(redoRight - kIconButtonSize, toolbarTop, redoRight, toolbarTop + kIconButtonSize);
+    const RECT candidateUndoRect = MakeRect(candidateRedoRect.left - toolGap - kIconButtonSize, toolbarTop, candidateRedoRect.left - toolGap, toolbarTop + kIconButtonSize);
+    const int minimumTitleWidth = compactMenus ? 80 : 120;
+    if (candidateUndoRect.left >= layout.menu.viewRect.right + minimumTitleWidth) {
+        layout.redoRect = candidateRedoRect;
+        layout.undoRect = candidateUndoRect;
     }
 
     return layout;
+}
+
+SidebarHeaderLayout BuildSidebarHeaderLayout(RECT sidebarRect) {
+    SidebarHeaderLayout layout {};
+    const int padding = 12;
+    const int buttonSize = 26;
+    const int gap = 8;
+    const int headerHeight = 44;
+    layout.headerRect = MakeRect(sidebarRect.left + padding, sidebarRect.top + padding, sidebarRect.right - padding, sidebarRect.top + padding + headerHeight);
+    layout.previousPageRect = MakeRect(layout.headerRect.left, layout.headerRect.top + 9, layout.headerRect.left + buttonSize, layout.headerRect.top + 9 + buttonSize);
+    layout.nextPageRect = MakeRect(layout.headerRect.right - buttonSize, layout.headerRect.top + 9, layout.headerRect.right, layout.headerRect.top + 9 + buttonSize);
+    layout.pageLabelRect = MakeRect(layout.previousPageRect.right + gap, layout.headerRect.top + 7, layout.nextPageRect.left - gap, layout.headerRect.bottom - 7);
+    layout.contentRect = MakeRect(sidebarRect.left, layout.headerRect.bottom + 8, sidebarRect.right, sidebarRect.bottom);
+    return layout;
+}
+
+QuickSizePopupLayout BuildQuickSizePopupLayout(RECT clientRect, POINT anchor) {
+    QuickSizePopupLayout layout {};
+    constexpr int kPanelWidth = 188;
+    constexpr int kPanelHeight = 38;
+    constexpr int kPreviewBounds = 28;
+    constexpr int kCursorGap = 14;
+    constexpr int kPreviewGap = 5;
+    const int totalHeight = kPreviewBounds + kPreviewGap + kPanelHeight;
+    const int toolbarBottom = clientRect.top;
+    int left = anchor.x - (kPanelWidth / 2);
+    int top = anchor.y - totalHeight - kCursorGap;
+    left = std::clamp(left, static_cast<int>(clientRect.left) + 8, static_cast<int>(clientRect.right) - kPanelWidth - 8);
+    top = std::clamp(top, toolbarBottom + 8, static_cast<int>(clientRect.bottom) - totalHeight - 8);
+    const int panelTop = top + kPreviewBounds + kPreviewGap;
+    layout.panelRect = MakeRect(left, panelTop, left + kPanelWidth, panelTop + kPanelHeight);
+    layout.sliderRect = MakeRect(left + 10, panelTop + 10, left + 144, panelTop + 28);
+    layout.valueRect = MakeRect(left + 150, panelTop + 6, left + 178, panelTop + 32);
+    const int sliderCenterX = (layout.sliderRect.left + layout.sliderRect.right) / 2;
+    layout.previewRect = MakeRect(
+        sliderCenterX - (kPreviewBounds / 2),
+        top,
+        sliderCenterX + (kPreviewBounds / 2),
+        top + kPreviewBounds);
+    return layout;
+}
+
+RECT QuickSizePopupBounds(const QuickSizePopupLayout& layout) {
+    return InflateRectCopy(UnionRectangles(layout.panelRect, layout.previewRect), 3);
 }
 
 PaletteMenuLayout BuildPaletteMenuLayout(const ToolbarLayout& toolbarLayout, std::size_t colorCount) {
@@ -829,18 +892,13 @@ std::optional<std::size_t> PaletteWheelIndexAtPoint(const PaletteWheelLayout& la
 }
 
 bool IsToolbarControlRect(const ToolbarLayout& layout, POINT cursor) {
-    const std::array<RECT, 17> controls {
+    const std::array<RECT, 12> controls {
         layout.menu.fileRect,
         layout.menu.editRect,
         layout.menu.viewRect,
         layout.minimizeRect,
         layout.maximizeRect,
         layout.closeRect,
-        layout.previousPageRect,
-        layout.pageLabelRect,
-        layout.nextPageRect,
-        layout.brushSliderRect,
-        layout.brushValueRect,
         layout.undoRect,
         layout.redoRect,
         layout.selectToolRect,
@@ -1526,6 +1584,7 @@ void App::CreateBlankDocument() {
 void App::PrepareForDocumentSwitch() {
     CancelDeferredRasterRefresh();
     KillTimer(window_, kZoomSessionTimerId);
+    CancelQuickSizePopup();
     zoomSessionActive_ = false;
     zoomAnchorValid_ = false;
     ++renderGeneration_;
@@ -1604,6 +1663,27 @@ void App::ClosePaletteOverlays() {
     wheel_.paletteWheelOpen = false;
 }
 
+void App::CancelQuickSizePopup(bool cancelInput) {
+    RECT popupRect {};
+    bool invalidatePopup = false;
+    if (window_ != nullptr && quickSizePopupTool_.has_value()) {
+        RECT clientRect {};
+        GetClientRect(window_, &clientRect);
+        const RECT canvasRect = CanvasRect(clientRect);
+        popupRect = QuickSizePopupBounds(BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_));
+        invalidatePopup = true;
+    }
+
+    quickSizePopupTool_.reset();
+    if (cancelInput) {
+        CancelToolbarBrushSizeInput();
+    }
+    EndToolbarBrushSliderDrag();
+    if (invalidatePopup) {
+        InvalidateRect(window_, &popupRect, FALSE);
+    }
+}
+
 void App::ToggleToolInWheel(Tool tool) {
     const auto existing = std::find(wheel_.tools.begin(), wheel_.tools.end(), tool);
     if (existing != wheel_.tools.end()) {
@@ -1637,6 +1717,35 @@ void App::TogglePaletteWheel() {
     wheel_.center = cursor;
     wheel_.paletteWheelOpen = !wheel_.paletteWheelOpen;
     wheel_.paletteMenuOpen = false;
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void App::ToggleQuickSizePopup() {
+    if (!IsToolbarBrushTool(activeTool_) || window_ == nullptr) {
+        return;
+    }
+
+    if (quickSizePopupTool_.has_value() && *quickSizePopupTool_ == activeTool_) {
+        CancelQuickSizePopup();
+        InvalidateRect(window_, nullptr, FALSE);
+        return;
+    }
+
+    POINT cursor {};
+    GetCursorPos(&cursor);
+    ScreenToClient(window_, &cursor);
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    RECT canvasRect = CanvasRect(clientRect);
+    if (cursor.x < canvasRect.left || cursor.x >= canvasRect.right || cursor.y < canvasRect.top || cursor.y >= canvasRect.bottom) {
+        cursor.x = (canvasRect.left + canvasRect.right) / 2;
+        cursor.y = canvasRect.top + 120;
+    }
+
+    quickSizePopupAnchor_ = cursor;
+    quickSizePopupTool_ = activeTool_;
+    CancelToolbarBrushSizeInput();
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -1764,8 +1873,7 @@ void App::SetActiveTool(Tool tool) {
         strokeTransformInitials_.clear();
     }
     if (tool != activeTool_) {
-        CancelToolbarBrushSizeInput();
-        EndToolbarBrushSliderDrag();
+        CancelQuickSizePopup();
     }
     activeTool_ = tool;
     SyncBrushWidthFromActiveTool();
@@ -2327,9 +2435,10 @@ std::optional<std::size_t> App::HitTestSidebarPage(POINT cursor) const {
         return std::nullopt;
     }
 
-    const int itemWidth = (sidebarRect.right - sidebarRect.left) - 24;
+    const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect);
+    const int itemWidth = (headerLayout.contentRect.right - headerLayout.contentRect.left) - 24;
     const int left = sidebarRect.left + 12;
-    int top = sidebarRect.top + 12 - pdfSidebarScrollY_;
+    int top = headerLayout.contentRect.top + 12 - pdfSidebarScrollY_;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         const Page& page = document_.PageAt(pageIndex);
         const float aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
@@ -2352,20 +2461,21 @@ void App::EnsureSidebarCurrentPageVisible() {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const RECT sidebarRect = PdfSidebarRect(clientRect);
-    const int itemWidth = (sidebarRect.right - sidebarRect.left) - 24;
-    int top = sidebarRect.top + 12;
+    const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect);
+    const int itemWidth = (headerLayout.contentRect.right - headerLayout.contentRect.left) - 24;
+    int top = headerLayout.contentRect.top + 12;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         const Page& page = document_.PageAt(pageIndex);
         const float aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
         const int thumbHeight = std::max(56, static_cast<int>(std::lround(static_cast<float>(itemWidth) * aspect)));
         RECT itemRect = MakeRect(sidebarRect.left + 12, top, sidebarRect.right - 12, top + thumbHeight + 22);
         if (pageIndex == document_.CurrentPageIndex()) {
-            const int visibleTop = sidebarRect.top + 8 + pdfSidebarScrollY_;
-            const int visibleBottom = sidebarRect.bottom - 8 + pdfSidebarScrollY_;
+            const int visibleTop = headerLayout.contentRect.top + 8 + pdfSidebarScrollY_;
+            const int visibleBottom = headerLayout.contentRect.bottom - 8 + pdfSidebarScrollY_;
             if (itemRect.top < visibleTop) {
-                pdfSidebarScrollY_ = std::max(0, static_cast<int>(itemRect.top - sidebarRect.top - 8));
+                pdfSidebarScrollY_ = std::max(0, static_cast<int>(itemRect.top - headerLayout.contentRect.top - 8));
             } else if (itemRect.bottom > visibleBottom) {
-                pdfSidebarScrollY_ = std::max(0, static_cast<int>(itemRect.bottom - (sidebarRect.bottom - 8)));
+                pdfSidebarScrollY_ = std::max(0, static_cast<int>(itemRect.bottom - (headerLayout.contentRect.bottom - 8)));
             }
             return;
         }
@@ -2471,6 +2581,9 @@ void App::ApplyPageJumpInput() {
 }
 
 std::optional<App::Tool> App::ToolbarBrushTool() const {
+    if (quickSizePopupTool_.has_value()) {
+        return quickSizePopupTool_;
+    }
     if (IsToolbarBrushTool(activeTool_)) {
         return activeTool_;
     }
@@ -2528,7 +2641,7 @@ void App::ApplyToolbarBrushSizeInput() {
 }
 
 void App::BeginToolbarBrushSliderDrag(POINT cursor) {
-    if (!ToolbarBrushTool().has_value()) {
+    if (!quickSizePopupTool_.has_value()) {
         return;
     }
 
@@ -2540,14 +2653,15 @@ void App::BeginToolbarBrushSliderDrag(POINT cursor) {
 
 void App::UpdateToolbarBrushSliderDrag(POINT cursor) {
     const auto tool = ToolbarBrushTool();
-    if (!tool.has_value()) {
+    if (!tool.has_value() || !quickSizePopupTool_.has_value()) {
         return;
     }
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
-    const RECT trackRect = ToolbarBrushTrackRect(layout.brushSliderRect);
+    const RECT canvasRect = CanvasRect(clientRect);
+    const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_);
+    const RECT trackRect = ToolbarBrushTrackRect(popupLayout.sliderRect);
     if (trackRect.right <= trackRect.left) {
         return;
     }
@@ -3867,15 +3981,8 @@ bool App::HandleToolbarClick(POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
-    const bool clickedPageLabel = PtInRect(&layout.pageLabelRect, cursor) != 0;
-    const bool clickedBrushSlider = PtInRect(&layout.brushSliderRect, cursor) != 0;
-    const bool clickedBrushValue = PtInRect(&layout.brushValueRect, cursor) != 0;
-    if (pageJumpEditing_ && !clickedPageLabel) {
-        CancelPageJumpInput();
-    }
-    if (toolbarBrushSizeEditing_ && !clickedBrushValue) {
-        CancelToolbarBrushSizeInput();
-    }
+    CancelPageJumpInput();
+    CancelQuickSizePopup();
 
     const auto openMenu = [&](RECT rect, unsigned int kind) {
         HMENU menu = CreatePopupMenu();
@@ -3968,44 +4075,6 @@ bool App::HandleToolbarClick(POINT cursor) {
         return true;
     }
 
-    if (PtInRect(&layout.previousPageRect, cursor) != 0) {
-        ClosePaletteOverlays();
-        CancelPageJumpInput();
-        PreviousPage();
-        return true;
-    }
-
-    if (clickedPageLabel) {
-        ClosePaletteOverlays();
-        CancelToolbarBrushSizeInput();
-        BeginPageJumpInput();
-        InvalidateRect(window_, nullptr, FALSE);
-        return true;
-    }
-
-    if (PtInRect(&layout.nextPageRect, cursor) != 0) {
-        ClosePaletteOverlays();
-        CancelPageJumpInput();
-        NextPage();
-        return true;
-    }
-
-    if (clickedBrushSlider) {
-        ClosePaletteOverlays();
-        CancelPageJumpInput();
-        BeginToolbarBrushSliderDrag(cursor);
-        InvalidateRect(window_, nullptr, FALSE);
-        return true;
-    }
-
-    if (clickedBrushValue) {
-        ClosePaletteOverlays();
-        CancelPageJumpInput();
-        BeginToolbarBrushSizeInput();
-        InvalidateRect(window_, nullptr, FALSE);
-        return true;
-    }
-
     if (PtInRect(&layout.drawToolRect, cursor) != 0) {
         ClosePaletteOverlays();
         SetActiveTool(Tool::Draw);
@@ -4046,6 +4115,84 @@ bool App::HandleToolbarClick(POINT cursor) {
     if (PtInRect(&layout.redoRect, cursor) != 0) {
         ClosePaletteOverlays();
         Redo();
+        return true;
+    }
+
+    return true;
+}
+
+bool App::HandleSidebarClick(POINT cursor) {
+    if (!IsPdfSidebarVisible()) {
+        return false;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const RECT sidebarRect = PdfSidebarRect(clientRect);
+    if (PtInRect(&sidebarRect, cursor) == 0) {
+        return false;
+    }
+
+    const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect);
+    const bool clickedPageLabel = PtInRect(&headerLayout.pageLabelRect, cursor) != 0;
+    if (pageJumpEditing_ && !clickedPageLabel) {
+        CancelPageJumpInput();
+    }
+
+    CancelQuickSizePopup();
+
+    if (PtInRect(&headerLayout.previousPageRect, cursor) != 0) {
+        PreviousPage();
+        return true;
+    }
+
+    if (clickedPageLabel) {
+        BeginPageJumpInput();
+        InvalidateRect(window_, nullptr, FALSE);
+        return true;
+    }
+
+    if (PtInRect(&headerLayout.nextPageRect, cursor) != 0) {
+        NextPage();
+        return true;
+    }
+
+    if (const auto sidebarPage = HitTestSidebarPage(cursor); sidebarPage.has_value()) {
+        FocusPage(*sidebarPage);
+    }
+    return true;
+}
+
+bool App::HandleQuickSizePopupClick(POINT cursor) {
+    if (!quickSizePopupTool_.has_value() || window_ == nullptr) {
+        return false;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const RECT canvasRect = CanvasRect(clientRect);
+    const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_);
+    const bool clickedSlider = PtInRect(&popupLayout.sliderRect, cursor) != 0;
+    const bool clickedValue = PtInRect(&popupLayout.valueRect, cursor) != 0;
+    const RECT popupBounds = QuickSizePopupBounds(popupLayout);
+    if (PtInRect(&popupBounds, cursor) == 0) {
+        CancelQuickSizePopup();
+        return false;
+    }
+
+    if (toolbarBrushSizeEditing_ && !clickedValue) {
+        CancelToolbarBrushSizeInput();
+    }
+
+    if (clickedSlider) {
+        BeginToolbarBrushSliderDrag(cursor);
+        InvalidateRect(window_, nullptr, FALSE);
+        return true;
+    }
+
+    if (clickedValue) {
+        BeginToolbarBrushSizeInput();
+        InvalidateRect(window_, nullptr, FALSE);
         return true;
     }
 
@@ -4695,6 +4842,7 @@ void App::Paint() {
 
     PaintToolbar(memoryDc, clientRect);
     PaintCanvas(memoryDc, clientRect);
+    PaintQuickSizePopup(memoryDc, clientRect);
     PaintPaletteMenu(memoryDc, clientRect);
     PaintPaletteWheel(memoryDc, clientRect);
 
@@ -4755,13 +4903,6 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     DrawTextW(hdc, L"File", -1, &fileRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     DrawTextW(hdc, L"Edit", -1, &editRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     DrawTextW(hdc, L"View", -1, &viewRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    const auto paintFlatNavButton = [&](RECT rect, const wchar_t* label, bool enabled) {
-        SetTextColor(hdc, enabled ? primaryText : RGB(102, 111, 124));
-        SelectObject(hdc, bodyFont);
-        RECT labelRect = rect;
-        DrawTextW(hdc, label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    };
 
     const auto paintIconToolButton = [&](RECT rect, auto&& paintFallbackIcon, const wchar_t* svgFileName, bool selected, bool enabled = true) {
         const COLORREF iconColor = enabled
@@ -4833,10 +4974,12 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
         DeleteObject(pen);
     };
 
-    paintSvgActionButton(layout.undoRect, L"undo.svg", L"Undo", CanUndo());
-    paintSvgActionButton(layout.redoRect, L"redo.svg", L"Redo", CanRedo());
-    paintFlatNavButton(layout.previousPageRect, L"<", CanGoToPreviousPage());
-    paintFlatNavButton(layout.nextPageRect, L">", CanGoToNextPage());
+    if (HasRect(layout.undoRect)) {
+        paintSvgActionButton(layout.undoRect, L"undo.svg", L"Undo", CanUndo());
+    }
+    if (HasRect(layout.redoRect)) {
+        paintSvgActionButton(layout.redoRect, L"redo.svg", L"Redo", CanRedo());
+    }
     paintIconToolButton(layout.selectToolRect, PaintSelectToolIcon, L"lasso.svg", activeTool_ == Tool::Select);
     paintIconToolButton(layout.moveToolRect, PaintMoveToolIcon, L"cursor.svg", activeTool_ == Tool::Move || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_);
     paintIconToolButton(layout.eraseToolRect, PaintEraseToolIcon, L"erase.svg", activeTool_ == Tool::Erase);
@@ -4862,93 +5005,16 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     paintWindowButton(layout.maximizeRect, 1, hoveredWindowButton_ == 1);
     paintWindowButton(layout.closeRect, 2, hoveredWindowButton_ == 2);
 
-    const int titleLeftBound = layout.nextPageRect.right + 16;
-    int titleRightBound = layout.minimizeRect.left - 16;
-    if (const auto toolbarBrushTool = ToolbarBrushTool(); toolbarBrushTool.has_value() && layout.brushSliderRect.right > layout.brushSliderRect.left) {
-        const int labelWidth = *toolbarBrushTool == Tool::Erase ? 42 : 36;
-        titleRightBound = layout.brushSliderRect.left - labelWidth - 18;
-    }
-
-    const int titleCenterX = clientRect.right / 2;
-    const int titleHalfWidth = std::max(0, std::min(titleCenterX - titleLeftBound, titleRightBound - titleCenterX));
-    RECT titleRect = MakeRect(titleCenterX - titleHalfWidth, ToolbarTopInset(IsZoomed(window_)), titleCenterX + titleHalfWidth, toolbarHeight - 1);
-    if (titleRect.right > titleRect.left) {
+    const int titleLeftBound = layout.menu.viewRect.right + 18;
+    const int titleRightBound = (HasRect(layout.undoRect) ? layout.undoRect.left : layout.moveToolRect.left) - 16;
+    RECT titleRect = MakeRect(titleLeftBound, ToolbarTopInset(IsZoomed(window_)), titleRightBound, toolbarHeight - 1);
+    if ((titleRect.right - titleRect.left) >= 72) {
         SetTextColor(hdc, mutedText);
         SelectObject(hdc, bodyFont);
         std::wstring title = CurrentWindowTitle();
-        DrawTextW(hdc, title.c_str(), -1, &titleRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    }
-
-    if (const auto toolbarBrushTool = ToolbarBrushTool(); toolbarBrushTool.has_value() && layout.brushSliderRect.right > layout.brushSliderRect.left) {
-        const std::wstring brushLabel = *toolbarBrushTool == Tool::Erase ? L"Erase" : L"Draw";
-        const float brushSize = BrushSizeForTool(*toolbarBrushTool);
-        RECT brushLabelRect = MakeRect(layout.brushSliderRect.left - ((*toolbarBrushTool == Tool::Erase ? 42 : 36) + 8), ToolbarTopInset(IsZoomed(window_)), layout.brushSliderRect.left - 8, toolbarHeight - 1);
-        SetTextColor(hdc, mutedText);
-        SelectObject(hdc, labelFont);
-        DrawTextW(hdc, brushLabel.c_str(), -1, &brushLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-        const int sliderCenterY = (layout.brushSliderRect.top + layout.brushSliderRect.bottom) / 2;
-        RECT sliderTrackRect = ToolbarBrushTrackRect(layout.brushSliderRect);
-        FillRoundedRect(hdc, sliderTrackRect, RGB(41, 51, 66));
-        const int thumbCenterX = ToolbarBrushThumbCenterX(sliderTrackRect, brushSize);
-        RECT sliderFillRect = sliderTrackRect;
-        sliderFillRect.right = static_cast<LONG>(std::max<int>(sliderFillRect.left + 1, thumbCenterX + 1));
-        FillRoundedRect(hdc, sliderFillRect, accent);
-        RECT thumbRect = MakeRect(thumbCenterX - 6, sliderCenterY - 6, thumbCenterX + 7, sliderCenterY + 7);
-        FillRoundedRect(hdc, thumbRect, RGB(244, 247, 252));
-        StrokeRoundedRect(hdc, thumbRect, toolbarBrushSliderDragging_ ? RGB(255, 255, 255) : RGB(120, 138, 162), 1);
-
-        const std::wstring brushValue = ToolbarBrushValueLabel();
-        RECT brushValueTextRect = layout.brushValueRect;
-        SetTextColor(hdc, primaryText);
-        SelectObject(hdc, labelFont);
-        if (toolbarBrushSizeEditing_) {
-            StrokeRoundedRect(hdc, layout.brushValueRect, accent, 1);
-            brushValueTextRect.left += 7;
-            brushValueTextRect.right -= 7;
-            SetTextColor(hdc, RGB(244, 247, 252));
-            DrawTextW(hdc, brushValue.c_str(), -1, &brushValueTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-            SIZE textSize {};
-            if (GetTextExtentPoint32W(hdc, brushValue.c_str(), static_cast<int>(brushValue.size()), &textSize) != 0) {
-                const int caretX = std::min(brushValueTextRect.right - 1, brushValueTextRect.left + textSize.cx + 1);
-                HPEN caretPen = CreatePen(PS_SOLID, 1, RGB(244, 247, 252));
-                HGDIOBJ oldCaretPen = SelectObject(hdc, caretPen);
-                MoveToEx(hdc, caretX, layout.brushValueRect.top + 6, nullptr);
-                LineTo(hdc, caretX, layout.brushValueRect.bottom - 6);
-                SelectObject(hdc, oldCaretPen);
-                DeleteObject(caretPen);
-            }
-        } else {
-            DrawTextW(hdc, brushValue.c_str(), -1, &brushValueTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        }
-    }
-
-    RECT pageLabelRect = layout.pageLabelRect;
-    const std::wstring pageLabel = PageIndicatorLabel();
-    if (pageJumpEditing_) {
-        StrokeRoundedRect(hdc, pageLabelRect, accent, 1);
-        RECT entryTextRect = pageLabelRect;
-        entryTextRect.left += 7;
-        entryTextRect.right -= 7;
-        SetTextColor(hdc, RGB(244, 247, 252));
-        SelectObject(hdc, labelFont);
-        DrawTextW(hdc, pageLabel.c_str(), -1, &entryTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-        SIZE textSize {};
-        if (GetTextExtentPoint32W(hdc, pageLabel.c_str(), static_cast<int>(pageLabel.size()), &textSize) != 0) {
-            const int caretX = std::min(entryTextRect.right - 1, entryTextRect.left + textSize.cx + 1);
-            HPEN caretPen = CreatePen(PS_SOLID, 1, RGB(244, 247, 252));
-            HGDIOBJ oldCaretPen = SelectObject(hdc, caretPen);
-            MoveToEx(hdc, caretX, pageLabelRect.top + 6, nullptr);
-            LineTo(hdc, caretX, pageLabelRect.bottom - 6);
-            SelectObject(hdc, oldCaretPen);
-            DeleteObject(caretPen);
-        }
-    } else {
-        SetTextColor(hdc, primaryText);
-        SelectObject(hdc, labelFont);
-        DrawTextW(hdc, pageLabel.c_str(), -1, &pageLabelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        titleRect.left += 4;
+        titleRect.right -= 4;
+        DrawTextW(hdc, title.c_str(), -1, &titleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
     FillRoundedRect(hdc, layout.currentColorRect, ToColorRef(palette_[colorIndex_]));
@@ -5087,8 +5153,49 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
     HGDIOBJ previousFont = SelectObject(hdc, labelFont);
 
-    const int itemWidth = (sidebarRect.right - sidebarRect.left) - 24;
-    int top = sidebarRect.top + 12 - pdfSidebarScrollY_;
+    const COLORREF panelBorder = RGB(43, 52, 64);
+    const COLORREF primaryText = RGB(236, 240, 245);
+    const COLORREF mutedText = RGB(156, 165, 178);
+    const COLORREF accent = RGB(92, 137, 187);
+    const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect);
+    FillRoundedRect(hdc, headerLayout.headerRect, RGB(22, 28, 36));
+    StrokeRoundedRect(hdc, headerLayout.headerRect, panelBorder, 1);
+
+    const auto paintHeaderButton = [&](RECT rect, const wchar_t* label, bool enabled) {
+        SetTextColor(hdc, enabled ? primaryText : RGB(102, 111, 124));
+        RECT labelRect = rect;
+        DrawTextW(hdc, label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    };
+    paintHeaderButton(headerLayout.previousPageRect, L"<", CanGoToPreviousPage());
+    paintHeaderButton(headerLayout.nextPageRect, L">", CanGoToNextPage());
+
+    const std::wstring pageLabel = PageIndicatorLabel();
+    RECT pageLabelRect = headerLayout.pageLabelRect;
+    if (pageJumpEditing_) {
+        StrokeRoundedRect(hdc, pageLabelRect, accent, 1);
+        RECT entryTextRect = pageLabelRect;
+        entryTextRect.left += 7;
+        entryTextRect.right -= 7;
+        SetTextColor(hdc, RGB(244, 247, 252));
+        DrawTextW(hdc, pageLabel.c_str(), -1, &entryTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        SIZE textSize {};
+        if (GetTextExtentPoint32W(hdc, pageLabel.c_str(), static_cast<int>(pageLabel.size()), &textSize) != 0) {
+            const int caretX = std::min(entryTextRect.right - 1, entryTextRect.left + textSize.cx + 1);
+            HPEN caretPen = CreatePen(PS_SOLID, 1, RGB(244, 247, 252));
+            HGDIOBJ oldCaretPen = SelectObject(hdc, caretPen);
+            MoveToEx(hdc, caretX, pageLabelRect.top + 6, nullptr);
+            LineTo(hdc, caretX, pageLabelRect.bottom - 6);
+            SelectObject(hdc, oldCaretPen);
+            DeleteObject(caretPen);
+        }
+    } else {
+        SetTextColor(hdc, mutedText);
+        DrawTextW(hdc, pageLabel.c_str(), -1, &pageLabelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+
+    const int itemWidth = (headerLayout.contentRect.right - headerLayout.contentRect.left) - 24;
+    int top = headerLayout.contentRect.top + 12 - pdfSidebarScrollY_;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         const Page& page = document_.PageAt(pageIndex);
         const float aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
@@ -5168,6 +5275,102 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
     SelectObject(hdc, previousFont);
     DeleteObject(labelFont);
     RestoreDC(hdc, -1);
+}
+
+void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
+    if (!quickSizePopupTool_.has_value()) {
+        return;
+    }
+
+    const RECT canvasRect = CanvasRect(clientRect);
+    const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_);
+    const Tool popupTool = *quickSizePopupTool_;
+    const COLORREF panelFill = RGB(18, 24, 32);
+    const COLORREF panelBorder = RGB(46, 58, 74);
+    const COLORREF primaryText = RGB(236, 240, 245);
+    const COLORREF accent = RGB(92, 137, 187);
+
+    FillRoundedRect(hdc, popupLayout.panelRect, panelFill);
+    StrokeRoundedRect(hdc, popupLayout.panelRect, panelBorder, 1);
+
+    HFONT labelFont = CreateFontW(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
+    HGDIOBJ previousFont = SelectObject(hdc, labelFont);
+    SetBkMode(hdc, TRANSPARENT);
+
+    const float brushSize = BrushSizeForTool(popupTool);
+    const int previewDiameter = std::clamp(static_cast<int>(std::lround(brushSize * 1.5f)), 4, 28);
+    const int previewCenterX = (popupLayout.previewRect.left + popupLayout.previewRect.right) / 2;
+    const int previewCenterY = (popupLayout.previewRect.top + popupLayout.previewRect.bottom) / 2;
+    const RECT previewDotRect = MakeRect(
+        previewCenterX - (previewDiameter / 2),
+        previewCenterY - (previewDiameter / 2),
+        previewCenterX + ((previewDiameter + 1) / 2),
+        previewCenterY + ((previewDiameter + 1) / 2));
+    const COLORREF previewFill = popupTool == Tool::Erase ? RGB(244, 247, 252) : ToColorRef(palette_[colorIndex_]);
+    {
+        Gdiplus::Graphics graphics(hdc);
+        graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+        Gdiplus::SolidBrush brush(Gdiplus::Color(255, GetRValue(previewFill), GetGValue(previewFill), GetBValue(previewFill)));
+        Gdiplus::Pen pen(
+            Gdiplus::Color(
+                255,
+                GetRValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : panelBorder),
+                GetGValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : panelBorder),
+                GetBValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : panelBorder)),
+            1.0f);
+        graphics.FillEllipse(
+            &brush,
+            static_cast<Gdiplus::REAL>(previewDotRect.left),
+            static_cast<Gdiplus::REAL>(previewDotRect.top),
+            static_cast<Gdiplus::REAL>(previewDotRect.right - previewDotRect.left),
+            static_cast<Gdiplus::REAL>(previewDotRect.bottom - previewDotRect.top));
+        graphics.DrawEllipse(
+            &pen,
+            static_cast<Gdiplus::REAL>(previewDotRect.left),
+            static_cast<Gdiplus::REAL>(previewDotRect.top),
+            static_cast<Gdiplus::REAL>(previewDotRect.right - previewDotRect.left),
+            static_cast<Gdiplus::REAL>(previewDotRect.bottom - previewDotRect.top));
+    }
+
+    const RECT sliderTrackRect = ToolbarBrushTrackRect(popupLayout.sliderRect);
+    const int sliderCenterY = (popupLayout.sliderRect.top + popupLayout.sliderRect.bottom) / 2;
+    FillRoundedRect(hdc, sliderTrackRect, RGB(41, 51, 66));
+    const int thumbCenterX = ToolbarBrushThumbCenterX(sliderTrackRect, brushSize);
+    RECT sliderFillRect = sliderTrackRect;
+    sliderFillRect.right = static_cast<LONG>(std::max<int>(sliderFillRect.left + 1, thumbCenterX + 1));
+    FillRoundedRect(hdc, sliderFillRect, accent);
+    RECT thumbRect = MakeRect(thumbCenterX - 6, sliderCenterY - 6, thumbCenterX + 7, sliderCenterY + 7);
+    FillRoundedRect(hdc, thumbRect, RGB(244, 247, 252));
+    StrokeRoundedRect(hdc, thumbRect, toolbarBrushSliderDragging_ ? RGB(255, 255, 255) : RGB(120, 138, 162), 1);
+
+    const std::wstring brushValue = ToolbarBrushValueLabel();
+    RECT brushValueTextRect = popupLayout.valueRect;
+    SetTextColor(hdc, primaryText);
+    if (toolbarBrushSizeEditing_) {
+        StrokeRoundedRect(hdc, popupLayout.valueRect, accent, 1);
+        brushValueTextRect.left += 5;
+        brushValueTextRect.right -= 5;
+        SetTextColor(hdc, RGB(244, 247, 252));
+        DrawTextW(hdc, brushValue.c_str(), -1, &brushValueTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        SIZE textSize {};
+        if (GetTextExtentPoint32W(hdc, brushValue.c_str(), static_cast<int>(brushValue.size()), &textSize) != 0) {
+            const int caretX = std::min(brushValueTextRect.right - 1, brushValueTextRect.left + textSize.cx + 1);
+            HPEN caretPen = CreatePen(PS_SOLID, 1, RGB(244, 247, 252));
+            HGDIOBJ oldCaretPen = SelectObject(hdc, caretPen);
+            MoveToEx(hdc, caretX, popupLayout.valueRect.top + 6, nullptr);
+            LineTo(hdc, caretX, popupLayout.valueRect.bottom - 6);
+            SelectObject(hdc, oldCaretPen);
+            DeleteObject(caretPen);
+        }
+    } else {
+        DrawTextW(hdc, brushValue.c_str(), -1, &brushValueTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    SelectObject(hdc, previousFont);
+    DeleteObject(labelFont);
 }
 
 void App::PaintCanvas(HDC hdc, RECT clientRect) {
@@ -5771,21 +5974,21 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_LBUTTONDOWN: {
         SetFocus(window_);
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        if (const auto sidebarPage = HitTestSidebarPage(cursor); sidebarPage.has_value()) {
-            CancelPageJumpInput();
-            CancelToolbarBrushSizeInput();
-            FocusPage(*sidebarPage);
-            return 0;
-        }
         if (HandlePaletteClick(cursor)) {
             return 0;
         }
         if (HandleToolbarClick(cursor)) {
             return 0;
         }
+        if (HandleQuickSizePopupClick(cursor)) {
+            return 0;
+        }
+        if (HandleSidebarClick(cursor)) {
+            return 0;
+        }
 
         CancelPageJumpInput();
-        CancelToolbarBrushSizeInput();
+        CancelQuickSizePopup();
 
         ClosePaletteOverlays();
 
@@ -5910,12 +6113,19 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_MOUSEWHEEL: {
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         ScreenToClient(window_, &cursor);
+        const int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+        const bool ctrlPressed = (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0;
+        if (ctrlPressed) {
+            ZoomAt(wheelDelta, cursor);
+            return 0;
+        }
         if (IsPdfSidebarVisible()) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
             const RECT sidebarRect = PdfSidebarRect(clientRect);
             if (PtInRect(&sidebarRect, cursor) != 0) {
-                const int itemWidth = (sidebarRect.right - sidebarRect.left) - 24;
+                const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect);
+                const int itemWidth = (headerLayout.contentRect.right - headerLayout.contentRect.left) - 24;
                 int contentHeight = 12;
                 for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
                     const Page& page = document_.PageAt(pageIndex);
@@ -5923,14 +6133,22 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                     const int thumbHeight = std::max(56, static_cast<int>(std::lround(static_cast<float>(itemWidth) * aspect)));
                     contentHeight += thumbHeight + 32;
                 }
-                const int viewportHeight = std::max(1, static_cast<int>(sidebarRect.bottom - sidebarRect.top));
+                const int viewportHeight = std::max(1, static_cast<int>(headerLayout.contentRect.bottom - headerLayout.contentRect.top));
                 const int maxScroll = std::max(0, contentHeight - viewportHeight);
-                pdfSidebarScrollY_ = std::clamp(pdfSidebarScrollY_ - (GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA) * 72, 0, maxScroll);
+                sidebarWheelScrollRemainder_ += static_cast<int>(std::lround(static_cast<float>(wheelDelta) * kWheelScrollPixels));
+                const int scrollPixels = sidebarWheelScrollRemainder_ / WHEEL_DELTA;
+                sidebarWheelScrollRemainder_ -= scrollPixels * WHEEL_DELTA;
+                pdfSidebarScrollY_ = std::clamp(pdfSidebarScrollY_ - scrollPixels, 0, maxScroll);
                 InvalidateRect(window_, &sidebarRect, FALSE);
                 return 0;
             }
         }
-        ZoomAt(GET_WHEEL_DELTA_WPARAM(wParam), cursor);
+        PanBy(0.0f, (static_cast<float>(wheelDelta) / static_cast<float>(WHEEL_DELTA)) * kWheelScrollPixels);
+        return 0;
+    }
+    case WM_MOUSEHWHEEL: {
+        const int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+        PanBy(-(static_cast<float>(wheelDelta) / static_cast<float>(WHEEL_DELTA)) * kWheelScrollPixels, 0.0f);
         return 0;
     }
     case kRenderResultsMessage:
@@ -5975,7 +6193,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
             const RECT sidebarRect = PdfSidebarRect(clientRect);
+            const QuickSizePopupLayout quickSizePopupLayout = BuildQuickSizePopupLayout(CanvasRect(clientRect), quickSizePopupAnchor_);
+            const RECT quickSizePopupBounds = QuickSizePopupBounds(quickSizePopupLayout);
             if (IsPdfSidebarVisible() && PtInRect(&sidebarRect, cursor) != 0) {
+                SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+            } else if (quickSizePopupTool_.has_value()
+                && PtInRect(&quickSizePopupBounds, cursor) != 0) {
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
             } else if (cursor.y < ToolbarHeight(IsZoomed(window_))) {
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
@@ -6113,6 +6336,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        if (wParam == VK_ESCAPE && quickSizePopupTool_.has_value()) {
+            CancelQuickSizePopup();
+            InvalidateRect(window_, nullptr, FALSE);
+            return 0;
+        }
+
         switch (wParam) {
         case VK_LEFT:
             PanBy(20.0f, 0.0f);
@@ -6197,3 +6426,6 @@ LRESULT CALLBACK App::WindowProc(HWND window, UINT message, WPARAM wParam, LPARA
 }
 
 }  // namespace cnote
+
+
+

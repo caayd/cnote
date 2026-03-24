@@ -49,9 +49,12 @@ Run:
 - `Left Mouse`: draw
 - `Header`: use `File`, `Edit`, and `View` dropdowns plus the tool/color/history controls
 - `Edit > Brush Settings`: edit palette colors with RGB sliders, paste hex values, add/remove palette colors, change brush size, and tune stabilization/smoothing
-- `Ctrl+B`: toggle the PDF page preview sidebar
+- `Ctrl+B`: toggle the PDF page preview sidebar and its page navigator
+- `Ctrl+W`: open the active brush/eraser size slider near the cursor
 - `Middle Mouse Hold`: pan
-- `Mouse Wheel`: zoom
+- `Mouse Wheel`: scroll
+- `Trackpad Horizontal Scroll`: pan horizontally
+- `Ctrl` + `Mouse Wheel`: zoom
 - `Page Up` / `Page Down`: jump focus to the previous or next PDF page
 - `Arrow Keys`: pan
 - `Ctrl+N`: new blank document

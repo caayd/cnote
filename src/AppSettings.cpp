@@ -195,6 +195,7 @@ void App::TogglePdfSidebar() {
     if (!document_.IsPdfDocument() || document_.PageCount() == 0U) {
         pdfSidebarOpen_ = false;
         pdfSidebarScrollY_ = 0;
+        CancelPageJumpInput();
         InvalidateRect(window_, nullptr, FALSE);
         return;
     }
@@ -204,6 +205,7 @@ void App::TogglePdfSidebar() {
         EnsureSidebarCurrentPageVisible();
     } else {
         pdfSidebarScrollY_ = 0;
+        CancelPageJumpInput();
     }
     InvalidateRect(window_, nullptr, FALSE);
 }
@@ -597,6 +599,9 @@ void App::ExecuteShortcutAction(ShortcutAction action) {
         break;
     case ShortcutAction::TogglePdfSidebar:
         TogglePdfSidebar();
+        break;
+    case ShortcutAction::ToggleQuickSize:
+        ToggleQuickSizePopup();
         break;
     case ShortcutAction::ToggleWheel:
         TogglePaletteWheel();
