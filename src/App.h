@@ -163,9 +163,12 @@ private:
     void UpdateCaptureState();
     void ExecuteCommand(unsigned int commandId);
     [[nodiscard]] bool HandleToolbarClick(POINT cursor);
+    [[nodiscard]] bool HandlePaletteClick(POINT cursor);
     [[nodiscard]] bool HandleSettingsClick(POINT cursor);
     void UpdateActiveSlider(POINT cursor);
     [[nodiscard]] bool IsCursorInsideSettingsPanel(POINT cursor) const;
+    void TogglePaletteWheel();
+    void ClosePaletteOverlays();
     void PanBy(float dx, float dy);
     void ZoomAt(int delta, POINT cursor);
     void BeginZoomSession(POINT cursor);
@@ -223,6 +226,8 @@ private:
 
     void Paint();
     void PaintToolbar(HDC hdc, RECT clientRect) const;
+    void PaintPaletteMenu(HDC hdc, RECT clientRect) const;
+    void PaintPaletteWheel(HDC hdc, RECT clientRect) const;
     void PaintCanvas(HDC hdc, RECT clientRect);
     void PaintPage(HDC hdc, const PageView& pageView);
     void PaintSettingsPanel(HDC hdc, RECT clientRect) const;
@@ -254,7 +259,10 @@ private:
     bool isTransformingImage_ = false;
     bool isTransformingStroke_ = false;
     bool settingsOpen_ = false;
+    bool paletteMenuOpen_ = false;
+    bool paletteWheelOpen_ = false;
     std::size_t settingsPaletteIndex_ = 0;
+    POINT paletteWheelCenter_ {};
     SliderTarget activeSlider_ = SliderTarget::None;
     std::optional<Stroke> activeStroke_ {};
     std::optional<std::size_t> activeStrokePageIndex_ {};

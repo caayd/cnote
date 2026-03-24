@@ -3,10 +3,15 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
 #include <filesystem>
+#include <fstream>
+#include <memory>
+#include <optional>
+#include <string_view>
 #include <utility>
 
 #include <commdlg.h>
@@ -22,8 +27,7 @@ namespace {
 constexpr wchar_t kWindowClassName[] = L"CnoteWindow";
 constexpr wchar_t kWindowTitle[] = L"cnote";
 constexpr int kToolbarPadding = 18;
-constexpr int kToolButtonWidth = 92;
-constexpr int kToolButtonHeight = 34;
+constexpr int kIconButtonSize = 34;
 constexpr int kColorSwatchSize = 26;
 constexpr int kColorSwatchGap = 10;
 constexpr unsigned int kCommandFileNew = 1001;
@@ -59,7 +63,18 @@ struct ToolbarLayout {
     RECT drawToolRect {};
     RECT panToolRect {};
     RECT eraseToolRect {};
-    std::vector<RECT> colorRects;
+    RECT currentColorRect {};
+};
+
+struct PaletteMenuLayout {
+    RECT panelRect {};
+    std::vector<RECT> swatchRects;
+};
+
+struct PaletteWheelLayout {
+    POINT center {};
+    int innerRadius = 0;
+    int outerRadius = 0;
 };
 
 struct SettingsLayout {
@@ -111,66 +126,574 @@ bool HasExtension(const std::wstring& path, const wchar_t* extension) {
     return normalizedPath.ends_with(normalizedExtension);
 }
 
+struct SvgPathStyle {
+    bool fill = true;
+    bool stroke = false;
+    float strokeWidth = 1.0f;
+    Gdiplus::LineCap lineCap = Gdiplus::LineCapRound;
+    Gdiplus::LineJoin lineJoin = Gdiplus::LineJoinRound;
+};
+
+struct SvgPathShape {
+    std::unique_ptr<Gdiplus::GraphicsPath> path;
+    SvgPathStyle style {};
+};
+
+struct SvgIconData {
+    float viewBoxX = 0.0f;
+    float viewBoxY = 0.0f;
+    float viewBoxWidth = 24.0f;
+    float viewBoxHeight = 24.0f;
+    std::vector<SvgPathShape> shapes;
+    bool loaded = false;
+};
+
+std::optional<std::string> ReadUtf8TextFile(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return std::nullopt;
+    }
+
+    input.seekg(0, std::ios::end);
+    const std::streamoff size = input.tellg();
+    if (size < 0) {
+        return std::nullopt;
+    }
+    input.seekg(0, std::ios::beg);
+
+    std::string contents(static_cast<std::size_t>(size), '\0');
+    if (!contents.empty()) {
+        input.read(contents.data(), static_cast<std::streamsize>(contents.size()));
+        if (!input) {
+            return std::nullopt;
+        }
+    }
+
+    return contents;
+}
+
+std::optional<std::string> ExtractXmlAttribute(std::string_view tag, std::string_view attribute) {
+    const std::string needle = std::string(attribute) + "=\"";
+    const std::size_t start = tag.find(needle);
+    if (start == std::string_view::npos) {
+        return std::nullopt;
+    }
+
+    const std::size_t valueStart = start + needle.size();
+    const std::size_t valueEnd = tag.find('"', valueStart);
+    if (valueEnd == std::string_view::npos) {
+        return std::nullopt;
+    }
+
+    return std::string(tag.substr(valueStart, valueEnd - valueStart));
+}
+
+void SkipSvgSeparators(const char*& cursor) {
+    while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n' || *cursor == ',') {
+        ++cursor;
+    }
+}
+
+bool ConsumeSvgFloat(const char*& cursor, float& value) {
+    SkipSvgSeparators(cursor);
+    if (*cursor == '\0') {
+        return false;
+    }
+
+    char* end = nullptr;
+    value = std::strtof(cursor, &end);
+    if (end == cursor) {
+        return false;
+    }
+    cursor = end;
+    SkipSvgSeparators(cursor);
+    return true;
+}
+
+bool IsSvgCommandLetter(char ch) {
+    switch (ch) {
+    case 'M':
+    case 'm':
+    case 'L':
+    case 'l':
+    case 'H':
+    case 'h':
+    case 'V':
+    case 'v':
+    case 'C':
+    case 'c':
+    case 'Z':
+    case 'z':
+        return true;
+    default:
+        return false;
+    }
+}
+
+std::unique_ptr<Gdiplus::GraphicsPath> ParseSvgPathData(const std::string& pathData) {
+    auto path = std::make_unique<Gdiplus::GraphicsPath>();
+    const char* cursor = pathData.c_str();
+    char command = '\0';
+    Gdiplus::PointF current(0.0f, 0.0f);
+    Gdiplus::PointF subpathStart(0.0f, 0.0f);
+    bool hasCurrentPoint = false;
+
+    while (*cursor != '\0') {
+        SkipSvgSeparators(cursor);
+        if (*cursor == '\0') {
+            break;
+        }
+
+        if (IsSvgCommandLetter(*cursor)) {
+            command = *cursor++;
+        } else if (command == '\0') {
+            return {};
+        }
+
+        switch (command) {
+        case 'M':
+        case 'm': {
+            bool firstPoint = true;
+            while (*cursor != '\0' && !IsSvgCommandLetter(*cursor)) {
+                float x = 0.0f;
+                float y = 0.0f;
+                if (!ConsumeSvgFloat(cursor, x) || !ConsumeSvgFloat(cursor, y)) {
+                    return {};
+                }
+                if (command == 'm' && hasCurrentPoint) {
+                    x += current.X;
+                    y += current.Y;
+                }
+
+                if (firstPoint) {
+                    path->StartFigure();
+                    current = Gdiplus::PointF(x, y);
+                    subpathStart = current;
+                    hasCurrentPoint = true;
+                    firstPoint = false;
+                } else {
+                    path->AddLine(current, Gdiplus::PointF(x, y));
+                    current = Gdiplus::PointF(x, y);
+                }
+            }
+            break;
+        }
+        case 'L':
+        case 'l':
+            while (*cursor != '\0' && !IsSvgCommandLetter(*cursor)) {
+                float x = 0.0f;
+                float y = 0.0f;
+                if (!ConsumeSvgFloat(cursor, x) || !ConsumeSvgFloat(cursor, y) || !hasCurrentPoint) {
+                    return {};
+                }
+                if (command == 'l') {
+                    x += current.X;
+                    y += current.Y;
+                }
+                path->AddLine(current, Gdiplus::PointF(x, y));
+                current = Gdiplus::PointF(x, y);
+            }
+            break;
+        case 'H':
+        case 'h':
+            while (*cursor != '\0' && !IsSvgCommandLetter(*cursor)) {
+                float x = 0.0f;
+                if (!ConsumeSvgFloat(cursor, x) || !hasCurrentPoint) {
+                    return {};
+                }
+                if (command == 'h') {
+                    x += current.X;
+                }
+                path->AddLine(current, Gdiplus::PointF(x, current.Y));
+                current = Gdiplus::PointF(x, current.Y);
+            }
+            break;
+        case 'V':
+        case 'v':
+            while (*cursor != '\0' && !IsSvgCommandLetter(*cursor)) {
+                float y = 0.0f;
+                if (!ConsumeSvgFloat(cursor, y) || !hasCurrentPoint) {
+                    return {};
+                }
+                if (command == 'v') {
+                    y += current.Y;
+                }
+                path->AddLine(current, Gdiplus::PointF(current.X, y));
+                current = Gdiplus::PointF(current.X, y);
+            }
+            break;
+        case 'C':
+        case 'c':
+            while (*cursor != '\0' && !IsSvgCommandLetter(*cursor)) {
+                float x1 = 0.0f;
+                float y1 = 0.0f;
+                float x2 = 0.0f;
+                float y2 = 0.0f;
+                float x3 = 0.0f;
+                float y3 = 0.0f;
+                if (!ConsumeSvgFloat(cursor, x1) || !ConsumeSvgFloat(cursor, y1)
+                    || !ConsumeSvgFloat(cursor, x2) || !ConsumeSvgFloat(cursor, y2)
+                    || !ConsumeSvgFloat(cursor, x3) || !ConsumeSvgFloat(cursor, y3)
+                    || !hasCurrentPoint) {
+                    return {};
+                }
+                if (command == 'c') {
+                    x1 += current.X;
+                    y1 += current.Y;
+                    x2 += current.X;
+                    y2 += current.Y;
+                    x3 += current.X;
+                    y3 += current.Y;
+                }
+                path->AddBezier(current, Gdiplus::PointF(x1, y1), Gdiplus::PointF(x2, y2), Gdiplus::PointF(x3, y3));
+                current = Gdiplus::PointF(x3, y3);
+            }
+            break;
+        case 'Z':
+        case 'z':
+            if (hasCurrentPoint) {
+                path->CloseFigure();
+                current = subpathStart;
+            }
+            break;
+        default:
+            return {};
+        }
+    }
+
+    return path;
+}
+
+std::optional<std::array<float, 4>> ParseViewBox(const std::string& viewBox) {
+    const char* cursor = viewBox.c_str();
+    std::array<float, 4> values {};
+    for (float& value : values) {
+        if (!ConsumeSvgFloat(cursor, value)) {
+            return std::nullopt;
+        }
+    }
+    return values;
+}
+
+Gdiplus::LineCap ParseSvgLineCap(const std::string& value) {
+    if (value == "butt") {
+        return Gdiplus::LineCapFlat;
+    }
+    if (value == "square") {
+        return Gdiplus::LineCapSquare;
+    }
+    return Gdiplus::LineCapRound;
+}
+
+Gdiplus::LineJoin ParseSvgLineJoin(const std::string& value) {
+    if (value == "bevel") {
+        return Gdiplus::LineJoinBevel;
+    }
+    if (value == "miter") {
+        return Gdiplus::LineJoinMiter;
+    }
+    return Gdiplus::LineJoinRound;
+}
+
+std::optional<SvgIconData> LoadSvgIcon(const std::wstring& fileName) {
+    const std::array<std::filesystem::path, 3> basePaths {
+        std::filesystem::current_path(),
+        std::filesystem::path([] {
+            wchar_t buffer[MAX_PATH] = {};
+            GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+            return std::filesystem::path(buffer).parent_path();
+        }()),
+        std::filesystem::path([] {
+            wchar_t buffer[MAX_PATH] = {};
+            GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+            return std::filesystem::path(buffer).parent_path().parent_path();
+        }()),
+    };
+
+    std::optional<std::string> svgContents;
+    for (const auto& basePath : basePaths) {
+        const auto candidate = basePath / "assets" / "icons" / fileName;
+        svgContents = ReadUtf8TextFile(candidate);
+        if (svgContents.has_value()) {
+            break;
+        }
+    }
+
+    if (!svgContents.has_value()) {
+        return std::nullopt;
+    }
+
+    SvgIconData icon {};
+    const std::size_t svgStart = svgContents->find("<svg");
+    if (svgStart == std::string::npos) {
+        return std::nullopt;
+    }
+    const std::size_t svgEnd = svgContents->find('>', svgStart);
+    if (svgEnd == std::string::npos) {
+        return std::nullopt;
+    }
+
+    const std::string_view svgTag(svgContents->data() + svgStart, (svgEnd - svgStart) + 1U);
+    if (const auto viewBox = ExtractXmlAttribute(svgTag, "viewBox"); viewBox.has_value()) {
+        if (const auto parsed = ParseViewBox(*viewBox); parsed.has_value()) {
+            icon.viewBoxX = (*parsed)[0];
+            icon.viewBoxY = (*parsed)[1];
+            icon.viewBoxWidth = (*parsed)[2];
+            icon.viewBoxHeight = (*parsed)[3];
+        }
+    }
+
+    std::size_t searchStart = 0;
+    while (true) {
+        const std::size_t pathStart = svgContents->find("<path", searchStart);
+        if (pathStart == std::string::npos) {
+            break;
+        }
+        const std::size_t pathEnd = svgContents->find('>', pathStart);
+        if (pathEnd == std::string::npos) {
+            return std::nullopt;
+        }
+
+        const std::string_view pathTag(svgContents->data() + pathStart, (pathEnd - pathStart) + 1U);
+        const auto pathData = ExtractXmlAttribute(pathTag, "d");
+        if (!pathData.has_value()) {
+            searchStart = pathEnd + 1U;
+            continue;
+        }
+
+        SvgPathShape shape {};
+        shape.path = ParseSvgPathData(*pathData);
+        if (!shape.path) {
+            return std::nullopt;
+        }
+
+        if (const auto fill = ExtractXmlAttribute(pathTag, "fill"); fill.has_value()) {
+            shape.style.fill = *fill != "none";
+        }
+        if (const auto stroke = ExtractXmlAttribute(pathTag, "stroke"); stroke.has_value()) {
+            shape.style.stroke = *stroke != "none";
+        }
+        if (const auto strokeWidth = ExtractXmlAttribute(pathTag, "stroke-width"); strokeWidth.has_value()) {
+            const char* cursor = strokeWidth->c_str();
+            float parsedWidth = 1.0f;
+            if (ConsumeSvgFloat(cursor, parsedWidth)) {
+                shape.style.strokeWidth = parsedWidth;
+            }
+        }
+        if (const auto lineCap = ExtractXmlAttribute(pathTag, "stroke-linecap"); lineCap.has_value()) {
+            shape.style.lineCap = ParseSvgLineCap(*lineCap);
+        }
+        if (const auto lineJoin = ExtractXmlAttribute(pathTag, "stroke-linejoin"); lineJoin.has_value()) {
+            shape.style.lineJoin = ParseSvgLineJoin(*lineJoin);
+        }
+
+        icon.shapes.push_back(std::move(shape));
+        searchStart = pathEnd + 1U;
+    }
+
+    if (icon.shapes.empty()) {
+        return std::nullopt;
+    }
+
+    icon.loaded = true;
+    return icon;
+}
+
+const SvgIconData* ToolbarSvgIcon(std::wstring_view fileName) {
+    struct CacheEntry {
+        std::wstring name;
+        std::optional<SvgIconData> icon;
+    };
+
+    static std::vector<CacheEntry> cache;
+    const auto existing = std::find_if(cache.begin(), cache.end(), [&](const CacheEntry& entry) {
+        return entry.name == fileName;
+    });
+    if (existing != cache.end()) {
+        return existing->icon.has_value() ? &*existing->icon : nullptr;
+    }
+
+    cache.push_back({ std::wstring(fileName), LoadSvgIcon(std::wstring(fileName)) });
+    return cache.back().icon.has_value() ? &*cache.back().icon : nullptr;
+}
+
+void PaintSvgIcon(HDC hdc, RECT rect, const SvgIconData& icon, COLORREF color) {
+    if (!icon.loaded || icon.shapes.empty() || icon.viewBoxWidth <= 0.0f || icon.viewBoxHeight <= 0.0f) {
+        return;
+    }
+
+    const float availableWidth = static_cast<float>((rect.right - rect.left) - 8);
+    const float availableHeight = static_cast<float>((rect.bottom - rect.top) - 8);
+    const float scale = std::max(0.01f, std::min(availableWidth / icon.viewBoxWidth, availableHeight / icon.viewBoxHeight));
+    const float drawWidth = icon.viewBoxWidth * scale;
+    const float drawHeight = icon.viewBoxHeight * scale;
+    const float offsetX = static_cast<float>(rect.left) + ((rect.right - rect.left) - drawWidth) * 0.5f;
+    const float offsetY = static_cast<float>(rect.top) + ((rect.bottom - rect.top) - drawHeight) * 0.5f;
+    const auto alpha = static_cast<BYTE>(0xFF);
+    const auto red = GetRValue(color);
+    const auto green = GetGValue(color);
+    const auto blue = GetBValue(color);
+    const Gdiplus::Color gdipColor(alpha, red, green, blue);
+
+    Gdiplus::Graphics graphics(hdc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+
+    for (const SvgPathShape& shape : icon.shapes) {
+        std::unique_ptr<Gdiplus::GraphicsPath> transformed(shape.path->Clone());
+        if (!transformed) {
+            continue;
+        }
+
+        Gdiplus::Matrix matrix(
+            scale,
+            0.0f,
+            0.0f,
+            scale,
+            offsetX - (icon.viewBoxX * scale),
+            offsetY - (icon.viewBoxY * scale));
+        transformed->Transform(&matrix);
+
+        if (shape.style.fill) {
+            Gdiplus::SolidBrush brush(gdipColor);
+            graphics.FillPath(&brush, transformed.get());
+        }
+
+        if (shape.style.stroke) {
+            Gdiplus::Pen pen(gdipColor, std::max(1.0f, shape.style.strokeWidth * scale));
+            pen.SetLineCap(shape.style.lineCap, shape.style.lineCap, Gdiplus::DashCapRound);
+            pen.SetLineJoin(shape.style.lineJoin);
+            graphics.DrawPath(&pen, transformed.get());
+        }
+    }
+}
+
 ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount) {
     ToolbarLayout layout;
+    static_cast<void>(colorCount);
 
     const int rightEdge = static_cast<int>(clientRect.right) - kToolbarPadding;
     const int toolbarTop = 10;
-    const int swatchBandWidth = static_cast<int>(colorCount) * kColorSwatchSize
-        + static_cast<int>(colorCount > 0 ? colorCount - 1U : 0U) * kColorSwatchGap;
-    const int colorsLeft = rightEdge - swatchBandWidth;
+    const int colorButtonSize = kIconButtonSize;
+    const int colorsLeft = rightEdge - colorButtonSize;
 
     layout.menu.fileRect = MakeRect(14, toolbarTop + 4, 58, toolbarTop + 28);
     layout.menu.editRect = MakeRect(layout.menu.fileRect.right + 8, toolbarTop + 4, layout.menu.fileRect.right + 52, toolbarTop + 28);
     layout.menu.viewRect = MakeRect(layout.menu.editRect.right + 8, toolbarTop + 4, layout.menu.editRect.right + 54, toolbarTop + 28);
-    layout.previousPageRect = MakeRect(layout.menu.viewRect.right + 20, toolbarTop, layout.menu.viewRect.right + 52, toolbarTop + kToolButtonHeight);
-    layout.pageLabelRect = MakeRect(layout.previousPageRect.right + 8, toolbarTop + 2, layout.previousPageRect.right + 92, toolbarTop + kToolButtonHeight - 2);
-    layout.nextPageRect = MakeRect(layout.pageLabelRect.right + 8, toolbarTop, layout.pageLabelRect.right + 40, toolbarTop + kToolButtonHeight);
-
-    layout.colorRects.reserve(colorCount);
-    for (std::size_t index = 0; index < colorCount; ++index) {
-        const int left = colorsLeft + static_cast<int>(index) * (kColorSwatchSize + kColorSwatchGap);
-        layout.colorRects.push_back(MakeRect(left, toolbarTop + 4, left + kColorSwatchSize, toolbarTop + 4 + kColorSwatchSize));
-    }
+    layout.previousPageRect = MakeRect(layout.menu.viewRect.right + 20, toolbarTop, layout.menu.viewRect.right + 20 + kIconButtonSize, toolbarTop + kIconButtonSize);
+    layout.pageLabelRect = MakeRect(layout.previousPageRect.right + 8, toolbarTop + 3, layout.previousPageRect.right + 92, toolbarTop + kIconButtonSize - 3);
+    layout.nextPageRect = MakeRect(layout.pageLabelRect.right + 8, toolbarTop, layout.pageLabelRect.right + 8 + kIconButtonSize, toolbarTop + kIconButtonSize);
+    layout.currentColorRect = MakeRect(colorsLeft, toolbarTop, colorsLeft + colorButtonSize, toolbarTop + colorButtonSize);
 
     const int toolBandRight = colorsLeft - 24;
     layout.panToolRect = MakeRect(
-        toolBandRight - kToolButtonWidth,
+        toolBandRight - kIconButtonSize,
         toolbarTop,
         toolBandRight,
-        toolbarTop + kToolButtonHeight);
+        toolbarTop + kIconButtonSize);
     layout.drawToolRect = MakeRect(
-        layout.panToolRect.left - 10 - kToolButtonWidth,
+        layout.panToolRect.left - 10 - kIconButtonSize,
         toolbarTop,
         layout.panToolRect.left - 10,
-        toolbarTop + kToolButtonHeight);
+        toolbarTop + kIconButtonSize);
     layout.eraseToolRect = MakeRect(
-        layout.drawToolRect.left - 10 - kToolButtonWidth,
+        layout.drawToolRect.left - 10 - kIconButtonSize,
         toolbarTop,
         layout.drawToolRect.left - 10,
-        toolbarTop + kToolButtonHeight);
+        toolbarTop + kIconButtonSize);
     layout.selectToolRect = MakeRect(
-        layout.eraseToolRect.left - 10 - kToolButtonWidth,
+        layout.eraseToolRect.left - 10 - kIconButtonSize,
         toolbarTop,
         layout.eraseToolRect.left - 10,
-        toolbarTop + kToolButtonHeight);
+        toolbarTop + kIconButtonSize);
     layout.moveToolRect = MakeRect(
-        layout.selectToolRect.left - 10 - kToolButtonWidth,
+        layout.selectToolRect.left - 10 - kIconButtonSize,
         toolbarTop,
         layout.selectToolRect.left - 10,
-        toolbarTop + kToolButtonHeight);
+        toolbarTop + kIconButtonSize);
     layout.redoRect = MakeRect(
-        layout.moveToolRect.left - 22 - 72,
+        layout.moveToolRect.left - 22 - kIconButtonSize,
         toolbarTop,
         layout.moveToolRect.left - 22,
-        toolbarTop + kToolButtonHeight);
+        toolbarTop + kIconButtonSize);
     layout.undoRect = MakeRect(
-        layout.redoRect.left - 10 - 72,
+        layout.redoRect.left - 10 - kIconButtonSize,
         toolbarTop,
         layout.redoRect.left - 10,
-        toolbarTop + kToolButtonHeight);
+        toolbarTop + kIconButtonSize);
 
     return layout;
+}
+
+PaletteMenuLayout BuildPaletteMenuLayout(const ToolbarLayout& toolbarLayout, std::size_t colorCount) {
+    PaletteMenuLayout layout;
+    const int columns = std::min(4, std::max(1, static_cast<int>(colorCount)));
+    const int swatchSize = 28;
+    const int gap = 8;
+    const int rows = std::max(1, static_cast<int>((colorCount + static_cast<std::size_t>(columns) - 1U) / static_cast<std::size_t>(columns)));
+    const int panelPadding = 12;
+    const int panelWidth = (columns * swatchSize) + ((columns - 1) * gap) + (panelPadding * 2);
+    const int panelHeight = (rows * swatchSize) + ((rows - 1) * gap) + (panelPadding * 2);
+    layout.panelRect = MakeRect(
+        toolbarLayout.currentColorRect.right - panelWidth,
+        toolbarLayout.currentColorRect.bottom + 8,
+        toolbarLayout.currentColorRect.right,
+        toolbarLayout.currentColorRect.bottom + 8 + panelHeight);
+
+    layout.swatchRects.reserve(colorCount);
+    for (std::size_t index = 0; index < colorCount; ++index) {
+        const int column = static_cast<int>(index % static_cast<std::size_t>(columns));
+        const int row = static_cast<int>(index / static_cast<std::size_t>(columns));
+        const int left = layout.panelRect.left + panelPadding + (column * (swatchSize + gap));
+        const int top = layout.panelRect.top + panelPadding + (row * (swatchSize + gap));
+        layout.swatchRects.push_back(MakeRect(left, top, left + swatchSize, top + swatchSize));
+    }
+
+    return layout;
+}
+
+PaletteWheelLayout BuildPaletteWheelLayout(RECT clientRect, POINT requestedCenter, std::size_t colorCount) {
+    PaletteWheelLayout layout;
+    constexpr int kToolbarBottom = 54;
+    layout.innerRadius = 20;
+    layout.outerRadius = colorCount <= 1U ? 40 : 86;
+    const int margin = layout.outerRadius + 12;
+    layout.center.x = std::clamp(static_cast<int>(requestedCenter.x), margin, static_cast<int>(clientRect.right) - margin);
+    layout.center.y = std::clamp(static_cast<int>(requestedCenter.y), kToolbarBottom + margin, static_cast<int>(clientRect.bottom) - margin);
+    return layout;
+}
+
+std::optional<std::size_t> PaletteWheelIndexAtPoint(const PaletteWheelLayout& layout, POINT cursor, std::size_t colorCount) {
+    if (colorCount == 0U) {
+        return std::nullopt;
+    }
+
+    const float dx = static_cast<float>(cursor.x - layout.center.x);
+    const float dy = static_cast<float>(cursor.y - layout.center.y);
+    const float distanceSquared = (dx * dx) + (dy * dy);
+    const float innerSquared = static_cast<float>(layout.innerRadius * layout.innerRadius);
+    const float outerSquared = static_cast<float>(layout.outerRadius * layout.outerRadius);
+
+    if (distanceSquared < innerSquared || distanceSquared > outerSquared) {
+        return std::nullopt;
+    }
+
+    if (colorCount == 1U) {
+        return 0U;
+    }
+
+    constexpr float kWheelPi = 3.14159265358979323846f;
+    float angle = std::atan2(dy, dx);
+    angle += kWheelPi / 2.0f;
+    if (angle < 0.0f) {
+        angle += 2.0f * kWheelPi;
+    }
+
+    const float normalized = angle / (2.0f * kWheelPi);
+    const std::size_t index = std::min(
+        colorCount - 1U,
+        static_cast<std::size_t>(std::floor(normalized * static_cast<float>(colorCount))));
+    return index;
 }
 
 SettingsLayout BuildSettingsLayout(RECT clientRect, std::size_t colorCount) {
@@ -255,6 +778,104 @@ void StrokeRoundedRect(HDC hdc, RECT rect, COLORREF color, int width) {
     SelectObject(hdc, oldBrush);
     SelectObject(hdc, oldPen);
     DeleteObject(pen);
+}
+
+void FillSolidRect(HDC hdc, RECT rect, COLORREF color) {
+    HBRUSH brush = CreateSolidBrush(color);
+    FillRect(hdc, &rect, brush);
+    DeleteObject(brush);
+}
+
+template <std::size_t N>
+void FillSolidPolygon(HDC hdc, const std::array<POINT, N>& points, COLORREF color) {
+    HBRUSH brush = CreateSolidBrush(color);
+    HGDIOBJ oldBrush = SelectObject(hdc, brush);
+    HGDIOBJ oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
+    Polygon(hdc, points.data(), static_cast<int>(points.size()));
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(brush);
+}
+
+void PaintSelectToolIcon(HDC hdc, RECT rect, COLORREF color) {
+    const int centerX = (rect.left + rect.right) / 2;
+    const int centerY = (rect.top + rect.bottom) / 2;
+    const RECT box = MakeRect(centerX - 8, centerY - 7, centerX + 8, centerY + 7);
+    const int thickness = 2;
+    const int handle = 3;
+
+    FillSolidRect(hdc, MakeRect(box.left, box.top, box.right, box.top + thickness), color);
+    FillSolidRect(hdc, MakeRect(box.left, box.bottom - thickness, box.right, box.bottom), color);
+    FillSolidRect(hdc, MakeRect(box.left, box.top, box.left + thickness, box.bottom), color);
+    FillSolidRect(hdc, MakeRect(box.right - thickness, box.top, box.right, box.bottom), color);
+
+    FillSolidRect(hdc, MakeRect(box.left - 1, box.top - 1, box.left - 1 + handle, box.top - 1 + handle), color);
+    FillSolidRect(hdc, MakeRect(box.right - handle + 1, box.top - 1, box.right + 1, box.top - 1 + handle), color);
+    FillSolidRect(hdc, MakeRect(box.left - 1, box.bottom - handle + 1, box.left - 1 + handle, box.bottom + 1), color);
+    FillSolidRect(hdc, MakeRect(box.right - handle + 1, box.bottom - handle + 1, box.right + 1, box.bottom + 1), color);
+}
+
+void PaintMoveToolIcon(HDC hdc, RECT rect, COLORREF color) {
+    const int centerX = (rect.left + rect.right) / 2;
+    const int centerY = (rect.top + rect.bottom) / 2;
+    const std::array<POINT, 7> arrow {
+        POINT { centerX - 8, centerY - 9 },
+        POINT { centerX - 8, centerY + 8 },
+        POINT { centerX - 4, centerY + 4 },
+        POINT { centerX - 1, centerY + 11 },
+        POINT { centerX + 3, centerY + 9 },
+        POINT { centerX, centerY + 2 },
+        POINT { centerX + 7, centerY + 2 },
+    };
+    FillSolidPolygon(hdc, arrow, color);
+}
+
+void PaintDrawToolIcon(HDC hdc, RECT rect, COLORREF color) {
+    const int centerX = (rect.left + rect.right) / 2;
+    const int centerY = (rect.top + rect.bottom) / 2;
+    const std::array<POINT, 4> body {
+        POINT { centerX - 7, centerY + 5 },
+        POINT { centerX + 2, centerY - 8 },
+        POINT { centerX + 7, centerY - 3 },
+        POINT { centerX - 2, centerY + 10 },
+    };
+    const std::array<POINT, 3> tip {
+        POINT { centerX - 4, centerY + 8 },
+        POINT { centerX - 1, centerY + 12 },
+        POINT { centerX - 7, centerY + 11 },
+    };
+    FillSolidPolygon(hdc, body, color);
+    FillSolidPolygon(hdc, tip, color);
+}
+
+void PaintPanToolIcon(HDC hdc, RECT rect, COLORREF color) {
+    const int centerX = (rect.left + rect.right) / 2;
+    const int centerY = (rect.top + rect.bottom) / 2;
+    FillSolidRect(hdc, MakeRect(centerX - 5, centerY - 1, centerX + 5, centerY + 8), color);
+    FillSolidRect(hdc, MakeRect(centerX - 7, centerY - 7, centerX - 4, centerY + 1), color);
+    FillSolidRect(hdc, MakeRect(centerX - 3, centerY - 10, centerX, centerY + 1), color);
+    FillSolidRect(hdc, MakeRect(centerX + 1, centerY - 9, centerX + 4, centerY + 1), color);
+    FillSolidRect(hdc, MakeRect(centerX + 5, centerY - 5, centerX + 8, centerY + 2), color);
+    const std::array<POINT, 4> thumb {
+        POINT { centerX - 5, centerY + 1 },
+        POINT { centerX - 11, centerY - 2 },
+        POINT { centerX - 9, centerY + 4 },
+        POINT { centerX - 5, centerY + 6 },
+    };
+    FillSolidPolygon(hdc, thumb, color);
+}
+
+void PaintEraseToolIcon(HDC hdc, RECT rect, COLORREF color) {
+    const int centerX = (rect.left + rect.right) / 2;
+    const int centerY = (rect.top + rect.bottom) / 2;
+    const std::array<POINT, 4> eraser {
+        POINT { centerX - 7, centerY + 4 },
+        POINT { centerX - 1, centerY - 8 },
+        POINT { centerX + 8, centerY - 1 },
+        POINT { centerX + 2, centerY + 10 },
+    };
+    FillSolidPolygon(hdc, eraser, color);
+    FillSolidRect(hdc, MakeRect(centerX - 1, centerY + 5, centerX + 7, centerY + 8), RGB(15, 18, 24));
 }
 
 float DistanceSquared(Vec2 a, Vec2 b) {
@@ -769,6 +1390,7 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
     document_ = std::move(document);
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     ClearSelection();
+    ClosePaletteOverlays();
     selectionPageIndex_.reset();
     selectionLassoPoints_.clear();
     isSelecting_ = false;
@@ -819,6 +1441,31 @@ std::wstring App::SuggestedPdfExportPath() const {
 void App::ClearHistory() {
     undoActions_.clear();
     redoActions_.clear();
+}
+
+void App::ClosePaletteOverlays() {
+    paletteMenuOpen_ = false;
+    paletteWheelOpen_ = false;
+}
+
+void App::TogglePaletteWheel() {
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+
+    POINT cursor {};
+    GetCursorPos(&cursor);
+    ScreenToClient(window_, &cursor);
+
+    if (cursor.x < 0 || cursor.y < 0 || cursor.x >= clientRect.right || cursor.y >= clientRect.bottom) {
+        const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size());
+        cursor.x = (toolbarLayout.currentColorRect.left + toolbarLayout.currentColorRect.right) / 2;
+        cursor.y = toolbarLayout.currentColorRect.bottom + 72;
+    }
+
+    paletteWheelCenter_ = cursor;
+    paletteWheelOpen_ = !paletteWheelOpen_;
+    paletteMenuOpen_ = false;
+    InvalidateRect(window_, nullptr, FALSE);
 }
 
 void App::InvalidateCanvas() {
@@ -2877,74 +3524,124 @@ bool App::HandleToolbarClick(POINT cursor) {
     };
 
     if (PtInRect(&layout.menu.fileRect, cursor) != 0) {
+        ClosePaletteOverlays();
         openMenu(layout.menu.fileRect, 0);
         return true;
     }
 
     if (PtInRect(&layout.menu.editRect, cursor) != 0) {
+        ClosePaletteOverlays();
         openMenu(layout.menu.editRect, 1);
         return true;
     }
 
     if (PtInRect(&layout.menu.viewRect, cursor) != 0) {
+        ClosePaletteOverlays();
         openMenu(layout.menu.viewRect, 2);
         return true;
     }
 
     if (PtInRect(&layout.previousPageRect, cursor) != 0) {
+        ClosePaletteOverlays();
         PreviousPage();
         return true;
     }
 
     if (PtInRect(&layout.nextPageRect, cursor) != 0) {
+        ClosePaletteOverlays();
         NextPage();
         return true;
     }
 
     if (PtInRect(&layout.drawToolRect, cursor) != 0) {
+        ClosePaletteOverlays();
         SetActiveTool(Tool::Draw);
         return true;
     }
 
     if (PtInRect(&layout.selectToolRect, cursor) != 0) {
+        ClosePaletteOverlays();
         selectionMode_ = SelectionMode::Lasso;
         SetActiveTool(Tool::Select);
         return true;
     }
 
     if (PtInRect(&layout.moveToolRect, cursor) != 0) {
+        ClosePaletteOverlays();
         SetActiveTool(Tool::Move);
         return true;
     }
 
     if (PtInRect(&layout.panToolRect, cursor) != 0) {
+        ClosePaletteOverlays();
         SetActiveTool(Tool::Pan);
         return true;
     }
 
     if (PtInRect(&layout.eraseToolRect, cursor) != 0) {
+        ClosePaletteOverlays();
         SetActiveTool(Tool::Erase);
         return true;
     }
 
     if (PtInRect(&layout.undoRect, cursor) != 0) {
+        ClosePaletteOverlays();
         Undo();
         return true;
     }
 
     if (PtInRect(&layout.redoRect, cursor) != 0) {
+        ClosePaletteOverlays();
         Redo();
         return true;
     }
 
-    for (std::size_t index = 0; index < layout.colorRects.size(); ++index) {
-        if (PtInRect(&layout.colorRects[index], cursor) != 0) {
-            SetColorIndex(index);
-            return true;
-        }
+    return true;
+}
+
+bool App::HandlePaletteClick(POINT cursor) {
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size());
+
+    if (PtInRect(&toolbarLayout.currentColorRect, cursor) != 0) {
+        paletteMenuOpen_ = !paletteMenuOpen_;
+        paletteWheelOpen_ = false;
+        InvalidateRect(window_, nullptr, FALSE);
+        return true;
     }
 
-    return true;
+    if (paletteMenuOpen_) {
+        const PaletteMenuLayout menuLayout = BuildPaletteMenuLayout(toolbarLayout, palette_.size());
+        for (std::size_t index = 0; index < menuLayout.swatchRects.size(); ++index) {
+            if (PtInRect(&menuLayout.swatchRects[index], cursor) != 0) {
+                SetColorIndex(index);
+                return true;
+            }
+        }
+
+        if (PtInRect(&menuLayout.panelRect, cursor) != 0) {
+            return true;
+        }
+
+        ClosePaletteOverlays();
+        InvalidateRect(window_, nullptr, FALSE);
+        return true;
+    }
+
+    if (paletteWheelOpen_) {
+        const PaletteWheelLayout wheelLayout = BuildPaletteWheelLayout(clientRect, paletteWheelCenter_, palette_.size());
+        if (const auto index = PaletteWheelIndexAtPoint(wheelLayout, cursor, palette_.size()); index.has_value()) {
+            SetColorIndex(*index);
+            return true;
+        }
+
+        ClosePaletteOverlays();
+        InvalidateRect(window_, nullptr, FALSE);
+        return true;
+    }
+
+    return false;
 }
 
 bool App::HandleSettingsClick(POINT cursor) {
@@ -3249,6 +3946,7 @@ void App::SetColorIndex(std::size_t index) {
     }
 
     colorIndex_ = index;
+    ClosePaletteOverlays();
     bool recoloredSelection = false;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         if (pageIndex >= selectedStrokeIndices_.size() || selectedStrokeIndices_[pageIndex].empty()) {
@@ -3566,6 +4264,8 @@ void App::Paint() {
     PaintToolbar(memoryDc, clientRect);
     PaintCanvas(memoryDc, clientRect);
     PaintSettingsPanel(memoryDc, clientRect);
+    PaintPaletteMenu(memoryDc, clientRect);
+    PaintPaletteWheel(memoryDc, clientRect);
 
     BitBlt(
         windowDc,
@@ -3633,15 +4333,42 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
         DrawTextW(hdc, label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     };
 
-    paintToolButton(layout.undoRect, L"Undo", false, CanUndo());
-    paintToolButton(layout.redoRect, L"Redo", false, CanRedo());
+    const auto paintIconToolButton = [&](RECT rect, auto&& paintFallbackIcon, const wchar_t* svgFileName, bool selected, bool enabled = true) {
+        FillRoundedRect(hdc, rect, selected ? selectedFill : idleFill);
+        StrokeRoundedRect(hdc, rect, selected ? RGB(92, 137, 187) : panelBorder, 1);
+        const COLORREF iconColor = enabled
+            ? (selected ? RGB(240, 247, 255) : primaryText)
+            : RGB(102, 111, 124);
+        if (const SvgIconData* icon = ToolbarSvgIcon(svgFileName); icon != nullptr) {
+            PaintSvgIcon(hdc, rect, *icon, iconColor);
+        } else {
+            paintFallbackIcon(hdc, rect, iconColor);
+        }
+    };
+
+    const auto paintSvgActionButton = [&](RECT rect, const wchar_t* svgFileName, const wchar_t* label, bool enabled) {
+        FillRoundedRect(hdc, rect, idleFill);
+        StrokeRoundedRect(hdc, rect, panelBorder, 1);
+        const COLORREF iconColor = enabled ? primaryText : RGB(102, 111, 124);
+        if (const SvgIconData* icon = ToolbarSvgIcon(svgFileName); icon != nullptr) {
+            PaintSvgIcon(hdc, rect, *icon, iconColor);
+        } else {
+            SetTextColor(hdc, iconColor);
+            SelectObject(hdc, bodyFont);
+            RECT labelRect = rect;
+            DrawTextW(hdc, label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    };
+
+    paintSvgActionButton(layout.undoRect, L"undo.svg", L"Undo", CanUndo());
+    paintSvgActionButton(layout.redoRect, L"redo.svg", L"Redo", CanRedo());
     paintToolButton(layout.previousPageRect, L"<", false, CanGoToPreviousPage());
     paintToolButton(layout.nextPageRect, L">", false, CanGoToNextPage());
-    paintToolButton(layout.selectToolRect, L"Lasso", activeTool_ == Tool::Select);
-    paintToolButton(layout.moveToolRect, L"Cursor", activeTool_ == Tool::Move || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_);
-    paintToolButton(layout.eraseToolRect, L"Erase", activeTool_ == Tool::Erase);
-    paintToolButton(layout.drawToolRect, L"Draw", activeTool_ == Tool::Draw && !isPanning_);
-    paintToolButton(layout.panToolRect, L"Pan", activeTool_ == Tool::Pan || isPanning_);
+    paintIconToolButton(layout.selectToolRect, PaintSelectToolIcon, L"lasso.svg", activeTool_ == Tool::Select);
+    paintIconToolButton(layout.moveToolRect, PaintMoveToolIcon, L"cursor.svg", activeTool_ == Tool::Move || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_);
+    paintIconToolButton(layout.eraseToolRect, PaintEraseToolIcon, L"erase.svg", activeTool_ == Tool::Erase);
+    paintIconToolButton(layout.drawToolRect, PaintDrawToolIcon, L"draw.svg", activeTool_ == Tool::Draw && !isPanning_);
+    paintIconToolButton(layout.panToolRect, PaintPanToolIcon, L"pan.svg", activeTool_ == Tool::Pan || isPanning_);
 
     FillRoundedRect(hdc, layout.pageLabelRect, RGB(22, 28, 36));
     StrokeRoundedRect(hdc, layout.pageLabelRect, panelBorder, 1);
@@ -3651,16 +4378,97 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     const std::wstring pageLabel = PageIndicatorLabel();
     DrawTextW(hdc, pageLabel.c_str(), -1, &pageLabelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    for (std::size_t index = 0; index < layout.colorRects.size(); ++index) {
-        RECT swatchRect = layout.colorRects[index];
-        const bool selected = index == colorIndex_;
-        FillRoundedRect(hdc, swatchRect, ToColorRef(palette_[index]));
-        StrokeRoundedRect(hdc, swatchRect, selected ? RGB(244, 247, 252) : panelBorder, selected ? 2 : 1);
-    }
+    FillRoundedRect(hdc, layout.currentColorRect, ToColorRef(palette_[colorIndex_]));
+    StrokeRoundedRect(hdc, layout.currentColorRect, paletteMenuOpen_ ? RGB(244, 247, 252) : panelBorder, paletteMenuOpen_ ? 2 : 1);
 
     SelectObject(hdc, previousFont);
     DeleteObject(bodyFont);
     DeleteObject(labelFont);
+}
+
+void App::PaintPaletteMenu(HDC hdc, RECT clientRect) const {
+    if (!paletteMenuOpen_) {
+        return;
+    }
+
+    const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size());
+    const PaletteMenuLayout layout = BuildPaletteMenuLayout(toolbarLayout, palette_.size());
+    const COLORREF panelFill = RGB(18, 24, 32);
+    const COLORREF panelBorder = RGB(46, 58, 74);
+
+    FillRoundedRect(hdc, layout.panelRect, panelFill);
+    StrokeRoundedRect(hdc, layout.panelRect, panelBorder, 1);
+
+    for (std::size_t index = 0; index < layout.swatchRects.size(); ++index) {
+        const RECT swatchRect = layout.swatchRects[index];
+        FillRoundedRect(hdc, swatchRect, ToColorRef(palette_[index]));
+        StrokeRoundedRect(hdc, swatchRect, index == colorIndex_ ? RGB(244, 247, 252) : panelBorder, index == colorIndex_ ? 2 : 1);
+    }
+}
+
+void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
+    if (!paletteWheelOpen_) {
+        return;
+    }
+
+    const PaletteWheelLayout layout = BuildPaletteWheelLayout(clientRect, paletteWheelCenter_, palette_.size());
+    if (palette_.empty()) {
+        return;
+    }
+
+    Gdiplus::Graphics graphics(hdc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+
+    const int outerDiameter = layout.outerRadius * 2;
+    const int innerDiameter = layout.innerRadius * 2;
+    Gdiplus::Rect outerRect(
+        layout.center.x - layout.outerRadius,
+        layout.center.y - layout.outerRadius,
+        outerDiameter,
+        outerDiameter);
+
+    Gdiplus::SolidBrush shadowBrush(Gdiplus::Color(210, 18, 24, 32));
+    graphics.FillEllipse(
+        &shadowBrush,
+        static_cast<Gdiplus::REAL>(layout.center.x - (layout.outerRadius + 6)),
+        static_cast<Gdiplus::REAL>(layout.center.y - (layout.outerRadius + 6)),
+        static_cast<Gdiplus::REAL>((layout.outerRadius + 6) * 2),
+        static_cast<Gdiplus::REAL>((layout.outerRadius + 6) * 2));
+
+    const float sweep = 360.0f / static_cast<float>(palette_.size());
+    float start = -90.0f;
+    for (std::size_t index = 0; index < palette_.size(); ++index) {
+        const COLORREF color = ToColorRef(palette_[index]);
+        Gdiplus::SolidBrush brush(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)));
+        graphics.FillPie(&brush, outerRect, start, sweep);
+
+        Gdiplus::Pen separatorPen(Gdiplus::Color(index == colorIndex_ ? 255 : 120, 244, 247, 252), index == colorIndex_ ? 3.0f : 1.2f);
+        graphics.DrawPie(&separatorPen, outerRect, start, sweep);
+        start += sweep;
+    }
+
+    Gdiplus::SolidBrush cutoutBrush(Gdiplus::Color(245, 18, 24, 32));
+    graphics.FillEllipse(
+        &cutoutBrush,
+        static_cast<Gdiplus::REAL>(layout.center.x - layout.innerRadius),
+        static_cast<Gdiplus::REAL>(layout.center.y - layout.innerRadius),
+        static_cast<Gdiplus::REAL>(innerDiameter),
+        static_cast<Gdiplus::REAL>(innerDiameter));
+
+    Gdiplus::Pen ringBorder(Gdiplus::Color(180, 244, 247, 252), 1.5f);
+    graphics.DrawEllipse(
+        &ringBorder,
+        static_cast<Gdiplus::REAL>(layout.center.x - layout.outerRadius),
+        static_cast<Gdiplus::REAL>(layout.center.y - layout.outerRadius),
+        static_cast<Gdiplus::REAL>(outerDiameter),
+        static_cast<Gdiplus::REAL>(outerDiameter));
+    graphics.DrawEllipse(
+        &ringBorder,
+        static_cast<Gdiplus::REAL>(layout.center.x - layout.innerRadius),
+        static_cast<Gdiplus::REAL>(layout.center.y - layout.innerRadius),
+        static_cast<Gdiplus::REAL>(innerDiameter),
+        static_cast<Gdiplus::REAL>(innerDiameter));
 }
 
 void App::PaintSettingsPanel(HDC hdc, RECT clientRect) const {
@@ -4309,6 +5117,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_LBUTTONDOWN: {
         SetFocus(window_);
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (HandlePaletteClick(cursor)) {
+            return 0;
+        }
         if (HandleToolbarClick(cursor)) {
             return 0;
         }
@@ -4316,6 +5127,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         if (HandleSettingsClick(cursor)) {
             return 0;
         }
+
+        ClosePaletteOverlays();
 
         if (activeTool_ == Tool::Pan) {
             BeginPan(cursor, false);
@@ -4493,6 +5306,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 OpenDocument();
                 return 0;
             }
+            if (wParam == 'Q') {
+                TogglePaletteWheel();
+                return 0;
+            }
             if (wParam == 'S') {
                 static_cast<void>(SaveAsCnote());
                 return 0;
@@ -4505,6 +5322,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 
         if (wParam == VK_DELETE) {
             DeleteSelection();
+            return 0;
+        }
+
+        if (wParam == VK_ESCAPE && (paletteMenuOpen_ || paletteWheelOpen_)) {
+            ClosePaletteOverlays();
+            InvalidateRect(window_, nullptr, FALSE);
             return 0;
         }
 
