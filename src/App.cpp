@@ -5449,12 +5449,10 @@ bool App::TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke&
     HGDIOBJ previousBitmap = SelectObject(cacheDc, cacheBitmap);
     std::copy(cache.pixels.begin(), cache.pixels.end(), static_cast<std::uint8_t*>(bits));
 
-    const float cacheScaleX = cache.width > 0 ? static_cast<float>(cache.width) / std::max(1.0f, page.width) : 1.0f;
-    const float cacheScaleY = cache.height > 0 ? static_cast<float>(cache.height) / std::max(1.0f, page.height) : 1.0f;
     const PageView cacheView {
         MakeRect(0, 0, cache.width, cache.height),
         pageIndex,
-        std::min(cacheScaleX, cacheScaleY),
+        cache.pageScale > 0.0f ? cache.pageScale : 1.0f,
         true,
     };
     PaintStroke(cacheDc, stroke, cacheView, false);
@@ -5476,19 +5474,25 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
 
     const Page& page = document_.PageAt(pageView.pageIndex);
     PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
-    const int width = pageView.rect.right - pageView.rect.left;
-    const int height = pageView.rect.bottom - pageView.rect.top;
+    const float cacheScale = std::max(
+        std::max(0.1f, pageView.scale),
+        (page.raster.width > 0 && page.raster.height > 0 && page.raster.scale > 0.0f) ? page.raster.scale : 0.0f);
+    const int width = std::max(1, static_cast<int>(std::lround(std::max(1.0f, page.width) * cacheScale)));
+    const int height = std::max(1, static_cast<int>(std::lround(std::max(1.0f, page.height) * cacheScale)));
     if (width <= 0 || height <= 0) {
         return;
     }
 
     const bool cacheMatches = cache.valid
         && cache.pageIndex == pageView.pageIndex
+        && cache.width == width
+        && cache.height == height
         && cache.strokeCount == page.strokes.size()
         && cache.imageCount == page.images.size()
         && cache.rasterWidth == page.raster.width
         && cache.rasterHeight == page.raster.height
         && std::abs(cache.rasterScale - page.raster.scale) < 0.001f
+        && std::abs(cache.pageScale - cacheScale) < 0.001f
         && !cache.pixels.empty();
     if (cacheMatches) {
         return;
@@ -5553,7 +5557,7 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
     const PageView cacheView {
         MakeRect(0, 0, width, height),
         pageView.pageIndex,
-        pageView.scale,
+        cacheScale,
         true,
     };
     Gdiplus::Graphics imageGraphics(cacheDc);
@@ -5599,7 +5603,7 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
     cache.rasterWidth = page.raster.width;
     cache.rasterHeight = page.raster.height;
     cache.rasterScale = page.raster.scale;
-    cache.pageScale = pageView.scale;
+    cache.pageScale = cacheScale;
     cache.valid = true;
 
     SelectObject(cacheDc, previousBitmap);
@@ -6101,6 +6105,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             if (rasterRefreshPending_) {
                 ScheduleDeferredRasterRefresh();
             }
+            InvalidateCanvas();
         } else if (isPanning_ && !panFromMiddleButton_) {
             EndPan();
         }
