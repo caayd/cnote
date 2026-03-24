@@ -61,6 +61,7 @@ public:
         Paste,
         ResetView,
         ToggleSettings,
+        TogglePdfSidebar,
         ToggleWheel,
         PreviousPage,
         NextPage,
@@ -104,6 +105,17 @@ public:
         int rasterHeight = 0;
         float rasterScale = 0.0f;
         float pageScale = 0.0f;
+        bool valid = false;
+        std::vector<std::uint8_t> pixels {};
+    };
+
+    struct SidebarThumbnailCache {
+        int width = 0;
+        int height = 0;
+        int stride = 0;
+        int sourceWidth = 0;
+        int sourceHeight = 0;
+        float sourceScale = 0.0f;
         bool valid = false;
         std::vector<std::uint8_t> pixels {};
     };
@@ -168,6 +180,7 @@ private:
     void SetCurrentPageIndex(std::size_t index);
     void FocusPage(std::size_t index);
     void ToggleBrushSettings();
+    void TogglePdfSidebar();
     void Undo();
     void Redo();
     [[nodiscard]] bool CanUndo() const;
@@ -269,9 +282,21 @@ private:
     [[nodiscard]] unsigned char GetColorChannel(std::uint32_t color, int shift) const;
     [[nodiscard]] std::wstring CurrentWindowTitle() const;
     [[nodiscard]] std::wstring PageIndicatorLabel() const;
+    [[nodiscard]] bool IsPdfSidebarVisible() const;
+    [[nodiscard]] int PdfSidebarWidth() const;
+    [[nodiscard]] RECT PdfSidebarRect(RECT clientRect) const;
+    [[nodiscard]] RECT CanvasRect(RECT clientRect) const;
+    [[nodiscard]] std::optional<std::size_t> HitTestSidebarPage(POINT cursor) const;
+    void EnsureSidebarCurrentPageVisible();
+    void InvalidateSidebarThumbnailCache(std::size_t pageIndex);
+    void EnsureSidebarThumbnailCache(std::size_t pageIndex, int width, int height);
+    void CancelPageJumpInput();
+    void BeginPageJumpInput();
+    void ApplyPageJumpInput();
 
     void Paint();
     void PaintToolbar(HDC hdc, RECT clientRect) const;
+    void PaintPdfSidebar(HDC hdc, RECT clientRect);
     void PaintPaletteMenu(HDC hdc, RECT clientRect) const;
     void PaintPaletteWheel(HDC hdc, RECT clientRect) const;
     void PaintCanvas(HDC hdc, RECT clientRect);
@@ -339,6 +364,7 @@ private:
     Vec2 zoomAnchorPage_ {};
     POINT zoomAnchorCursor_ {};
     std::vector<PageSurfaceCache> pageSurfaceCaches_ {};
+    std::vector<SidebarThumbnailCache> sidebarThumbnailCaches_ {};
     std::uint64_t renderGeneration_ = 0;
     std::unordered_map<std::size_t, float> pendingRenderScales_ {};
     std::mutex renderMutex_ {};
@@ -349,7 +375,7 @@ private:
     bool renderWorkerRunning_ = false;
 
     std::vector<std::uint32_t> palette_ {
-        0xFF1F2937,
+        0xFF000000,
         0xFF2563EB,
         0xFFDC2626,
         0xFF059669,
@@ -358,8 +384,16 @@ private:
     ShortcutState shortcuts_ {};
     WheelState wheel_ {};
     SettingsState settings_ {};
+    HCURSOR eraserCursor_ = nullptr;
+    bool pdfSidebarOpen_ = false;
+    int pdfSidebarScrollY_ = 0;
+    bool pageJumpEditing_ = false;
+    bool pageJumpReplaceOnType_ = false;
+    std::wstring pageJumpText_ {};
+    int hoveredWindowButton_ = -1;
+    bool trackingMouseLeave_ = false;
 
-    static constexpr int kToolbarHeight = 54;
+    static constexpr int kToolbarHeight = 45;
     static constexpr int kSettingsPanelWidth = 320;
     static constexpr int kPageGap = 26;
     static constexpr UINT kRenderResultsMessage = WM_APP + 1;

@@ -29,6 +29,28 @@ std::filesystem::path AppSettingsPath() {
     return std::filesystem::current_path() / L"cnote.settings.ini";
 }
 
+const std::vector<std::uint32_t>& DefaultPalette() {
+    static const std::vector<std::uint32_t> palette {
+        0xFF000000,
+        0xFF2563EB,
+        0xFFDC2626,
+        0xFF059669,
+        0xFFF59E0B,
+    };
+    return palette;
+}
+
+const std::vector<std::uint32_t>& LegacyDefaultPalette() {
+    static const std::vector<std::uint32_t> palette {
+        0xFF1F2937,
+        0xFF2563EB,
+        0xFFDC2626,
+        0xFF059669,
+        0xFFF59E0B,
+    };
+    return palette;
+}
+
 std::string TrimAscii(std::string_view value) {
     std::size_t start = 0;
     while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])) != 0) {
@@ -167,6 +189,23 @@ void App::ToggleBrushSettings() {
         settings_.window = new SettingsWindow(*this);
     }
     settings_.window->Toggle(window_);
+}
+
+void App::TogglePdfSidebar() {
+    if (!document_.IsPdfDocument() || document_.PageCount() == 0U) {
+        pdfSidebarOpen_ = false;
+        pdfSidebarScrollY_ = 0;
+        InvalidateRect(window_, nullptr, FALSE);
+        return;
+    }
+
+    pdfSidebarOpen_ = !pdfSidebarOpen_;
+    if (pdfSidebarOpen_) {
+        EnsureSidebarCurrentPageVisible();
+    } else {
+        pdfSidebarScrollY_ = 0;
+    }
+    InvalidateRect(window_, nullptr, FALSE);
 }
 
 void App::RefreshSettingsWindow() {
@@ -362,8 +401,11 @@ void App::LoadAppSettings() {
         }
     }
 
+    if (palette_ == LegacyDefaultPalette()) {
+        palette_ = DefaultPalette();
+    }
     if (palette_.empty()) {
-        palette_.push_back(0xFF1F2937);
+        palette_ = DefaultPalette();
     }
     colorIndex_ = std::min(loadedColorIndex.value_or(colorIndex_), palette_.size() - 1U);
     settings_.paletteIndex = std::min(loadedSettingsPaletteIndex.value_or(settings_.paletteIndex), palette_.size() - 1U);
@@ -535,6 +577,9 @@ void App::ExecuteShortcutAction(ShortcutAction action) {
         break;
     case ShortcutAction::ToggleSettings:
         ToggleBrushSettings();
+        break;
+    case ShortcutAction::TogglePdfSidebar:
+        TogglePdfSidebar();
         break;
     case ShortcutAction::ToggleWheel:
         TogglePaletteWheel();
