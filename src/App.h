@@ -155,6 +155,8 @@ public:
     struct SettingsState {
         SettingsWindow* window = nullptr;
         std::size_t paletteIndex = 0;
+        float drawBrushSize = 3.0f;
+        float eraseBrushSize = 3.0f;
         float inputSpacing = 0.85f;
         float inputSmoothing = 0.3f;
         float strokeSmoothing = 0.55f;
@@ -255,6 +257,9 @@ private:
     [[nodiscard]] std::optional<std::size_t> SingleSelectedStrokePage() const;
     void TranslateSelectedContent(std::size_t pageIndex, Vec2 delta);
     void ChangeBrushSize(float delta);
+    [[nodiscard]] float BrushSizeForTool(Tool tool) const;
+    void SetBrushSizeForTool(Tool tool, float size, bool refreshUi = true);
+    void SyncBrushWidthFromActiveTool();
     void CycleColor();
     void SetColorIndex(std::size_t index);
     void OpenDocument();
@@ -293,6 +298,14 @@ private:
     void CancelPageJumpInput();
     void BeginPageJumpInput();
     void ApplyPageJumpInput();
+    [[nodiscard]] std::optional<Tool> ToolbarBrushTool() const;
+    [[nodiscard]] std::wstring ToolbarBrushValueLabel() const;
+    void CancelToolbarBrushSizeInput();
+    void BeginToolbarBrushSizeInput();
+    void ApplyToolbarBrushSizeInput();
+    void BeginToolbarBrushSliderDrag(POINT cursor);
+    void UpdateToolbarBrushSliderDrag(POINT cursor);
+    void EndToolbarBrushSliderDrag();
 
     void Paint();
     void PaintToolbar(HDC hdc, RECT clientRect) const;
@@ -390,6 +403,11 @@ private:
     bool pageJumpEditing_ = false;
     bool pageJumpReplaceOnType_ = false;
     std::wstring pageJumpText_ {};
+    bool toolbarBrushSizeEditing_ = false;
+    bool toolbarBrushSizeReplaceOnType_ = false;
+    std::optional<Tool> toolbarBrushSizeEditTool_ {};
+    std::wstring toolbarBrushSizeText_ {};
+    bool toolbarBrushSliderDragging_ = false;
     int hoveredWindowButton_ = -1;
     bool trackingMouseLeave_ = false;
 

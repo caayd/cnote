@@ -32,6 +32,8 @@ private:
     void CreateControls();
     void ApplyFonts();
     void LayoutControls();
+    void UpdateScrollInfo();
+    void ScrollTo(int scrollOffset);
     void RefreshPaletteList();
     void RefreshSliderValues();
     void RefreshShortcutList();
@@ -49,8 +51,11 @@ private:
     void ClearSelectedShortcut();
     void HandleShortcutCapture(UINT key);
     void UpdatePaletteFromRgbSliders();
-    HWND SliderHandle(SliderKind kind) const;
-    HWND LabelHandle(SliderKind kind) const;
+    [[nodiscard]] HWND SliderHandle(SliderKind kind) const;
+    [[nodiscard]] int SliderValue(SliderKind kind) const;
+    void UpdateSliderValue(SliderKind kind, int value);
+    void UpdateSliderFromPoint(SliderKind kind, POINT cursor);
+    [[nodiscard]] std::optional<SliderKind> HitTestSlider(POINT cursor) const;
     static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
 
@@ -80,6 +85,11 @@ private:
     HWND clearShortcutButton_ = nullptr;
     HWND shortcutHintLabel_ = nullptr;
     std::optional<App::ShortcutAction> capturingShortcutAction_ {};
+    std::optional<SliderKind> draggingSlider_ {};
+    int scrollOffset_ = 0;
+    int contentHeight_ = 0;
+    bool draggingScrollbar_ = false;
+    int scrollbarDragOffset_ = 0;
 };
 
 }  // namespace cnote

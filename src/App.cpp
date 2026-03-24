@@ -19,6 +19,7 @@
 #include <gdiplus.h>
 #include <windowsx.h>
 
+#include "resource.h"
 #include "SettingsWindow.h"
 #include "ShortcutConfig.h"
 
@@ -62,6 +63,8 @@ struct ToolbarLayout {
     RECT previousPageRect {};
     RECT nextPageRect {};
     RECT pageLabelRect {};
+    RECT brushSliderRect {};
+    RECT brushValueRect {};
     RECT undoRect {};
     RECT redoRect {};
     RECT selectToolRect {};
@@ -667,7 +670,7 @@ void PaintSvgIcon(HDC hdc, RECT rect, const SvgIconData& icon, COLORREF color) {
     }
 }
 
-ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool maximized) {
+ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool maximized, App::Tool activeTool) {
     ToolbarLayout layout;
     static_cast<void>(colorCount);
 
@@ -729,6 +732,28 @@ ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool m
         toolbarTop,
         layout.redoRect.left - 10,
         toolbarTop + kIconButtonSize);
+
+    if (activeTool == App::Tool::Draw || activeTool == App::Tool::Erase) {
+        const int clusterRight = layout.undoRect.left - 16;
+        const int valueWidth = 28;
+        const int labelWidth = activeTool == App::Tool::Erase ? 42 : 36;
+        const int sliderWidth = 84;
+        const int valueGap = 8;
+        const int clusterWidth = labelWidth + 8 + sliderWidth + valueGap + valueWidth;
+        const int clusterLeft = clusterRight - clusterWidth;
+        if (clusterLeft >= layout.nextPageRect.right + 16) {
+            layout.brushSliderRect = MakeRect(
+                clusterLeft + labelWidth + 8,
+                toolbarTop + 8,
+                clusterLeft + labelWidth + 8 + sliderWidth,
+                toolbarTop + kIconButtonSize - 8);
+            layout.brushValueRect = MakeRect(
+                layout.brushSliderRect.right + valueGap,
+                toolbarTop,
+                layout.brushSliderRect.right + valueGap + valueWidth,
+                toolbarTop + kIconButtonSize);
+        }
+    }
 
     return layout;
 }
@@ -804,7 +829,7 @@ std::optional<std::size_t> PaletteWheelIndexAtPoint(const PaletteWheelLayout& la
 }
 
 bool IsToolbarControlRect(const ToolbarLayout& layout, POINT cursor) {
-    const std::array<RECT, 15> controls {
+    const std::array<RECT, 17> controls {
         layout.menu.fileRect,
         layout.menu.editRect,
         layout.menu.viewRect,
@@ -814,6 +839,8 @@ bool IsToolbarControlRect(const ToolbarLayout& layout, POINT cursor) {
         layout.previousPageRect,
         layout.pageLabelRect,
         layout.nextPageRect,
+        layout.brushSliderRect,
+        layout.brushValueRect,
         layout.undoRect,
         layout.redoRect,
         layout.selectToolRect,
@@ -835,24 +862,91 @@ bool IsToolbarControlRect(const ToolbarLayout& layout, POINT cursor) {
     return PtInRect(&layout.currentColorRect, cursor) != 0;
 }
 
+bool IsToolbarBrushTool(App::Tool tool) {
+    return tool == App::Tool::Draw || tool == App::Tool::Erase;
+}
+
+RECT ToolbarBrushTrackRect(const RECT& sliderRect) {
+    const int centerY = (sliderRect.top + sliderRect.bottom) / 2;
+    return MakeRect(sliderRect.left + 10, centerY - 3, sliderRect.right - 10, centerY + 3);
+}
+
+int ToolbarBrushThumbCenterX(const RECT& sliderRect, float brushSize) {
+    const int width = std::max(1, static_cast<int>(sliderRect.right - sliderRect.left));
+    const float normalized = std::clamp((brushSize - 1.0f) / 19.0f, 0.0f, 1.0f);
+    return sliderRect.left + static_cast<int>(std::lround(normalized * static_cast<float>(width - 1)));
+}
+
+std::unique_ptr<Gdiplus::GraphicsPath> CreateRoundedRectPath(const RECT& rect, float radius) {
+    const float left = static_cast<float>(rect.left);
+    const float top = static_cast<float>(rect.top);
+    const float width = static_cast<float>(rect.right - rect.left);
+    const float height = static_cast<float>(rect.bottom - rect.top);
+    const float diameter = std::min(radius * 2.0f, std::min(width, height));
+
+    auto path = std::make_unique<Gdiplus::GraphicsPath>();
+    if (diameter <= 0.0f) {
+        path->AddRectangle(Gdiplus::RectF(left, top, width, height));
+        return path;
+    }
+
+    path->AddArc(left, top, diameter, diameter, 180.0f, 90.0f);
+    path->AddArc(left + width - diameter, top, diameter, diameter, 270.0f, 90.0f);
+    path->AddArc(left + width - diameter, top + height - diameter, diameter, diameter, 0.0f, 90.0f);
+    path->AddArc(left, top + height - diameter, diameter, diameter, 90.0f, 90.0f);
+    path->CloseFigure();
+    return path;
+}
+
 void FillRoundedRect(HDC hdc, RECT rect, COLORREF color) {
-    HBRUSH brush = CreateSolidBrush(color);
-    HGDIOBJ oldBrush = SelectObject(hdc, brush);
-    HGDIOBJ oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
-    RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-    DeleteObject(brush);
+    Gdiplus::Graphics graphics(hdc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::SolidBrush brush(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)));
+    const auto path = CreateRoundedRectPath(rect, 6.0f);
+    graphics.FillPath(&brush, path.get());
 }
 
 void StrokeRoundedRect(HDC hdc, RECT rect, COLORREF color, int width) {
-    HPEN pen = CreatePen(PS_SOLID, width, color);
-    HGDIOBJ oldPen = SelectObject(hdc, pen);
-    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
-    RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
-    SelectObject(hdc, oldBrush);
-    SelectObject(hdc, oldPen);
-    DeleteObject(pen);
+    Gdiplus::Graphics graphics(hdc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)), static_cast<Gdiplus::REAL>(width));
+    const auto path = CreateRoundedRectPath(rect, 6.0f);
+    graphics.DrawPath(&pen, path.get());
+}
+
+void DrawPolylineAA(HDC hdc, const POINT* points, int count, COLORREF color, float width, Gdiplus::DashStyle dashStyle = Gdiplus::DashStyleSolid) {
+    if (points == nullptr || count < 2) {
+        return;
+    }
+
+    std::vector<Gdiplus::PointF> pathPoints;
+    pathPoints.reserve(static_cast<std::size_t>(count));
+    for (int index = 0; index < count; ++index) {
+        pathPoints.push_back(Gdiplus::PointF(static_cast<Gdiplus::REAL>(points[index].x), static_cast<Gdiplus::REAL>(points[index].y)));
+    }
+
+    Gdiplus::Graphics graphics(hdc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)), width);
+    pen.SetDashStyle(dashStyle);
+    graphics.DrawLines(&pen, pathPoints.data(), static_cast<INT>(pathPoints.size()));
+}
+
+void DrawRectangleAA(HDC hdc, const RECT& rect, COLORREF color, float width, Gdiplus::DashStyle dashStyle = Gdiplus::DashStyleSolid) {
+    Gdiplus::Graphics graphics(hdc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)), width);
+    pen.SetDashStyle(dashStyle);
+    graphics.DrawRectangle(
+        &pen,
+        static_cast<Gdiplus::REAL>(rect.left),
+        static_cast<Gdiplus::REAL>(rect.top),
+        static_cast<Gdiplus::REAL>(rect.right - rect.left),
+        static_cast<Gdiplus::REAL>(rect.bottom - rect.top));
 }
 
 void FillSolidRect(HDC hdc, RECT rect, COLORREF color) {
@@ -1374,6 +1468,8 @@ bool App::CreateMainWindow(int showCommand) {
     windowClass.style = CS_HREDRAW | CS_VREDRAW;
     windowClass.lpfnWndProc = &App::WindowProc;
     windowClass.hInstance = instance_;
+    windowClass.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
+    windowClass.hIconSm = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     windowClass.lpszClassName = kWindowClassName;
@@ -1455,7 +1551,7 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
     isSelecting_ = false;
     ClearHistory();
     if (resetBrushWidth) {
-        brushWidth_ = 3.0f;
+        SyncBrushWidthFromActiveTool();
     }
     ResetView();
     EnsureSidebarCurrentPageVisible();
@@ -1533,7 +1629,7 @@ void App::TogglePaletteWheel() {
 
     if (cursor.x < 0 || cursor.y < 0 || cursor.x >= clientRect.right || cursor.y >= clientRect.bottom) {
         const bool maximized = IsZoomed(window_);
-        const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), maximized);
+        const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), maximized, activeTool_);
         cursor.x = (toolbarLayout.currentColorRect.left + toolbarLayout.currentColorRect.right) / 2;
         cursor.y = toolbarLayout.currentColorRect.bottom + 72;
     }
@@ -1667,7 +1763,12 @@ void App::SetActiveTool(Tool tool) {
         strokeTransformHandle_ = ImageTransformHandle::None;
         strokeTransformInitials_.clear();
     }
+    if (tool != activeTool_) {
+        CancelToolbarBrushSizeInput();
+        EndToolbarBrushSliderDrag();
+    }
     activeTool_ = tool;
+    SyncBrushWidthFromActiveTool();
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -2346,6 +2447,7 @@ void App::CancelPageJumpInput() {
 }
 
 void App::BeginPageJumpInput() {
+    CancelToolbarBrushSizeInput();
     pageJumpEditing_ = true;
     pageJumpText_ = std::to_wstring(document_.CurrentPageIndex() + 1U);
     pageJumpReplaceOnType_ = true;
@@ -2366,6 +2468,104 @@ void App::ApplyPageJumpInput() {
     if (pageIndex < document_.PageCount()) {
         FocusPage(pageIndex);
     }
+}
+
+std::optional<App::Tool> App::ToolbarBrushTool() const {
+    if (IsToolbarBrushTool(activeTool_)) {
+        return activeTool_;
+    }
+    return std::nullopt;
+}
+
+std::wstring App::ToolbarBrushValueLabel() const {
+    if (toolbarBrushSizeEditing_) {
+        return toolbarBrushSizeText_.empty() ? L"" : toolbarBrushSizeText_;
+    }
+
+    if (const auto tool = ToolbarBrushTool(); tool.has_value()) {
+        return std::to_wstring(static_cast<int>(std::lround(BrushSizeForTool(*tool))));
+    }
+
+    return L"";
+}
+
+void App::CancelToolbarBrushSizeInput() {
+    toolbarBrushSizeEditing_ = false;
+    toolbarBrushSizeReplaceOnType_ = false;
+    toolbarBrushSizeEditTool_.reset();
+    toolbarBrushSizeText_.clear();
+}
+
+void App::BeginToolbarBrushSizeInput() {
+    const auto tool = ToolbarBrushTool();
+    if (!tool.has_value()) {
+        return;
+    }
+
+    pageJumpEditing_ = false;
+    pageJumpReplaceOnType_ = false;
+    pageJumpText_.clear();
+    toolbarBrushSizeEditing_ = true;
+    toolbarBrushSizeReplaceOnType_ = true;
+    toolbarBrushSizeEditTool_ = tool;
+    toolbarBrushSizeText_ = std::to_wstring(static_cast<int>(std::lround(BrushSizeForTool(*tool))));
+}
+
+void App::ApplyToolbarBrushSizeInput() {
+    if (!toolbarBrushSizeEditTool_.has_value() || toolbarBrushSizeText_.empty()) {
+        return;
+    }
+
+    wchar_t* end = nullptr;
+    const long parsed = std::wcstol(toolbarBrushSizeText_.c_str(), &end, 10);
+    if (end == toolbarBrushSizeText_.c_str() || *end != L'\0' || parsed <= 0L) {
+        return;
+    }
+
+    const int clamped = std::clamp(static_cast<int>(parsed), 1, 20);
+    SetBrushSizeForTool(*toolbarBrushSizeEditTool_, static_cast<float>(clamped));
+    toolbarBrushSizeText_ = std::to_wstring(clamped);
+}
+
+void App::BeginToolbarBrushSliderDrag(POINT cursor) {
+    if (!ToolbarBrushTool().has_value()) {
+        return;
+    }
+
+    CancelToolbarBrushSizeInput();
+    toolbarBrushSliderDragging_ = true;
+    UpdateCaptureState();
+    UpdateToolbarBrushSliderDrag(cursor);
+}
+
+void App::UpdateToolbarBrushSliderDrag(POINT cursor) {
+    const auto tool = ToolbarBrushTool();
+    if (!tool.has_value()) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
+    const RECT trackRect = ToolbarBrushTrackRect(layout.brushSliderRect);
+    if (trackRect.right <= trackRect.left) {
+        return;
+    }
+
+    const int clampedX = std::clamp(cursor.x, trackRect.left, trackRect.right - 1);
+    const int width = std::max(1, static_cast<int>(trackRect.right - trackRect.left - 1));
+    const float normalized = static_cast<float>(clampedX - trackRect.left) / static_cast<float>(width);
+    const float size = 1.0f + std::lround(normalized * 19.0f);
+    SetBrushSizeForTool(*tool, size);
+}
+
+void App::EndToolbarBrushSliderDrag() {
+    if (!toolbarBrushSliderDragging_) {
+        return;
+    }
+
+    toolbarBrushSliderDragging_ = false;
+    UpdateCaptureState();
 }
 
 void App::UpdateWindowTitle() {
@@ -2391,7 +2591,7 @@ void App::BeginStroke(POINT cursor) {
     activeStroke_ = Stroke {};
     activeStrokePageIndex_ = pageIndex;
     activeStroke_->style.color = palette_.at(colorIndex_);
-    activeStroke_->style.width = brushWidth_;
+    activeStroke_->style.width = settings_.drawBrushSize;
     activeStroke_->points.push_back(pagePoint);
     isDrawing_ = true;
     UpdateCaptureState();
@@ -3507,7 +3707,7 @@ bool App::EraseAt(POINT cursor) {
     }
 
     const Vec2 center = ScreenToPage(cursor, nullptr);
-    const float eraseRadiusPage = std::max(10.0f, brushWidth_ * 4.0f) / pageView.scale;
+    const float eraseRadiusPage = std::max(10.0f, settings_.eraseBrushSize * 4.0f) / pageView.scale;
     const float eraseRadiusSquared = eraseRadiusPage * eraseRadiusPage;
     auto& strokes = document_.PageAt(pageView.pageIndex).strokes;
     document_.SetCurrentPageIndex(pageView.pageIndex);
@@ -3589,7 +3789,7 @@ void App::EndPan() {
 }
 
 void App::UpdateCaptureState() {
-    if (isDrawing_ || isPanning_ || isSelecting_ || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_) {
+    if (toolbarBrushSliderDragging_ || isDrawing_ || isPanning_ || isSelecting_ || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_) {
         SetCapture(window_);
         return;
     }
@@ -3666,10 +3866,15 @@ bool App::HandleToolbarClick(POINT cursor) {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_));
+    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
     const bool clickedPageLabel = PtInRect(&layout.pageLabelRect, cursor) != 0;
+    const bool clickedBrushSlider = PtInRect(&layout.brushSliderRect, cursor) != 0;
+    const bool clickedBrushValue = PtInRect(&layout.brushValueRect, cursor) != 0;
     if (pageJumpEditing_ && !clickedPageLabel) {
         CancelPageJumpInput();
+    }
+    if (toolbarBrushSizeEditing_ && !clickedBrushValue) {
+        CancelToolbarBrushSizeInput();
     }
 
     const auto openMenu = [&](RECT rect, unsigned int kind) {
@@ -3772,6 +3977,7 @@ bool App::HandleToolbarClick(POINT cursor) {
 
     if (clickedPageLabel) {
         ClosePaletteOverlays();
+        CancelToolbarBrushSizeInput();
         BeginPageJumpInput();
         InvalidateRect(window_, nullptr, FALSE);
         return true;
@@ -3781,6 +3987,22 @@ bool App::HandleToolbarClick(POINT cursor) {
         ClosePaletteOverlays();
         CancelPageJumpInput();
         NextPage();
+        return true;
+    }
+
+    if (clickedBrushSlider) {
+        ClosePaletteOverlays();
+        CancelPageJumpInput();
+        BeginToolbarBrushSliderDrag(cursor);
+        InvalidateRect(window_, nullptr, FALSE);
+        return true;
+    }
+
+    if (clickedBrushValue) {
+        ClosePaletteOverlays();
+        CancelPageJumpInput();
+        BeginToolbarBrushSizeInput();
+        InvalidateRect(window_, nullptr, FALSE);
         return true;
     }
 
@@ -3837,7 +4059,7 @@ bool App::HandleToolbarRightClick(POINT cursor) {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_));
+    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
 
     const auto showMenuForTool = [&](const RECT& rect, Tool tool) -> bool {
         if (PtInRect(&rect, cursor) == 0) {
@@ -3880,9 +4102,10 @@ bool App::HandleToolbarRightClick(POINT cursor) {
 bool App::HandlePaletteClick(POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_));
+    const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
 
     if (PtInRect(&toolbarLayout.currentColorRect, cursor) != 0) {
+        CancelToolbarBrushSizeInput();
         wheel_.paletteMenuOpen = !wheel_.paletteMenuOpen;
         wheel_.paletteWheelOpen = false;
         InvalidateRect(window_, nullptr, FALSE);
@@ -3893,15 +4116,18 @@ bool App::HandlePaletteClick(POINT cursor) {
         const PaletteMenuLayout menuLayout = BuildPaletteMenuLayout(toolbarLayout, palette_.size());
         for (std::size_t index = 0; index < menuLayout.swatchRects.size(); ++index) {
             if (PtInRect(&menuLayout.swatchRects[index], cursor) != 0) {
+                CancelToolbarBrushSizeInput();
                 SetColorIndex(index);
                 return true;
             }
         }
 
         if (PtInRect(&menuLayout.panelRect, cursor) != 0) {
+            CancelToolbarBrushSizeInput();
             return true;
         }
 
+        CancelToolbarBrushSizeInput();
         ClosePaletteOverlays();
         InvalidateRect(window_, nullptr, FALSE);
         return true;
@@ -3912,8 +4138,10 @@ bool App::HandlePaletteClick(POINT cursor) {
         const PaletteWheelLayout wheelLayout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, ToolbarHeight(IsZoomed(window_)));
         if (const auto index = PaletteWheelIndexAtPoint(wheelLayout, cursor, wheelEntryCount); index.has_value()) {
             if (*index < palette_.size()) {
+                CancelToolbarBrushSizeInput();
                 SetColorIndex(*index);
             } else {
+                CancelToolbarBrushSizeInput();
                 SetActiveTool(wheel_.tools[*index - palette_.size()]);
                 ClosePaletteOverlays();
                 InvalidateRect(window_, nullptr, FALSE);
@@ -3921,6 +4149,7 @@ bool App::HandlePaletteClick(POINT cursor) {
             return true;
         }
 
+        CancelToolbarBrushSizeInput();
         ClosePaletteOverlays();
         InvalidateRect(window_, nullptr, FALSE);
         return true;
@@ -4096,8 +4325,46 @@ void App::QueuePageRasterRequest(const PageView& pageView) {
 }
 
 void App::ChangeBrushSize(float delta) {
-    brushWidth_ = std::clamp(brushWidth_ + delta, 1.0f, 24.0f);
-    InvalidateRect(window_, nullptr, FALSE);
+    const Tool targetTool = activeTool_ == Tool::Erase ? Tool::Erase : Tool::Draw;
+    SetBrushSizeForTool(targetTool, BrushSizeForTool(targetTool) + delta);
+}
+
+float App::BrushSizeForTool(Tool tool) const {
+    switch (tool) {
+    case Tool::Erase:
+        return settings_.eraseBrushSize;
+    case Tool::Draw:
+    default:
+        return settings_.drawBrushSize;
+    }
+}
+
+void App::SetBrushSizeForTool(Tool tool, float size, bool refreshUi) {
+    const float clamped = std::clamp(size, 1.0f, 20.0f);
+    switch (tool) {
+    case Tool::Erase:
+        settings_.eraseBrushSize = clamped;
+        break;
+    case Tool::Draw:
+    default:
+        settings_.drawBrushSize = clamped;
+        break;
+    }
+
+    SyncBrushWidthFromActiveTool();
+    SaveAppSettings();
+    if (refreshUi) {
+        RefreshSettingsWindow();
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+}
+
+void App::SyncBrushWidthFromActiveTool() {
+    if (activeTool_ == Tool::Erase) {
+        brushWidth_ = settings_.eraseBrushSize;
+    } else {
+        brushWidth_ = settings_.drawBrushSize;
+    }
 }
 
 void App::CycleColor() {
@@ -4478,7 +4745,7 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
     HFONT labelFont = CreateFontW(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
-    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_));
+    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
 
     HGDIOBJ previousFont = SelectObject(hdc, labelFont);
     SetTextColor(hdc, primaryText);
@@ -4596,7 +4863,12 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     paintWindowButton(layout.closeRect, 2, hoveredWindowButton_ == 2);
 
     const int titleLeftBound = layout.nextPageRect.right + 16;
-    const int titleRightBound = layout.minimizeRect.left - 16;
+    int titleRightBound = layout.minimizeRect.left - 16;
+    if (const auto toolbarBrushTool = ToolbarBrushTool(); toolbarBrushTool.has_value() && layout.brushSliderRect.right > layout.brushSliderRect.left) {
+        const int labelWidth = *toolbarBrushTool == Tool::Erase ? 42 : 36;
+        titleRightBound = layout.brushSliderRect.left - labelWidth - 18;
+    }
+
     const int titleCenterX = clientRect.right / 2;
     const int titleHalfWidth = std::max(0, std::min(titleCenterX - titleLeftBound, titleRightBound - titleCenterX));
     RECT titleRect = MakeRect(titleCenterX - titleHalfWidth, ToolbarTopInset(IsZoomed(window_)), titleCenterX + titleHalfWidth, toolbarHeight - 1);
@@ -4605,6 +4877,51 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
         SelectObject(hdc, bodyFont);
         std::wstring title = CurrentWindowTitle();
         DrawTextW(hdc, title.c_str(), -1, &titleRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+
+    if (const auto toolbarBrushTool = ToolbarBrushTool(); toolbarBrushTool.has_value() && layout.brushSliderRect.right > layout.brushSliderRect.left) {
+        const std::wstring brushLabel = *toolbarBrushTool == Tool::Erase ? L"Erase" : L"Draw";
+        const float brushSize = BrushSizeForTool(*toolbarBrushTool);
+        RECT brushLabelRect = MakeRect(layout.brushSliderRect.left - ((*toolbarBrushTool == Tool::Erase ? 42 : 36) + 8), ToolbarTopInset(IsZoomed(window_)), layout.brushSliderRect.left - 8, toolbarHeight - 1);
+        SetTextColor(hdc, mutedText);
+        SelectObject(hdc, labelFont);
+        DrawTextW(hdc, brushLabel.c_str(), -1, &brushLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        const int sliderCenterY = (layout.brushSliderRect.top + layout.brushSliderRect.bottom) / 2;
+        RECT sliderTrackRect = ToolbarBrushTrackRect(layout.brushSliderRect);
+        FillRoundedRect(hdc, sliderTrackRect, RGB(41, 51, 66));
+        const int thumbCenterX = ToolbarBrushThumbCenterX(sliderTrackRect, brushSize);
+        RECT sliderFillRect = sliderTrackRect;
+        sliderFillRect.right = static_cast<LONG>(std::max<int>(sliderFillRect.left + 1, thumbCenterX + 1));
+        FillRoundedRect(hdc, sliderFillRect, accent);
+        RECT thumbRect = MakeRect(thumbCenterX - 6, sliderCenterY - 6, thumbCenterX + 7, sliderCenterY + 7);
+        FillRoundedRect(hdc, thumbRect, RGB(244, 247, 252));
+        StrokeRoundedRect(hdc, thumbRect, toolbarBrushSliderDragging_ ? RGB(255, 255, 255) : RGB(120, 138, 162), 1);
+
+        const std::wstring brushValue = ToolbarBrushValueLabel();
+        RECT brushValueTextRect = layout.brushValueRect;
+        SetTextColor(hdc, primaryText);
+        SelectObject(hdc, labelFont);
+        if (toolbarBrushSizeEditing_) {
+            StrokeRoundedRect(hdc, layout.brushValueRect, accent, 1);
+            brushValueTextRect.left += 7;
+            brushValueTextRect.right -= 7;
+            SetTextColor(hdc, RGB(244, 247, 252));
+            DrawTextW(hdc, brushValue.c_str(), -1, &brushValueTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            SIZE textSize {};
+            if (GetTextExtentPoint32W(hdc, brushValue.c_str(), static_cast<int>(brushValue.size()), &textSize) != 0) {
+                const int caretX = std::min(brushValueTextRect.right - 1, brushValueTextRect.left + textSize.cx + 1);
+                HPEN caretPen = CreatePen(PS_SOLID, 1, RGB(244, 247, 252));
+                HGDIOBJ oldCaretPen = SelectObject(hdc, caretPen);
+                MoveToEx(hdc, caretX, layout.brushValueRect.top + 6, nullptr);
+                LineTo(hdc, caretX, layout.brushValueRect.bottom - 6);
+                SelectObject(hdc, oldCaretPen);
+                DeleteObject(caretPen);
+            }
+        } else {
+            DrawTextW(hdc, brushValue.c_str(), -1, &brushValueTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
     }
 
     RECT pageLabelRect = layout.pageLabelRect;
@@ -4647,7 +4964,7 @@ void App::PaintPaletteMenu(HDC hdc, RECT clientRect) const {
         return;
     }
 
-    const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_));
+    const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
     const PaletteMenuLayout layout = BuildPaletteMenuLayout(toolbarLayout, palette_.size());
     const COLORREF panelFill = RGB(18, 24, 32);
     const COLORREF panelBorder = RGB(46, 58, 74);
@@ -4698,9 +5015,10 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
     for (std::size_t index = 0; index < wheelEntryCount; ++index) {
         const bool isColorEntry = index < palette_.size();
         const bool selected = isColorEntry ? index == colorIndex_ : activeTool_ == wheel_.tools[index - palette_.size()];
-        Gdiplus::SolidBrush brush = isColorEntry
-            ? Gdiplus::SolidBrush(Gdiplus::Color(255, GetRValue(ToColorRef(palette_[index])), GetGValue(ToColorRef(palette_[index])), GetBValue(ToColorRef(palette_[index]))))
-            : Gdiplus::SolidBrush(selected ? Gdiplus::Color(110, 240, 247, 255) : Gdiplus::Color(52, 240, 247, 255));
+        const Gdiplus::Color segmentColor = isColorEntry
+            ? Gdiplus::Color(255, GetRValue(ToColorRef(palette_[index])), GetGValue(ToColorRef(palette_[index])), GetBValue(ToColorRef(palette_[index])))
+            : (selected ? Gdiplus::Color(110, 240, 247, 255) : Gdiplus::Color(52, 240, 247, 255));
+        Gdiplus::SolidBrush brush(segmentColor);
         graphics.FillPie(&brush, outerRect, start, sweep);
 
         Gdiplus::Pen separatorPen(Gdiplus::Color(selected ? 255 : 120, 244, 247, 252), selected ? 3.0f : 1.2f);
@@ -5157,13 +5475,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
             polygon[index].y = static_cast<LONG>(std::lround(screenPoint.y));
         }
         polygon[4] = polygon[0];
-        HPEN selectionPen = CreatePen(PS_DASH, 2, RGB(110, 204, 255));
-        HGDIOBJ oldImagePen = SelectObject(hdc, selectionPen);
-        HGDIOBJ oldImageBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
-        Polyline(hdc, polygon, 5);
-        SelectObject(hdc, oldImageBrush);
-        SelectObject(hdc, oldImagePen);
-        DeleteObject(selectionPen);
+        DrawPolylineAA(hdc, polygon, 5, RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
 
         if (singleImage.has_value() && singleImage->first == pageView.pageIndex && singleImage->second == imageIndex
             && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingImage_)) {
@@ -5258,13 +5570,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         const int top = pageView.rect.top + static_cast<int>(std::lround(minY * pageView.scale));
         const int right = pageView.rect.left + static_cast<int>(std::lround(maxX * pageView.scale));
         const int bottom = pageView.rect.top + static_cast<int>(std::lround(maxY * pageView.scale));
-        HPEN selectionPen = CreatePen(PS_DASH, 2, RGB(110, 204, 255));
-        HGDIOBJ oldStrokePen = SelectObject(hdc, selectionPen);
-        HGDIOBJ oldStrokeBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
-        Rectangle(hdc, left, top, right, bottom);
-        SelectObject(hdc, oldStrokeBrush);
-        SelectObject(hdc, oldStrokePen);
-        DeleteObject(selectionPen);
+        DrawRectangleAA(hdc, MakeRect(left, top, right, bottom), RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
 
         const int handleHalf = 4;
         const auto paintHandle = [&](int centerX, int centerY) {
@@ -5299,16 +5605,12 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     }
 
     if (isSelecting_ && selectionPageIndex_.has_value() && *selectionPageIndex_ == pageView.pageIndex) {
-        HPEN marqueePen = CreatePen(PS_DASH, 1, RGB(124, 211, 255));
-        HGDIOBJ oldPenSelection = SelectObject(hdc, marqueePen);
-        HGDIOBJ oldBrushSelection = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
-
         if (selectionBoxOverride_ || selectionMode_ == SelectionMode::Box) {
             const int left = pageView.rect.left + static_cast<int>(std::lround(std::min(selectionAnchorPage_.x, selectionCurrentPage_.x) * pageView.scale));
             const int top = pageView.rect.top + static_cast<int>(std::lround(std::min(selectionAnchorPage_.y, selectionCurrentPage_.y) * pageView.scale));
             const int right = pageView.rect.left + static_cast<int>(std::lround(std::max(selectionAnchorPage_.x, selectionCurrentPage_.x) * pageView.scale));
             const int bottom = pageView.rect.top + static_cast<int>(std::lround(std::max(selectionAnchorPage_.y, selectionCurrentPage_.y) * pageView.scale));
-            Rectangle(hdc, left, top, right, bottom);
+            DrawRectangleAA(hdc, MakeRect(left, top, right, bottom), RGB(124, 211, 255), 1.5f, Gdiplus::DashStyleDash);
         } else if (!selectionLassoPoints_.empty()) {
             std::vector<POINT> points;
             points.reserve(selectionLassoPoints_.size() + 1U);
@@ -5323,13 +5625,9 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
                 pageView.rect.top + static_cast<LONG>(std::lround(selectionCurrentPage_.y * pageView.scale)),
             });
             if (points.size() >= 2U) {
-                Polyline(hdc, points.data(), static_cast<int>(points.size()));
+                DrawPolylineAA(hdc, points.data(), static_cast<int>(points.size()), RGB(124, 211, 255), 1.5f, Gdiplus::DashStyleDash);
             }
         }
-
-        SelectObject(hdc, oldBrushSelection);
-        SelectObject(hdc, oldPenSelection);
-        DeleteObject(marqueePen);
     }
 
     RestoreDC(hdc, -1);
@@ -5465,7 +5763,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         if (clientCursor.y >= 0 && clientCursor.y < ToolbarHeight(IsZoomed(window_))) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
-            const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_));
+            const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
             return IsToolbarControlRect(layout, clientCursor) ? HTCLIENT : HTCAPTION;
         }
         return HTCLIENT;
@@ -5475,6 +5773,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         if (const auto sidebarPage = HitTestSidebarPage(cursor); sidebarPage.has_value()) {
             CancelPageJumpInput();
+            CancelToolbarBrushSizeInput();
             FocusPage(*sidebarPage);
             return 0;
         }
@@ -5486,6 +5785,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
 
         CancelPageJumpInput();
+        CancelToolbarBrushSizeInput();
 
         ClosePaletteOverlays();
 
@@ -5522,7 +5822,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         if (cursor.y >= 0 && cursor.y < ToolbarHeight(IsZoomed(window_))) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
-            const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_));
+            const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
             if (PtInRect(&layout.minimizeRect, cursor) != 0) {
                 hoveredWindowButton = 0;
             } else if (PtInRect(&layout.maximizeRect, cursor) != 0) {
@@ -5548,7 +5848,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             }
         }
 
-        if (isSelecting_) {
+        if (toolbarBrushSliderDragging_) {
+            UpdateToolbarBrushSliderDrag(cursor);
+        } else if (isSelecting_) {
             ExtendSelection(cursor);
         } else if (isTransformingStroke_) {
             UpdateStrokeTransform(cursor);
@@ -5578,7 +5880,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         return 0;
     case WM_LBUTTONUP:
-        if (isDrawing_) {
+        if (toolbarBrushSliderDragging_) {
+            EndToolbarBrushSliderDrag();
+        } else if (isDrawing_) {
             EndStroke();
         } else if (isTransformingStroke_) {
             EndStrokeTransform();
@@ -5730,6 +6034,34 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             InvalidateRect(window_, nullptr, FALSE);
             return 0;
         }
+        if (toolbarBrushSizeEditing_) {
+            if (wParam == VK_BACK) {
+                if (toolbarBrushSizeReplaceOnType_) {
+                    toolbarBrushSizeText_.clear();
+                    toolbarBrushSizeReplaceOnType_ = false;
+                }
+                if (!toolbarBrushSizeText_.empty()) {
+                    toolbarBrushSizeText_.pop_back();
+                    ApplyToolbarBrushSizeInput();
+                }
+            } else if (wParam >= L'0' && wParam <= L'9') {
+                if (toolbarBrushSizeReplaceOnType_) {
+                    toolbarBrushSizeText_.clear();
+                    toolbarBrushSizeReplaceOnType_ = false;
+                }
+                if (!(toolbarBrushSizeText_.empty() && wParam == L'0') && toolbarBrushSizeText_.size() < 2) {
+                    toolbarBrushSizeText_.push_back(static_cast<wchar_t>(wParam));
+                    ApplyToolbarBrushSizeInput();
+                }
+            } else if (wParam == VK_RETURN) {
+                ApplyToolbarBrushSizeInput();
+                CancelToolbarBrushSizeInput();
+            } else if (wParam == 27) {
+                CancelToolbarBrushSizeInput();
+            }
+            InvalidateRect(window_, nullptr, FALSE);
+            return 0;
+        }
         break;
     case WM_KEYDOWN:
     {
@@ -5746,6 +6078,20 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             }
             if (wParam == VK_ESCAPE) {
                 CancelPageJumpInput();
+                InvalidateRect(window_, nullptr, FALSE);
+                return 0;
+            }
+            return 0;
+        }
+        if (toolbarBrushSizeEditing_) {
+            if (wParam == VK_RETURN) {
+                ApplyToolbarBrushSizeInput();
+                CancelToolbarBrushSizeInput();
+                InvalidateRect(window_, nullptr, FALSE);
+                return 0;
+            }
+            if (wParam == VK_ESCAPE) {
+                CancelToolbarBrushSizeInput();
                 InvalidateRect(window_, nullptr, FALSE);
                 return 0;
             }

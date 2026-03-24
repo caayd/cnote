@@ -4,12 +4,18 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cwctype>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <objidl.h>
+#include <gdiplus.h>
 #include <windowsx.h>
 
+#include "resource.h"
 #include "ShortcutConfig.h"
 
 namespace cnote {
@@ -27,6 +33,13 @@ constexpr COLORREF kButtonFillActive = RGB(48, 68, 94);
 constexpr COLORREF kTextPrimary = RGB(235, 240, 246);
 constexpr COLORREF kTextMuted = RGB(141, 152, 167);
 constexpr COLORREF kSelectionBorder = RGB(244, 247, 252);
+constexpr COLORREF kScrollbarTrackFill = RGB(20, 26, 34);
+constexpr COLORREF kScrollbarThumbFill = RGB(70, 88, 111);
+constexpr COLORREF kScrollbarThumbActiveFill = RGB(92, 118, 150);
+
+constexpr int kScrollbarGap = 8;
+constexpr int kScrollbarWidth = 12;
+constexpr int kScrollbarMinThumbHeight = 44;
 
 constexpr int kIdPaletteList = 100;
 constexpr int kIdAddColor = 101;
@@ -38,9 +51,9 @@ constexpr int kIdClearShortcut = 122;
 constexpr int kIdRedSlider = 200;
 constexpr int kIdGreenSlider = 201;
 constexpr int kIdBlueSlider = 202;
-constexpr int kIdStabilizationSlider = 203;
-constexpr int kIdSpacingSlider = 204;
-constexpr int kIdStrokeSmoothingSlider = 205;
+constexpr int kIdStabilizationSlider = 205;
+constexpr int kIdSpacingSlider = 206;
+constexpr int kIdStrokeSmoothingSlider = 207;
 
 struct SettingsWindowLayout {
     RECT palettePanel {};
@@ -69,6 +82,10 @@ struct SettingsWindowLayout {
     RECT spacingSliderRect {};
     RECT strokeSmoothingLabelRect {};
     RECT strokeSmoothingSliderRect {};
+    RECT scrollbarTrackRect {};
+    RECT scrollbarThumbRect {};
+    bool showScrollbar = false;
+    int contentHeight = 0;
 };
 
 std::wstring FormatPaletteEntry(std::size_t index, std::uint32_t color) {
@@ -106,21 +123,51 @@ RECT MakeRect(int left, int top, int right, int bottom) {
     return rect;
 }
 
-SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, std::size_t paletteCount, std::size_t shortcutCount) {
+int RectHeight(const RECT& rect) {
+    return static_cast<int>(rect.bottom - rect.top);
+}
+
+void OffsetRectY(RECT& rect, int deltaY) {
+    rect.top += deltaY;
+    rect.bottom += deltaY;
+}
+
+std::unique_ptr<Gdiplus::GraphicsPath> CreateRoundedRectPath(const RECT& rect, float radius) {
+    const float left = static_cast<float>(rect.left);
+    const float top = static_cast<float>(rect.top);
+    const float width = static_cast<float>(rect.right - rect.left);
+    const float height = static_cast<float>(rect.bottom - rect.top);
+    const float diameter = std::min(radius * 2.0f, std::min(width, height));
+
+    auto path = std::make_unique<Gdiplus::GraphicsPath>();
+    if (diameter <= 0.0f) {
+        path->AddRectangle(Gdiplus::RectF(left, top, width, height));
+        return path;
+    }
+
+    path->AddArc(left, top, diameter, diameter, 180.0f, 90.0f);
+    path->AddArc(left + width - diameter, top, diameter, diameter, 270.0f, 90.0f);
+    path->AddArc(left + width - diameter, top + height - diameter, diameter, diameter, 0.0f, 90.0f);
+    path->AddArc(left, top + height - diameter, diameter, diameter, 90.0f, 90.0f);
+    path->CloseFigure();
+    return path;
+}
+
+SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, std::size_t paletteCount, std::size_t shortcutCount, int scrollOffset) {
     SettingsWindowLayout layout;
     const int margin = 16;
     const int gap = 14;
     const int topOffset = 40;
-    const int usableWidth = static_cast<int>(clientRect.right) - (margin * 2);
+    const int scrollbarReserve = kScrollbarGap + kScrollbarWidth;
+    const int usableWidth = static_cast<int>(clientRect.right) - (margin * 2) - scrollbarReserve;
     const int rightColumnWidth = std::clamp(usableWidth / 3, 190, 240);
     const int leftColumnWidth = std::max(260, usableWidth - gap - rightColumnWidth);
     const int left = margin;
     const int rightColumnLeft = left + leftColumnWidth + gap;
 
     layout.palettePanel = MakeRect(left, topOffset, left + leftColumnWidth, topOffset + 220);
-    layout.shortcutPanel = MakeRect(rightColumnLeft, topOffset, clientRect.right - margin, clientRect.bottom - margin);
-    layout.colorPanel = MakeRect(left, layout.palettePanel.bottom + gap, left + leftColumnWidth, layout.palettePanel.bottom + gap + 170);
-    layout.drawingPanel = MakeRect(left, layout.colorPanel.bottom + gap, left + leftColumnWidth, clientRect.bottom - margin);
+    layout.colorPanel = MakeRect(left, layout.palettePanel.bottom + gap, left + leftColumnWidth, layout.palettePanel.bottom + gap + 272);
+    layout.drawingPanel = MakeRect(left, layout.colorPanel.bottom + gap, left + leftColumnWidth, layout.colorPanel.bottom + gap + 10);
 
     const int panelPadding = 14;
     const int swatchGap = 12;
@@ -164,6 +211,11 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, std::size_t pale
     layout.spacingSliderRect = MakeRect(drawingSliderLeft, layout.spacingLabelRect.bottom + 2, drawingSliderRight, layout.spacingLabelRect.bottom + 28);
     layout.strokeSmoothingLabelRect = MakeRect(drawingSliderLeft, layout.spacingSliderRect.bottom + 12, drawingSliderRight, layout.spacingSliderRect.bottom + 28);
     layout.strokeSmoothingSliderRect = MakeRect(drawingSliderLeft, layout.strokeSmoothingLabelRect.bottom + 2, drawingSliderRight, layout.strokeSmoothingLabelRect.bottom + 28);
+    layout.drawingPanel.bottom = layout.strokeSmoothingSliderRect.bottom + 18;
+
+    const int visibleBottom = static_cast<int>(clientRect.bottom) + scrollOffset - margin;
+    const int shortcutPanelBottom = std::max({ visibleBottom, static_cast<int>(layout.drawingPanel.bottom), topOffset + 600 });
+    layout.shortcutPanel = MakeRect(rightColumnLeft, topOffset, clientRect.right - margin - scrollbarReserve, shortcutPanelBottom);
 
     const int shortcutPanelPadding = 12;
     layout.shortcutListRect = MakeRect(
@@ -176,27 +228,81 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, std::size_t pale
     layout.shortcutHintRect = MakeRect(layout.shortcutPanel.left + shortcutPanelPadding, layout.shortcutPanel.bottom - 128, layout.shortcutPanel.right - shortcutPanelPadding, layout.shortcutPanel.bottom - 92);
 
     static_cast<void>(shortcutCount);
+    layout.contentHeight = std::max(layout.drawingPanel.bottom, layout.shortcutPanel.bottom) + margin;
+    layout.scrollbarTrackRect = MakeRect(clientRect.right - margin - kScrollbarWidth, topOffset, clientRect.right - margin, clientRect.bottom - margin);
+
+    const int viewportHeight = std::max(1, RectHeight(clientRect));
+    const int maxScroll = std::max(0, layout.contentHeight - viewportHeight);
+    layout.showScrollbar = maxScroll > 0 && RectHeight(layout.scrollbarTrackRect) > 0;
+    if (layout.showScrollbar) {
+        const int trackHeight = RectHeight(layout.scrollbarTrackRect);
+        const int thumbHeight = std::clamp((viewportHeight * trackHeight) / std::max(1, layout.contentHeight), kScrollbarMinThumbHeight, trackHeight);
+        const int travel = std::max(0, trackHeight - thumbHeight);
+        const int thumbTop = layout.scrollbarTrackRect.top + ((travel * scrollOffset) / maxScroll);
+        layout.scrollbarThumbRect = MakeRect(layout.scrollbarTrackRect.left, thumbTop, layout.scrollbarTrackRect.right, thumbTop + thumbHeight);
+    }
+
+    const int deltaY = -scrollOffset;
+    OffsetRectY(layout.palettePanel, deltaY);
+    OffsetRectY(layout.paletteGridRect, deltaY);
+    for (RECT& swatchRect : layout.paletteSwatches) {
+        OffsetRectY(swatchRect, deltaY);
+    }
+    OffsetRectY(layout.addColorButton, deltaY);
+    OffsetRectY(layout.removeColorButton, deltaY);
+    OffsetRectY(layout.pasteHexButton, deltaY);
+    OffsetRectY(layout.colorPanel, deltaY);
+    OffsetRectY(layout.colorPreviewRect, deltaY);
+    OffsetRectY(layout.shortcutPanel, deltaY);
+    OffsetRectY(layout.shortcutListRect, deltaY);
+    OffsetRectY(layout.changeShortcutButton, deltaY);
+    OffsetRectY(layout.clearShortcutButton, deltaY);
+    OffsetRectY(layout.shortcutHintRect, deltaY);
+    OffsetRectY(layout.drawingPanel, deltaY);
+    OffsetRectY(layout.redLabelRect, deltaY);
+    OffsetRectY(layout.redSliderRect, deltaY);
+    OffsetRectY(layout.greenLabelRect, deltaY);
+    OffsetRectY(layout.greenSliderRect, deltaY);
+    OffsetRectY(layout.blueLabelRect, deltaY);
+    OffsetRectY(layout.blueSliderRect, deltaY);
+    OffsetRectY(layout.stabilizationLabelRect, deltaY);
+    OffsetRectY(layout.stabilizationSliderRect, deltaY);
+    OffsetRectY(layout.spacingLabelRect, deltaY);
+    OffsetRectY(layout.spacingSliderRect, deltaY);
+    OffsetRectY(layout.strokeSmoothingLabelRect, deltaY);
+    OffsetRectY(layout.strokeSmoothingSliderRect, deltaY);
+
     return layout;
 }
 
 void FillRoundedRect(HDC hdc, RECT rect, COLORREF color) {
-    HBRUSH brush = CreateSolidBrush(color);
-    HGDIOBJ oldBrush = SelectObject(hdc, brush);
-    HGDIOBJ oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
-    RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-    DeleteObject(brush);
+    Gdiplus::Graphics graphics(hdc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::SolidBrush brush(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)));
+    const auto path = CreateRoundedRectPath(rect, 6.0f);
+    graphics.FillPath(&brush, path.get());
 }
 
 void StrokeRoundedRect(HDC hdc, RECT rect, COLORREF color, int width) {
-    HPEN pen = CreatePen(PS_SOLID, width, color);
-    HGDIOBJ oldPen = SelectObject(hdc, pen);
-    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
-    RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
-    SelectObject(hdc, oldBrush);
-    SelectObject(hdc, oldPen);
-    DeleteObject(pen);
+    Gdiplus::Graphics graphics(hdc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)), static_cast<Gdiplus::REAL>(width));
+    const auto path = CreateRoundedRectPath(rect, 6.0f);
+    graphics.DrawPath(&pen, path.get());
+}
+
+RECT SliderTrackRect(const RECT& sliderRect) {
+    const int centerY = (sliderRect.top + sliderRect.bottom) / 2;
+    return MakeRect(sliderRect.left + 10, centerY - 3, sliderRect.right - 10, centerY + 3);
+}
+
+int SliderThumbCenterX(const RECT& trackRect, int value, int minimum, int maximum) {
+    const int width = std::max(1, static_cast<int>(trackRect.right - trackRect.left));
+    const int range = std::max(1, maximum - minimum);
+    const float normalized = static_cast<float>(std::clamp(value, minimum, maximum) - minimum) / static_cast<float>(range);
+    return trackRect.left + static_cast<int>(std::lround(normalized * static_cast<float>(width - 1)));
 }
 
 }  // namespace
@@ -274,13 +380,16 @@ void SettingsWindow::CreateIfNeeded(HWND owner) {
 
     static bool classRegistered = false;
     if (!classRegistered) {
-        WNDCLASSW windowClass {};
+        WNDCLASSEXW windowClass {};
+        windowClass.cbSize = sizeof(windowClass);
         windowClass.lpfnWndProc = &SettingsWindow::WindowProc;
         windowClass.hInstance = app_.instance_;
         windowClass.lpszClassName = kSettingsWindowClassName;
+        windowClass.hIcon = LoadIconW(app_.instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
+        windowClass.hIconSm = static_cast<HICON>(LoadImageW(app_.instance_, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
         windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         windowClass.hbrBackground = nullptr;
-        RegisterClassW(&windowClass);
+        RegisterClassExW(&windowClass);
         classRegistered = true;
     }
 
@@ -327,7 +436,7 @@ void SettingsWindow::CreateControls() {
             x, y, width, height, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), app_.instance_, nullptr);
     };
     const auto createSlider = [&](int id, int x, int y, int width, int height) {
-        return CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP,
+        return CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | TBS_HORZ | TBS_AUTOTICKS,
             x, y, width, height, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), app_.instance_, nullptr);
     };
 
@@ -341,7 +450,6 @@ void SettingsWindow::CreateControls() {
     greenSlider_ = createSlider(kIdGreenSlider, 0, 0, 320, 30);
     blueLabel_ = createLabel(L"Blue", 0, 0, 220, 20);
     blueSlider_ = createSlider(kIdBlueSlider, 0, 0, 320, 30);
-
     stabilizationLabel_ = createLabel(L"Stabilization", 0, 0, 260, 20);
     stabilizationSlider_ = createSlider(kIdStabilizationSlider, 0, 0, 320, 30);
     spacingLabel_ = createLabel(L"Point Spacing", 0, 0, 260, 20);
@@ -423,30 +531,64 @@ void SettingsWindow::LayoutControls() {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size());
+    SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size(), scrollOffset_);
+    contentHeight_ = layout.contentHeight;
+    const int previousScrollOffset = scrollOffset_;
+    UpdateScrollInfo();
+    if (scrollOffset_ != previousScrollOffset) {
+        layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size(), scrollOffset_);
+        contentHeight_ = layout.contentHeight;
+    }
 
-    MoveWindow(addColorButton_, layout.addColorButton.left, layout.addColorButton.top, layout.addColorButton.right - layout.addColorButton.left, layout.addColorButton.bottom - layout.addColorButton.top, TRUE);
-    MoveWindow(removeColorButton_, layout.removeColorButton.left, layout.removeColorButton.top, layout.removeColorButton.right - layout.removeColorButton.left, layout.removeColorButton.bottom - layout.removeColorButton.top, TRUE);
-    MoveWindow(pasteHexButton_, layout.pasteHexButton.left, layout.pasteHexButton.top, layout.pasteHexButton.right - layout.pasteHexButton.left, layout.pasteHexButton.bottom - layout.pasteHexButton.top, TRUE);
+    MoveWindow(addColorButton_, layout.addColorButton.left, layout.addColorButton.top, layout.addColorButton.right - layout.addColorButton.left, layout.addColorButton.bottom - layout.addColorButton.top, FALSE);
+    MoveWindow(removeColorButton_, layout.removeColorButton.left, layout.removeColorButton.top, layout.removeColorButton.right - layout.removeColorButton.left, layout.removeColorButton.bottom - layout.removeColorButton.top, FALSE);
+    MoveWindow(pasteHexButton_, layout.pasteHexButton.left, layout.pasteHexButton.top, layout.pasteHexButton.right - layout.pasteHexButton.left, layout.pasteHexButton.bottom - layout.pasteHexButton.top, FALSE);
 
-    MoveWindow(redLabel_, layout.redLabelRect.left, layout.redLabelRect.top, layout.redLabelRect.right - layout.redLabelRect.left, layout.redLabelRect.bottom - layout.redLabelRect.top, TRUE);
-    MoveWindow(redSlider_, layout.redSliderRect.left, layout.redSliderRect.top, layout.redSliderRect.right - layout.redSliderRect.left, layout.redSliderRect.bottom - layout.redSliderRect.top, TRUE);
-    MoveWindow(greenLabel_, layout.greenLabelRect.left, layout.greenLabelRect.top, layout.greenLabelRect.right - layout.greenLabelRect.left, layout.greenLabelRect.bottom - layout.greenLabelRect.top, TRUE);
-    MoveWindow(greenSlider_, layout.greenSliderRect.left, layout.greenSliderRect.top, layout.greenSliderRect.right - layout.greenSliderRect.left, layout.greenSliderRect.bottom - layout.greenSliderRect.top, TRUE);
-    MoveWindow(blueLabel_, layout.blueLabelRect.left, layout.blueLabelRect.top, layout.blueLabelRect.right - layout.blueLabelRect.left, layout.blueLabelRect.bottom - layout.blueLabelRect.top, TRUE);
-    MoveWindow(blueSlider_, layout.blueSliderRect.left, layout.blueSliderRect.top, layout.blueSliderRect.right - layout.blueSliderRect.left, layout.blueSliderRect.bottom - layout.blueSliderRect.top, TRUE);
+    MoveWindow(redLabel_, layout.redLabelRect.left, layout.redLabelRect.top, layout.redLabelRect.right - layout.redLabelRect.left, layout.redLabelRect.bottom - layout.redLabelRect.top, FALSE);
+    MoveWindow(redSlider_, layout.redSliderRect.left, layout.redSliderRect.top, layout.redSliderRect.right - layout.redSliderRect.left, layout.redSliderRect.bottom - layout.redSliderRect.top, FALSE);
+    MoveWindow(greenLabel_, layout.greenLabelRect.left, layout.greenLabelRect.top, layout.greenLabelRect.right - layout.greenLabelRect.left, layout.greenLabelRect.bottom - layout.greenLabelRect.top, FALSE);
+    MoveWindow(greenSlider_, layout.greenSliderRect.left, layout.greenSliderRect.top, layout.greenSliderRect.right - layout.greenSliderRect.left, layout.greenSliderRect.bottom - layout.greenSliderRect.top, FALSE);
+    MoveWindow(blueLabel_, layout.blueLabelRect.left, layout.blueLabelRect.top, layout.blueLabelRect.right - layout.blueLabelRect.left, layout.blueLabelRect.bottom - layout.blueLabelRect.top, FALSE);
+    MoveWindow(blueSlider_, layout.blueSliderRect.left, layout.blueSliderRect.top, layout.blueSliderRect.right - layout.blueSliderRect.left, layout.blueSliderRect.bottom - layout.blueSliderRect.top, FALSE);
 
-    MoveWindow(stabilizationLabel_, layout.stabilizationLabelRect.left, layout.stabilizationLabelRect.top, layout.stabilizationLabelRect.right - layout.stabilizationLabelRect.left, layout.stabilizationLabelRect.bottom - layout.stabilizationLabelRect.top, TRUE);
-    MoveWindow(stabilizationSlider_, layout.stabilizationSliderRect.left, layout.stabilizationSliderRect.top, layout.stabilizationSliderRect.right - layout.stabilizationSliderRect.left, layout.stabilizationSliderRect.bottom - layout.stabilizationSliderRect.top, TRUE);
-    MoveWindow(spacingLabel_, layout.spacingLabelRect.left, layout.spacingLabelRect.top, layout.spacingLabelRect.right - layout.spacingLabelRect.left, layout.spacingLabelRect.bottom - layout.spacingLabelRect.top, TRUE);
-    MoveWindow(spacingSlider_, layout.spacingSliderRect.left, layout.spacingSliderRect.top, layout.spacingSliderRect.right - layout.spacingSliderRect.left, layout.spacingSliderRect.bottom - layout.spacingSliderRect.top, TRUE);
-    MoveWindow(strokeSmoothingLabel_, layout.strokeSmoothingLabelRect.left, layout.strokeSmoothingLabelRect.top, layout.strokeSmoothingLabelRect.right - layout.strokeSmoothingLabelRect.left, layout.strokeSmoothingLabelRect.bottom - layout.strokeSmoothingLabelRect.top, TRUE);
-    MoveWindow(strokeSmoothingSlider_, layout.strokeSmoothingSliderRect.left, layout.strokeSmoothingSliderRect.top, layout.strokeSmoothingSliderRect.right - layout.strokeSmoothingSliderRect.left, layout.strokeSmoothingSliderRect.bottom - layout.strokeSmoothingSliderRect.top, TRUE);
+    MoveWindow(stabilizationLabel_, layout.stabilizationLabelRect.left, layout.stabilizationLabelRect.top, layout.stabilizationLabelRect.right - layout.stabilizationLabelRect.left, layout.stabilizationLabelRect.bottom - layout.stabilizationLabelRect.top, FALSE);
+    MoveWindow(stabilizationSlider_, layout.stabilizationSliderRect.left, layout.stabilizationSliderRect.top, layout.stabilizationSliderRect.right - layout.stabilizationSliderRect.left, layout.stabilizationSliderRect.bottom - layout.stabilizationSliderRect.top, FALSE);
+    MoveWindow(spacingLabel_, layout.spacingLabelRect.left, layout.spacingLabelRect.top, layout.spacingLabelRect.right - layout.spacingLabelRect.left, layout.spacingLabelRect.bottom - layout.spacingLabelRect.top, FALSE);
+    MoveWindow(spacingSlider_, layout.spacingSliderRect.left, layout.spacingSliderRect.top, layout.spacingSliderRect.right - layout.spacingSliderRect.left, layout.spacingSliderRect.bottom - layout.spacingSliderRect.top, FALSE);
+    MoveWindow(strokeSmoothingLabel_, layout.strokeSmoothingLabelRect.left, layout.strokeSmoothingLabelRect.top, layout.strokeSmoothingLabelRect.right - layout.strokeSmoothingLabelRect.left, layout.strokeSmoothingLabelRect.bottom - layout.strokeSmoothingLabelRect.top, FALSE);
+    MoveWindow(strokeSmoothingSlider_, layout.strokeSmoothingSliderRect.left, layout.strokeSmoothingSliderRect.top, layout.strokeSmoothingSliderRect.right - layout.strokeSmoothingSliderRect.left, layout.strokeSmoothingSliderRect.bottom - layout.strokeSmoothingSliderRect.top, FALSE);
 
-    MoveWindow(shortcutList_, layout.shortcutListRect.left, layout.shortcutListRect.top, layout.shortcutListRect.right - layout.shortcutListRect.left, layout.shortcutListRect.bottom - layout.shortcutListRect.top, TRUE);
-    MoveWindow(changeShortcutButton_, layout.changeShortcutButton.left, layout.changeShortcutButton.top, layout.changeShortcutButton.right - layout.changeShortcutButton.left, layout.changeShortcutButton.bottom - layout.changeShortcutButton.top, TRUE);
-    MoveWindow(clearShortcutButton_, layout.clearShortcutButton.left, layout.clearShortcutButton.top, layout.clearShortcutButton.right - layout.clearShortcutButton.left, layout.clearShortcutButton.bottom - layout.clearShortcutButton.top, TRUE);
-    MoveWindow(shortcutHintLabel_, layout.shortcutHintRect.left, layout.shortcutHintRect.top, layout.shortcutHintRect.right - layout.shortcutHintRect.left, layout.shortcutHintRect.bottom - layout.shortcutHintRect.top, TRUE);
+    MoveWindow(shortcutList_, layout.shortcutListRect.left, layout.shortcutListRect.top, layout.shortcutListRect.right - layout.shortcutListRect.left, layout.shortcutListRect.bottom - layout.shortcutListRect.top, FALSE);
+    MoveWindow(changeShortcutButton_, layout.changeShortcutButton.left, layout.changeShortcutButton.top, layout.changeShortcutButton.right - layout.changeShortcutButton.left, layout.changeShortcutButton.bottom - layout.changeShortcutButton.top, FALSE);
+    MoveWindow(clearShortcutButton_, layout.clearShortcutButton.left, layout.clearShortcutButton.top, layout.clearShortcutButton.right - layout.clearShortcutButton.left, layout.clearShortcutButton.bottom - layout.clearShortcutButton.top, FALSE);
+    MoveWindow(shortcutHintLabel_, layout.shortcutHintRect.left, layout.shortcutHintRect.top, layout.shortcutHintRect.right - layout.shortcutHintRect.left, layout.shortcutHintRect.bottom - layout.shortcutHintRect.top, FALSE);
+}
+
+void SettingsWindow::UpdateScrollInfo() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const int viewportHeight = std::max(1, static_cast<int>(clientRect.bottom - clientRect.top));
+    const int maxScroll = std::max(0, contentHeight_ - viewportHeight);
+    scrollOffset_ = std::clamp(scrollOffset_, 0, maxScroll);
+}
+
+void SettingsWindow::ScrollTo(int scrollOffset) {
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const int viewportHeight = std::max(1, static_cast<int>(clientRect.bottom - clientRect.top));
+    const int maxScroll = std::max(0, contentHeight_ - viewportHeight);
+    const int clamped = std::clamp(scrollOffset, 0, maxScroll);
+    if (clamped == scrollOffset_) {
+        return;
+    }
+
+    scrollOffset_ = clamped;
+    LayoutControls();
+    RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 
 void SettingsWindow::RefreshPaletteList() {
@@ -599,7 +741,7 @@ HBRUSH SettingsWindow::HandleControlColor(HDC hdc, HWND control) {
 RECT SettingsWindow::ColorPreviewRect() const {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    return BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size()).colorPreviewRect;
+    return BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size(), scrollOffset_).colorPreviewRect;
 }
 
 void SettingsWindow::PaintWindow() {
@@ -609,7 +751,7 @@ void SettingsWindow::PaintWindow() {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     FillRect(hdc, &clientRect, backgroundBrush_);
-    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size());
+    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size(), scrollOffset_);
 
     SetBkMode(hdc, TRANSPARENT);
     HGDIOBJ previousFont = SelectObject(hdc, titleFont_ != nullptr ? titleFont_ : font_);
@@ -661,6 +803,33 @@ void SettingsWindow::PaintWindow() {
         : RGB(248, 250, 252));
     const std::wstring previewText = FormatPaletteEntry(app_.settings_.paletteIndex, app_.palette_[app_.settings_.paletteIndex]);
     DrawTextW(hdc, previewText.c_str(), -1, &previewLabel, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    const auto paintSlider = [&](SliderKind kind, RECT sliderRect, int minimum, int maximum) {
+        const RECT trackRect = SliderTrackRect(sliderRect);
+        FillRoundedRect(hdc, trackRect, RGB(41, 51, 66));
+        const int thumbCenterX = SliderThumbCenterX(trackRect, SliderValue(kind), minimum, maximum);
+        RECT fillRect = trackRect;
+        fillRect.right = static_cast<LONG>(std::max<int>(fillRect.left + 1, thumbCenterX + 1));
+        FillRoundedRect(hdc, fillRect, RGB(92, 137, 187));
+
+        const int centerY = (sliderRect.top + sliderRect.bottom) / 2;
+        RECT thumbRect = MakeRect(thumbCenterX - 6, centerY - 6, thumbCenterX + 7, centerY + 7);
+        FillRoundedRect(hdc, thumbRect, RGB(244, 247, 252));
+        StrokeRoundedRect(hdc, thumbRect, draggingSlider_ == kind ? RGB(255, 255, 255) : RGB(120, 138, 162), 1);
+    };
+
+    paintSlider(SliderKind::Red, layout.redSliderRect, 0, 255);
+    paintSlider(SliderKind::Green, layout.greenSliderRect, 0, 255);
+    paintSlider(SliderKind::Blue, layout.blueSliderRect, 0, 255);
+    paintSlider(SliderKind::Stabilization, layout.stabilizationSliderRect, 5, 95);
+    paintSlider(SliderKind::Spacing, layout.spacingSliderRect, 5, 405);
+    paintSlider(SliderKind::StrokeSmoothing, layout.strokeSmoothingSliderRect, 0, 100);
+
+    if (layout.showScrollbar) {
+        FillRoundedRect(hdc, layout.scrollbarTrackRect, kScrollbarTrackFill);
+        StrokeRoundedRect(hdc, layout.scrollbarTrackRect, kPanelBorder, 1);
+        FillRoundedRect(hdc, layout.scrollbarThumbRect, draggingScrollbar_ ? kScrollbarThumbActiveFill : kScrollbarThumbFill);
+    }
 
     SelectObject(hdc, previousFont);
     EndPaint(window_, &paint);
@@ -827,23 +996,133 @@ HWND SettingsWindow::SliderHandle(SliderKind kind) const {
     }
 }
 
-HWND SettingsWindow::LabelHandle(SliderKind kind) const {
+int SettingsWindow::SliderValue(SliderKind kind) const {
+    if (HWND slider = SliderHandle(kind); slider != nullptr) {
+        return static_cast<int>(SendMessageW(slider, TBM_GETPOS, 0, 0));
+    }
+    return 0;
+}
+
+void SettingsWindow::UpdateSliderValue(SliderKind kind, int value) {
+    const auto clampValue = [&](int minimum, int maximum) {
+        return std::clamp(value, minimum, maximum);
+    };
+
+    if (HWND slider = SliderHandle(kind); slider != nullptr) {
+        switch (kind) {
+        case SliderKind::Red:
+        case SliderKind::Green:
+        case SliderKind::Blue:
+            SendMessageW(slider, TBM_SETPOS, TRUE, clampValue(0, 255));
+            UpdatePaletteFromRgbSliders();
+            RefreshPaletteList();
+            RefreshSliderValues();
+            InvalidateRect(app_.window_, nullptr, FALSE);
+            InvalidateRect(window_, nullptr, FALSE);
+            return;
+        case SliderKind::Stabilization:
+            SendMessageW(slider, TBM_SETPOS, TRUE, clampValue(5, 95));
+            app_.settings_.inputSmoothing = static_cast<float>(SliderValue(kind)) / 100.0f;
+            break;
+        case SliderKind::Spacing:
+            SendMessageW(slider, TBM_SETPOS, TRUE, clampValue(5, 405));
+            app_.settings_.inputSpacing = static_cast<float>(SliderValue(kind)) / 100.0f;
+            break;
+        case SliderKind::StrokeSmoothing:
+            SendMessageW(slider, TBM_SETPOS, TRUE, clampValue(0, 100));
+            app_.settings_.strokeSmoothing = static_cast<float>(SliderValue(kind)) / 100.0f;
+            break;
+        default:
+            break;
+        }
+    }
+
+    app_.SaveAppSettings();
+    RefreshSliderValues();
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void SettingsWindow::UpdateSliderFromPoint(SliderKind kind, POINT cursor) {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size(), scrollOffset_);
+    RECT sliderRect {};
+    int minimum = 0;
+    int maximum = 100;
     switch (kind) {
     case SliderKind::Red:
-        return redLabel_;
+        sliderRect = layout.redSliderRect;
+        minimum = 0;
+        maximum = 255;
+        break;
     case SliderKind::Green:
-        return greenLabel_;
+        sliderRect = layout.greenSliderRect;
+        minimum = 0;
+        maximum = 255;
+        break;
     case SliderKind::Blue:
-        return blueLabel_;
+        sliderRect = layout.blueSliderRect;
+        minimum = 0;
+        maximum = 255;
+        break;
     case SliderKind::Stabilization:
-        return stabilizationLabel_;
+        sliderRect = layout.stabilizationSliderRect;
+        minimum = 5;
+        maximum = 95;
+        break;
     case SliderKind::Spacing:
-        return spacingLabel_;
+        sliderRect = layout.spacingSliderRect;
+        minimum = 5;
+        maximum = 405;
+        break;
     case SliderKind::StrokeSmoothing:
-        return strokeSmoothingLabel_;
+        sliderRect = layout.strokeSmoothingSliderRect;
+        minimum = 0;
+        maximum = 100;
+        break;
     default:
-        return nullptr;
+        return;
     }
+
+    const RECT trackRect = SliderTrackRect(sliderRect);
+    const int clampedX = std::clamp(static_cast<int>(cursor.x), static_cast<int>(trackRect.left), static_cast<int>(trackRect.right) - 1);
+    const int width = std::max(1, static_cast<int>(trackRect.right - trackRect.left - 1));
+    const float normalized = static_cast<float>(clampedX - trackRect.left) / static_cast<float>(width);
+    const int value = minimum + static_cast<int>(std::lround(normalized * static_cast<float>(maximum - minimum)));
+    UpdateSliderValue(kind, value);
+}
+
+std::optional<SettingsWindow::SliderKind> SettingsWindow::HitTestSlider(POINT cursor) const {
+    if (window_ == nullptr) {
+        return std::nullopt;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size(), scrollOffset_);
+    const std::array<std::pair<SliderKind, RECT>, 6> sliders {{
+        { SliderKind::Red, layout.redSliderRect },
+        { SliderKind::Green, layout.greenSliderRect },
+        { SliderKind::Blue, layout.blueSliderRect },
+        { SliderKind::Stabilization, layout.stabilizationSliderRect },
+        { SliderKind::Spacing, layout.spacingSliderRect },
+        { SliderKind::StrokeSmoothing, layout.strokeSmoothingSliderRect },
+    }};
+
+    for (const auto& [kind, rect] : sliders) {
+        RECT hitRect = rect;
+        hitRect.top -= 4;
+        hitRect.bottom += 4;
+        if (PtInRect(&hitRect, cursor) != 0) {
+            return kind;
+        }
+    }
+
+    return std::nullopt;
 }
 
 LRESULT CALLBACK SettingsWindow::WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -876,12 +1155,27 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
         LayoutControls();
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
+    case WM_MOUSEWHEEL:
+        ScrollTo(scrollOffset_ - ((GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA) * 48));
+        return 0;
     case WM_LBUTTONDOWN:
     {
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         RECT clientRect {};
         GetClientRect(window_, &clientRect);
-        const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size());
+        const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size(), scrollOffset_);
+        if (layout.showScrollbar && PtInRect(&layout.scrollbarThumbRect, cursor) != 0) {
+            draggingScrollbar_ = true;
+            scrollbarDragOffset_ = cursor.y - layout.scrollbarThumbRect.top;
+            SetCapture(window_);
+            InvalidateRect(window_, &layout.scrollbarTrackRect, FALSE);
+            return 0;
+        }
+        if (layout.showScrollbar && PtInRect(&layout.scrollbarTrackRect, cursor) != 0) {
+            const int pageStep = std::max(48, RectHeight(clientRect) - 96);
+            ScrollTo(scrollOffset_ + (cursor.y < layout.scrollbarThumbRect.top ? -pageStep : pageStep));
+            return 0;
+        }
         for (std::size_t index = 0; index < layout.paletteSwatches.size(); ++index) {
             if (PtInRect(&layout.paletteSwatches[index], cursor) != 0) {
                 app_.settings_.paletteIndex = index;
@@ -891,14 +1185,70 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
                 return 0;
             }
         }
+        if (const auto slider = HitTestSlider(cursor); slider.has_value()) {
+            draggingSlider_ = slider;
+            SetCapture(window_);
+            UpdateSliderFromPoint(*slider, cursor);
+            return 0;
+        }
         break;
     }
+    case WM_MOUSEMOVE:
+        if (draggingScrollbar_) {
+            RECT clientRect {};
+            GetClientRect(window_, &clientRect);
+            const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size(), scrollOffset_);
+            if (!layout.showScrollbar) {
+                return 0;
+            }
+
+            const int thumbHeight = RectHeight(layout.scrollbarThumbRect);
+            const int maxScroll = std::max(0, contentHeight_ - RectHeight(clientRect));
+            const int travel = std::max(1, RectHeight(layout.scrollbarTrackRect) - thumbHeight);
+            const int thumbTop = std::clamp(
+                GET_Y_LPARAM(lParam) - scrollbarDragOffset_,
+                static_cast<int>(layout.scrollbarTrackRect.top),
+                static_cast<int>(layout.scrollbarTrackRect.bottom) - thumbHeight);
+            const int newOffset = maxScroll > 0 ? ((thumbTop - static_cast<int>(layout.scrollbarTrackRect.top)) * maxScroll) / travel : 0;
+            ScrollTo(newOffset);
+            return 0;
+        }
+        if (draggingSlider_.has_value()) {
+            UpdateSliderFromPoint(*draggingSlider_, { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) });
+            return 0;
+        }
+        break;
+    case WM_LBUTTONUP:
+        if (draggingScrollbar_) {
+            draggingScrollbar_ = false;
+            ReleaseCapture();
+            InvalidateRect(window_, nullptr, FALSE);
+            return 0;
+        }
+        if (draggingSlider_.has_value()) {
+            draggingSlider_.reset();
+            ReleaseCapture();
+            InvalidateRect(window_, nullptr, FALSE);
+            return 0;
+        }
+        break;
+    case WM_CAPTURECHANGED:
+        if (draggingScrollbar_) {
+            draggingScrollbar_ = false;
+            InvalidateRect(window_, nullptr, FALSE);
+        }
+        if (draggingSlider_.has_value()) {
+            draggingSlider_.reset();
+            InvalidateRect(window_, nullptr, FALSE);
+        }
+        break;
     case WM_PAINT:
         PaintWindow();
         return 0;
     case WM_ERASEBKGND:
         return 1;
     case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX:
         return reinterpret_cast<LRESULT>(HandleControlColor(reinterpret_cast<HDC>(wParam), reinterpret_cast<HWND>(lParam)));
     case WM_DRAWITEM:

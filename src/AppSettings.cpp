@@ -339,6 +339,20 @@ void App::LoadAppSettings() {
             continue;
         }
 
+        if (key == "draw_brush_size") {
+            if (const auto parsed = ParseFloat(value); parsed.has_value()) {
+                settings_.drawBrushSize = std::clamp(*parsed, 1.0f, 20.0f);
+            }
+            continue;
+        }
+
+        if (key == "erase_brush_size") {
+            if (const auto parsed = ParseFloat(value); parsed.has_value()) {
+                settings_.eraseBrushSize = std::clamp(*parsed, 1.0f, 20.0f);
+            }
+            continue;
+        }
+
         if (key == "input_spacing") {
             if (const auto parsed = ParseFloat(value); parsed.has_value()) {
                 settings_.inputSpacing = std::clamp(*parsed, 0.05f, 4.05f);
@@ -409,6 +423,7 @@ void App::LoadAppSettings() {
     }
     colorIndex_ = std::min(loadedColorIndex.value_or(colorIndex_), palette_.size() - 1U);
     settings_.paletteIndex = std::min(loadedSettingsPaletteIndex.value_or(settings_.paletteIndex), palette_.size() - 1U);
+    SyncBrushWidthFromActiveTool();
 }
 
 void App::SaveAppSettings() const {
@@ -437,6 +452,8 @@ void App::SaveAppSettings() const {
     output << '\n';
     output << "active_color=" << colorIndex_ << '\n';
     output << "settings_palette_index=" << settings_.paletteIndex << '\n';
+    output << "draw_brush_size=" << settings_.drawBrushSize << '\n';
+    output << "erase_brush_size=" << settings_.eraseBrushSize << '\n';
     output << "input_smoothing=" << settings_.inputSmoothing << '\n';
     output << "input_spacing=" << settings_.inputSpacing << '\n';
     output << "stroke_smoothing=" << settings_.strokeSmoothing << '\n';
