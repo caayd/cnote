@@ -12,9 +12,12 @@ set(PDFIUM_IMPLIB "${PDFIUM_ROOT}/lib/libpdfium.dll.a")
 
 add_executable(cnote WIN32
     src/App.cpp
+    src/AppSettings.cpp
     src/Document.cpp
     src/PdfBackend.cpp
     src/ProjectFile.cpp
+    src/SettingsWindow.cpp
+    src/ShortcutConfig.cpp
     src/main.cpp
 )
 
@@ -51,6 +54,7 @@ target_compile_options(cnote PRIVATE
 
 target_link_libraries(cnote PRIVATE
     comdlg32
+    comctl32
     dwmapi
     gdi32
     gdiplus

@@ -19,14 +19,14 @@
 
 namespace cnote {
 
+class SettingsWindow;
+
 class App {
 public:
     explicit App(HINSTANCE instance);
     ~App();
 
     int Run(int showCommand, std::optional<std::wstring> startupPath = std::nullopt);
-
-private:
     enum class Tool {
         Select,
         Move,
@@ -45,15 +45,25 @@ private:
         RemoveStroke,
     };
 
-    enum class SliderTarget {
-        None,
-        Red,
-        Green,
-        Blue,
-        BrushSize,
-        Stabilization,
-        Spacing,
-        Smoothing,
+    enum class ShortcutAction {
+        ToolDraw,
+        ToolSelect,
+        ToolMove,
+        ToolPan,
+        ToolErase,
+        New,
+        Undo,
+        Redo,
+        Open,
+        Save,
+        ExportPdf,
+        Copy,
+        Paste,
+        ResetView,
+        ToggleSettings,
+        ToggleWheel,
+        PreviousPage,
+        NextPage,
     };
 
     enum class ImageTransformHandle {
@@ -112,6 +122,35 @@ private:
         std::optional<RasterImage> raster {};
     };
 
+    struct KeyBinding {
+        UINT key = 0;
+        bool ctrl = false;
+        bool shift = false;
+        bool alt = false;
+    };
+
+    struct ShortcutState {
+        std::vector<std::pair<ShortcutAction, KeyBinding>> bindings {};
+    };
+
+    struct WheelState {
+        bool paletteMenuOpen = false;
+        bool paletteWheelOpen = false;
+        POINT center {};
+        std::vector<Tool> tools {};
+    };
+
+    struct SettingsState {
+        SettingsWindow* window = nullptr;
+        std::size_t paletteIndex = 0;
+        float inputSpacing = 0.85f;
+        float inputSmoothing = 0.3f;
+        float strokeSmoothing = 0.55f;
+    };
+
+private:
+    friend class SettingsWindow;
+
     bool CreateMainWindow(int showCommand);
     void StartRenderWorker();
     void StopRenderWorker();
@@ -163,12 +202,19 @@ private:
     void UpdateCaptureState();
     void ExecuteCommand(unsigned int commandId);
     [[nodiscard]] bool HandleToolbarClick(POINT cursor);
+    [[nodiscard]] bool HandleToolbarRightClick(POINT cursor);
     [[nodiscard]] bool HandlePaletteClick(POINT cursor);
-    [[nodiscard]] bool HandleSettingsClick(POINT cursor);
-    void UpdateActiveSlider(POINT cursor);
-    [[nodiscard]] bool IsCursorInsideSettingsPanel(POINT cursor) const;
     void TogglePaletteWheel();
     void ClosePaletteOverlays();
+    void ToggleToolInWheel(Tool tool);
+    [[nodiscard]] bool IsToolInWheel(Tool tool) const;
+    [[nodiscard]] bool HandleShortcutKey(UINT key, bool ctrl, bool shift, bool alt);
+    void ExecuteShortcutAction(ShortcutAction action);
+    [[nodiscard]] std::wstring FormatKeyBinding(const KeyBinding& binding) const;
+    void LoadAppSettings();
+    void SaveAppSettings() const;
+    void RefreshSettingsWindow();
+    [[nodiscard]] bool IsSettingsWindowOpen() const;
     void PanBy(float dx, float dy);
     void ZoomAt(int delta, POINT cursor);
     void BeginZoomSession(POINT cursor);
@@ -230,7 +276,6 @@ private:
     void PaintPaletteWheel(HDC hdc, RECT clientRect) const;
     void PaintCanvas(HDC hdc, RECT clientRect);
     void PaintPage(HDC hdc, const PageView& pageView);
-    void PaintSettingsPanel(HDC hdc, RECT clientRect) const;
     void PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke) const;
     bool TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke& stroke);
     void EnsurePageSurfaceCache(const PageView& pageView);
@@ -258,21 +303,12 @@ private:
     bool isMovingSelection_ = false;
     bool isTransformingImage_ = false;
     bool isTransformingStroke_ = false;
-    bool settingsOpen_ = false;
-    bool paletteMenuOpen_ = false;
-    bool paletteWheelOpen_ = false;
-    std::size_t settingsPaletteIndex_ = 0;
-    POINT paletteWheelCenter_ {};
-    SliderTarget activeSlider_ = SliderTarget::None;
     std::optional<Stroke> activeStroke_ {};
     std::optional<std::size_t> activeStrokePageIndex_ {};
     std::vector<HistoryAction> undoActions_ {};
     std::vector<HistoryAction> redoActions_ {};
     POINT lastPanCursor_ {};
     ULONG_PTR gdiplusToken_ = 0;
-    float inputSpacing_ = 0.85f;
-    float inputSmoothing_ = 0.3f;
-    float strokeSmoothing_ = 0.55f;
     SelectionMode selectionMode_ = SelectionMode::Box;
     std::optional<std::size_t> selectionPageIndex_ {};
     std::optional<std::size_t> moveSelectionPageIndex_ {};
@@ -319,6 +355,9 @@ private:
         0xFF059669,
         0xFFF59E0B,
     };
+    ShortcutState shortcuts_ {};
+    WheelState wheel_ {};
+    SettingsState settings_ {};
 
     static constexpr int kToolbarHeight = 54;
     static constexpr int kSettingsPanelWidth = 320;

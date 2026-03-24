@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
@@ -19,6 +18,9 @@
 #include <objidl.h>
 #include <gdiplus.h>
 #include <windowsx.h>
+
+#include "SettingsWindow.h"
+#include "ShortcutConfig.h"
 
 namespace cnote {
 
@@ -44,6 +46,7 @@ constexpr unsigned int kCommandSelectLasso = 1111;
 constexpr unsigned int kCommandViewReset = 1201;
 constexpr unsigned int kCommandViewPreviousPage = 1202;
 constexpr unsigned int kCommandViewNextPage = 1203;
+constexpr unsigned int kCommandToolToggleQuickWheel = 1301;
 
 struct MenuLayout {
     RECT fileRect {};
@@ -75,21 +78,6 @@ struct PaletteWheelLayout {
     POINT center {};
     int innerRadius = 0;
     int outerRadius = 0;
-};
-
-struct SettingsLayout {
-    RECT panelRect {};
-    std::vector<RECT> paletteRects;
-    RECT pasteHexRect {};
-    RECT addColorRect {};
-    RECT removeColorRect {};
-    RECT redTrack {};
-    RECT greenTrack {};
-    RECT blueTrack {};
-    RECT brushSizeTrack {};
-    RECT stabilizationTrack {};
-    RECT spacingTrack {};
-    RECT smoothingTrack {};
 };
 
 RECT MakeRect(int left, int top, int right, int bottom) {
@@ -147,6 +135,23 @@ struct SvgIconData {
     std::vector<SvgPathShape> shapes;
     bool loaded = false;
 };
+
+const wchar_t* ToolSvgFileName(App::Tool tool) {
+    switch (tool) {
+    case App::Tool::Select:
+        return L"lasso.svg";
+    case App::Tool::Move:
+        return L"cursor.svg";
+    case App::Tool::Draw:
+        return L"draw.svg";
+    case App::Tool::Pan:
+        return L"pan.svg";
+    case App::Tool::Erase:
+        return L"erase.svg";
+    default:
+        return L"";
+    }
+}
 
 std::optional<std::string> ReadUtf8TextFile(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
@@ -696,70 +701,6 @@ std::optional<std::size_t> PaletteWheelIndexAtPoint(const PaletteWheelLayout& la
     return index;
 }
 
-SettingsLayout BuildSettingsLayout(RECT clientRect, std::size_t colorCount) {
-    SettingsLayout layout;
-    const int panelWidth = 320;
-    const int panelLeft = std::max(24, static_cast<int>(clientRect.right) - panelWidth - 24);
-    const int panelTop = 54 + 10;
-    layout.panelRect = MakeRect(panelLeft, panelTop, panelLeft + panelWidth, panelTop + 418);
-
-    const int contentLeft = panelLeft + 18;
-    const int sliderLeft = contentLeft;
-    const int sliderRight = layout.panelRect.right - 18;
-    const int sliderHeight = 10;
-
-    layout.paletteRects.reserve(colorCount);
-    const int paletteTop = panelTop + 48;
-    for (std::size_t index = 0; index < colorCount; ++index) {
-        const int column = static_cast<int>(index % 6U);
-        const int row = static_cast<int>(index / 6U);
-        const int left = contentLeft + (column * 44);
-        const int top = paletteTop + (row * 34);
-        layout.paletteRects.push_back(MakeRect(left, top, left + 36, top + 26));
-    }
-
-    const int paletteRows = static_cast<int>((colorCount + 5U) / 6U);
-    const int actionsTop = paletteTop + (std::max(1, paletteRows) * 34) + 4;
-    layout.pasteHexRect = MakeRect(contentLeft, actionsTop, contentLeft + 118, actionsTop + 28);
-    layout.addColorRect = MakeRect(layout.pasteHexRect.right + 10, actionsTop, layout.pasteHexRect.right + 54, actionsTop + 28);
-    layout.removeColorRect = MakeRect(layout.addColorRect.right + 10, actionsTop, layout.addColorRect.right + 54, actionsTop + 28);
-
-    const int sliderStart = actionsTop + 54;
-    layout.redTrack = MakeRect(sliderLeft, sliderStart, sliderRight, sliderStart + sliderHeight);
-    layout.greenTrack = MakeRect(sliderLeft, sliderStart + 36, sliderRight, sliderStart + 36 + sliderHeight);
-    layout.blueTrack = MakeRect(sliderLeft, sliderStart + 72, sliderRight, sliderStart + 72 + sliderHeight);
-    layout.brushSizeTrack = MakeRect(sliderLeft, sliderStart + 118, sliderRight, sliderStart + 118 + sliderHeight);
-    layout.stabilizationTrack = MakeRect(sliderLeft, sliderStart + 164, sliderRight, sliderStart + 164 + sliderHeight);
-    layout.spacingTrack = MakeRect(sliderLeft, sliderStart + 200, sliderRight, sliderStart + 200 + sliderHeight);
-    layout.smoothingTrack = MakeRect(sliderLeft, sliderStart + 236, sliderRight, sliderStart + 236 + sliderHeight);
-
-    layout.panelRect.bottom = layout.smoothingTrack.bottom + 24;
-
-    const int maxBottom = static_cast<int>(clientRect.bottom) - 12;
-    if (layout.panelRect.bottom > maxBottom) {
-        const int minTop = 62;
-        const int availableShift = std::max(0, static_cast<int>(layout.panelRect.top) - minTop);
-        const int overflow = static_cast<int>(layout.panelRect.bottom) - maxBottom;
-        const int shift = std::min(overflow, availableShift);
-        OffsetRect(&layout.panelRect, 0, -shift);
-        OffsetRect(&layout.pasteHexRect, 0, -shift);
-        OffsetRect(&layout.addColorRect, 0, -shift);
-        OffsetRect(&layout.removeColorRect, 0, -shift);
-        OffsetRect(&layout.redTrack, 0, -shift);
-        OffsetRect(&layout.greenTrack, 0, -shift);
-        OffsetRect(&layout.blueTrack, 0, -shift);
-        OffsetRect(&layout.brushSizeTrack, 0, -shift);
-        OffsetRect(&layout.stabilizationTrack, 0, -shift);
-        OffsetRect(&layout.spacingTrack, 0, -shift);
-        OffsetRect(&layout.smoothingTrack, 0, -shift);
-        for (RECT& rect : layout.paletteRects) {
-            OffsetRect(&rect, 0, -shift);
-        }
-    }
-
-    return layout;
-}
-
 void FillRoundedRect(HDC hdc, RECT rect, COLORREF color) {
     HBRUSH brush = CreateSolidBrush(color);
     HGDIOBJ oldBrush = SelectObject(hdc, brush);
@@ -922,43 +863,6 @@ std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float str
     }
 
     return smoothed;
-}
-
-std::wstring Trimmed(std::wstring value) {
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [](wchar_t ch) { return !iswspace(ch); }));
-    value.erase(std::find_if(value.rbegin(), value.rend(), [](wchar_t ch) { return !iswspace(ch); }).base(), value.end());
-    return value;
-}
-
-std::optional<std::uint32_t> ParseHexColor(std::wstring value) {
-    value = Trimmed(std::move(value));
-    if (value.empty()) {
-        return std::nullopt;
-    }
-
-    if (value.starts_with(L"#")) {
-        value.erase(0, 1);
-    }
-    if (value.starts_with(L"0x") || value.starts_with(L"0X")) {
-        value.erase(0, 2);
-    }
-
-    if (value.size() != 6U && value.size() != 8U) {
-        return std::nullopt;
-    }
-
-    for (wchar_t ch : value) {
-        if (!iswxdigit(ch)) {
-            return std::nullopt;
-        }
-    }
-
-    const unsigned long parsed = std::wcstoul(value.c_str(), nullptr, 16);
-    if (value.size() == 6U) {
-        return 0xFF000000U | static_cast<std::uint32_t>(parsed);
-    }
-
-    return static_cast<std::uint32_t>(parsed);
 }
 
 bool PointInRectF(Vec2 point, float left, float top, float right, float bottom) {
@@ -1242,11 +1146,19 @@ App::App(HINSTANCE instance) : instance_(instance) {
     if (Gdiplus::GdiplusStartup(&token, &startupInput, nullptr) == Gdiplus::Ok) {
         gdiplusToken_ = token;
     }
+    shortcuts_.bindings.reserve(ShortcutDefinitions().size());
+    for (const ShortcutDefinition& definition : ShortcutDefinitions()) {
+        shortcuts_.bindings.push_back({ definition.action, definition.defaultBinding });
+    }
+    LoadAppSettings();
     ClearSelection();
     StartRenderWorker();
 }
 
 App::~App() {
+    delete settings_.window;
+    settings_.window = nullptr;
+    SaveAppSettings();
     StopRenderWorker();
     if (gdiplusToken_ != 0) {
         Gdiplus::GdiplusShutdown(gdiplusToken_);
@@ -1444,8 +1356,23 @@ void App::ClearHistory() {
 }
 
 void App::ClosePaletteOverlays() {
-    paletteMenuOpen_ = false;
-    paletteWheelOpen_ = false;
+    wheel_.paletteMenuOpen = false;
+    wheel_.paletteWheelOpen = false;
+}
+
+void App::ToggleToolInWheel(Tool tool) {
+    const auto existing = std::find(wheel_.tools.begin(), wheel_.tools.end(), tool);
+    if (existing != wheel_.tools.end()) {
+        wheel_.tools.erase(existing);
+    } else {
+        wheel_.tools.push_back(tool);
+    }
+    SaveAppSettings();
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+bool App::IsToolInWheel(Tool tool) const {
+    return std::find(wheel_.tools.begin(), wheel_.tools.end(), tool) != wheel_.tools.end();
 }
 
 void App::TogglePaletteWheel() {
@@ -1462,9 +1389,9 @@ void App::TogglePaletteWheel() {
         cursor.y = toolbarLayout.currentColorRect.bottom + 72;
     }
 
-    paletteWheelCenter_ = cursor;
-    paletteWheelOpen_ = !paletteWheelOpen_;
-    paletteMenuOpen_ = false;
+    wheel_.center = cursor;
+    wheel_.paletteWheelOpen = !wheel_.paletteWheelOpen;
+    wheel_.paletteMenuOpen = false;
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -1537,7 +1464,7 @@ void App::InvalidateStrokeRegion(const Stroke& stroke, std::size_t pageIndex, bo
     }
 
     const std::vector<Vec2> renderPoints = smoothLiveStroke
-        ? BuildSmoothedPoints(stroke.points, strokeSmoothing_)
+        ? BuildSmoothedPoints(stroke.points, settings_.strokeSmoothing)
         : stroke.points;
     if (renderPoints.empty()) {
         return;
@@ -1629,12 +1556,6 @@ void App::FocusPage(std::size_t index) {
     const int pageCenterY = (pageView.rect.top + pageView.rect.bottom) / 2;
     const int desiredCenterY = canvasTop + (canvasHeight / 2);
     panY_ += static_cast<float>(desiredCenterY - pageCenterY);
-    InvalidateRect(window_, nullptr, FALSE);
-}
-
-void App::ToggleBrushSettings() {
-    settingsOpen_ = !settingsOpen_;
-    activeSlider_ = SliderTarget::None;
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -2098,58 +2019,6 @@ bool App::CanGoToNextPage() const {
     return document_.CurrentPageIndex() + 1U < document_.PageCount();
 }
 
-void App::AddPaletteColor() {
-    if (palette_.size() >= 12U) {
-        return;
-    }
-
-    const std::uint32_t sourceColor = palette_.at(settingsPaletteIndex_);
-    palette_.push_back(sourceColor);
-    settingsPaletteIndex_ = palette_.size() - 1U;
-    colorIndex_ = std::min(colorIndex_, palette_.size() - 1U);
-    InvalidateRect(window_, nullptr, FALSE);
-}
-
-void App::RemovePaletteColor() {
-    if (palette_.size() <= 1U || settingsPaletteIndex_ >= palette_.size()) {
-        return;
-    }
-
-    palette_.erase(palette_.begin() + static_cast<std::ptrdiff_t>(settingsPaletteIndex_));
-    if (settingsPaletteIndex_ >= palette_.size()) {
-        settingsPaletteIndex_ = palette_.size() - 1U;
-    }
-    if (colorIndex_ >= palette_.size()) {
-        colorIndex_ = palette_.size() - 1U;
-    }
-    InvalidateRect(window_, nullptr, FALSE);
-}
-
-bool App::ApplyHexColorFromClipboard() {
-    if (!OpenClipboard(window_)) {
-        return false;
-    }
-
-    bool applied = false;
-    HANDLE clipboardData = GetClipboardData(CF_UNICODETEXT);
-    if (clipboardData != nullptr) {
-        const auto* rawText = static_cast<const wchar_t*>(GlobalLock(clipboardData));
-        if (rawText != nullptr) {
-            if (const auto parsed = ParseHexColor(rawText); parsed.has_value() && settingsPaletteIndex_ < palette_.size()) {
-                palette_[settingsPaletteIndex_] = *parsed;
-                applied = true;
-            }
-            GlobalUnlock(clipboardData);
-        }
-    }
-
-    CloseClipboard();
-    if (applied) {
-        InvalidateRect(window_, nullptr, FALSE);
-    }
-    return applied;
-}
-
 std::wstring App::CurrentWindowTitle() const {
     if (!document_.FilePath().empty()) {
         return BaseName(document_.FilePath());
@@ -2224,8 +2093,8 @@ void App::ExtendStroke(POINT cursor) {
     Vec2 filteredPoint = rawPoint;
 
     if (!activeStroke_->points.empty()) {
-        filteredPoint = Lerp(activeStroke_->points.back(), rawPoint, inputSmoothing_);
-        if (DistanceSquared(filteredPoint, activeStroke_->points.back()) < inputSpacing_) {
+        filteredPoint = Lerp(activeStroke_->points.back(), rawPoint, settings_.inputSmoothing);
+        if (DistanceSquared(filteredPoint, activeStroke_->points.back()) < settings_.inputSpacing) {
             return;
         }
     }
@@ -2239,7 +2108,7 @@ void App::EndStroke() {
     std::optional<std::size_t> committedPageIndex;
     if (isDrawing_ && activeStroke_.has_value() && activeStrokePageIndex_.has_value() && !activeStroke_->points.empty()) {
         Stroke finishedStroke = std::move(*activeStroke_);
-        finishedStroke.points = BuildSmoothedPoints(finishedStroke.points, strokeSmoothing_);
+        finishedStroke.points = BuildSmoothedPoints(finishedStroke.points, settings_.strokeSmoothing);
         auto& strokes = document_.PageAt(*activeStrokePageIndex_).strokes;
         const std::size_t insertIndex = strokes.size();
         strokes.push_back(finishedStroke);
@@ -3490,7 +3359,7 @@ bool App::HandleToolbarClick(POINT cursor) {
             AppendMenuW(menu, MF_STRING, kCommandEditCopy, L"Copy");
             AppendMenuW(menu, MF_STRING, kCommandEditPaste, L"Paste");
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(menu, MF_STRING, kCommandEditBrushSettings, settingsOpen_ ? L"Hide Brush Settings" : L"Brush Settings");
+            AppendMenuW(menu, MF_STRING, kCommandEditBrushSettings, IsSettingsWindowOpen() ? L"Hide Settings" : L"Settings");
             break;
         case 2:
             AppendMenuW(menu, MF_STRING, kCommandViewReset, L"Reset View");
@@ -3599,19 +3468,66 @@ bool App::HandleToolbarClick(POINT cursor) {
     return true;
 }
 
+bool App::HandleToolbarRightClick(POINT cursor) {
+    if (cursor.y >= kToolbarHeight) {
+        return false;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size());
+
+    const auto showMenuForTool = [&](const RECT& rect, Tool tool) -> bool {
+        if (PtInRect(&rect, cursor) == 0) {
+            return false;
+        }
+
+        HMENU menu = CreatePopupMenu();
+        if (menu == nullptr) {
+            return true;
+        }
+
+        const bool alreadyInWheel = IsToolInWheel(tool);
+        AppendMenuW(menu, MF_STRING, kCommandToolToggleQuickWheel, alreadyInWheel ? L"Remove from Quick Wheel" : L"Add to Quick Wheel");
+
+        POINT anchor { cursor.x, cursor.y };
+        ClientToScreen(window_, &anchor);
+        const unsigned int selected = TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
+            anchor.x,
+            anchor.y,
+            0,
+            window_,
+            nullptr);
+        DestroyMenu(menu);
+
+        if (selected == kCommandToolToggleQuickWheel) {
+            ToggleToolInWheel(tool);
+        }
+        return true;
+    };
+
+    return showMenuForTool(layout.selectToolRect, Tool::Select)
+        || showMenuForTool(layout.moveToolRect, Tool::Move)
+        || showMenuForTool(layout.drawToolRect, Tool::Draw)
+        || showMenuForTool(layout.panToolRect, Tool::Pan)
+        || showMenuForTool(layout.eraseToolRect, Tool::Erase);
+}
+
 bool App::HandlePaletteClick(POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size());
 
     if (PtInRect(&toolbarLayout.currentColorRect, cursor) != 0) {
-        paletteMenuOpen_ = !paletteMenuOpen_;
-        paletteWheelOpen_ = false;
+        wheel_.paletteMenuOpen = !wheel_.paletteMenuOpen;
+        wheel_.paletteWheelOpen = false;
         InvalidateRect(window_, nullptr, FALSE);
         return true;
     }
 
-    if (paletteMenuOpen_) {
+    if (wheel_.paletteMenuOpen) {
         const PaletteMenuLayout menuLayout = BuildPaletteMenuLayout(toolbarLayout, palette_.size());
         for (std::size_t index = 0; index < menuLayout.swatchRects.size(); ++index) {
             if (PtInRect(&menuLayout.swatchRects[index], cursor) != 0) {
@@ -3629,10 +3545,17 @@ bool App::HandlePaletteClick(POINT cursor) {
         return true;
     }
 
-    if (paletteWheelOpen_) {
-        const PaletteWheelLayout wheelLayout = BuildPaletteWheelLayout(clientRect, paletteWheelCenter_, palette_.size());
-        if (const auto index = PaletteWheelIndexAtPoint(wheelLayout, cursor, palette_.size()); index.has_value()) {
-            SetColorIndex(*index);
+    if (wheel_.paletteWheelOpen) {
+        const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
+        const PaletteWheelLayout wheelLayout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount);
+        if (const auto index = PaletteWheelIndexAtPoint(wheelLayout, cursor, wheelEntryCount); index.has_value()) {
+            if (*index < palette_.size()) {
+                SetColorIndex(*index);
+            } else {
+                SetActiveTool(wheel_.tools[*index - palette_.size()]);
+                ClosePaletteOverlays();
+                InvalidateRect(window_, nullptr, FALSE);
+            }
             return true;
         }
 
@@ -3642,128 +3565,6 @@ bool App::HandlePaletteClick(POINT cursor) {
     }
 
     return false;
-}
-
-bool App::HandleSettingsClick(POINT cursor) {
-    if (!settingsOpen_) {
-        return false;
-    }
-
-    RECT clientRect {};
-    GetClientRect(window_, &clientRect);
-    const SettingsLayout layout = BuildSettingsLayout(clientRect, palette_.size());
-    if (PtInRect(&layout.panelRect, cursor) == 0) {
-        return false;
-    }
-
-    for (std::size_t index = 0; index < layout.paletteRects.size(); ++index) {
-        if (PtInRect(&layout.paletteRects[index], cursor) != 0) {
-            settingsPaletteIndex_ = index;
-            InvalidateRect(window_, nullptr, FALSE);
-            return true;
-        }
-    }
-
-    if (PtInRect(&layout.pasteHexRect, cursor) != 0) {
-        static_cast<void>(ApplyHexColorFromClipboard());
-        return true;
-    }
-
-    if (PtInRect(&layout.addColorRect, cursor) != 0) {
-        AddPaletteColor();
-        return true;
-    }
-
-    if (PtInRect(&layout.removeColorRect, cursor) != 0) {
-        RemovePaletteColor();
-        return true;
-    }
-
-    const auto beginSlider = [&](SliderTarget target, const RECT& track) -> bool {
-        RECT expanded = track;
-        expanded.top -= 8;
-        expanded.bottom += 8;
-        if (PtInRect(&expanded, cursor) != 0) {
-            activeSlider_ = target;
-            UpdateActiveSlider(cursor);
-            return true;
-        }
-        return false;
-    };
-
-    if (beginSlider(SliderTarget::Red, layout.redTrack)
-        || beginSlider(SliderTarget::Green, layout.greenTrack)
-        || beginSlider(SliderTarget::Blue, layout.blueTrack)
-        || beginSlider(SliderTarget::BrushSize, layout.brushSizeTrack)
-        || beginSlider(SliderTarget::Stabilization, layout.stabilizationTrack)
-        || beginSlider(SliderTarget::Spacing, layout.spacingTrack)
-        || beginSlider(SliderTarget::Smoothing, layout.smoothingTrack)) {
-        return true;
-    }
-
-    return true;
-}
-
-void App::UpdateActiveSlider(POINT cursor) {
-    if (activeSlider_ == SliderTarget::None) {
-        return;
-    }
-
-    RECT clientRect {};
-    GetClientRect(window_, &clientRect);
-    const SettingsLayout layout = BuildSettingsLayout(clientRect, palette_.size());
-
-    const auto sliderValue = [&](const RECT& track) {
-        const float width = static_cast<float>(std::max(1L, track.right - track.left));
-        return std::clamp((static_cast<float>(cursor.x - track.left) / width), 0.0f, 1.0f);
-    };
-
-    std::uint32_t color = palette_.at(settingsPaletteIndex_);
-    unsigned char red = GetColorChannel(color, 16);
-    unsigned char green = GetColorChannel(color, 8);
-    unsigned char blue = GetColorChannel(color, 0);
-
-    switch (activeSlider_) {
-    case SliderTarget::Red:
-        red = static_cast<unsigned char>(std::lround(sliderValue(layout.redTrack) * 255.0f));
-        palette_[settingsPaletteIndex_] = ComposeColor(red, green, blue);
-        break;
-    case SliderTarget::Green:
-        green = static_cast<unsigned char>(std::lround(sliderValue(layout.greenTrack) * 255.0f));
-        palette_[settingsPaletteIndex_] = ComposeColor(red, green, blue);
-        break;
-    case SliderTarget::Blue:
-        blue = static_cast<unsigned char>(std::lround(sliderValue(layout.blueTrack) * 255.0f));
-        palette_[settingsPaletteIndex_] = ComposeColor(red, green, blue);
-        break;
-    case SliderTarget::BrushSize:
-        brushWidth_ = 1.0f + (sliderValue(layout.brushSizeTrack) * 23.0f);
-        break;
-    case SliderTarget::Stabilization:
-        inputSmoothing_ = std::clamp(sliderValue(layout.stabilizationTrack), 0.05f, 0.95f);
-        break;
-    case SliderTarget::Spacing:
-        inputSpacing_ = 0.05f + (sliderValue(layout.spacingTrack) * 4.0f);
-        break;
-    case SliderTarget::Smoothing:
-        strokeSmoothing_ = sliderValue(layout.smoothingTrack);
-        break;
-    case SliderTarget::None:
-        break;
-    }
-
-    InvalidateRect(window_, nullptr, FALSE);
-}
-
-bool App::IsCursorInsideSettingsPanel(POINT cursor) const {
-    if (!settingsOpen_) {
-        return false;
-    }
-
-    RECT clientRect {};
-    GetClientRect(window_, &clientRect);
-    const SettingsLayout layout = BuildSettingsLayout(clientRect, palette_.size());
-    return PtInRect(&layout.panelRect, cursor) != 0;
 }
 
 void App::PanBy(float dx, float dy) {
@@ -3840,7 +3641,7 @@ void App::CancelDeferredRasterRefresh(bool clearPending) {
 }
 
 void App::HandleDeferredRasterRefresh() {
-    if (isDrawing_ || isPanning_ || isErasing_ || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_ || activeSlider_ != SliderTarget::None || zoomSessionActive_) {
+    if (isDrawing_ || isPanning_ || isErasing_ || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_ || zoomSessionActive_) {
         SetTimer(window_, kRasterRefreshTimerId, kRasterRefreshDelayMs, nullptr);
         return;
     }
@@ -3946,6 +3747,7 @@ void App::SetColorIndex(std::size_t index) {
     }
 
     colorIndex_ = index;
+    SaveAppSettings();
     ClosePaletteOverlays();
     bool recoloredSelection = false;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
@@ -4078,7 +3880,7 @@ bool App::ExportAsPdf() {
         return false;
     }
 
-    if (!pdfBackend_.ExportPdf(document_, fileBuffer, 2.0f, strokeSmoothing_)) {
+    if (!pdfBackend_.ExportPdf(document_, fileBuffer, 2.0f, settings_.strokeSmoothing)) {
         MessageBoxW(window_, L"Failed to export the PDF.", L"Export as PDF", MB_OK | MB_ICONERROR);
         return false;
     }
@@ -4263,7 +4065,6 @@ void App::Paint() {
 
     PaintToolbar(memoryDc, clientRect);
     PaintCanvas(memoryDc, clientRect);
-    PaintSettingsPanel(memoryDc, clientRect);
     PaintPaletteMenu(memoryDc, clientRect);
     PaintPaletteWheel(memoryDc, clientRect);
 
@@ -4346,6 +4147,11 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
         }
     };
 
+    const auto paintWheelBadge = [&](RECT rect) {
+        RECT badgeRect = MakeRect(rect.right - 10, rect.top + 4, rect.right - 4, rect.top + 10);
+        FillRoundedRect(hdc, badgeRect, RGB(244, 247, 252));
+    };
+
     const auto paintSvgActionButton = [&](RECT rect, const wchar_t* svgFileName, const wchar_t* label, bool enabled) {
         FillRoundedRect(hdc, rect, idleFill);
         StrokeRoundedRect(hdc, rect, panelBorder, 1);
@@ -4369,6 +4175,21 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     paintIconToolButton(layout.eraseToolRect, PaintEraseToolIcon, L"erase.svg", activeTool_ == Tool::Erase);
     paintIconToolButton(layout.drawToolRect, PaintDrawToolIcon, L"draw.svg", activeTool_ == Tool::Draw && !isPanning_);
     paintIconToolButton(layout.panToolRect, PaintPanToolIcon, L"pan.svg", activeTool_ == Tool::Pan || isPanning_);
+    if (IsToolInWheel(Tool::Select)) {
+        paintWheelBadge(layout.selectToolRect);
+    }
+    if (IsToolInWheel(Tool::Move)) {
+        paintWheelBadge(layout.moveToolRect);
+    }
+    if (IsToolInWheel(Tool::Erase)) {
+        paintWheelBadge(layout.eraseToolRect);
+    }
+    if (IsToolInWheel(Tool::Draw)) {
+        paintWheelBadge(layout.drawToolRect);
+    }
+    if (IsToolInWheel(Tool::Pan)) {
+        paintWheelBadge(layout.panToolRect);
+    }
 
     FillRoundedRect(hdc, layout.pageLabelRect, RGB(22, 28, 36));
     StrokeRoundedRect(hdc, layout.pageLabelRect, panelBorder, 1);
@@ -4379,7 +4200,7 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     DrawTextW(hdc, pageLabel.c_str(), -1, &pageLabelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     FillRoundedRect(hdc, layout.currentColorRect, ToColorRef(palette_[colorIndex_]));
-    StrokeRoundedRect(hdc, layout.currentColorRect, paletteMenuOpen_ ? RGB(244, 247, 252) : panelBorder, paletteMenuOpen_ ? 2 : 1);
+    StrokeRoundedRect(hdc, layout.currentColorRect, wheel_.paletteMenuOpen ? RGB(244, 247, 252) : panelBorder, wheel_.paletteMenuOpen ? 2 : 1);
 
     SelectObject(hdc, previousFont);
     DeleteObject(bodyFont);
@@ -4387,7 +4208,7 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
 }
 
 void App::PaintPaletteMenu(HDC hdc, RECT clientRect) const {
-    if (!paletteMenuOpen_) {
+    if (!wheel_.paletteMenuOpen) {
         return;
     }
 
@@ -4407,12 +4228,13 @@ void App::PaintPaletteMenu(HDC hdc, RECT clientRect) const {
 }
 
 void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
-    if (!paletteWheelOpen_) {
+    if (!wheel_.paletteWheelOpen) {
         return;
     }
 
-    const PaletteWheelLayout layout = BuildPaletteWheelLayout(clientRect, paletteWheelCenter_, palette_.size());
-    if (palette_.empty()) {
+    const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
+    const PaletteWheelLayout layout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount);
+    if (wheelEntryCount == 0U) {
         return;
     }
 
@@ -4436,15 +4258,31 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
         static_cast<Gdiplus::REAL>((layout.outerRadius + 6) * 2),
         static_cast<Gdiplus::REAL>((layout.outerRadius + 6) * 2));
 
-    const float sweep = 360.0f / static_cast<float>(palette_.size());
+    const float sweep = 360.0f / static_cast<float>(wheelEntryCount);
     float start = -90.0f;
-    for (std::size_t index = 0; index < palette_.size(); ++index) {
-        const COLORREF color = ToColorRef(palette_[index]);
-        Gdiplus::SolidBrush brush(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)));
+    for (std::size_t index = 0; index < wheelEntryCount; ++index) {
+        const bool isColorEntry = index < palette_.size();
+        const bool selected = isColorEntry ? index == colorIndex_ : activeTool_ == wheel_.tools[index - palette_.size()];
+        Gdiplus::SolidBrush brush = isColorEntry
+            ? Gdiplus::SolidBrush(Gdiplus::Color(255, GetRValue(ToColorRef(palette_[index])), GetGValue(ToColorRef(palette_[index])), GetBValue(ToColorRef(palette_[index]))))
+            : Gdiplus::SolidBrush(selected ? Gdiplus::Color(110, 240, 247, 255) : Gdiplus::Color(52, 240, 247, 255));
         graphics.FillPie(&brush, outerRect, start, sweep);
 
-        Gdiplus::Pen separatorPen(Gdiplus::Color(index == colorIndex_ ? 255 : 120, 244, 247, 252), index == colorIndex_ ? 3.0f : 1.2f);
+        Gdiplus::Pen separatorPen(Gdiplus::Color(selected ? 255 : 120, 244, 247, 252), selected ? 3.0f : 1.2f);
         graphics.DrawPie(&separatorPen, outerRect, start, sweep);
+
+        if (!isColorEntry) {
+            const float centerAngleDegrees = start + (sweep * 0.5f);
+            const float centerAngleRadians = centerAngleDegrees * (3.14159265358979323846f / 180.0f);
+            const float iconRadius = static_cast<float>(layout.innerRadius + ((layout.outerRadius - layout.innerRadius) * 0.5f));
+            const int iconCenterX = layout.center.x + static_cast<int>(std::lround(std::cos(centerAngleRadians) * iconRadius));
+            const int iconCenterY = layout.center.y + static_cast<int>(std::lround(std::sin(centerAngleRadians) * iconRadius));
+            const RECT iconRect = MakeRect(iconCenterX - 10, iconCenterY - 10, iconCenterX + 10, iconCenterY + 10);
+            const COLORREF iconColor = selected ? RGB(255, 255, 255) : RGB(232, 238, 245);
+            if (const SvgIconData* icon = ToolbarSvgIcon(ToolSvgFileName(wheel_.tools[index - palette_.size()])); icon != nullptr) {
+                PaintSvgIcon(hdc, iconRect, *icon, iconColor);
+            }
+        }
         start += sweep;
     }
 
@@ -4469,84 +4307,6 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
         static_cast<Gdiplus::REAL>(layout.center.y - layout.innerRadius),
         static_cast<Gdiplus::REAL>(innerDiameter),
         static_cast<Gdiplus::REAL>(innerDiameter));
-}
-
-void App::PaintSettingsPanel(HDC hdc, RECT clientRect) const {
-    if (!settingsOpen_) {
-        return;
-    }
-
-    const SettingsLayout layout = BuildSettingsLayout(clientRect, palette_.size());
-    const COLORREF panelFill = RGB(18, 24, 32);
-    const COLORREF panelBorder = RGB(46, 58, 74);
-    const COLORREF textColor = RGB(235, 240, 246);
-    const COLORREF mutedText = RGB(141, 152, 167);
-
-    FillRoundedRect(hdc, layout.panelRect, panelFill);
-    StrokeRoundedRect(hdc, layout.panelRect, panelBorder, 1);
-
-    SetBkMode(hdc, TRANSPARENT);
-    HFONT titleFont = CreateFontW(18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
-        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
-    HFONT bodyFont = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
-        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
-    HGDIOBJ previousFont = SelectObject(hdc, titleFont);
-    SetTextColor(hdc, textColor);
-    TextOutW(hdc, layout.panelRect.left + 18, layout.panelRect.top + 18, L"Brush Settings", 14);
-
-    SelectObject(hdc, bodyFont);
-    SetTextColor(hdc, mutedText);
-    TextOutW(hdc, layout.panelRect.left + 18, layout.panelRect.top + 96, L"Palette", 7);
-
-    for (std::size_t index = 0; index < layout.paletteRects.size(); ++index) {
-        RECT slotRect = layout.paletteRects[index];
-        FillRoundedRect(hdc, slotRect, ToColorRef(palette_[index]));
-        StrokeRoundedRect(hdc, slotRect, index == settingsPaletteIndex_ ? RGB(244, 247, 252) : panelBorder, index == settingsPaletteIndex_ ? 2 : 1);
-    }
-
-    const auto paintButton = [&](RECT rect, const wchar_t* label, bool enabled = true) {
-        FillRoundedRect(hdc, rect, enabled ? RGB(28, 34, 43) : RGB(24, 28, 35));
-        StrokeRoundedRect(hdc, rect, panelBorder, 1);
-        SetTextColor(hdc, enabled ? textColor : RGB(102, 111, 124));
-        RECT labelRect = rect;
-        DrawTextW(hdc, label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    };
-
-    paintButton(layout.pasteHexRect, L"Paste Hex");
-    paintButton(layout.addColorRect, L"+", palette_.size() < 12U);
-    paintButton(layout.removeColorRect, L"-", palette_.size() > 1U);
-
-    const auto paintSlider = [&](const wchar_t* label, const RECT& track, float normalized, COLORREF accent, int value) {
-        RECT labelRect = MakeRect(track.left, track.top - 24, track.right, track.top - 6);
-        SetTextColor(hdc, mutedText);
-        DrawTextW(hdc, label, -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-        wchar_t valueBuffer[32] = {};
-        std::swprintf(valueBuffer, std::size(valueBuffer), L"%d", value);
-        SetTextColor(hdc, textColor);
-        DrawTextW(hdc, valueBuffer, -1, &labelRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-
-        FillRoundedRect(hdc, track, RGB(33, 40, 52));
-        RECT fillRect = track;
-        fillRect.right = track.left + static_cast<LONG>(std::lround((track.right - track.left) * std::clamp(normalized, 0.0f, 1.0f)));
-        FillRoundedRect(hdc, fillRect, accent);
-
-        RECT knob = MakeRect(fillRect.right - 6, track.top - 5, fillRect.right + 6, track.bottom + 5);
-        FillRoundedRect(hdc, knob, RGB(245, 247, 250));
-    };
-
-    const std::uint32_t activeColor = palette_[settingsPaletteIndex_];
-    paintSlider(L"Red", layout.redTrack, GetColorChannel(activeColor, 16) / 255.0f, RGB(220, 76, 70), GetColorChannel(activeColor, 16));
-    paintSlider(L"Green", layout.greenTrack, GetColorChannel(activeColor, 8) / 255.0f, RGB(70, 190, 118), GetColorChannel(activeColor, 8));
-    paintSlider(L"Blue", layout.blueTrack, GetColorChannel(activeColor, 0) / 255.0f, RGB(74, 132, 225), GetColorChannel(activeColor, 0));
-    paintSlider(L"Brush Size", layout.brushSizeTrack, (brushWidth_ - 1.0f) / 23.0f, RGB(56, 189, 248), static_cast<int>(std::lround(brushWidth_)));
-    paintSlider(L"Stabilization", layout.stabilizationTrack, inputSmoothing_, RGB(129, 140, 248), static_cast<int>(std::lround(inputSmoothing_ * 100.0f)));
-    paintSlider(L"Point Spacing", layout.spacingTrack, (inputSpacing_ - 0.05f) / 4.0f, RGB(244, 114, 182), static_cast<int>(std::lround(inputSpacing_ * 100.0f)));
-    paintSlider(L"Stroke Smoothing", layout.smoothingTrack, strokeSmoothing_, RGB(245, 158, 11), static_cast<int>(std::lround(strokeSmoothing_ * 100.0f)));
-
-    SelectObject(hdc, previousFont);
-    DeleteObject(titleFont);
-    DeleteObject(bodyFont);
 }
 
 void App::PaintCanvas(HDC hdc, RECT clientRect) {
@@ -5037,7 +4797,7 @@ void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, b
     }
 
     const std::vector<Vec2> smoothedPoints = smoothLiveStroke
-        ? BuildSmoothedPoints(stroke.points, strokeSmoothing_)
+        ? BuildSmoothedPoints(stroke.points, settings_.strokeSmoothing)
         : stroke.points;
     const float penWidth = std::max(1.25f, stroke.style.width * pageView.scale / 2.15f);
 
@@ -5079,7 +4839,7 @@ void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, b
             graphics.DrawLines(&pen, screenPoints.data(), static_cast<INT>(screenPoints.size()));
         } else {
             Gdiplus::GraphicsPath path;
-            path.AddCurve(screenPoints.data(), static_cast<INT>(screenPoints.size()), 0.1f + (strokeSmoothing_ * 0.8f));
+            path.AddCurve(screenPoints.data(), static_cast<INT>(screenPoints.size()), 0.1f + (settings_.strokeSmoothing * 0.8f));
             graphics.DrawPath(&pen, &path);
         }
 
@@ -5124,10 +4884,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
-        if (HandleSettingsClick(cursor)) {
-            return 0;
-        }
-
         ClosePaletteOverlays();
 
         if (activeTool_ == Tool::Pan) {
@@ -5149,11 +4905,17 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         BeginPan(cursor, true);
         return 0;
     }
+    case WM_RBUTTONDOWN: {
+        SetFocus(window_);
+        POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (HandleToolbarRightClick(cursor)) {
+            return 0;
+        }
+        break;
+    }
     case WM_MOUSEMOVE: {
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        if (activeSlider_ != SliderTarget::None && (wParam & MK_LBUTTON) != 0) {
-            UpdateActiveSlider(cursor);
-        } else if (isSelecting_) {
+        if (isSelecting_) {
             ExtendSelection(cursor);
         } else if (isTransformingStroke_) {
             UpdateStrokeTransform(cursor);
@@ -5192,7 +4954,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         } else if (isPanning_ && !panFromMiddleButton_) {
             EndPan();
         }
-        activeSlider_ = SliderTarget::None;
         return 0;
     case WM_MBUTTONUP:
         if (isPanning_ && panFromMiddleButton_) {
@@ -5246,8 +5007,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             };
             if (cursor.y < kToolbarHeight) {
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
-            } else if (activeSlider_ != SliderTarget::None || IsCursorInsideSettingsPanel(cursor)) {
-                SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
             } else if (isPanning_ || activeTool_ == Tool::Pan) {
                 SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
             } else if (isTransformingStroke_) {
@@ -5275,49 +5034,13 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         break;
     case WM_KEYDOWN:
-        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
-            if (wParam == 'Z') {
-                if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) {
-                    Redo();
-                } else {
-                    Undo();
-                }
-                return 0;
-            }
-            if (wParam == 'Y') {
-                Redo();
-                return 0;
-            }
-            if (wParam == 'C') {
-                static_cast<void>(CopySelectionToClipboard());
-                return 0;
-            }
-            if (wParam == 'V') {
-                if (!PasteSelectionFromClipboard()) {
-                    static_cast<void>(PasteImageFromClipboard());
-                }
-                return 0;
-            }
-            if (wParam == 'N') {
-                CreateBlankDocument();
-                return 0;
-            }
-            if (wParam == 'O') {
-                OpenDocument();
-                return 0;
-            }
-            if (wParam == 'Q') {
-                TogglePaletteWheel();
-                return 0;
-            }
-            if (wParam == 'S') {
-                static_cast<void>(SaveAsCnote());
-                return 0;
-            }
-            if (wParam == 'B') {
-                ToggleBrushSettings();
-                return 0;
-            }
+    {
+        const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        const bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
+
+        if (HandleShortcutKey(static_cast<UINT>(wParam), ctrlPressed, shiftPressed, altPressed)) {
+            return 0;
         }
 
         if (wParam == VK_DELETE) {
@@ -5325,19 +5048,13 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
-        if (wParam == VK_ESCAPE && (paletteMenuOpen_ || paletteWheelOpen_)) {
+        if (wParam == VK_ESCAPE && (wheel_.paletteMenuOpen || wheel_.paletteWheelOpen)) {
             ClosePaletteOverlays();
             InvalidateRect(window_, nullptr, FALSE);
             return 0;
         }
 
         switch (wParam) {
-        case VK_PRIOR:
-            PreviousPage();
-            return 0;
-        case VK_NEXT:
-            NextPage();
-            return 0;
         case VK_LEFT:
             PanBy(20.0f, 0.0f);
             return 0;
@@ -5360,12 +5077,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         case VK_OEM_PLUS:
             ChangeBrushSize(1.0f);
             return 0;
-        case '0':
-            CancelDeferredRasterRefresh();
-            ResetView();
-            EnsureVisiblePageRasterQuality();
-            InvalidateRect(window_, nullptr, FALSE);
-            return 0;
         case '1':
         case '2':
         case '3':
@@ -5380,6 +5091,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             break;
         }
         break;
+    }
     case WM_PAINT:
         Paint();
         return 0;

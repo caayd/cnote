@@ -1,0 +1,952 @@
+#include "SettingsWindow.h"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdio>
+#include <vector>
+
+#include <commctrl.h>
+#include <dwmapi.h>
+#include <windowsx.h>
+
+#include "ShortcutConfig.h"
+
+namespace cnote {
+
+namespace {
+
+constexpr wchar_t kSettingsWindowClassName[] = L"CnoteSettingsWindow";
+constexpr int kWindowWidth = 640;
+constexpr int kWindowHeight = 780;
+constexpr COLORREF kWindowBackground = RGB(18, 22, 29);
+constexpr COLORREF kPanelFill = RGB(18, 24, 32);
+constexpr COLORREF kPanelBorder = RGB(46, 58, 74);
+constexpr COLORREF kButtonFill = RGB(28, 34, 43);
+constexpr COLORREF kButtonFillActive = RGB(48, 68, 94);
+constexpr COLORREF kTextPrimary = RGB(235, 240, 246);
+constexpr COLORREF kTextMuted = RGB(141, 152, 167);
+constexpr COLORREF kSelectionBorder = RGB(244, 247, 252);
+
+constexpr int kIdPaletteList = 100;
+constexpr int kIdAddColor = 101;
+constexpr int kIdRemoveColor = 102;
+constexpr int kIdPasteHex = 103;
+constexpr int kIdShortcutList = 120;
+constexpr int kIdChangeShortcut = 121;
+constexpr int kIdClearShortcut = 122;
+constexpr int kIdRedSlider = 200;
+constexpr int kIdGreenSlider = 201;
+constexpr int kIdBlueSlider = 202;
+constexpr int kIdStabilizationSlider = 203;
+constexpr int kIdSpacingSlider = 204;
+constexpr int kIdStrokeSmoothingSlider = 205;
+
+struct SettingsWindowLayout {
+    RECT palettePanel {};
+    RECT paletteGridRect {};
+    std::vector<RECT> paletteSwatches;
+    RECT addColorButton {};
+    RECT removeColorButton {};
+    RECT pasteHexButton {};
+    RECT colorPanel {};
+    RECT colorPreviewRect {};
+    RECT shortcutPanel {};
+    RECT shortcutListRect {};
+    RECT changeShortcutButton {};
+    RECT clearShortcutButton {};
+    RECT shortcutHintRect {};
+    RECT drawingPanel {};
+    RECT redLabelRect {};
+    RECT redSliderRect {};
+    RECT greenLabelRect {};
+    RECT greenSliderRect {};
+    RECT blueLabelRect {};
+    RECT blueSliderRect {};
+    RECT stabilizationLabelRect {};
+    RECT stabilizationSliderRect {};
+    RECT spacingLabelRect {};
+    RECT spacingSliderRect {};
+    RECT strokeSmoothingLabelRect {};
+    RECT strokeSmoothingSliderRect {};
+};
+
+std::wstring FormatPaletteEntry(std::size_t index, std::uint32_t color) {
+    wchar_t buffer[32] = {};
+    std::swprintf(buffer, std::size(buffer), L"%zu. #%06X", index + 1U, color & 0xFFFFFFU);
+    return buffer;
+}
+
+std::wstring FormatSliderLabel(const wchar_t* prefix, int value) {
+    wchar_t buffer[64] = {};
+    std::swprintf(buffer, std::size(buffer), L"%ls: %d", prefix, value);
+    return buffer;
+}
+
+std::wstring FormatFloatSliderLabel(const wchar_t* prefix, float value, int multiplier) {
+    wchar_t buffer[64] = {};
+    std::swprintf(buffer, std::size(buffer), L"%ls: %d", prefix, static_cast<int>(std::lround(value * multiplier)));
+    return buffer;
+}
+
+std::wstring FormatSpacingLabel(float spacing) {
+    wchar_t buffer[64] = {};
+    std::swprintf(buffer, std::size(buffer), L"Point Spacing: %.2f", spacing);
+    return buffer;
+}
+
+void SetControlText(HWND control, const std::wstring& text) {
+    if (control != nullptr) {
+        SetWindowTextW(control, text.c_str());
+    }
+}
+
+RECT MakeRect(int left, int top, int right, int bottom) {
+    RECT rect { left, top, right, bottom };
+    return rect;
+}
+
+SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, std::size_t paletteCount, std::size_t shortcutCount) {
+    SettingsWindowLayout layout;
+    const int margin = 16;
+    const int gap = 14;
+    const int topOffset = 40;
+    const int usableWidth = static_cast<int>(clientRect.right) - (margin * 2);
+    const int rightColumnWidth = std::clamp(usableWidth / 3, 190, 240);
+    const int leftColumnWidth = std::max(260, usableWidth - gap - rightColumnWidth);
+    const int left = margin;
+    const int rightColumnLeft = left + leftColumnWidth + gap;
+
+    layout.palettePanel = MakeRect(left, topOffset, left + leftColumnWidth, topOffset + 220);
+    layout.shortcutPanel = MakeRect(rightColumnLeft, topOffset, clientRect.right - margin, clientRect.bottom - margin);
+    layout.colorPanel = MakeRect(left, layout.palettePanel.bottom + gap, left + leftColumnWidth, layout.palettePanel.bottom + gap + 170);
+    layout.drawingPanel = MakeRect(left, layout.colorPanel.bottom + gap, left + leftColumnWidth, clientRect.bottom - margin);
+
+    const int panelPadding = 14;
+    const int swatchGap = 12;
+    const int columns = 4;
+    const int swatchWidth = std::max(52, (leftColumnWidth - (panelPadding * 2) - (swatchGap * (columns - 1))) / columns);
+    const int swatchHeight = 52;
+    layout.paletteGridRect = MakeRect(
+        layout.palettePanel.left + panelPadding,
+        layout.palettePanel.top + 34,
+        layout.palettePanel.right - panelPadding,
+        layout.palettePanel.top + 34 + (swatchHeight * 3) + (swatchGap * 2));
+    layout.paletteSwatches.reserve(paletteCount);
+    for (std::size_t index = 0; index < paletteCount; ++index) {
+        const int column = static_cast<int>(index % columns);
+        const int row = static_cast<int>(index / columns);
+        const int leftPos = layout.paletteGridRect.left + (column * (swatchWidth + swatchGap));
+        const int topPos = layout.paletteGridRect.top + (row * (swatchHeight + swatchGap));
+        layout.paletteSwatches.push_back(MakeRect(leftPos, topPos, leftPos + swatchWidth, topPos + swatchHeight));
+    }
+
+    const int buttonTop = layout.palettePanel.bottom - 42;
+    layout.addColorButton = MakeRect(layout.palettePanel.left + panelPadding, buttonTop, layout.palettePanel.left + panelPadding + 108, buttonTop + 28);
+    layout.removeColorButton = MakeRect(layout.addColorButton.right + 10, buttonTop, layout.addColorButton.right + 118, buttonTop + 28);
+    layout.pasteHexButton = MakeRect(layout.removeColorButton.right + 10, buttonTop, layout.palettePanel.right - panelPadding, buttonTop + 28);
+
+    layout.colorPreviewRect = MakeRect(layout.colorPanel.left + 14, layout.colorPanel.top + 34, layout.colorPanel.right - 14, layout.colorPanel.top + 100);
+    const int sliderLeft = layout.colorPanel.left + 14;
+    const int sliderRight = layout.colorPanel.right - 14;
+    layout.redLabelRect = MakeRect(sliderLeft, layout.colorPreviewRect.bottom + 12, sliderRight, layout.colorPreviewRect.bottom + 28);
+    layout.redSliderRect = MakeRect(sliderLeft, layout.redLabelRect.bottom + 2, sliderRight, layout.redLabelRect.bottom + 28);
+    layout.greenLabelRect = MakeRect(sliderLeft, layout.redSliderRect.bottom + 8, sliderRight, layout.redSliderRect.bottom + 24);
+    layout.greenSliderRect = MakeRect(sliderLeft, layout.greenLabelRect.bottom + 2, sliderRight, layout.greenLabelRect.bottom + 28);
+    layout.blueLabelRect = MakeRect(sliderLeft, layout.greenSliderRect.bottom + 8, sliderRight, layout.greenSliderRect.bottom + 24);
+    layout.blueSliderRect = MakeRect(sliderLeft, layout.blueLabelRect.bottom + 2, sliderRight, layout.blueLabelRect.bottom + 28);
+
+    const int drawingSliderLeft = layout.drawingPanel.left + 14;
+    const int drawingSliderRight = layout.drawingPanel.right - 14;
+    layout.stabilizationLabelRect = MakeRect(drawingSliderLeft, layout.drawingPanel.top + 34, drawingSliderRight, layout.drawingPanel.top + 50);
+    layout.stabilizationSliderRect = MakeRect(drawingSliderLeft, layout.stabilizationLabelRect.bottom + 2, drawingSliderRight, layout.stabilizationLabelRect.bottom + 28);
+    layout.spacingLabelRect = MakeRect(drawingSliderLeft, layout.stabilizationSliderRect.bottom + 12, drawingSliderRight, layout.stabilizationSliderRect.bottom + 28);
+    layout.spacingSliderRect = MakeRect(drawingSliderLeft, layout.spacingLabelRect.bottom + 2, drawingSliderRight, layout.spacingLabelRect.bottom + 28);
+    layout.strokeSmoothingLabelRect = MakeRect(drawingSliderLeft, layout.spacingSliderRect.bottom + 12, drawingSliderRight, layout.spacingSliderRect.bottom + 28);
+    layout.strokeSmoothingSliderRect = MakeRect(drawingSliderLeft, layout.strokeSmoothingLabelRect.bottom + 2, drawingSliderRight, layout.strokeSmoothingLabelRect.bottom + 28);
+
+    const int shortcutPanelPadding = 12;
+    layout.shortcutListRect = MakeRect(
+        layout.shortcutPanel.left + shortcutPanelPadding,
+        layout.shortcutPanel.top + 34,
+        layout.shortcutPanel.right - shortcutPanelPadding,
+        layout.shortcutPanel.bottom - 104);
+    layout.changeShortcutButton = MakeRect(layout.shortcutPanel.left + shortcutPanelPadding, layout.shortcutPanel.bottom - 86, layout.shortcutPanel.right - shortcutPanelPadding, layout.shortcutPanel.bottom - 58);
+    layout.clearShortcutButton = MakeRect(layout.shortcutPanel.left + shortcutPanelPadding, layout.shortcutPanel.bottom - 50, layout.shortcutPanel.right - shortcutPanelPadding, layout.shortcutPanel.bottom - 22);
+    layout.shortcutHintRect = MakeRect(layout.shortcutPanel.left + shortcutPanelPadding, layout.shortcutPanel.bottom - 128, layout.shortcutPanel.right - shortcutPanelPadding, layout.shortcutPanel.bottom - 92);
+
+    static_cast<void>(shortcutCount);
+    return layout;
+}
+
+void FillRoundedRect(HDC hdc, RECT rect, COLORREF color) {
+    HBRUSH brush = CreateSolidBrush(color);
+    HGDIOBJ oldBrush = SelectObject(hdc, brush);
+    HGDIOBJ oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
+    RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(brush);
+}
+
+void StrokeRoundedRect(HDC hdc, RECT rect, COLORREF color, int width) {
+    HPEN pen = CreatePen(PS_SOLID, width, color);
+    HGDIOBJ oldPen = SelectObject(hdc, pen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+    RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+}  // namespace
+
+SettingsWindow::SettingsWindow(App& app) : app_(app) {
+    INITCOMMONCONTROLSEX initControls {};
+    initControls.dwSize = sizeof(initControls);
+    initControls.dwICC = ICC_BAR_CLASSES;
+    InitCommonControlsEx(&initControls);
+}
+
+SettingsWindow::~SettingsWindow() {
+    if (window_ != nullptr) {
+        DestroyWindow(window_);
+        window_ = nullptr;
+    }
+    if (font_ != nullptr) {
+        DeleteObject(font_);
+        font_ = nullptr;
+    }
+    if (titleFont_ != nullptr) {
+        DeleteObject(titleFont_);
+        titleFont_ = nullptr;
+    }
+    if (backgroundBrush_ != nullptr) {
+        DeleteObject(backgroundBrush_);
+        backgroundBrush_ = nullptr;
+    }
+    if (panelBrush_ != nullptr) {
+        DeleteObject(panelBrush_);
+        panelBrush_ = nullptr;
+    }
+}
+
+void SettingsWindow::Toggle(HWND owner) {
+    if (IsOpen()) {
+        DestroyWindow(window_);
+        return;
+    }
+    Show(owner);
+}
+
+void SettingsWindow::Show(HWND owner) {
+    CreateIfNeeded(owner);
+    if (window_ == nullptr) {
+        return;
+    }
+
+    ShowWindow(window_, SW_SHOWNORMAL);
+    BringWindowToTop(window_);
+    SetForegroundWindow(window_);
+    Refresh();
+}
+
+bool SettingsWindow::IsOpen() const {
+    return window_ != nullptr;
+}
+
+void SettingsWindow::Refresh() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    RefreshPaletteList();
+    RefreshSliderValues();
+    RefreshShortcutList();
+    RefreshShortcutButtons();
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void SettingsWindow::CreateIfNeeded(HWND owner) {
+    if (window_ != nullptr) {
+        return;
+    }
+
+    static bool classRegistered = false;
+    if (!classRegistered) {
+        WNDCLASSW windowClass {};
+        windowClass.lpfnWndProc = &SettingsWindow::WindowProc;
+        windowClass.hInstance = app_.instance_;
+        windowClass.lpszClassName = kSettingsWindowClassName;
+        windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        windowClass.hbrBackground = nullptr;
+        RegisterClassW(&windowClass);
+        classRegistered = true;
+    }
+
+    window_ = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kSettingsWindowClassName,
+        L"Settings",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        kWindowWidth,
+        kWindowHeight,
+        owner,
+        nullptr,
+        app_.instance_,
+        this);
+
+    if (window_ == nullptr) {
+        return;
+    }
+
+    constexpr DWORD kDwmDarkModeAttribute = 20;
+    constexpr DWORD kDwmBorderColorAttribute = 34;
+    constexpr DWORD kDwmCaptionColorAttribute = 35;
+    constexpr DWORD kDwmTextColorAttribute = 36;
+    const BOOL useDarkMode = TRUE;
+    const COLORREF chromeColor = RGB(15, 18, 24);
+    const COLORREF chromeText = RGB(236, 240, 245);
+    DwmSetWindowAttribute(window_, kDwmDarkModeAttribute, &useDarkMode, sizeof(useDarkMode));
+    DwmSetWindowAttribute(window_, kDwmBorderColorAttribute, &chromeColor, sizeof(chromeColor));
+    DwmSetWindowAttribute(window_, kDwmCaptionColorAttribute, &chromeColor, sizeof(chromeColor));
+    DwmSetWindowAttribute(window_, kDwmTextColorAttribute, &chromeText, sizeof(chromeText));
+
+    CreateControls();
+    ApplyFonts();
+}
+
+void SettingsWindow::CreateControls() {
+    const auto createLabel = [&](const wchar_t* text, int x, int y, int width, int height) {
+        return CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE, x, y, width, height, window_, nullptr, app_.instance_, nullptr);
+    };
+    const auto createButton = [&](const wchar_t* text, int id, int x, int y, int width, int height) {
+        return CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            x, y, width, height, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), app_.instance_, nullptr);
+    };
+    const auto createSlider = [&](int id, int x, int y, int width, int height) {
+        return CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP,
+            x, y, width, height, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), app_.instance_, nullptr);
+    };
+
+    addColorButton_ = createButton(L"Add Color", kIdAddColor, 0, 0, 120, 28);
+    removeColorButton_ = createButton(L"Remove Color", kIdRemoveColor, 0, 0, 120, 28);
+    pasteHexButton_ = createButton(L"Paste Hex", kIdPasteHex, 0, 0, 120, 28);
+
+    redLabel_ = createLabel(L"Red", 0, 0, 220, 20);
+    redSlider_ = createSlider(kIdRedSlider, 0, 0, 320, 30);
+    greenLabel_ = createLabel(L"Green", 0, 0, 220, 20);
+    greenSlider_ = createSlider(kIdGreenSlider, 0, 0, 320, 30);
+    blueLabel_ = createLabel(L"Blue", 0, 0, 220, 20);
+    blueSlider_ = createSlider(kIdBlueSlider, 0, 0, 320, 30);
+
+    stabilizationLabel_ = createLabel(L"Stabilization", 0, 0, 260, 20);
+    stabilizationSlider_ = createSlider(kIdStabilizationSlider, 0, 0, 320, 30);
+    spacingLabel_ = createLabel(L"Point Spacing", 0, 0, 260, 20);
+    spacingSlider_ = createSlider(kIdSpacingSlider, 0, 0, 320, 30);
+    strokeSmoothingLabel_ = createLabel(L"Stroke Smoothing", 0, 0, 260, 20);
+    strokeSmoothingSlider_ = createSlider(kIdStrokeSmoothingSlider, 0, 0, 320, 30);
+
+    shortcutList_ = CreateWindowExW(
+        0,
+        L"LISTBOX",
+        nullptr,
+        WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_TABSTOP | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+        0,
+        0,
+        148,
+        500,
+        window_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdShortcutList)),
+        app_.instance_,
+        nullptr);
+    changeShortcutButton_ = createButton(L"Change Shortcut", kIdChangeShortcut, 0, 0, 148, 28);
+    clearShortcutButton_ = createButton(L"Clear Shortcut", kIdClearShortcut, 0, 0, 148, 28);
+    shortcutHintLabel_ = createLabel(L"Select a command to edit its binding.", 0, 0, 148, 40);
+
+    SendMessageW(redSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
+    SendMessageW(greenSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
+    SendMessageW(blueSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
+    SendMessageW(stabilizationSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(5, 95));
+    SendMessageW(spacingSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(5, 405));
+    SendMessageW(strokeSmoothingSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+    SendMessageW(shortcutList_, LB_SETITEMHEIGHT, 0, 26);
+    LayoutControls();
+}
+
+void SettingsWindow::ApplyFonts() {
+    font_ = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
+    titleFont_ = CreateFontW(18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
+    backgroundBrush_ = CreateSolidBrush(kWindowBackground);
+    panelBrush_ = CreateSolidBrush(kPanelFill);
+    const std::array<HWND, 17> controls {
+        addColorButton_,
+        removeColorButton_,
+        pasteHexButton_,
+        redLabel_,
+        redSlider_,
+        greenLabel_,
+        greenSlider_,
+        blueLabel_,
+        blueSlider_,
+        stabilizationLabel_,
+        stabilizationSlider_,
+        spacingLabel_,
+        spacingSlider_,
+        strokeSmoothingLabel_,
+        strokeSmoothingSlider_,
+        shortcutList_,
+        changeShortcutButton_,
+    };
+
+    for (HWND control : controls) {
+        if (control != nullptr) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+        }
+    }
+    if (clearShortcutButton_ != nullptr) {
+        SendMessageW(clearShortcutButton_, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+    }
+    if (shortcutHintLabel_ != nullptr) {
+        SendMessageW(shortcutHintLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+    }
+}
+
+void SettingsWindow::LayoutControls() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size());
+
+    MoveWindow(addColorButton_, layout.addColorButton.left, layout.addColorButton.top, layout.addColorButton.right - layout.addColorButton.left, layout.addColorButton.bottom - layout.addColorButton.top, TRUE);
+    MoveWindow(removeColorButton_, layout.removeColorButton.left, layout.removeColorButton.top, layout.removeColorButton.right - layout.removeColorButton.left, layout.removeColorButton.bottom - layout.removeColorButton.top, TRUE);
+    MoveWindow(pasteHexButton_, layout.pasteHexButton.left, layout.pasteHexButton.top, layout.pasteHexButton.right - layout.pasteHexButton.left, layout.pasteHexButton.bottom - layout.pasteHexButton.top, TRUE);
+
+    MoveWindow(redLabel_, layout.redLabelRect.left, layout.redLabelRect.top, layout.redLabelRect.right - layout.redLabelRect.left, layout.redLabelRect.bottom - layout.redLabelRect.top, TRUE);
+    MoveWindow(redSlider_, layout.redSliderRect.left, layout.redSliderRect.top, layout.redSliderRect.right - layout.redSliderRect.left, layout.redSliderRect.bottom - layout.redSliderRect.top, TRUE);
+    MoveWindow(greenLabel_, layout.greenLabelRect.left, layout.greenLabelRect.top, layout.greenLabelRect.right - layout.greenLabelRect.left, layout.greenLabelRect.bottom - layout.greenLabelRect.top, TRUE);
+    MoveWindow(greenSlider_, layout.greenSliderRect.left, layout.greenSliderRect.top, layout.greenSliderRect.right - layout.greenSliderRect.left, layout.greenSliderRect.bottom - layout.greenSliderRect.top, TRUE);
+    MoveWindow(blueLabel_, layout.blueLabelRect.left, layout.blueLabelRect.top, layout.blueLabelRect.right - layout.blueLabelRect.left, layout.blueLabelRect.bottom - layout.blueLabelRect.top, TRUE);
+    MoveWindow(blueSlider_, layout.blueSliderRect.left, layout.blueSliderRect.top, layout.blueSliderRect.right - layout.blueSliderRect.left, layout.blueSliderRect.bottom - layout.blueSliderRect.top, TRUE);
+
+    MoveWindow(stabilizationLabel_, layout.stabilizationLabelRect.left, layout.stabilizationLabelRect.top, layout.stabilizationLabelRect.right - layout.stabilizationLabelRect.left, layout.stabilizationLabelRect.bottom - layout.stabilizationLabelRect.top, TRUE);
+    MoveWindow(stabilizationSlider_, layout.stabilizationSliderRect.left, layout.stabilizationSliderRect.top, layout.stabilizationSliderRect.right - layout.stabilizationSliderRect.left, layout.stabilizationSliderRect.bottom - layout.stabilizationSliderRect.top, TRUE);
+    MoveWindow(spacingLabel_, layout.spacingLabelRect.left, layout.spacingLabelRect.top, layout.spacingLabelRect.right - layout.spacingLabelRect.left, layout.spacingLabelRect.bottom - layout.spacingLabelRect.top, TRUE);
+    MoveWindow(spacingSlider_, layout.spacingSliderRect.left, layout.spacingSliderRect.top, layout.spacingSliderRect.right - layout.spacingSliderRect.left, layout.spacingSliderRect.bottom - layout.spacingSliderRect.top, TRUE);
+    MoveWindow(strokeSmoothingLabel_, layout.strokeSmoothingLabelRect.left, layout.strokeSmoothingLabelRect.top, layout.strokeSmoothingLabelRect.right - layout.strokeSmoothingLabelRect.left, layout.strokeSmoothingLabelRect.bottom - layout.strokeSmoothingLabelRect.top, TRUE);
+    MoveWindow(strokeSmoothingSlider_, layout.strokeSmoothingSliderRect.left, layout.strokeSmoothingSliderRect.top, layout.strokeSmoothingSliderRect.right - layout.strokeSmoothingSliderRect.left, layout.strokeSmoothingSliderRect.bottom - layout.strokeSmoothingSliderRect.top, TRUE);
+
+    MoveWindow(shortcutList_, layout.shortcutListRect.left, layout.shortcutListRect.top, layout.shortcutListRect.right - layout.shortcutListRect.left, layout.shortcutListRect.bottom - layout.shortcutListRect.top, TRUE);
+    MoveWindow(changeShortcutButton_, layout.changeShortcutButton.left, layout.changeShortcutButton.top, layout.changeShortcutButton.right - layout.changeShortcutButton.left, layout.changeShortcutButton.bottom - layout.changeShortcutButton.top, TRUE);
+    MoveWindow(clearShortcutButton_, layout.clearShortcutButton.left, layout.clearShortcutButton.top, layout.clearShortcutButton.right - layout.clearShortcutButton.left, layout.clearShortcutButton.bottom - layout.clearShortcutButton.top, TRUE);
+    MoveWindow(shortcutHintLabel_, layout.shortcutHintRect.left, layout.shortcutHintRect.top, layout.shortcutHintRect.right - layout.shortcutHintRect.left, layout.shortcutHintRect.bottom - layout.shortcutHintRect.top, TRUE);
+}
+
+void SettingsWindow::RefreshPaletteList() {
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void SettingsWindow::RefreshSliderValues() {
+    const std::uint32_t color = app_.palette_[app_.settings_.paletteIndex];
+    const int red = app_.GetColorChannel(color, 16);
+    const int green = app_.GetColorChannel(color, 8);
+    const int blue = app_.GetColorChannel(color, 0);
+    SendMessageW(redSlider_, TBM_SETPOS, TRUE, red);
+    SendMessageW(greenSlider_, TBM_SETPOS, TRUE, green);
+    SendMessageW(blueSlider_, TBM_SETPOS, TRUE, blue);
+    SendMessageW(stabilizationSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.inputSmoothing * 100.0f)));
+    SendMessageW(spacingSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.inputSpacing * 100.0f)));
+    SendMessageW(strokeSmoothingSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.strokeSmoothing * 100.0f)));
+
+    SetControlText(redLabel_, FormatSliderLabel(L"Red", red));
+    SetControlText(greenLabel_, FormatSliderLabel(L"Green", green));
+    SetControlText(blueLabel_, FormatSliderLabel(L"Blue", blue));
+    SetControlText(stabilizationLabel_, FormatFloatSliderLabel(L"Stabilization", app_.settings_.inputSmoothing, 100));
+    SetControlText(spacingLabel_, FormatSpacingLabel(app_.settings_.inputSpacing));
+    SetControlText(strokeSmoothingLabel_, FormatFloatSliderLabel(L"Stroke Smoothing", app_.settings_.strokeSmoothing, 100));
+}
+
+void SettingsWindow::RefreshShortcutList() {
+    SendMessageW(shortcutList_, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(shortcutList_, LB_RESETCONTENT, 0, 0);
+    int selection = static_cast<int>(SendMessageW(shortcutList_, LB_GETCURSEL, 0, 0));
+    int index = 0;
+    for (const ShortcutDefinition& definition : ShortcutDefinitions()) {
+        const auto bindingIt = std::find_if(app_.shortcuts_.bindings.begin(), app_.shortcuts_.bindings.end(), [&](const auto& binding) {
+            return binding.first == definition.action;
+        });
+        const std::wstring bindingLabel = bindingIt != app_.shortcuts_.bindings.end()
+            ? app_.FormatKeyBinding(bindingIt->second)
+            : L"Unbound";
+        std::wstring entry = definition.label;
+        entry += L"  -  ";
+        entry += bindingLabel;
+        SendMessageW(shortcutList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(entry.c_str()));
+        ++index;
+    }
+    if (selection < 0) {
+        selection = 0;
+    }
+    if (index > 0) {
+        selection = std::clamp(selection, 0, index - 1);
+        SendMessageW(shortcutList_, LB_SETCURSEL, static_cast<WPARAM>(selection), 0);
+    }
+    SendMessageW(shortcutList_, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(shortcutList_, nullptr, TRUE);
+}
+
+void SettingsWindow::RefreshShortcutButtons() {
+    const int selection = static_cast<int>(SendMessageW(shortcutList_, LB_GETCURSEL, 0, 0));
+    EnableWindow(changeShortcutButton_, selection >= 0);
+    EnableWindow(clearShortcutButton_, selection >= 0);
+    if (capturingShortcutAction_.has_value()) {
+        SetWindowTextW(changeShortcutButton_, L"Press Key...");
+        SetWindowTextW(shortcutHintLabel_, L"Press the new shortcut. Esc cancels.");
+    } else {
+        SetWindowTextW(changeShortcutButton_, L"Change Shortcut");
+        SetWindowTextW(shortcutHintLabel_, L"Select a command to edit its binding.");
+    }
+}
+
+void SettingsWindow::HandleCommand(WPARAM wParam, LPARAM lParam) {
+    const int controlId = LOWORD(wParam);
+    const int notification = HIWORD(wParam);
+    switch (controlId) {
+    case kIdAddColor:
+        if (notification == BN_CLICKED) {
+            app_.AddPaletteColor();
+            Refresh();
+        }
+        break;
+    case kIdRemoveColor:
+        if (notification == BN_CLICKED) {
+            app_.RemovePaletteColor();
+            Refresh();
+        }
+        break;
+    case kIdPasteHex:
+        if (notification == BN_CLICKED) {
+            static_cast<void>(app_.ApplyHexColorFromClipboard());
+            Refresh();
+        }
+        break;
+    case kIdShortcutList:
+        if (notification == LBN_SELCHANGE) {
+            HandleShortcutSelectionChanged();
+        } else if (notification == LBN_DBLCLK) {
+            BeginShortcutCapture();
+        }
+        break;
+    case kIdChangeShortcut:
+        if (notification == BN_CLICKED) {
+            BeginShortcutCapture();
+        }
+        break;
+    case kIdClearShortcut:
+        if (notification == BN_CLICKED) {
+            ClearSelectedShortcut();
+        }
+        break;
+    default:
+        static_cast<void>(lParam);
+        break;
+    }
+}
+
+void SettingsWindow::HandleHScroll(LPARAM lParam) {
+    if (reinterpret_cast<HWND>(lParam) == redSlider_
+        || reinterpret_cast<HWND>(lParam) == greenSlider_
+        || reinterpret_cast<HWND>(lParam) == blueSlider_) {
+        UpdatePaletteFromRgbSliders();
+        RefreshPaletteList();
+        RefreshSliderValues();
+        InvalidateRect(app_.window_, nullptr, FALSE);
+        return;
+    }
+
+    if (reinterpret_cast<HWND>(lParam) == stabilizationSlider_) {
+        app_.settings_.inputSmoothing = static_cast<float>(SendMessageW(stabilizationSlider_, TBM_GETPOS, 0, 0)) / 100.0f;
+    } else if (reinterpret_cast<HWND>(lParam) == spacingSlider_) {
+        app_.settings_.inputSpacing = static_cast<float>(SendMessageW(spacingSlider_, TBM_GETPOS, 0, 0)) / 100.0f;
+    } else if (reinterpret_cast<HWND>(lParam) == strokeSmoothingSlider_) {
+        app_.settings_.strokeSmoothing = static_cast<float>(SendMessageW(strokeSmoothingSlider_, TBM_GETPOS, 0, 0)) / 100.0f;
+    } else {
+        return;
+    }
+
+    app_.SaveAppSettings();
+    RefreshSliderValues();
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+HBRUSH SettingsWindow::HandleControlColor(HDC hdc, HWND control) {
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, control == shortcutHintLabel_ ? kTextMuted : kTextPrimary);
+    if (control == shortcutList_) {
+        SetTextColor(hdc, kTextPrimary);
+        return panelBrush_;
+    }
+    return backgroundBrush_;
+}
+
+RECT SettingsWindow::ColorPreviewRect() const {
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    return BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size()).colorPreviewRect;
+}
+
+void SettingsWindow::PaintWindow() {
+    PAINTSTRUCT paint {};
+    HDC hdc = BeginPaint(window_, &paint);
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    FillRect(hdc, &clientRect, backgroundBrush_);
+    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size());
+
+    SetBkMode(hdc, TRANSPARENT);
+    HGDIOBJ previousFont = SelectObject(hdc, titleFont_ != nullptr ? titleFont_ : font_);
+    SetTextColor(hdc, kTextPrimary);
+    TextOutW(hdc, 16, 12, L"Settings", 8);
+
+    FillRoundedRect(hdc, layout.palettePanel, kPanelFill);
+    FillRoundedRect(hdc, layout.shortcutPanel, kPanelFill);
+    FillRoundedRect(hdc, layout.colorPanel, kPanelFill);
+    FillRoundedRect(hdc, layout.drawingPanel, kPanelFill);
+    StrokeRoundedRect(hdc, layout.palettePanel, kPanelBorder, 1);
+    StrokeRoundedRect(hdc, layout.shortcutPanel, kPanelBorder, 1);
+    StrokeRoundedRect(hdc, layout.colorPanel, kPanelBorder, 1);
+    StrokeRoundedRect(hdc, layout.drawingPanel, kPanelBorder, 1);
+
+    SelectObject(hdc, font_);
+    SetTextColor(hdc, kTextMuted);
+    TextOutW(hdc, layout.palettePanel.left + 14, layout.palettePanel.top + 12, L"Palette", 7);
+    TextOutW(hdc, layout.colorPanel.left + 14, layout.colorPanel.top + 12, L"Selected Color", 14);
+    TextOutW(hdc, layout.drawingPanel.left + 14, layout.drawingPanel.top + 12, L"Drawing", 7);
+    TextOutW(hdc, layout.shortcutPanel.left + 12, layout.shortcutPanel.top + 12, L"Shortcuts", 9);
+
+    for (std::size_t index = 0; index < layout.paletteSwatches.size(); ++index) {
+        const RECT swatchRect = layout.paletteSwatches[index];
+        FillRoundedRect(hdc, swatchRect, app_.ToColorRef(app_.palette_[index]));
+        StrokeRoundedRect(hdc, swatchRect, index == app_.settings_.paletteIndex ? kSelectionBorder : kPanelBorder, index == app_.settings_.paletteIndex ? 3 : 1);
+        RECT textRect = swatchRect;
+        textRect.top = swatchRect.bottom - 18;
+        SetTextColor(hdc, (app_.GetColorChannel(app_.palette_[index], 16)
+                + app_.GetColorChannel(app_.palette_[index], 8)
+                + app_.GetColorChannel(app_.palette_[index], 0)) > 384
+            ? RGB(22, 28, 36)
+            : RGB(248, 250, 252));
+        wchar_t number[8] = {};
+        std::swprintf(number, std::size(number), L"%zu", index + 1U);
+        DrawTextW(hdc, number, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    RECT previewRect = layout.colorPreviewRect;
+    FillRoundedRect(hdc, previewRect, app_.ToColorRef(app_.palette_[app_.settings_.paletteIndex]));
+    StrokeRoundedRect(hdc, previewRect, kSelectionBorder, 2);
+
+    RECT previewLabel = previewRect;
+    previewLabel.top += 10;
+    SetTextColor(hdc, (app_.GetColorChannel(app_.palette_[app_.settings_.paletteIndex], 16)
+            + app_.GetColorChannel(app_.palette_[app_.settings_.paletteIndex], 8)
+            + app_.GetColorChannel(app_.palette_[app_.settings_.paletteIndex], 0)) > 384
+        ? RGB(22, 28, 36)
+        : RGB(248, 250, 252));
+    const std::wstring previewText = FormatPaletteEntry(app_.settings_.paletteIndex, app_.palette_[app_.settings_.paletteIndex]);
+    DrawTextW(hdc, previewText.c_str(), -1, &previewLabel, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    SelectObject(hdc, previousFont);
+    EndPaint(window_, &paint);
+}
+
+void SettingsWindow::DrawButton(const DRAWITEMSTRUCT& drawItem) {
+    const bool selected = (drawItem.itemState & ODS_SELECTED) != 0;
+    const bool focused = (drawItem.itemState & ODS_FOCUS) != 0;
+    const bool disabled = (drawItem.itemState & ODS_DISABLED) != 0;
+    COLORREF fill = selected ? kButtonFillActive : kButtonFill;
+    COLORREF border = selected ? RGB(92, 137, 187) : kPanelBorder;
+    COLORREF text = disabled ? RGB(102, 111, 124) : kTextPrimary;
+
+    FillRoundedRect(drawItem.hDC, drawItem.rcItem, fill);
+    StrokeRoundedRect(drawItem.hDC, drawItem.rcItem, focused ? kSelectionBorder : border, focused ? 2 : 1);
+
+    wchar_t label[128] = {};
+    GetWindowTextW(drawItem.hwndItem, label, static_cast<int>(std::size(label)));
+    SetBkMode(drawItem.hDC, TRANSPARENT);
+    SetTextColor(drawItem.hDC, text);
+    SelectObject(drawItem.hDC, font_);
+    RECT labelRect = drawItem.rcItem;
+    DrawTextW(drawItem.hDC, label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+void SettingsWindow::DrawPaletteItem(const DRAWITEMSTRUCT& drawItem) {
+    static_cast<void>(drawItem);
+}
+
+void SettingsWindow::DrawShortcutItem(const DRAWITEMSTRUCT& drawItem) {
+    if (drawItem.itemID == static_cast<UINT>(-1)) {
+        return;
+    }
+
+    wchar_t buffer[256] = {};
+    SendMessageW(shortcutList_, LB_GETTEXT, drawItem.itemID, reinterpret_cast<LPARAM>(buffer));
+    HBRUSH itemBrush = CreateSolidBrush((drawItem.itemState & ODS_SELECTED) != 0 ? RGB(32, 40, 52) : kPanelFill);
+    FillRect(drawItem.hDC, &drawItem.rcItem, itemBrush);
+    DeleteObject(itemBrush);
+
+    RECT textRect = drawItem.rcItem;
+    textRect.left += 10;
+    SetBkMode(drawItem.hDC, TRANSPARENT);
+    SetTextColor(drawItem.hDC, kTextPrimary);
+    SelectObject(drawItem.hDC, font_);
+    DrawTextW(drawItem.hDC, buffer, -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+void SettingsWindow::HandleShortcutSelectionChanged() {
+    RefreshShortcutButtons();
+}
+
+void SettingsWindow::BeginShortcutCapture() {
+    const int selection = static_cast<int>(SendMessageW(shortcutList_, LB_GETCURSEL, 0, 0));
+    const auto definitions = ShortcutDefinitions();
+    if (selection < 0 || selection >= static_cast<int>(definitions.size())) {
+        return;
+    }
+
+    capturingShortcutAction_ = definitions[static_cast<std::size_t>(selection)].action;
+    RefreshShortcutButtons();
+    SetFocus(window_);
+}
+
+void SettingsWindow::ClearSelectedShortcut() {
+    const int selection = static_cast<int>(SendMessageW(shortcutList_, LB_GETCURSEL, 0, 0));
+    const auto definitions = ShortcutDefinitions();
+    if (selection < 0 || selection >= static_cast<int>(definitions.size())) {
+        return;
+    }
+
+    const App::ShortcutAction action = definitions[static_cast<std::size_t>(selection)].action;
+    const auto bindingIt = std::find_if(app_.shortcuts_.bindings.begin(), app_.shortcuts_.bindings.end(), [&](auto& binding) {
+        return binding.first == action;
+    });
+    if (bindingIt != app_.shortcuts_.bindings.end()) {
+        bindingIt->second = {};
+        app_.SaveAppSettings();
+        RefreshShortcutList();
+        RefreshShortcutButtons();
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+}
+
+void SettingsWindow::HandleShortcutCapture(UINT key) {
+    if (!capturingShortcutAction_.has_value()) {
+        return;
+    }
+
+    switch (key) {
+    case VK_CONTROL:
+    case VK_SHIFT:
+    case VK_MENU:
+    case VK_LCONTROL:
+    case VK_RCONTROL:
+    case VK_LSHIFT:
+    case VK_RSHIFT:
+    case VK_LMENU:
+    case VK_RMENU:
+        return;
+    case VK_ESCAPE:
+        capturingShortcutAction_.reset();
+        RefreshShortcutButtons();
+        return;
+    default:
+        break;
+    }
+
+    const App::KeyBinding newBinding {
+        key,
+        (GetKeyState(VK_CONTROL) & 0x8000) != 0,
+        (GetKeyState(VK_SHIFT) & 0x8000) != 0,
+        (GetKeyState(VK_MENU) & 0x8000) != 0,
+    };
+
+    for (auto& shortcut : app_.shortcuts_.bindings) {
+        if (shortcut.first != *capturingShortcutAction_
+            && shortcut.second.key == newBinding.key
+            && shortcut.second.ctrl == newBinding.ctrl
+            && shortcut.second.shift == newBinding.shift
+            && shortcut.second.alt == newBinding.alt) {
+            shortcut.second = {};
+        }
+    }
+
+    const auto bindingIt = std::find_if(app_.shortcuts_.bindings.begin(), app_.shortcuts_.bindings.end(), [&](auto& binding) {
+        return binding.first == *capturingShortcutAction_;
+    });
+    if (bindingIt != app_.shortcuts_.bindings.end()) {
+        bindingIt->second = newBinding;
+    }
+
+    capturingShortcutAction_.reset();
+    app_.SaveAppSettings();
+    RefreshShortcutList();
+    RefreshShortcutButtons();
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void SettingsWindow::UpdatePaletteFromRgbSliders() {
+    const auto red = static_cast<unsigned char>(SendMessageW(redSlider_, TBM_GETPOS, 0, 0));
+    const auto green = static_cast<unsigned char>(SendMessageW(greenSlider_, TBM_GETPOS, 0, 0));
+    const auto blue = static_cast<unsigned char>(SendMessageW(blueSlider_, TBM_GETPOS, 0, 0));
+    app_.palette_[app_.settings_.paletteIndex] = app_.ComposeColor(red, green, blue);
+    app_.SaveAppSettings();
+}
+
+HWND SettingsWindow::SliderHandle(SliderKind kind) const {
+    switch (kind) {
+    case SliderKind::Red:
+        return redSlider_;
+    case SliderKind::Green:
+        return greenSlider_;
+    case SliderKind::Blue:
+        return blueSlider_;
+    case SliderKind::Stabilization:
+        return stabilizationSlider_;
+    case SliderKind::Spacing:
+        return spacingSlider_;
+    case SliderKind::StrokeSmoothing:
+        return strokeSmoothingSlider_;
+    default:
+        return nullptr;
+    }
+}
+
+HWND SettingsWindow::LabelHandle(SliderKind kind) const {
+    switch (kind) {
+    case SliderKind::Red:
+        return redLabel_;
+    case SliderKind::Green:
+        return greenLabel_;
+    case SliderKind::Blue:
+        return blueLabel_;
+    case SliderKind::Stabilization:
+        return stabilizationLabel_;
+    case SliderKind::Spacing:
+        return spacingLabel_;
+    case SliderKind::StrokeSmoothing:
+        return strokeSmoothingLabel_;
+    default:
+        return nullptr;
+    }
+}
+
+LRESULT CALLBACK SettingsWindow::WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    SettingsWindow* self = nullptr;
+    if (message == WM_NCCREATE) {
+        auto* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        self = static_cast<SettingsWindow*>(createStruct->lpCreateParams);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        self->window_ = window;
+    } else {
+        self = reinterpret_cast<SettingsWindow*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    }
+
+    if (self == nullptr) {
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+    return self->HandleMessage(message, wParam, lParam);
+}
+
+LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_GETMINMAXINFO:
+    {
+        auto* minMax = reinterpret_cast<MINMAXINFO*>(lParam);
+        minMax->ptMinTrackSize.x = 640;
+        minMax->ptMinTrackSize.y = 780;
+        return 0;
+    }
+    case WM_SIZE:
+        LayoutControls();
+        InvalidateRect(window_, nullptr, FALSE);
+        return 0;
+    case WM_LBUTTONDOWN:
+    {
+        POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        RECT clientRect {};
+        GetClientRect(window_, &clientRect);
+        const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size());
+        for (std::size_t index = 0; index < layout.paletteSwatches.size(); ++index) {
+            if (PtInRect(&layout.paletteSwatches[index], cursor) != 0) {
+                app_.settings_.paletteIndex = index;
+                app_.SaveAppSettings();
+                RefreshSliderValues();
+                InvalidateRect(window_, nullptr, FALSE);
+                return 0;
+            }
+        }
+        break;
+    }
+    case WM_PAINT:
+        PaintWindow();
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORLISTBOX:
+        return reinterpret_cast<LRESULT>(HandleControlColor(reinterpret_cast<HDC>(wParam), reinterpret_cast<HWND>(lParam)));
+    case WM_DRAWITEM:
+    {
+        const auto* drawItem = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (drawItem == nullptr) {
+            return FALSE;
+        }
+        if (drawItem->CtlType == ODT_BUTTON) {
+            DrawButton(*drawItem);
+            return TRUE;
+        }
+        if (drawItem->CtlType == ODT_LISTBOX) {
+            if (drawItem->CtlID == kIdPaletteList) {
+                DrawPaletteItem(*drawItem);
+                return TRUE;
+            }
+            if (drawItem->CtlID == kIdShortcutList) {
+                DrawShortcutItem(*drawItem);
+                return TRUE;
+            }
+        }
+        break;
+    }
+    case WM_COMMAND:
+        HandleCommand(wParam, lParam);
+        return 0;
+    case WM_HSCROLL:
+        HandleHScroll(lParam);
+        return 0;
+    case WM_KEYDOWN:
+        if (capturingShortcutAction_.has_value()) {
+            HandleShortcutCapture(static_cast<UINT>(wParam));
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(window_);
+        return 0;
+    case WM_DESTROY:
+        window_ = nullptr;
+        capturingShortcutAction_.reset();
+        return 0;
+    default:
+        break;
+    }
+
+    return DefWindowProcW(window_, message, wParam, lParam);
+}
+
+}  // namespace cnote
