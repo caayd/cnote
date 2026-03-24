@@ -96,6 +96,7 @@ private:
     void InvalidateCanvas();
     void InvalidatePageSurfaceCache(std::size_t pageIndex);
     void InvalidateAllPageSurfaceCaches();
+    void InvalidateVisiblePageSurfaceCaches();
     void InvalidateStrokeRegion(const Stroke& stroke, std::size_t pageIndex, bool smoothLiveStroke);
     void ResetView();
     void SetActiveTool(Tool tool);
@@ -229,7 +230,7 @@ private:
     static constexpr UINT_PTR kRasterRefreshTimerId = 1;
     static constexpr UINT_PTR kZoomSessionTimerId = 3;
     static constexpr UINT kRasterRefreshDelayMs = 120;
-    static constexpr UINT kZoomSessionDelayMs = 180;
+    static constexpr UINT kZoomSessionDelayMs = 100;
     static constexpr float kMinZoom = 0.35f;
     static constexpr float kMaxZoom = 4.0f;
 };

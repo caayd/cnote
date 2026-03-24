@@ -489,6 +489,26 @@ void App::InvalidateAllPageSurfaceCaches() {
     }
 }
 
+void App::InvalidateVisiblePageSurfaceCaches() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const int visibleTop = kToolbarHeight;
+    const int visibleBottom = static_cast<int>(clientRect.bottom);
+    for (const PageView& pageView : CalculatePageViews(clientRect)) {
+        if (!pageView.valid) {
+            continue;
+        }
+        if (pageView.rect.bottom < visibleTop || pageView.rect.top > visibleBottom) {
+            continue;
+        }
+        InvalidatePageSurfaceCache(pageView.pageIndex);
+    }
+}
+
 void App::InvalidateStrokeRegion(const Stroke& stroke, std::size_t pageIndex, bool smoothLiveStroke) {
     if (window_ == nullptr || stroke.points.empty()) {
         return;
@@ -593,6 +613,7 @@ void App::Undo() {
     undoActions_.pop_back();
     auto& strokes = document_.PageAt(action.pageIndex).strokes;
     document_.SetCurrentPageIndex(action.pageIndex);
+    bool cacheUpdated = false;
 
     if (action.type == HistoryActionType::AddStroke) {
         if (action.index < strokes.size()) {
@@ -600,11 +621,16 @@ void App::Undo() {
         }
     } else if (action.index <= strokes.size()) {
         strokes.insert(strokes.begin() + static_cast<std::ptrdiff_t>(action.index), action.stroke);
+        if (action.index + 1U == strokes.size()) {
+            cacheUpdated = TryAppendStrokeToPageSurfaceCache(action.pageIndex, action.stroke);
+        }
     }
 
     redoActions_.push_back(std::move(action));
-    InvalidatePageSurfaceCache(redoActions_.back().pageIndex);
-    InvalidateRect(window_, nullptr, FALSE);
+    if (!cacheUpdated) {
+        InvalidatePageSurfaceCache(redoActions_.back().pageIndex);
+    }
+    InvalidateStrokeRegion(redoActions_.back().stroke, redoActions_.back().pageIndex, false);
 }
 
 void App::Redo() {
@@ -616,18 +642,24 @@ void App::Redo() {
     redoActions_.pop_back();
     auto& strokes = document_.PageAt(action.pageIndex).strokes;
     document_.SetCurrentPageIndex(action.pageIndex);
+    bool cacheUpdated = false;
 
     if (action.type == HistoryActionType::AddStroke) {
         if (action.index <= strokes.size()) {
             strokes.insert(strokes.begin() + static_cast<std::ptrdiff_t>(action.index), action.stroke);
+            if (action.index + 1U == strokes.size()) {
+                cacheUpdated = TryAppendStrokeToPageSurfaceCache(action.pageIndex, action.stroke);
+            }
         }
     } else if (action.index < strokes.size()) {
         strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(action.index));
     }
 
     undoActions_.push_back(std::move(action));
-    InvalidatePageSurfaceCache(undoActions_.back().pageIndex);
-    InvalidateRect(window_, nullptr, FALSE);
+    if (!cacheUpdated) {
+        InvalidatePageSurfaceCache(undoActions_.back().pageIndex);
+    }
+    InvalidateStrokeRegion(undoActions_.back().stroke, undoActions_.back().pageIndex, false);
 }
 
 bool App::CanUndo() const {
@@ -1292,6 +1324,7 @@ void App::HandleDeferredRasterRefresh() {
     }
 
     CancelDeferredRasterRefresh();
+    InvalidateVisiblePageSurfaceCaches();
     EnsureVisiblePageRasterQuality();
     InvalidateCanvas();
 }
@@ -1313,6 +1346,11 @@ void App::HandleCompletedRenderResults() {
             if (pending != pendingRenderScales_.end() && pending->second <= result.renderScale + 0.001f) {
                 pendingRenderScales_.erase(pending);
             }
+        }
+
+        const auto pending = pendingRenderScales_.find(result.pageIndex);
+        if (pending != pendingRenderScales_.end() && pending->second > result.renderScale + 0.001f) {
+            continue;
         }
 
         if (result.generation != renderGeneration_ || !result.raster.has_value() || result.pageIndex >= document_.PageCount()) {
@@ -1356,6 +1394,16 @@ void App::QueuePageRasterRequest(const PageView& pageView) {
     pendingRenderScales_[pageView.pageIndex] = desiredScale;
     {
         std::lock_guard lock(renderMutex_);
+        renderRequests_.erase(
+            std::remove_if(
+                renderRequests_.begin(),
+                renderRequests_.end(),
+                [&](const RenderRequest& request) {
+                    return request.generation == renderGeneration_
+                        && request.pageIndex == pageView.pageIndex
+                        && request.renderScale <= desiredScale + 0.001f;
+                }),
+            renderRequests_.end());
         renderRequests_.push_back({ document_.SourcePath(), pageView.pageIndex, desiredScale, renderGeneration_ });
     }
     renderCv_.notify_one();
