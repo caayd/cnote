@@ -1,5 +1,8 @@
 /build/
+/build_verify/
 /.vs/
+third_party/pdfium-win-x64.tgz
+third_party/pdfium/lib/pdfium.def
 *.user
 *.suo
 *.obj

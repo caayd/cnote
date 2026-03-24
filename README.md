@@ -15,14 +15,19 @@ What it does today:
 - opens a native window
 - creates a blank page surface
 - lets you draw freehand ink strokes on that page
+- includes a dark header with `File`, `Edit`, and `View` menus
+- includes `Edit > Brush Settings` for palette, brush-size, and smoothing controls
+- keeps the native Windows title bar and window buttons
+- includes tool, color, undo, and redo controls in the header
+- includes an eraser tool for deleting strokes
 - supports zooming, panning, brush sizing, and color switching
-- opens a `.pdf` path into a placeholder document session so the app flow is already wired for PDF work
+- renders opened PDFs in a stacked multi-page document view and lets you ink on top of each page
+- dynamically upgrades raster quality and caches visible page surfaces to keep scrolling and drawing responsive
 
 What it does not do yet:
 
-- render actual PDF page content
 - persist annotations back into a PDF
-- support multiple pages, selections, text, shapes, or export
+- support selections, text, shapes, or export
 
 ## Build
 
@@ -40,21 +45,29 @@ Run:
 ## Controls
 
 - `Left Mouse`: draw
+- `Header`: use `File`, `Edit`, and `View` dropdowns plus the tool/color/history controls
+- `Edit > Brush Settings`: edit palette colors with RGB sliders, paste hex values, add/remove palette colors, change brush size, and tune stabilization/smoothing
+- `Ctrl+B`: toggle brush settings
 - `Middle Mouse Hold`: pan
 - `Mouse Wheel`: zoom
+- `Page Up` / `Page Down`: jump focus to the previous or next PDF page
 - `Arrow Keys`: pan
 - `Ctrl+N`: new blank document
-- `Ctrl+O`: open a PDF path into the placeholder PDF session
+- `Ctrl+O`: open and render a PDF
+- `Ctrl+Z`: undo
+- `Ctrl+Y` or `Ctrl+Shift+Z`: redo
 - `[` or `-`: smaller brush
 - `]` or `+`: larger brush
 - `1`-`5`: choose color
 - `C`: cycle color
 - `0`: reset view
 
-## Next step for real PDFs
+## PDF backend
 
-The app already isolates PDF concerns behind `IPdfBackend` in [src/PdfBackend.h](C:\Users\Cayd\Documents\Projects\ctrainer\src\PdfBackend.h). The natural next move is to swap `StubPdfBackend` for a real renderer/editor backend such as PDFium or MuPDF and use it to:
+The app now uses PDFium behind `IPdfBackend` in [src/PdfBackend.h](C:\Users\Cayd\Documents\Projects\ctrainer\src\PdfBackend.h) to rasterize PDF pages into bitmaps for display.
 
-1. rasterize each page into a backing bitmap
-2. map ink strokes into PDF page coordinates
-3. save new annotations or flattened output
+The next natural steps are:
+
+1. unload distant page rasters for very large PDFs
+2. map ink strokes into PDF page coordinates for export
+3. save new annotations or flattened output back to PDF

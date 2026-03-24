@@ -6,6 +6,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(PDFIUM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium")
+set(PDFIUM_DLL "${PDFIUM_ROOT}/bin/pdfium.dll")
+set(PDFIUM_IMPLIB "${PDFIUM_ROOT}/lib/libpdfium.dll.a")
+
 add_executable(ctrainer WIN32
     src/App.cpp
     src/Document.cpp
@@ -15,6 +19,29 @@ add_executable(ctrainer WIN32
 
 target_include_directories(ctrainer PRIVATE src)
 
+if(MINGW AND EXISTS "${PDFIUM_DLL}" AND NOT EXISTS "${PDFIUM_IMPLIB}")
+    find_program(GENDEF_EXECUTABLE gendef REQUIRED)
+    find_program(DLLTOOL_EXECUTABLE dlltool REQUIRED)
+
+    execute_process(
+        COMMAND "${GENDEF_EXECUTABLE}" ../bin/pdfium.dll
+        WORKING_DIRECTORY "${PDFIUM_ROOT}/lib"
+        COMMAND_ERROR_IS_FATAL ANY
+    )
+    execute_process(
+        COMMAND "${DLLTOOL_EXECUTABLE}" -d pdfium.def -D pdfium.dll -l libpdfium.dll.a
+        WORKING_DIRECTORY "${PDFIUM_ROOT}/lib"
+        COMMAND_ERROR_IS_FATAL ANY
+    )
+endif()
+
+add_library(pdfium SHARED IMPORTED)
+set_target_properties(pdfium PROPERTIES
+    IMPORTED_LOCATION "${PDFIUM_DLL}"
+    IMPORTED_IMPLIB "${PDFIUM_IMPLIB}"
+    INTERFACE_INCLUDE_DIRECTORIES "${PDFIUM_ROOT}/include;${PDFIUM_ROOT}/include/cpp"
+)
+
 target_compile_definitions(ctrainer PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 
 target_compile_options(ctrainer PRIVATE
@@ -23,7 +50,15 @@ target_compile_options(ctrainer PRIVATE
 
 target_link_libraries(ctrainer PRIVATE
     comdlg32
+    dwmapi
     gdi32
     gdiplus
+    pdfium
     user32
+)
+
+add_custom_command(TARGET ctrainer POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${PDFIUM_DLL}"
+        "$<TARGET_FILE_DIR:ctrainer>/pdfium.dll"
 )

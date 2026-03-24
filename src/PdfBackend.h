@@ -14,9 +14,16 @@ public:
     [[nodiscard]] virtual std::optional<Document> Open(const std::wstring& filePath) = 0;
 };
 
-class StubPdfBackend final : public IPdfBackend {
+class PdfiumBackend final : public IPdfBackend {
 public:
+    PdfiumBackend();
+    ~PdfiumBackend() override;
+
     [[nodiscard]] std::optional<Document> Open(const std::wstring& filePath) override;
+    [[nodiscard]] std::optional<RasterImage> RenderPage(const std::wstring& filePath, std::size_t pageIndex, float renderScale) const;
+
+private:
+    bool initialized_ = false;
 };
 
 }  // namespace ctrainer
