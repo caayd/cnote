@@ -211,7 +211,8 @@ RasterImage ComposePageRaster(
     const Document& document,
     std::size_t pageIndex,
     float renderScale,
-    float strokeSmoothing) {
+    float strokeSmoothing,
+    bool includeStrokes) {
     const Page& page = document.PageAt(pageIndex);
     RasterImage raster = document.HasPdfData()
         ? backend.RenderPage(document.PdfData(), pageIndex, renderScale).value_or(CreateBlankRaster(page.width, page.height, renderScale))
@@ -234,11 +235,65 @@ RasterImage ComposePageRaster(
         DrawPageImage(graphics, image, renderScale);
     }
 
-    for (const Stroke& stroke : page.strokes) {
-        DrawStroke(graphics, stroke, renderScale, strokeSmoothing);
+    if (includeStrokes) {
+        for (const Stroke& stroke : page.strokes) {
+            DrawStroke(graphics, stroke, renderScale, strokeSmoothing);
+        }
     }
 
     return raster;
+}
+
+float ToPdfY(float pageHeight, float pageY) {
+    return pageHeight - pageY;
+}
+
+bool AppendVectorStroke(FPDF_PAGE pageHandle, const Page& page, const Stroke& stroke, float strokeSmoothing) {
+    if (stroke.points.empty()) {
+        return true;
+    }
+
+    const std::vector<Vec2> smoothedPoints = BuildSmoothedPoints(stroke.points, strokeSmoothing);
+    if (smoothedPoints.empty()) {
+        return true;
+    }
+
+    const Vec2 firstPoint = smoothedPoints.front();
+    FPDF_PAGEOBJECT path = FPDFPageObj_CreateNewPath(firstPoint.x, ToPdfY(page.height, firstPoint.y));
+    if (path == nullptr) {
+        return false;
+    }
+
+    bool ok = true;
+    if (smoothedPoints.size() == 1U) {
+        ok = FPDFPath_LineTo(path, firstPoint.x + 0.01f, ToPdfY(page.height, firstPoint.y)) != 0;
+    } else {
+        for (std::size_t pointIndex = 1; ok && pointIndex < smoothedPoints.size(); ++pointIndex) {
+            ok = FPDFPath_LineTo(
+                path,
+                smoothedPoints[pointIndex].x,
+                ToPdfY(page.height, smoothedPoints[pointIndex].y)) != 0;
+        }
+    }
+
+    const auto alpha = static_cast<unsigned int>((stroke.style.color >> 24U) & 0xFFU);
+    const auto red = static_cast<unsigned int>((stroke.style.color >> 16U) & 0xFFU);
+    const auto green = static_cast<unsigned int>((stroke.style.color >> 8U) & 0xFFU);
+    const auto blue = static_cast<unsigned int>(stroke.style.color & 0xFFU);
+    const float pdfStrokeWidth = std::max(0.6f, stroke.style.width / kStrokeRenderWidthDivisor);
+
+    ok = ok
+        && FPDFPageObj_SetStrokeColor(path, red, green, blue, alpha) != 0
+        && FPDFPageObj_SetStrokeWidth(path, pdfStrokeWidth) != 0
+        && FPDFPageObj_SetLineJoin(path, FPDF_LINEJOIN_ROUND) != 0
+        && FPDFPageObj_SetLineCap(path, FPDF_LINECAP_ROUND) != 0
+        && FPDFPath_SetDrawMode(path, FPDF_FILLMODE_NONE, 1) != 0;
+    if (!ok) {
+        return false;
+    }
+
+    FPDFPage_InsertObject(pageHandle, path);
+    return true;
 }
 
 struct PdfFileWriter {
@@ -381,7 +436,7 @@ bool PdfiumBackend::ExportPdf(
     bool ok = true;
     for (std::size_t pageIndex = 0; ok && pageIndex < document.PageCount(); ++pageIndex) {
         const Page& sourcePage = document.PageAt(pageIndex);
-        flattenedPages.push_back(ComposePageRaster(*this, document, pageIndex, renderScale, strokeSmoothing));
+        flattenedPages.push_back(ComposePageRaster(*this, document, pageIndex, renderScale, strokeSmoothing, false));
         RasterImage& raster = flattenedPages.back();
 
         FPDF_PAGE pageHandle = FPDFPage_New(
@@ -420,6 +475,12 @@ bool PdfiumBackend::ExportPdf(
         }
 
         FPDFPage_InsertObject(pageHandle, imageObject);
+        for (const Stroke& stroke : sourcePage.strokes) {
+            ok = AppendVectorStroke(pageHandle, sourcePage, stroke, strokeSmoothing);
+            if (!ok) {
+                break;
+            }
+        }
         ok = FPDFPage_GenerateContent(pageHandle) != 0;
     }
 
