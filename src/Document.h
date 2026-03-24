@@ -21,6 +21,18 @@ struct Stroke {
     std::vector<Vec2> points;
 };
 
+struct PageImage {
+    float x = 0.0f;
+    float y = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
+    float rotationDegrees = 0.0f;
+    int pixelWidth = 0;
+    int pixelHeight = 0;
+    int stride = 0;
+    std::vector<std::uint8_t> pixels;
+};
+
 struct RasterImage {
     int width = 0;
     int height = 0;
@@ -33,6 +45,7 @@ struct Page {
     float width = 612.0f;
     float height = 792.0f;
     RasterImage raster {};
+    std::vector<PageImage> images;
     std::vector<Stroke> strokes;
 };
 

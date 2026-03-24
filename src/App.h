@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <windows.h>
@@ -25,9 +26,16 @@ public:
 
 private:
     enum class Tool {
+        Select,
+        Move,
         Draw,
         Pan,
         Erase,
+    };
+
+    enum class SelectionMode {
+        Box,
+        Lasso,
     };
 
     enum class HistoryActionType {
@@ -44,6 +52,19 @@ private:
         Stabilization,
         Spacing,
         Smoothing,
+    };
+
+    enum class ImageTransformHandle {
+        None,
+        ResizeNorthWest,
+        ResizeNorth,
+        ResizeNorthEast,
+        ResizeEast,
+        ResizeSouthEast,
+        ResizeSouth,
+        ResizeSouthWest,
+        ResizeWest,
+        Rotate,
     };
 
     struct PageView {
@@ -66,6 +87,7 @@ private:
         int stride = 0;
         std::size_t pageIndex = 0;
         std::size_t strokeCount = 0;
+        std::size_t imageCount = 0;
         int rasterWidth = 0;
         int rasterHeight = 0;
         float rasterScale = 0.0f;
@@ -118,6 +140,18 @@ private:
     void BeginStroke(POINT cursor);
     void ExtendStroke(POINT cursor);
     void EndStroke();
+    void BeginSelection(POINT cursor);
+    void ExtendSelection(POINT cursor);
+    void EndSelection();
+    void BeginMoveSelection(POINT cursor);
+    void UpdateMoveSelection(POINT cursor);
+    void EndMoveSelection();
+    void BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, ImageTransformHandle handle, POINT cursor);
+    void UpdateImageTransform(POINT cursor);
+    void EndImageTransform();
+    void BeginStrokeTransform(std::size_t pageIndex, ImageTransformHandle handle, POINT cursor);
+    void UpdateStrokeTransform(POINT cursor);
+    void EndStrokeTransform();
     void BeginErase(POINT cursor);
     void ExtendErase(POINT cursor);
     [[nodiscard]] bool EraseAt(POINT cursor);
@@ -139,6 +173,23 @@ private:
     void HandleDeferredRasterRefresh();
     void HandleCompletedRenderResults();
     void QueuePageRasterRequest(const PageView& pageView);
+    void ClearSelection();
+    [[nodiscard]] bool HasSelection() const;
+    [[nodiscard]] bool HasSelectedStrokes() const;
+    void DeleteSelection();
+    void AdjustSelectionForRemoval(std::size_t pageIndex, std::size_t strokeIndex);
+    void AdjustSelectionForInsertion(std::size_t pageIndex, std::size_t strokeIndex);
+    [[nodiscard]] bool IsImageSelected(std::size_t pageIndex, std::size_t imageIndex) const;
+    [[nodiscard]] bool IsStrokeSelected(std::size_t pageIndex, std::size_t strokeIndex) const;
+    [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedImageHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* imageIndex = nullptr) const;
+    [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedStrokeHandle(POINT cursor, std::size_t* pageIndex = nullptr) const;
+    bool CopySelectionToClipboard();
+    bool PasteSelectionFromClipboard();
+    bool PasteImageFromClipboard();
+    [[nodiscard]] std::optional<Vec2> DefaultPasteOrigin(std::size_t pageIndex) const;
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> SingleSelectedImage() const;
+    [[nodiscard]] std::optional<std::size_t> SingleSelectedStrokePage() const;
+    void TranslateSelectedContent(std::size_t pageIndex, Vec2 delta);
     void ChangeBrushSize(float delta);
     void CycleColor();
     void SetColorIndex(std::size_t index);
@@ -187,6 +238,10 @@ private:
     bool isErasing_ = false;
     bool isPanning_ = false;
     bool panFromMiddleButton_ = false;
+    bool isSelecting_ = false;
+    bool isMovingSelection_ = false;
+    bool isTransformingImage_ = false;
+    bool isTransformingStroke_ = false;
     bool settingsOpen_ = false;
     std::size_t settingsPaletteIndex_ = 0;
     SliderTarget activeSlider_ = SliderTarget::None;
@@ -199,6 +254,29 @@ private:
     float inputSpacing_ = 0.85f;
     float inputSmoothing_ = 0.3f;
     float strokeSmoothing_ = 0.55f;
+    SelectionMode selectionMode_ = SelectionMode::Box;
+    std::optional<std::size_t> selectionPageIndex_ {};
+    std::optional<std::size_t> moveSelectionPageIndex_ {};
+    std::optional<std::size_t> transformingImagePageIndex_ {};
+    std::optional<std::size_t> transformingImageIndex_ {};
+    std::optional<std::size_t> transformingStrokePageIndex_ {};
+    Vec2 selectionAnchorPage_ {};
+    Vec2 selectionCurrentPage_ {};
+    Vec2 lastMovePagePoint_ {};
+    Vec2 imageTransformStartPagePoint_ {};
+    Vec2 strokeTransformStartPagePoint_ {};
+    PageImage imageTransformInitial_ {};
+    ImageTransformHandle imageTransformHandle_ = ImageTransformHandle::None;
+    ImageTransformHandle strokeTransformHandle_ = ImageTransformHandle::None;
+    float imageTransformStartAngleDegrees_ = 0.0f;
+    float strokeTransformStartAngleDegrees_ = 0.0f;
+    Vec2 strokeTransformBoundsMin_ {};
+    Vec2 strokeTransformBoundsMax_ {};
+    std::vector<std::pair<std::size_t, Stroke>> strokeTransformInitials_ {};
+    std::vector<Vec2> selectionLassoPoints_ {};
+    std::vector<std::vector<std::size_t>> selectedImageIndices_ {};
+    std::vector<std::vector<std::size_t>> selectedStrokeIndices_ {};
+    bool selectionBoxOverride_ = false;
     bool rasterRefreshPending_ = false;
     bool zoomSessionActive_ = false;
     bool zoomAnchorValid_ = false;
