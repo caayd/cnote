@@ -1,7 +1,12 @@
 #pragma once
 
+#include <condition_variable>
+#include <deque>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <windows.h>
@@ -69,7 +74,23 @@ private:
         std::vector<std::uint8_t> pixels {};
     };
 
+    struct RenderRequest {
+        std::wstring sourcePath {};
+        std::size_t pageIndex = 0;
+        float renderScale = 0.0f;
+        std::uint64_t generation = 0;
+    };
+
+    struct RenderResult {
+        std::size_t pageIndex = 0;
+        float renderScale = 0.0f;
+        std::uint64_t generation = 0;
+        std::optional<RasterImage> raster {};
+    };
+
     bool CreateMainWindow(int showCommand);
+    void StartRenderWorker();
+    void StopRenderWorker();
     void CreateBlankDocument();
     void ClearHistory();
     void InvalidateCanvas();
@@ -110,6 +131,13 @@ private:
     [[nodiscard]] bool IsCursorInsideSettingsPanel(POINT cursor) const;
     void PanBy(float dx, float dy);
     void ZoomAt(int delta, POINT cursor);
+    void BeginZoomSession(POINT cursor);
+    void EndZoomSession();
+    void ScheduleDeferredRasterRefresh();
+    void CancelDeferredRasterRefresh(bool clearPending = true);
+    void HandleDeferredRasterRefresh();
+    void HandleCompletedRenderResults();
+    void QueuePageRasterRequest(const PageView& pageView);
     void ChangeBrushSize(float delta);
     void CycleColor();
     void SetColorIndex(std::size_t index);
@@ -136,6 +164,7 @@ private:
     void PaintPage(HDC hdc, const PageView& pageView);
     void PaintSettingsPanel(HDC hdc, RECT clientRect) const;
     void PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke) const;
+    bool TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke& stroke);
     void EnsurePageSurfaceCache(const PageView& pageView);
 
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
@@ -147,6 +176,7 @@ private:
     PdfiumBackend pdfBackend_ {};
 
     float zoom_ = 1.0f;
+    float targetZoom_ = 1.0f;
     float panX_ = 0.0f;
     float panY_ = 0.0f;
     float brushWidth_ = 3.0f;
@@ -168,7 +198,21 @@ private:
     float inputSpacing_ = 0.85f;
     float inputSmoothing_ = 0.3f;
     float strokeSmoothing_ = 0.55f;
+    bool rasterRefreshPending_ = false;
+    bool zoomSessionActive_ = false;
+    bool zoomAnchorValid_ = false;
+    std::size_t zoomAnchorPageIndex_ = 0;
+    Vec2 zoomAnchorPage_ {};
+    POINT zoomAnchorCursor_ {};
     std::vector<PageSurfaceCache> pageSurfaceCaches_ {};
+    std::uint64_t renderGeneration_ = 0;
+    std::unordered_map<std::size_t, float> pendingRenderScales_ {};
+    std::mutex renderMutex_ {};
+    std::condition_variable renderCv_ {};
+    std::deque<RenderRequest> renderRequests_ {};
+    std::deque<RenderResult> renderResults_ {};
+    std::thread renderThread_ {};
+    bool renderWorkerRunning_ = false;
 
     std::vector<std::uint32_t> palette_ {
         0xFF1F2937,
@@ -181,6 +225,11 @@ private:
     static constexpr int kToolbarHeight = 54;
     static constexpr int kSettingsPanelWidth = 320;
     static constexpr int kPageGap = 26;
+    static constexpr UINT kRenderResultsMessage = WM_APP + 1;
+    static constexpr UINT_PTR kRasterRefreshTimerId = 1;
+    static constexpr UINT_PTR kZoomSessionTimerId = 3;
+    static constexpr UINT kRasterRefreshDelayMs = 120;
+    static constexpr UINT kZoomSessionDelayMs = 180;
     static constexpr float kMinZoom = 0.35f;
     static constexpr float kMaxZoom = 4.0f;
 };

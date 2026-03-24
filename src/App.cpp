@@ -308,11 +308,59 @@ App::App(HINSTANCE instance) : instance_(instance) {
     if (Gdiplus::GdiplusStartup(&token, &startupInput, nullptr) == Gdiplus::Ok) {
         gdiplusToken_ = token;
     }
+    StartRenderWorker();
 }
 
 App::~App() {
+    StopRenderWorker();
     if (gdiplusToken_ != 0) {
         Gdiplus::GdiplusShutdown(gdiplusToken_);
+    }
+}
+
+void App::StartRenderWorker() {
+    renderWorkerRunning_ = true;
+    renderThread_ = std::thread([this]() {
+        PdfiumBackend workerBackend {};
+        for (;;) {
+            RenderRequest request {};
+            {
+                std::unique_lock lock(renderMutex_);
+                renderCv_.wait(lock, [this]() { return !renderWorkerRunning_ || !renderRequests_.empty(); });
+                if (!renderWorkerRunning_ && renderRequests_.empty()) {
+                    break;
+                }
+                request = std::move(renderRequests_.front());
+                renderRequests_.pop_front();
+            }
+
+            RenderResult result {};
+            result.pageIndex = request.pageIndex;
+            result.renderScale = request.renderScale;
+            result.generation = request.generation;
+            result.raster = workerBackend.RenderPage(request.sourcePath, request.pageIndex, request.renderScale);
+
+            {
+                std::lock_guard lock(renderMutex_);
+                renderResults_.push_back(std::move(result));
+            }
+
+            if (window_ != nullptr) {
+                PostMessageW(window_, kRenderResultsMessage, 0, 0);
+            }
+        }
+    });
+}
+
+void App::StopRenderWorker() {
+    {
+        std::lock_guard lock(renderMutex_);
+        renderWorkerRunning_ = false;
+        renderRequests_.clear();
+    }
+    renderCv_.notify_all();
+    if (renderThread_.joinable()) {
+        renderThread_.join();
     }
 }
 
@@ -381,7 +429,18 @@ bool App::CreateMainWindow(int showCommand) {
 }
 
 void App::CreateBlankDocument() {
+    CancelDeferredRasterRefresh();
+    KillTimer(window_, kZoomSessionTimerId);
+    zoomSessionActive_ = false;
+    zoomAnchorValid_ = false;
     document_.ResetToBlank();
+    ++renderGeneration_;
+    pendingRenderScales_.clear();
+    {
+        std::lock_guard lock(renderMutex_);
+        renderRequests_.clear();
+        renderResults_.clear();
+    }
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     ClearHistory();
     brushWidth_ = 3.0f;
@@ -472,6 +531,7 @@ void App::InvalidateStrokeRegion(const Stroke& stroke, std::size_t pageIndex, bo
 
 void App::ResetView() {
     zoom_ = 1.0f;
+    targetZoom_ = 1.0f;
     panX_ = 0.0f;
     panY_ = 0.0f;
 }
@@ -495,6 +555,8 @@ void App::NextPage() {
 
 void App::SetCurrentPageIndex(std::size_t index) {
     if (document_.SetCurrentPageIndex(index)) {
+        CancelDeferredRasterRefresh();
+        targetZoom_ = zoom_;
         InvalidateRect(window_, nullptr, FALSE);
     }
 }
@@ -662,6 +724,7 @@ void App::BeginStroke(POINT cursor) {
         return;
     }
 
+    CancelDeferredRasterRefresh(false);
     std::size_t pageIndex = 0;
     const Vec2 pagePoint = ScreenToPage(cursor, &pageIndex);
     if (!HitTestPage(cursor).has_value()) {
@@ -716,6 +779,8 @@ void App::ExtendStroke(POINT cursor) {
 }
 
 void App::EndStroke() {
+    std::optional<Stroke> committedStroke;
+    std::optional<std::size_t> committedPageIndex;
     if (isDrawing_ && activeStroke_.has_value() && activeStrokePageIndex_.has_value() && !activeStroke_->points.empty()) {
         Stroke finishedStroke = std::move(*activeStroke_);
         finishedStroke.points = BuildSmoothedPoints(finishedStroke.points, strokeSmoothing_);
@@ -724,14 +789,25 @@ void App::EndStroke() {
         strokes.push_back(finishedStroke);
         undoActions_.push_back({ HistoryActionType::AddStroke, std::move(finishedStroke), insertIndex, *activeStrokePageIndex_ });
         redoActions_.clear();
-        InvalidatePageSurfaceCache(*activeStrokePageIndex_);
+        committedStroke = undoActions_.back().stroke;
+        committedPageIndex = *activeStrokePageIndex_;
+        if (!TryAppendStrokeToPageSurfaceCache(*committedPageIndex, *committedStroke)) {
+            InvalidatePageSurfaceCache(*committedPageIndex);
+        }
     }
 
     activeStroke_.reset();
     activeStrokePageIndex_.reset();
     isDrawing_ = false;
     UpdateCaptureState();
-    InvalidateRect(window_, nullptr, FALSE);
+    if (rasterRefreshPending_) {
+        ScheduleDeferredRasterRefresh();
+    }
+    if (committedStroke.has_value() && committedPageIndex.has_value()) {
+        InvalidateStrokeRegion(*committedStroke, *committedPageIndex, false);
+    } else {
+        InvalidateCanvas();
+    }
 }
 
 void App::BeginErase(POINT cursor) {
@@ -739,6 +815,7 @@ void App::BeginErase(POINT cursor) {
         return;
     }
 
+    CancelDeferredRasterRefresh(false);
     isErasing_ = true;
     UpdateCaptureState();
     static_cast<void>(EraseAt(cursor));
@@ -815,6 +892,7 @@ void App::BeginPan(POINT cursor, bool fromMiddleButton) {
         EndStroke();
     }
 
+    CancelDeferredRasterRefresh(false);
     isPanning_ = true;
     panFromMiddleButton_ = fromMiddleButton;
     lastPanCursor_ = cursor;
@@ -837,6 +915,9 @@ void App::EndPan() {
     isPanning_ = false;
     panFromMiddleButton_ = false;
     UpdateCaptureState();
+    if (rasterRefreshPending_) {
+        ScheduleDeferredRasterRefresh();
+    }
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -877,6 +958,7 @@ void App::ExecuteCommand(unsigned int commandId) {
         ToggleBrushSettings();
         break;
     case kCommandViewReset:
+        CancelDeferredRasterRefresh();
         ResetView();
         EnsureVisiblePageRasterQuality();
         InvalidateRect(window_, nullptr, FALSE);
@@ -1136,10 +1218,21 @@ void App::PanBy(float dx, float dy) {
     InvalidateCanvas();
 }
 
+void App::BeginZoomSession(POINT cursor) {
+    zoomSessionActive_ = true;
+    zoomAnchorValid_ = false;
+
+    if (const auto hitPage = HitTestPage(cursor); hitPage.has_value()) {
+        zoomAnchorValid_ = true;
+        zoomAnchorPageIndex_ = hitPage->pageIndex;
+        zoomAnchorPage_ = ScreenToPage(cursor, nullptr);
+        zoomAnchorCursor_ = cursor;
+    }
+
+    SetTimer(window_, kZoomSessionTimerId, kZoomSessionDelayMs, nullptr);
+}
+
 void App::ZoomAt(int delta, POINT cursor) {
-    RECT clientRect {};
-    GetClientRect(window_, &clientRect);
-    const auto hitPage = HitTestPage(cursor);
     const float factor = delta > 0 ? 1.1f : 0.9f;
     const float newZoom = std::clamp(zoom_ * factor, kMinZoom, kMaxZoom);
 
@@ -1147,27 +1240,125 @@ void App::ZoomAt(int delta, POINT cursor) {
         return;
     }
 
-    std::size_t anchorPageIndex = document_.CurrentPageIndex();
-    Vec2 anchorPage {};
-    const bool cursorOnPage = hitPage.has_value();
-    if (cursorOnPage) {
-        anchorPageIndex = hitPage->pageIndex;
-        anchorPage = ScreenToPage(cursor, nullptr);
-    }
-
+    CancelDeferredRasterRefresh();
+    BeginZoomSession(cursor);
     zoom_ = newZoom;
+    targetZoom_ = newZoom;
 
-    if (cursorOnPage) {
-        const PageView after = CalculatePageView(clientRect, anchorPageIndex);
-        if (after.valid) {
-            const POINT anchoredScreen = PageToScreen(anchorPageIndex, anchorPage);
-            panX_ += static_cast<float>(cursor.x - anchoredScreen.x);
-            panY_ += static_cast<float>(cursor.y - anchoredScreen.y);
-        }
+    if (zoomAnchorValid_) {
+        const POINT anchoredScreen = PageToScreen(zoomAnchorPageIndex_, zoomAnchorPage_);
+        panX_ += static_cast<float>(zoomAnchorCursor_.x - anchoredScreen.x);
+        panY_ += static_cast<float>(zoomAnchorCursor_.y - anchoredScreen.y);
     }
 
+    InvalidateCanvas();
+}
+
+void App::EndZoomSession() {
+    if (!zoomSessionActive_) {
+        return;
+    }
+
+    zoomSessionActive_ = false;
+    zoomAnchorValid_ = false;
+    KillTimer(window_, kZoomSessionTimerId);
+    HandleDeferredRasterRefresh();
+}
+
+void App::ScheduleDeferredRasterRefresh() {
+    if (window_ == nullptr || zoomSessionActive_) {
+        return;
+    }
+
+    rasterRefreshPending_ = true;
+    SetTimer(window_, kRasterRefreshTimerId, kRasterRefreshDelayMs, nullptr);
+}
+
+void App::CancelDeferredRasterRefresh(bool clearPending) {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    KillTimer(window_, kRasterRefreshTimerId);
+    if (clearPending) {
+        rasterRefreshPending_ = false;
+    }
+}
+
+void App::HandleDeferredRasterRefresh() {
+    if (isDrawing_ || isPanning_ || isErasing_ || activeSlider_ != SliderTarget::None || zoomSessionActive_) {
+        SetTimer(window_, kRasterRefreshTimerId, kRasterRefreshDelayMs, nullptr);
+        return;
+    }
+
+    CancelDeferredRasterRefresh();
     EnsureVisiblePageRasterQuality();
     InvalidateCanvas();
+}
+
+void App::HandleCompletedRenderResults() {
+    std::deque<RenderResult> results;
+    {
+        std::lock_guard lock(renderMutex_);
+        results.swap(renderResults_);
+    }
+
+    bool updated = false;
+    while (!results.empty()) {
+        RenderResult result = std::move(results.front());
+        results.pop_front();
+
+        if (result.pageIndex < document_.PageCount()) {
+            const auto pending = pendingRenderScales_.find(result.pageIndex);
+            if (pending != pendingRenderScales_.end() && pending->second <= result.renderScale + 0.001f) {
+                pendingRenderScales_.erase(pending);
+            }
+        }
+
+        if (result.generation != renderGeneration_ || !result.raster.has_value() || result.pageIndex >= document_.PageCount()) {
+            continue;
+        }
+
+        Page& page = document_.PageAt(result.pageIndex);
+        if (result.renderScale + 0.001f < page.raster.scale) {
+            continue;
+        }
+
+        page.raster = std::move(*result.raster);
+        InvalidatePageSurfaceCache(result.pageIndex);
+        updated = true;
+    }
+
+    if (updated) {
+        InvalidateCanvas();
+    }
+}
+
+void App::QueuePageRasterRequest(const PageView& pageView) {
+    if (!document_.IsPdfDocument() || document_.SourcePath().empty() || !pageView.valid) {
+        return;
+    }
+
+    Page& page = document_.PageAt(pageView.pageIndex);
+    const float desiredScale = DesiredRenderScale(pageView);
+    const float currentScale = page.raster.scale;
+    const bool missingRaster = page.raster.pixels.empty() || page.raster.width <= 0 || page.raster.height <= 0;
+    const bool needsUpgrade = missingRaster || currentScale <= 0.0f || desiredScale > (currentScale * 1.2f);
+    if (!needsUpgrade) {
+        return;
+    }
+
+    const auto pending = pendingRenderScales_.find(pageView.pageIndex);
+    if (pending != pendingRenderScales_.end() && pending->second >= desiredScale - 0.001f) {
+        return;
+    }
+
+    pendingRenderScales_[pageView.pageIndex] = desiredScale;
+    {
+        std::lock_guard lock(renderMutex_);
+        renderRequests_.push_back({ document_.SourcePath(), pageView.pageIndex, desiredScale, renderGeneration_ });
+    }
+    renderCv_.notify_one();
 }
 
 void App::ChangeBrushSize(float delta) {
@@ -1189,6 +1380,10 @@ void App::SetColorIndex(std::size_t index) {
 }
 
 void App::OpenPdf() {
+    CancelDeferredRasterRefresh();
+    KillTimer(window_, kZoomSessionTimerId);
+    zoomSessionActive_ = false;
+    zoomAnchorValid_ = false;
     wchar_t fileBuffer[MAX_PATH] = {};
     OPENFILENAMEW dialog {};
     dialog.lStructSize = sizeof(dialog);
@@ -1210,6 +1405,13 @@ void App::OpenPdf() {
     }
 
     document_ = *opened;
+    ++renderGeneration_;
+    pendingRenderScales_.clear();
+    {
+        std::lock_guard lock(renderMutex_);
+        renderRequests_.clear();
+        renderResults_.clear();
+    }
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     ClearHistory();
     ResetView();
@@ -1227,6 +1429,7 @@ void App::EnsureVisiblePageRasterQuality() {
     GetClientRect(window_, &clientRect);
     const int visibleTop = kToolbarHeight - 200;
     const int visibleBottom = static_cast<int>(clientRect.bottom) + 200;
+    std::vector<bool> keepCache(document_.PageCount(), false);
     for (const PageView& pageView : CalculatePageViews(clientRect)) {
         if (!pageView.valid) {
             continue;
@@ -1234,33 +1437,30 @@ void App::EnsureVisiblePageRasterQuality() {
         if (pageView.rect.bottom < visibleTop || pageView.rect.top > visibleBottom) {
             continue;
         }
-        EnsurePageRasterQuality(pageView);
+        keepCache[pageView.pageIndex] = true;
+        QueuePageRasterRequest(pageView);
+    }
+
+    const int cacheKeepTop = visibleTop - 1200;
+    const int cacheKeepBottom = visibleBottom + 1200;
+    for (const PageView& pageView : CalculatePageViews(clientRect)) {
+        if (!pageView.valid) {
+            continue;
+        }
+        if (pageView.rect.bottom >= cacheKeepTop && pageView.rect.top <= cacheKeepBottom) {
+            keepCache[pageView.pageIndex] = true;
+        }
+    }
+
+    for (std::size_t pageIndex = 0; pageIndex < keepCache.size(); ++pageIndex) {
+        if (!keepCache[pageIndex]) {
+            InvalidatePageSurfaceCache(pageIndex);
+        }
     }
 }
 
 void App::EnsurePageRasterQuality(const PageView& pageView) {
-    if (!document_.IsPdfDocument() || document_.SourcePath().empty() || !pageView.valid) {
-        return;
-    }
-
-    Page& page = document_.PageAt(pageView.pageIndex);
-    const float desiredScale = DesiredRenderScale(pageView);
-    if (desiredScale <= 0.0f) {
-        return;
-    }
-
-    const float currentScale = page.raster.scale;
-    const bool missingRaster = page.raster.pixels.empty() || page.raster.width <= 0 || page.raster.height <= 0;
-    const bool needsUpgrade = missingRaster || currentScale <= 0.0f || desiredScale > (currentScale * 1.2f);
-    if (!needsUpgrade) {
-        return;
-    }
-
-    const auto rerendered = pdfBackend_.RenderPage(document_.SourcePath(), pageView.pageIndex, desiredScale);
-    if (rerendered.has_value()) {
-        page.raster = std::move(*rerendered);
-        InvalidatePageSurfaceCache(pageView.pageIndex);
-    }
+    QueuePageRasterRequest(pageView);
 }
 
 bool App::IsCursorInsidePage(POINT cursor) const {
@@ -1388,17 +1588,29 @@ void App::Paint() {
     HDC memoryDc = CreateCompatibleDC(windowDc);
     HBITMAP bitmap = CreateCompatibleBitmap(windowDc, clientRect.right, clientRect.bottom);
     HGDIOBJ previousBitmap = SelectObject(memoryDc, bitmap);
+    SaveDC(memoryDc);
+    IntersectClipRect(memoryDc, paint.rcPaint.left, paint.rcPaint.top, paint.rcPaint.right, paint.rcPaint.bottom);
 
     HBRUSH backgroundBrush = CreateSolidBrush(RGB(18, 22, 29));
-    FillRect(memoryDc, &clientRect, backgroundBrush);
+    FillRect(memoryDc, &paint.rcPaint, backgroundBrush);
     DeleteObject(backgroundBrush);
 
     PaintToolbar(memoryDc, clientRect);
     PaintCanvas(memoryDc, clientRect);
     PaintSettingsPanel(memoryDc, clientRect);
 
-    BitBlt(windowDc, 0, 0, clientRect.right, clientRect.bottom, memoryDc, 0, 0, SRCCOPY);
+    BitBlt(
+        windowDc,
+        paint.rcPaint.left,
+        paint.rcPaint.top,
+        paint.rcPaint.right - paint.rcPaint.left,
+        paint.rcPaint.bottom - paint.rcPaint.top,
+        memoryDc,
+        paint.rcPaint.left,
+        paint.rcPaint.top,
+        SRCCOPY);
 
+    RestoreDC(memoryDc, -1);
     SelectObject(memoryDc, previousBitmap);
     DeleteObject(bitmap);
     DeleteDC(memoryDc);
@@ -1569,17 +1781,88 @@ void App::PaintCanvas(HDC hdc, RECT clientRect) {
 
     SaveDC(hdc);
     IntersectClipRect(hdc, canvasRect.left, canvasRect.top, canvasRect.right, canvasRect.bottom);
-    EnsureVisiblePageRasterQuality();
+    RECT clipRect {};
+    GetClipBox(hdc, &clipRect);
     for (const PageView& pageView : CalculatePageViews(clientRect)) {
         if (!pageView.valid) {
             continue;
         }
-        if (pageView.rect.bottom < canvasRect.top - 20 || pageView.rect.top > canvasRect.bottom + 20) {
+        const int paintPadding = zoomSessionActive_ ? 0 : 20;
+        if (pageView.rect.bottom < canvasRect.top - paintPadding || pageView.rect.top > canvasRect.bottom + paintPadding) {
+            continue;
+        }
+        RECT visibleRect {};
+        if (IntersectRect(&visibleRect, &pageView.rect, &clipRect) == 0) {
             continue;
         }
         PaintPage(hdc, pageView);
     }
     RestoreDC(hdc, -1);
+}
+
+bool App::TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke& stroke) {
+    if (pageIndex >= pageSurfaceCaches_.size() || stroke.points.empty()) {
+        return false;
+    }
+
+    const Page& page = document_.PageAt(pageIndex);
+    PageSurfaceCache& cache = pageSurfaceCaches_[pageIndex];
+    if (!cache.valid || cache.pixels.empty() || cache.width <= 0 || cache.height <= 0) {
+        return false;
+    }
+
+    if (cache.pageIndex != pageIndex
+        || cache.strokeCount + 1U != page.strokes.size()
+        || cache.rasterWidth != page.raster.width
+        || cache.rasterHeight != page.raster.height
+        || std::abs(cache.rasterScale - page.raster.scale) >= 0.001f) {
+        return false;
+    }
+
+    BITMAPINFO bitmapInfo {};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = cache.width;
+    bitmapInfo.bmiHeader.biHeight = -cache.height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    HDC cacheDc = CreateCompatibleDC(nullptr);
+    if (cacheDc == nullptr) {
+        return false;
+    }
+
+    void* bits = nullptr;
+    HBITMAP cacheBitmap = CreateDIBSection(cacheDc, &bitmapInfo, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (cacheBitmap == nullptr || bits == nullptr) {
+        if (cacheBitmap != nullptr) {
+            DeleteObject(cacheBitmap);
+        }
+        DeleteDC(cacheDc);
+        return false;
+    }
+
+    HGDIOBJ previousBitmap = SelectObject(cacheDc, cacheBitmap);
+    std::copy(cache.pixels.begin(), cache.pixels.end(), static_cast<std::uint8_t*>(bits));
+
+    const float cacheScaleX = cache.width > 0 ? static_cast<float>(cache.width) / std::max(1.0f, page.width) : 1.0f;
+    const float cacheScaleY = cache.height > 0 ? static_cast<float>(cache.height) / std::max(1.0f, page.height) : 1.0f;
+    const PageView cacheView {
+        MakeRect(0, 0, cache.width, cache.height),
+        pageIndex,
+        std::min(cacheScaleX, cacheScaleY),
+        true,
+    };
+    PaintStroke(cacheDc, stroke, cacheView, false);
+
+    std::copy_n(static_cast<const std::uint8_t*>(bits), cache.pixels.size(), cache.pixels.data());
+    cache.strokeCount = page.strokes.size();
+    cache.pageScale = cacheView.scale;
+
+    SelectObject(cacheDc, previousBitmap);
+    DeleteObject(cacheBitmap);
+    DeleteDC(cacheDc);
+    return true;
 }
 
 void App::EnsurePageSurfaceCache(const PageView& pageView) {
@@ -1597,13 +1880,11 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
 
     const bool cacheMatches = cache.valid
         && cache.pageIndex == pageView.pageIndex
-        && cache.width == width
-        && cache.height == height
         && cache.strokeCount == page.strokes.size()
         && cache.rasterWidth == page.raster.width
         && cache.rasterHeight == page.raster.height
         && std::abs(cache.rasterScale - page.raster.scale) < 0.001f
-        && std::abs(cache.pageScale - pageView.scale) < 0.001f;
+        && !cache.pixels.empty();
     if (cacheMatches) {
         return;
     }
@@ -1695,11 +1976,13 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
 }
 
 void App::PaintPage(HDC hdc, const PageView& pageView) {
-    RECT shadow = pageView.rect;
-    OffsetRect(&shadow, 8, 10);
-    HBRUSH shadowBrush = CreateSolidBrush(RGB(7, 10, 15));
-    FillRect(hdc, &shadow, shadowBrush);
-    DeleteObject(shadowBrush);
+    if (!zoomSessionActive_) {
+        RECT shadow = pageView.rect;
+        OffsetRect(&shadow, 8, 10);
+        HBRUSH shadowBrush = CreateSolidBrush(RGB(7, 10, 15));
+        FillRect(hdc, &shadow, shadowBrush);
+        DeleteObject(shadowBrush);
+    }
 
     HBRUSH pageBrush = CreateSolidBrush(RGB(255, 255, 255));
     FillRect(hdc, &pageView.rect, pageBrush);
@@ -1720,27 +2003,29 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     if (pageView.pageIndex < pageSurfaceCaches_.size()) {
         const PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
         if (cache.valid && !cache.pixels.empty()) {
-        BITMAPINFO bitmapInfo {};
-        bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
-        bitmapInfo.bmiHeader.biWidth = cache.width;
-        bitmapInfo.bmiHeader.biHeight = -cache.height;
-        bitmapInfo.bmiHeader.biPlanes = 1;
-        bitmapInfo.bmiHeader.biBitCount = 32;
-        bitmapInfo.bmiHeader.biCompression = BI_RGB;
+            BITMAPINFO bitmapInfo {};
+            bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+            bitmapInfo.bmiHeader.biWidth = cache.width;
+            bitmapInfo.bmiHeader.biHeight = -cache.height;
+            bitmapInfo.bmiHeader.biPlanes = 1;
+            bitmapInfo.bmiHeader.biBitCount = 32;
+            bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
-        SetDIBitsToDevice(
-            hdc,
-            pageView.rect.left,
-            pageView.rect.top,
-            static_cast<DWORD>(cache.width),
-            static_cast<DWORD>(cache.height),
-            0,
-            0,
-            0,
-            static_cast<UINT>(cache.height),
-            cache.pixels.data(),
-            &bitmapInfo,
-            DIB_RGB_COLORS);
+            SetStretchBltMode(hdc, (isPanning_ || isDrawing_ || isErasing_ || zoomSessionActive_) ? COLORONCOLOR : HALFTONE);
+            StretchDIBits(
+                hdc,
+                pageView.rect.left,
+                pageView.rect.top,
+                pageView.rect.right - pageView.rect.left,
+                pageView.rect.bottom - pageView.rect.top,
+                0,
+                0,
+                cache.width,
+                cache.height,
+                cache.pixels.data(),
+                &bitmapInfo,
+                DIB_RGB_COLORS,
+                SRCCOPY);
         }
     }
 
@@ -1879,6 +2164,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         } else if (isErasing_) {
             isErasing_ = false;
             UpdateCaptureState();
+            if (rasterRefreshPending_) {
+                ScheduleDeferredRasterRefresh();
+            }
         } else if (isPanning_ && !panFromMiddleButton_) {
             EndPan();
         }
@@ -1895,6 +2183,19 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         ZoomAt(GET_WHEEL_DELTA_WPARAM(wParam), cursor);
         return 0;
     }
+    case kRenderResultsMessage:
+        HandleCompletedRenderResults();
+        return 0;
+    case WM_TIMER:
+        if (wParam == kRasterRefreshTimerId) {
+            HandleDeferredRasterRefresh();
+            return 0;
+        }
+        if (wParam == kZoomSessionTimerId) {
+            EndZoomSession();
+            return 0;
+        }
+        break;
     case WM_SETCURSOR:
         if (LOWORD(lParam) == HTCLIENT) {
             POINT cursor {};
@@ -1972,6 +2273,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             ChangeBrushSize(1.0f);
             return 0;
         case '0':
+            CancelDeferredRasterRefresh();
             ResetView();
             EnsureVisiblePageRasterQuality();
             InvalidateRect(window_, nullptr, FALSE);
@@ -1996,11 +2298,18 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_ERASEBKGND:
         return 1;
     case WM_SIZE:
+        CancelDeferredRasterRefresh();
+        KillTimer(window_, kZoomSessionTimerId);
+        zoomSessionActive_ = false;
+        zoomAnchorValid_ = false;
+        targetZoom_ = zoom_;
         InvalidateAllPageSurfaceCaches();
         EnsureVisiblePageRasterQuality();
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
     case WM_DESTROY:
+        CancelDeferredRasterRefresh();
+        KillTimer(window_, kZoomSessionTimerId);
         PostQuitMessage(0);
         return 0;
     default:
