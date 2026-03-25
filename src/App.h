@@ -293,6 +293,7 @@ private:
     [[nodiscard]] POINT PageToScreen(std::size_t pageIndex, Vec2 point) const;
     [[nodiscard]] PageView CalculatePageView(RECT clientRect, std::size_t pageIndex) const;
     [[nodiscard]] std::vector<PageView> CalculatePageViews(RECT clientRect) const;
+    [[nodiscard]] std::optional<std::size_t> ViewedPageIndex(RECT clientRect) const;
     [[nodiscard]] float DesiredRenderScale(const PageView& pageView) const;
     [[nodiscard]] COLORREF ToColorRef(std::uint32_t argb) const;
     [[nodiscard]] std::uint32_t ComposeColor(unsigned char red, unsigned char green, unsigned char blue) const;
@@ -305,6 +306,7 @@ private:
     [[nodiscard]] RECT CanvasRect(RECT clientRect) const;
     [[nodiscard]] std::optional<std::size_t> HitTestSidebarPage(POINT cursor) const;
     void EnsureSidebarCurrentPageVisible();
+    void SyncCurrentPageToViewport();
     void InvalidateSidebarThumbnailCache(std::size_t pageIndex);
     void EnsureSidebarThumbnailCache(std::size_t pageIndex, int width, int height);
     void CancelPageJumpInput();

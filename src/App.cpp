@@ -2586,6 +2586,23 @@ void App::EnsureSidebarCurrentPageVisible() {
     }
 }
 
+void App::SyncCurrentPageToViewport() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const auto viewedPageIndex = ViewedPageIndex(clientRect);
+    if (!viewedPageIndex.has_value() || *viewedPageIndex == document_.CurrentPageIndex()) {
+        return;
+    }
+
+    document_.SetCurrentPageIndex(*viewedPageIndex);
+    EnsureSidebarCurrentPageVisible();
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
 void App::InvalidateSidebarThumbnailCache(std::size_t pageIndex) {
     if (pageIndex >= sidebarThumbnailCaches_.size()) {
         return;
@@ -4497,6 +4514,7 @@ bool App::HandlePaletteClick(POINT cursor) {
 void App::PanBy(float dx, float dy) {
     panX_ += dx;
     panY_ += dy;
+    SyncCurrentPageToViewport();
     InvalidateCanvas();
 }
 
@@ -4986,6 +5004,42 @@ std::vector<App::PageView> App::CalculatePageViews(RECT clientRect) const {
     }
 
     return pageViews;
+}
+
+std::optional<std::size_t> App::ViewedPageIndex(RECT clientRect) const {
+    if (document_.PageCount() == 0U) {
+        return std::nullopt;
+    }
+
+    const RECT canvasRect = CanvasRect(clientRect);
+    const int viewportCenterY = canvasRect.top + ((canvasRect.bottom - canvasRect.top) / 2);
+    bool hasBestPage = false;
+    std::size_t bestPageIndex = document_.CurrentPageIndex();
+    int bestVisibleHeight = -1;
+    int bestCenterDistance = 0;
+
+    for (const PageView& pageView : CalculatePageViews(clientRect)) {
+        if (!pageView.valid) {
+            continue;
+        }
+
+        const int visibleTop = std::max(static_cast<int>(pageView.rect.top), static_cast<int>(canvasRect.top));
+        const int visibleBottom = std::min(static_cast<int>(pageView.rect.bottom), static_cast<int>(canvasRect.bottom));
+        const int visibleHeight = std::max(0, visibleBottom - visibleTop);
+        const int pageCenterY = static_cast<int>((pageView.rect.top + pageView.rect.bottom) / 2);
+        const int centerDistance = std::abs(pageCenterY - viewportCenterY);
+
+        if (!hasBestPage
+            || visibleHeight > bestVisibleHeight
+            || (visibleHeight == bestVisibleHeight && centerDistance < bestCenterDistance)) {
+            hasBestPage = true;
+            bestPageIndex = pageView.pageIndex;
+            bestVisibleHeight = visibleHeight;
+            bestCenterDistance = centerDistance;
+        }
+    }
+
+    return hasBestPage ? std::optional<std::size_t>(bestPageIndex) : std::nullopt;
 }
 
 float App::DesiredRenderScale(const PageView& pageView) const {
