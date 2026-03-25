@@ -1062,14 +1062,21 @@ ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool m
 SidebarHeaderLayout BuildSidebarHeaderLayout(RECT sidebarRect, UINT dpi) {
     SidebarHeaderLayout layout {};
     const int padding = ScaleForDpi(8, dpi);
-    const int gap = ScaleForDpi(6, dpi);
-    const int actionSize = ScaleForDpi(22, dpi);
-    const int headerHeight = ScaleForDpi(38, dpi);
+    const int gap = ScaleForDpi(8, dpi);
+    const int actionSize = ScaleForDpi(26, dpi);
+    const int headerHeight = ScaleForDpi(42, dpi);
     layout.headerRect = MakeRect(sidebarRect.left + padding, sidebarRect.top + padding, sidebarRect.right - padding, sidebarRect.top + padding + headerHeight);
     const int rowTop = layout.headerRect.top + ((headerHeight - actionSize) / 2);
-    layout.newPageSettingsRect = MakeRect(layout.headerRect.right - actionSize, rowTop, layout.headerRect.right, rowTop + actionSize);
-    layout.addPageRect = MakeRect(layout.newPageSettingsRect.left - gap - actionSize, rowTop, layout.newPageSettingsRect.left - gap, rowTop + actionSize);
-    layout.pageLabelRect = MakeRect(layout.headerRect.left, rowTop, layout.addPageRect.left - gap, rowTop + actionSize);
+    const int headerWidth = static_cast<int>(layout.headerRect.right - layout.headerRect.left);
+    const int pageLabelWidth = std::clamp(
+        headerWidth - (actionSize * 2) - (gap * 2),
+        ScaleForDpi(74, dpi),
+        ScaleForDpi(88, dpi));
+    const int rowWidth = pageLabelWidth + (actionSize * 2) + (gap * 2);
+    const int rowLeft = layout.headerRect.left + std::max(0, (headerWidth - rowWidth) / 2);
+    layout.pageLabelRect = MakeRect(rowLeft, rowTop, rowLeft + pageLabelWidth, rowTop + actionSize);
+    layout.addPageRect = MakeRect(layout.pageLabelRect.right + gap, rowTop, layout.pageLabelRect.right + gap + actionSize, rowTop + actionSize);
+    layout.newPageSettingsRect = MakeRect(layout.addPageRect.right + gap, rowTop, layout.addPageRect.right + gap + actionSize, rowTop + actionSize);
     layout.contentRect = MakeRect(sidebarRect.left, layout.headerRect.bottom + ScaleForDpi(6, dpi), sidebarRect.right, sidebarRect.bottom);
     return layout;
 }
@@ -2933,15 +2940,21 @@ int App::PdfSidebarWidth() const {
 
 RECT App::PdfSidebarRect(RECT clientRect) const {
     RECT rect = clientRect;
-    rect.top = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
+    const UINT dpi = WindowDpi(window_);
+    const int horizontalInset = IsZoomed(window_) ? WindowFrameThicknessX(dpi) : 0;
+    rect.top = ToolbarHeight(IsZoomed(window_), dpi);
+    rect.left += horizontalInset;
     rect.right = rect.left + PdfSidebarWidth();
     return rect;
 }
 
 RECT App::CanvasRect(RECT clientRect) const {
     RECT rect = clientRect;
-    rect.top = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
-    rect.left += PdfSidebarWidth();
+    const UINT dpi = WindowDpi(window_);
+    const int horizontalInset = IsZoomed(window_) ? WindowFrameThicknessX(dpi) : 0;
+    rect.top = ToolbarHeight(IsZoomed(window_), dpi);
+    rect.left += horizontalInset + PdfSidebarWidth();
+    rect.right -= horizontalInset;
     return rect;
 }
 
@@ -2960,8 +2973,8 @@ std::optional<std::size_t> App::HitTestSidebarPage(POINT cursor) const {
     const UINT dpi = WindowDpi(window_);
     const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect, dpi);
     const SidebarMetrics metrics = BuildSidebarMetrics(dpi);
-    const int itemWidth = (headerLayout.contentRect.right - headerLayout.contentRect.left) - (metrics.itemInset * 2);
-    const int left = sidebarRect.left + metrics.itemInset;
+    const int itemWidth = std::max(1, static_cast<int>(headerLayout.headerRect.right - headerLayout.headerRect.left) - (metrics.itemInset * 2));
+    const int left = ((sidebarRect.left + sidebarRect.right) - itemWidth) / 2;
     int top = headerLayout.contentRect.top + metrics.contentPadding - pdfSidebarScrollY_;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         const Page& page = document_.PageAt(pageIndex);
@@ -2988,13 +3001,14 @@ void App::EnsureSidebarCurrentPageVisible() {
     const UINT dpi = WindowDpi(window_);
     const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect, dpi);
     const SidebarMetrics metrics = BuildSidebarMetrics(dpi);
-    const int itemWidth = (headerLayout.contentRect.right - headerLayout.contentRect.left) - (metrics.itemInset * 2);
+    const int itemWidth = std::max(1, static_cast<int>(headerLayout.headerRect.right - headerLayout.headerRect.left) - (metrics.itemInset * 2));
+    const int left = ((sidebarRect.left + sidebarRect.right) - itemWidth) / 2;
     int top = headerLayout.contentRect.top + metrics.contentPadding;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         const Page& page = document_.PageAt(pageIndex);
         const float aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
         const int thumbHeight = std::max(metrics.minThumbHeight, static_cast<int>(std::lround(static_cast<float>(itemWidth) * aspect)));
-        RECT itemRect = MakeRect(sidebarRect.left + metrics.itemInset, top, sidebarRect.right - metrics.itemInset, top + thumbHeight + metrics.labelHeight);
+        RECT itemRect = MakeRect(left, top, left + itemWidth, top + thumbHeight + metrics.labelHeight);
         if (pageIndex == document_.CurrentPageIndex()) {
             const int visibleTop = headerLayout.contentRect.top + metrics.contentPadding + pdfSidebarScrollY_;
             const int visibleBottom = headerLayout.contentRect.bottom - metrics.contentPadding + pdfSidebarScrollY_;
@@ -6006,7 +6020,7 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
     DeleteObject(dividerPen);
 
     SetBkMode(hdc, TRANSPARENT);
-    HFONT labelFont = CreateFontW(FontHeightForDpi(12, WindowDpi(window_)), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+    HFONT labelFont = CreateFontW(FontHeightForDpi(14, WindowDpi(window_)), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
     HGDIOBJ previousFont = SelectObject(hdc, labelFont);
 
@@ -6017,22 +6031,17 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
     const UINT dpi = WindowDpi(window_);
     const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect, dpi);
     const SidebarMetrics metrics = BuildSidebarMetrics(dpi);
-    FillRoundedRect(hdc, headerLayout.headerRect, RGB(22, 28, 36));
-    StrokeRoundedRect(hdc, headerLayout.headerRect, panelBorder, 1);
 
-    const auto paintActionButton = [&](RECT rect, const wchar_t* label, bool enabled, bool accentFill) {
-        FillRoundedRect(hdc, rect, accentFill ? RGB(32, 63, 102) : RGB(27, 34, 43));
-        StrokeRoundedRect(hdc, rect, enabled ? panelBorder : RGB(55, 63, 75), 1);
-        SetTextColor(hdc, enabled ? primaryText : RGB(102, 111, 124));
-        RECT labelRect = rect;
-        DrawTextW(hdc, label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    };
     const auto paintIconActionButton = [&](RECT rect, const wchar_t* svgFileName, const wchar_t* fallbackLabel, bool enabled, bool accentFill) {
         FillRoundedRect(hdc, rect, accentFill ? RGB(32, 63, 102) : RGB(27, 34, 43));
         StrokeRoundedRect(hdc, rect, enabled ? panelBorder : RGB(55, 63, 75), 1);
         const COLORREF iconColor = enabled ? primaryText : RGB(102, 111, 124);
         if (const SvgIconData* icon = ToolbarSvgIcon(svgFileName); icon != nullptr) {
-            RECT iconRect = MakeRect(rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1);
+            RECT iconRect = MakeRect(
+                rect.left + ScaleForDpi(2, dpi),
+                rect.top + ScaleForDpi(2, dpi),
+                rect.right - ScaleForDpi(2, dpi),
+                rect.bottom - ScaleForDpi(2, dpi));
             PaintSvgIcon(hdc, iconRect, *icon, iconColor);
         } else {
             SetTextColor(hdc, iconColor);
@@ -6040,7 +6049,7 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
             DrawTextW(hdc, fallbackLabel, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
     };
-    paintActionButton(headerLayout.addPageRect, L"+", true, true);
+    paintIconActionButton(headerLayout.addPageRect, L"new-page.svg", L"+", true, true);
     paintIconActionButton(headerLayout.newPageSettingsRect, L"settings.svg", L"...", true, false);
 
     const std::wstring pageLabel = PageIndicatorLabel();
@@ -6049,8 +6058,8 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
     StrokeRoundedRect(hdc, pageLabelRect, pageJumpEditing_ ? accent : panelBorder, 1);
     if (pageJumpEditing_) {
         RECT entryTextRect = pageLabelRect;
-        entryTextRect.left += 7;
-        entryTextRect.right -= 7;
+        entryTextRect.left += ScaleForDpi(8, dpi);
+        entryTextRect.right -= ScaleForDpi(8, dpi);
         SetTextColor(hdc, RGB(244, 247, 252));
         DrawTextW(hdc, pageLabel.c_str(), -1, &entryTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
@@ -6059,8 +6068,8 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
             const int caretX = std::min(entryTextRect.right - 1, entryTextRect.left + textSize.cx + 1);
             HPEN caretPen = CreatePen(PS_SOLID, 1, RGB(244, 247, 252));
             HGDIOBJ oldCaretPen = SelectObject(hdc, caretPen);
-            MoveToEx(hdc, caretX, pageLabelRect.top + 6, nullptr);
-            LineTo(hdc, caretX, pageLabelRect.bottom - 6);
+            MoveToEx(hdc, caretX, pageLabelRect.top + ScaleForDpi(6, dpi), nullptr);
+            LineTo(hdc, caretX, pageLabelRect.bottom - ScaleForDpi(6, dpi));
             SelectObject(hdc, oldCaretPen);
             DeleteObject(caretPen);
         }
@@ -6072,17 +6081,26 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
         DrawTextW(hdc, pageLabel.c_str(), -1, &labelInsetRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
-    const int itemWidth = (headerLayout.contentRect.right - headerLayout.contentRect.left) - (metrics.itemInset * 2);
+    SaveDC(hdc);
+    IntersectClipRect(
+        hdc,
+        headerLayout.contentRect.left,
+        headerLayout.contentRect.top,
+        headerLayout.contentRect.right,
+        headerLayout.contentRect.bottom);
+
+    const int itemWidth = std::max(1, static_cast<int>(headerLayout.headerRect.right - headerLayout.headerRect.left) - (metrics.itemInset * 2));
+    const int left = ((sidebarRect.left + sidebarRect.right) - itemWidth) / 2;
     int top = headerLayout.contentRect.top + metrics.contentPadding - pdfSidebarScrollY_;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         const Page& page = document_.PageAt(pageIndex);
         const float aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
         const int thumbHeight = std::max(metrics.minThumbHeight, static_cast<int>(std::lround(static_cast<float>(itemWidth) * aspect)));
-        RECT thumbRect = MakeRect(sidebarRect.left + metrics.itemInset, top, sidebarRect.left + metrics.itemInset + itemWidth, top + thumbHeight);
+        RECT thumbRect = MakeRect(left, top, left + itemWidth, top + thumbHeight);
         RECT itemRect = MakeRect(thumbRect.left, thumbRect.top, thumbRect.right, thumbRect.bottom + metrics.labelHeight);
         top = itemRect.bottom + metrics.itemGap;
 
-        if (itemRect.bottom < sidebarRect.top || itemRect.top > sidebarRect.bottom) {
+        if (itemRect.bottom < headerLayout.contentRect.top || itemRect.top > headerLayout.contentRect.bottom) {
             continue;
         }
 
@@ -6148,6 +6166,7 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
         DrawTextW(hdc, label.c_str(), -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
+    RestoreDC(hdc, -1);
     SelectObject(hdc, previousFont);
     DeleteObject(labelFont);
     RestoreDC(hdc, -1);
@@ -7056,7 +7075,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 const UINT dpi = WindowDpi(window_);
                 const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect, dpi);
                 const SidebarMetrics metrics = BuildSidebarMetrics(dpi);
-                const int itemWidth = (headerLayout.contentRect.right - headerLayout.contentRect.left) - (metrics.itemInset * 2);
+                const int itemWidth = std::max(1, static_cast<int>(headerLayout.headerRect.right - headerLayout.headerRect.left) - (metrics.itemInset * 2));
                 int contentHeight = metrics.contentPadding;
                 for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
                     const Page& page = document_.PageAt(pageIndex);
