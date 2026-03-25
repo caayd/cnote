@@ -2180,6 +2180,9 @@ void App::ResetView() {
 }
 
 void App::SetActiveTool(Tool tool) {
+    if (tool == Tool::Select) {
+        selectionMode_ = SelectionMode::Lasso;
+    }
     if (tool != Tool::Select) {
         isSelecting_ = false;
         selectionPageIndex_.reset();
@@ -2201,6 +2204,9 @@ void App::SetActiveTool(Tool tool) {
     }
     if (tool != activeTool_) {
         CancelQuickSizePopup();
+        if (tool != Tool::Select && HasSelection()) {
+            ClearSelection();
+        }
     }
     activeTool_ = tool;
     SyncBrushWidthFromActiveTool();
@@ -2608,6 +2614,63 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedStrokeHandle(POINT 
     }
 
     return std::nullopt;
+}
+
+std::vector<Vec2> App::CurrentSelectionLassoPolygon() const {
+    std::vector<Vec2> polygon = selectionLassoPoints_;
+    if (polygon.empty()) {
+        return polygon;
+    }
+
+    if (DistanceSquared(polygon.back(), selectionCurrentPage_) > 0.0001f) {
+        polygon.push_back(selectionCurrentPage_);
+    }
+    return polygon;
+}
+
+bool App::CursorHitsSelectedContent(POINT cursor) const {
+    const auto hitPage = HitTestPage(cursor);
+    if (!hitPage.has_value()) {
+        return false;
+    }
+
+    const std::size_t pageIndex = hitPage->pageIndex;
+    if (pageIndex >= selectedStrokeIndices_.size() && pageIndex >= selectedImageIndices_.size()) {
+        return false;
+    }
+
+    const Page& page = document_.PageAt(pageIndex);
+    const float pageX = (static_cast<float>(cursor.x - hitPage->rect.left)) / hitPage->scale;
+    const float pageY = (static_cast<float>(cursor.y - hitPage->rect.top)) / hitPage->scale;
+    const Vec2 pagePoint {
+        std::clamp(pageX, 0.0f, page.width),
+        std::clamp(pageY, 0.0f, page.height),
+    };
+    const float hitRadius = std::max(8.0f, brushWidth_ * 2.5f) / std::max(0.1f, hitPage->scale);
+
+    if (pageIndex < selectedStrokeIndices_.size()) {
+        for (std::size_t strokeIndex : selectedStrokeIndices_[pageIndex]) {
+            if (strokeIndex < page.strokes.size() && StrokeHitsPoint(page.strokes[strokeIndex], pagePoint, hitRadius)) {
+                return true;
+            }
+        }
+    }
+
+    if (pageIndex < selectedImageIndices_.size()) {
+        for (std::size_t imageIndex : selectedImageIndices_[pageIndex]) {
+            if (imageIndex < page.images.size() && ImageHitsPoint(page.images[imageIndex], pagePoint)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool App::CursorInteractsWithSelection(POINT cursor) const {
+    return HitTestSelectedStrokeHandle(cursor).has_value()
+        || HitTestSelectedImageHandle(cursor).has_value()
+        || CursorHitsSelectedContent(cursor);
 }
 
 void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta) {
@@ -3360,6 +3423,11 @@ void App::BeginStroke(POINT cursor) {
         return;
     }
 
+    if (HasSelection()) {
+        ClearSelection();
+        InvalidateCanvas();
+    }
+
     document_.SetCurrentPageIndex(pageIndex);
     activeStroke_ = Stroke {};
     activeStrokePageIndex_ = pageIndex;
@@ -3445,7 +3513,7 @@ void App::EndStroke() {
     }
 }
 
-void App::BeginSelection(POINT cursor) {
+void App::BeginSelection(POINT cursor, bool boxOverride) {
     if (isPanning_) {
         return;
     }
@@ -3453,6 +3521,7 @@ void App::BeginSelection(POINT cursor) {
     const auto hitPage = HitTestPage(cursor);
     if (!hitPage.has_value()) {
         ClearSelection();
+        selectionBoxOverride_ = false;
         InvalidateCanvas();
         return;
     }
@@ -3467,6 +3536,7 @@ void App::BeginSelection(POINT cursor) {
     selectionCurrentPage_ = selectionAnchorPage_;
     selectionLassoPoints_.clear();
     selectionLassoPoints_.push_back(selectionAnchorPage_);
+    selectionBoxOverride_ = boxOverride;
     isSelecting_ = true;
     document_.SetCurrentPageIndex(hitPage->pageIndex);
     UpdateCaptureState();
@@ -3515,6 +3585,9 @@ void App::EndSelection() {
         const Page& page = document_.PageAt(pageIndex);
         const bool clickSelection = DistanceSquared(selectionAnchorPage_, selectionCurrentPage_) <= 18.0f;
         const SelectionMode effectiveSelectionMode = selectionBoxOverride_ ? SelectionMode::Box : selectionMode_;
+        const std::vector<Vec2> selectionPolygon = effectiveSelectionMode == SelectionMode::Lasso
+            ? CurrentSelectionLassoPolygon()
+            : std::vector<Vec2> {};
 
         for (std::size_t strokeIndex = 0; strokeIndex < page.strokes.size(); ++strokeIndex) {
             const Stroke& stroke = page.strokes[strokeIndex];
@@ -3524,9 +3597,9 @@ void App::EndSelection() {
                     ? StrokeHitsPoint(stroke, selectionCurrentPage_, 10.0f)
                     : StrokeIntersectsRectSelection(stroke, selectionAnchorPage_, selectionCurrentPage_);
             } else {
-                hit = (selectionLassoPoints_.size() < 3U)
+                hit = (selectionPolygon.size() < 3U)
                     ? StrokeHitsPoint(stroke, selectionCurrentPage_, 10.0f)
-                    : StrokeIntersectsPolygonSelection(stroke, selectionLassoPoints_);
+                    : StrokeIntersectsPolygonSelection(stroke, selectionPolygon);
             }
 
             if (hit) {
@@ -3542,9 +3615,9 @@ void App::EndSelection() {
                     ? ImageHitsPoint(image, selectionCurrentPage_)
                     : ImageIntersectsRectSelection(image, selectionAnchorPage_, selectionCurrentPage_);
             } else {
-                hit = (selectionLassoPoints_.size() < 3U)
+                hit = (selectionPolygon.size() < 3U)
                     ? ImageHitsPoint(image, selectionCurrentPage_)
-                    : ImageIntersectsPolygonSelection(image, selectionLassoPoints_);
+                    : ImageIntersectsPolygonSelection(image, selectionPolygon);
             }
             if (hit) {
                 selectedImages.push_back(imageIndex);
@@ -3567,11 +3640,7 @@ void App::EndSelection() {
     selectionLassoPoints_.clear();
     selectionBoxOverride_ = false;
     UpdateCaptureState();
-    if (HasSelection()) {
-        SetActiveTool(Tool::Move);
-    } else {
-        InvalidateCanvas();
-    }
+    InvalidateCanvas();
 }
 
 void App::BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, ImageTransformHandle handle, POINT cursor) {
@@ -3708,8 +3777,7 @@ void App::BeginMoveSelection(POINT cursor) {
     if (!clickedSelectedStroke.has_value() && !clickedSelectedImage.has_value()
         && !clickedStroke.has_value() && !clickedImage.has_value()) {
         ClearSelection();
-        selectionBoxOverride_ = true;
-        BeginSelection(cursor);
+        BeginSelection(cursor, true);
         return;
     }
 
@@ -4464,7 +4532,15 @@ void App::BeginErase(POINT cursor) {
         return;
     }
 
+    if (!HitTestPage(cursor).has_value()) {
+        return;
+    }
+
     CancelDeferredRasterRefresh(false);
+    if (HasSelection()) {
+        ClearSelection();
+        InvalidateCanvas();
+    }
     isErasing_ = true;
     UpdateCaptureState();
     static_cast<void>(EraseAt(cursor));
@@ -4549,6 +4625,9 @@ void App::BeginPan(POINT cursor, bool fromMiddleButton) {
     }
 
     CancelDeferredRasterRefresh(false);
+    if (!fromMiddleButton && HasSelection()) {
+        ClearSelection();
+    }
     isPanning_ = true;
     panFromMiddleButton_ = fromMiddleButton;
     lastPanCursor_ = cursor;
@@ -5813,8 +5892,8 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     paintIconToolButton(layout.selectToolRect, PaintSelectToolIcon, L"lasso.svg", activeTool_ == Tool::Select);
     paintIconToolButton(layout.moveToolRect, PaintMoveToolIcon, L"cursor.svg", activeTool_ == Tool::Move || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_);
     paintIconToolButton(layout.eraseToolRect, PaintEraseToolIcon, L"erase.svg", activeTool_ == Tool::Erase);
-    paintIconToolButton(layout.drawToolRect, PaintDrawToolIcon, L"draw.svg", activeTool_ == Tool::Draw && !isPanning_);
-    paintIconToolButton(layout.panToolRect, PaintPanToolIcon, L"pan.svg", activeTool_ == Tool::Pan || isPanning_);
+    paintIconToolButton(layout.drawToolRect, PaintDrawToolIcon, L"draw.svg", activeTool_ == Tool::Draw);
+    paintIconToolButton(layout.panToolRect, PaintPanToolIcon, L"pan.svg", activeTool_ == Tool::Pan);
     if (IsToolInWheel(Tool::Select)) {
         paintWheelBadge(layout.selectToolRect);
     }
@@ -6562,6 +6641,13 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     }
 
     const Page& page = document_.PageAt(pageView.pageIndex);
+    bool showSelectToolSelectionAffordances = false;
+    if (activeTool_ == Tool::Select && window_ != nullptr) {
+        POINT cursor {};
+        GetCursorPos(&cursor);
+        ScreenToClient(window_, &cursor);
+        showSelectToolSelectionAffordances = CursorInteractsWithSelection(cursor);
+    }
     const auto singleImage = SingleSelectedImage();
     const auto singleStrokePage = SingleSelectedStrokePage();
     for (std::size_t imageIndex = 0; imageIndex < page.images.size(); ++imageIndex) {
@@ -6581,7 +6667,8 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         DrawPolylineAA(hdc, polygon, 5, RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
 
         if (singleImage.has_value() && singleImage->first == pageView.pageIndex && singleImage->second == imageIndex
-            && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingImage_)) {
+            && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingImage_
+                || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances))) {
             const int handleHalf = 4;
             const auto paintHandle = [&](int centerX, int centerY) {
                 RECT handleRect = MakeRect(centerX - handleHalf, centerY - handleHalf, centerX + handleHalf + 1, centerY + handleHalf + 1);
@@ -6652,7 +6739,8 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
 
     if (singleStrokePage.has_value() && *singleStrokePage == pageView.pageIndex
         && pageView.pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageView.pageIndex].empty()
-        && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingStroke_)) {
+        && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingStroke_
+            || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances))) {
         float minX = page.width;
         float minY = page.height;
         float maxX = 0.0f;
@@ -6715,20 +6803,21 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
             const int bottom = pageView.rect.top + static_cast<int>(std::lround(std::max(selectionAnchorPage_.y, selectionCurrentPage_.y) * pageView.scale));
             DrawRectangleAA(hdc, MakeRect(left, top, right, bottom), RGB(124, 211, 255), 1.5f, Gdiplus::DashStyleDash);
         } else if (!selectionLassoPoints_.empty()) {
+            const std::vector<Vec2> selectionPolygon = CurrentSelectionLassoPolygon();
             std::vector<POINT> points;
-            points.reserve(selectionLassoPoints_.size() + 1U);
-            for (const Vec2& point : selectionLassoPoints_) {
+            points.reserve(selectionPolygon.size());
+            for (const Vec2& point : selectionPolygon) {
                 points.push_back({
                     pageView.rect.left + static_cast<LONG>(std::lround(point.x * pageView.scale)),
                     pageView.rect.top + static_cast<LONG>(std::lround(point.y * pageView.scale)),
                 });
             }
-            points.push_back({
-                pageView.rect.left + static_cast<LONG>(std::lround(selectionCurrentPage_.x * pageView.scale)),
-                pageView.rect.top + static_cast<LONG>(std::lround(selectionCurrentPage_.y * pageView.scale)),
-            });
             if (points.size() >= 2U) {
                 DrawPolylineAA(hdc, points.data(), static_cast<int>(points.size()), RGB(124, 211, 255), 1.5f, Gdiplus::DashStyleDash);
+                if (points.size() >= 3U) {
+                    POINT closingLine[2] { points.back(), points.front() };
+                    DrawPolylineAA(hdc, closingLine, 2, RGB(124, 211, 255), 1.5f, Gdiplus::DashStyleDash);
+                }
             }
         }
     }
@@ -6917,7 +7006,14 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         } else if (activeTool_ == Tool::Move) {
             BeginMoveSelection(cursor);
         } else if (activeTool_ == Tool::Select) {
-            BeginSelection(cursor);
+            if (HasSelection() && CursorInteractsWithSelection(cursor)) {
+                BeginMoveSelection(cursor);
+            } else {
+                if (HasSelection()) {
+                    ClearSelection();
+                }
+                BeginSelection(cursor);
+            }
         } else if (activeTool_ == Tool::Erase) {
             BeginErase(cursor);
         } else {
@@ -7183,11 +7279,21 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                     SetCursor(LoadCursorW(nullptr, cursorForHandle(*strokeHandle)));
                 } else if (const auto imageHandle = HitTestSelectedImageHandle(cursor); imageHandle.has_value()) {
                     SetCursor(LoadCursorW(nullptr, cursorForHandle(*imageHandle)));
+                } else if (CursorHitsSelectedContent(cursor)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
                 } else {
                     SetCursor(LoadCursorW(nullptr, IDC_ARROW));
                 }
             } else if (activeTool_ == Tool::Select) {
-                SetCursor(LoadCursorW(nullptr, IDC_CROSS));
+                if (const auto strokeHandle = HitTestSelectedStrokeHandle(cursor); strokeHandle.has_value()) {
+                    SetCursor(LoadCursorW(nullptr, cursorForHandle(*strokeHandle)));
+                } else if (const auto imageHandle = HitTestSelectedImageHandle(cursor); imageHandle.has_value()) {
+                    SetCursor(LoadCursorW(nullptr, cursorForHandle(*imageHandle)));
+                } else if (CursorHitsSelectedContent(cursor)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+                } else {
+                    SetCursor(LoadCursorW(nullptr, IDC_CROSS));
+                }
             } else if (activeTool_ == Tool::Erase) {
                 SetCursor(eraserCursor_ != nullptr ? eraserCursor_ : LoadCursorW(nullptr, IDC_CROSS));
             } else {

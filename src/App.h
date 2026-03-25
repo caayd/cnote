@@ -242,7 +242,7 @@ private:
     void BeginStroke(POINT cursor);
     void ExtendStroke(POINT cursor);
     void EndStroke();
-    void BeginSelection(POINT cursor);
+    void BeginSelection(POINT cursor, bool boxOverride = false);
     void ExtendSelection(POINT cursor);
     void EndSelection();
     void BeginMoveSelection(POINT cursor);
@@ -311,6 +311,9 @@ private:
     [[nodiscard]] bool IsStrokeSelected(std::size_t pageIndex, std::size_t strokeIndex) const;
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedImageHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* imageIndex = nullptr) const;
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedStrokeHandle(POINT cursor, std::size_t* pageIndex = nullptr) const;
+    [[nodiscard]] std::vector<Vec2> CurrentSelectionLassoPolygon() const;
+    [[nodiscard]] bool CursorHitsSelectedContent(POINT cursor) const;
+    [[nodiscard]] bool CursorInteractsWithSelection(POINT cursor) const;
     bool CopySelectionToClipboard();
     bool PasteSelectionFromClipboard();
     bool PasteImageFromClipboard();
@@ -418,7 +421,7 @@ private:
     std::vector<HistoryAction> redoActions_ {};
     POINT lastPanCursor_ {};
     ULONG_PTR gdiplusToken_ = 0;
-    SelectionMode selectionMode_ = SelectionMode::Box;
+    SelectionMode selectionMode_ = SelectionMode::Lasso;
     std::optional<std::size_t> selectionPageIndex_ {};
     std::optional<std::size_t> moveSelectionPageIndex_ {};
     std::optional<std::size_t> transformingImagePageIndex_ {};
