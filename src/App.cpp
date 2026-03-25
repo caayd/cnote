@@ -39,25 +39,12 @@ constexpr unsigned int kCommandFileOpen = 1002;
 constexpr unsigned int kCommandFileSaveCnote = 1003;
 constexpr unsigned int kCommandFileExportPdf = 1004;
 constexpr unsigned int kCommandFileExit = 1005;
-constexpr unsigned int kCommandEditUndo = 1101;
-constexpr unsigned int kCommandEditRedo = 1102;
 constexpr unsigned int kCommandEditBrushSettings = 1103;
-constexpr unsigned int kCommandEditCopy = 1104;
-constexpr unsigned int kCommandEditPaste = 1105;
 constexpr unsigned int kCommandSelectLasso = 1111;
-constexpr unsigned int kCommandViewReset = 1201;
-constexpr unsigned int kCommandViewPreviousPage = 1202;
-constexpr unsigned int kCommandViewNextPage = 1203;
 constexpr unsigned int kCommandToolToggleQuickWheel = 1301;
 
-struct MenuLayout {
-    RECT fileRect {};
-    RECT editRect {};
-    RECT viewRect {};
-};
-
 struct ToolbarLayout {
-    MenuLayout menu {};
+    RECT titleAreaRect {};
     RECT minimizeRect {};
     RECT maximizeRect {};
     RECT closeRect {};
@@ -69,6 +56,14 @@ struct ToolbarLayout {
     RECT panToolRect {};
     RECT eraseToolRect {};
     RECT currentColorRect {};
+};
+
+struct ToolbarTitleLayout {
+    RECT fileTitleRect {};
+    RECT titleTextRect {};
+    RECT zoomRect {};
+    RECT zoomTextRect {};
+    int dividerX = 0;
 };
 
 struct SidebarHeaderLayout {
@@ -271,6 +266,87 @@ std::wstring FormatBrushSizeValue(float size) {
         value.pop_back();
     }
     return value;
+}
+
+std::wstring FormatZoomPercentValue(float zoom) {
+    wchar_t buffer[32] = {};
+    const float percent = zoom * 100.0f;
+    if (std::abs(percent - std::round(percent)) < 0.05f) {
+        std::swprintf(buffer, std::size(buffer), L"%.0f", percent);
+    } else {
+        std::swprintf(buffer, std::size(buffer), L"%.1f", percent);
+    }
+    std::wstring value = buffer;
+    while (!value.empty() && value.back() == L'0') {
+        value.pop_back();
+    }
+    if (!value.empty() && value.back() == L'.') {
+        value.pop_back();
+    }
+    return value;
+}
+
+int MeasureToolbarTextWidth(HDC hdc, const std::wstring& text) {
+    if (text.empty()) {
+        return 0;
+    }
+
+    SIZE size {};
+    if (GetTextExtentPoint32W(hdc, text.c_str(), static_cast<int>(text.size()), &size) == FALSE) {
+        return 0;
+    }
+    return static_cast<int>(size.cx);
+}
+
+ToolbarTitleLayout ResolveToolbarTitleLayout(const ToolbarLayout& layout, HDC hdc, const std::wstring& title, const std::wstring& zoomLabel) {
+    ToolbarTitleLayout resolved {};
+    if (!HasRect(layout.titleAreaRect)) {
+        return resolved;
+    }
+
+    constexpr int kTitleLeftInset = 4;
+    constexpr int kTitleRightInset = 4;
+    constexpr int kZoomGap = 12;
+    constexpr int kZoomHorizontalPadding = 6;
+    constexpr int kMinimumTitleWidth = 24;
+    constexpr int kMinimumZoomWidth = 44;
+    constexpr int kMaximumZoomWidth = 72;
+
+    const int availableWidth = static_cast<int>(layout.titleAreaRect.right - layout.titleAreaRect.left);
+    const int zoomWidth = std::clamp(
+        MeasureToolbarTextWidth(hdc, zoomLabel) + (kZoomHorizontalPadding * 2),
+        kMinimumZoomWidth,
+        kMaximumZoomWidth);
+    const int maxTitleWidth = std::max(kMinimumTitleWidth, availableWidth - kZoomGap - zoomWidth);
+    const int titleWidth = std::clamp(
+        MeasureToolbarTextWidth(hdc, title) + kTitleLeftInset + kTitleRightInset,
+        kMinimumTitleWidth,
+        maxTitleWidth);
+
+    resolved.fileTitleRect = MakeRect(
+        layout.titleAreaRect.left,
+        layout.titleAreaRect.top,
+        layout.titleAreaRect.left + titleWidth,
+        layout.titleAreaRect.bottom);
+    resolved.zoomRect = MakeRect(
+        resolved.fileTitleRect.right + kZoomGap,
+        layout.titleAreaRect.top,
+        resolved.fileTitleRect.right + kZoomGap + zoomWidth,
+        layout.titleAreaRect.bottom);
+    if (!HasRect(resolved.fileTitleRect) || !HasRect(resolved.zoomRect)) {
+        resolved = {};
+        return resolved;
+    }
+
+    resolved.titleTextRect = resolved.fileTitleRect;
+    resolved.titleTextRect.left += kTitleLeftInset;
+    resolved.titleTextRect.right -= kTitleRightInset;
+
+    resolved.zoomTextRect = resolved.zoomRect;
+    resolved.zoomTextRect.left += kZoomHorizontalPadding;
+    resolved.zoomTextRect.right -= kZoomHorizontalPadding;
+    resolved.dividerX = resolved.fileTitleRect.right + (kZoomGap / 2);
+    return resolved;
 }
 
 struct SvgPathStyle {
@@ -892,10 +968,9 @@ ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool m
     const int titleBarInset = maximized ? WindowFrameThicknessX() : 0;
     const int buttonStripRight = clientRect.right - titleBarInset;
     const int availableWidth = clientRect.right - clientRect.left;
-    const bool compactMenus = availableWidth < 760;
-    const int menuGap = compactMenus ? 2 : 4;
-    const int toolGap = compactMenus ? 8 : 10;
-    const int outerGap = compactMenus ? 12 : 18;
+    const bool compactTitle = availableWidth < 760;
+    const int toolGap = compactTitle ? 8 : 10;
+    const int outerGap = compactTitle ? 12 : 18;
 
     layout.closeRect = MakeRect(buttonStripRight - 46, topInset, buttonStripRight, toolbarHeight);
     layout.maximizeRect = MakeRect(layout.closeRect.left - 46, topInset, layout.closeRect.left, toolbarHeight);
@@ -906,12 +981,6 @@ ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool m
     const int colorButtonSize = kIconButtonSize;
     const int colorsLeft = rightEdge - colorButtonSize;
 
-    const int fileWidth = compactMenus ? 34 : 40;
-    const int editWidth = compactMenus ? 36 : 42;
-    const int viewWidth = compactMenus ? 38 : 44;
-    layout.menu.fileRect = MakeRect(12, topInset, 12 + fileWidth, toolbarHeight);
-    layout.menu.editRect = MakeRect(layout.menu.fileRect.right + menuGap, topInset, layout.menu.fileRect.right + menuGap + editWidth, toolbarHeight);
-    layout.menu.viewRect = MakeRect(layout.menu.editRect.right + menuGap, topInset, layout.menu.editRect.right + menuGap + viewWidth, toolbarHeight);
     layout.currentColorRect = MakeRect(colorsLeft, toolbarTop, colorsLeft + colorButtonSize, toolbarTop + colorButtonSize);
 
     const int toolBandRight = colorsLeft - outerGap;
@@ -940,13 +1009,20 @@ ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool m
         toolbarTop,
         layout.selectToolRect.left - toolGap,
         toolbarTop + kIconButtonSize);
-    const int redoRight = layout.moveToolRect.left - (compactMenus ? 12 : 16);
+    const int redoRight = layout.moveToolRect.left - (compactTitle ? 12 : 16);
     const RECT candidateRedoRect = MakeRect(redoRight - kIconButtonSize, toolbarTop, redoRight, toolbarTop + kIconButtonSize);
     const RECT candidateUndoRect = MakeRect(candidateRedoRect.left - toolGap - kIconButtonSize, toolbarTop, candidateRedoRect.left - toolGap, toolbarTop + kIconButtonSize);
-    const int minimumTitleWidth = compactMenus ? 80 : 120;
-    if (candidateUndoRect.left >= layout.menu.viewRect.right + minimumTitleWidth) {
+    const int titleLeft = 12;
+    const int minimumTitleAreaWidth = compactTitle ? 150 : 210;
+    if (candidateUndoRect.left >= titleLeft + minimumTitleAreaWidth) {
         layout.redoRect = candidateRedoRect;
         layout.undoRect = candidateUndoRect;
+    }
+
+    const int titleRight = (HasRect(layout.undoRect) ? layout.undoRect.left : layout.moveToolRect.left) - 16;
+    const int titleAreaWidth = std::max(0, titleRight - titleLeft);
+    if (titleAreaWidth >= minimumTitleAreaWidth) {
+        layout.titleAreaRect = MakeRect(titleLeft, topInset, titleRight, toolbarHeight);
     }
 
     return layout;
@@ -1071,11 +1147,10 @@ std::optional<std::size_t> PaletteWheelIndexAtPoint(const PaletteWheelLayout& la
     return index;
 }
 
-bool IsToolbarControlRect(const ToolbarLayout& layout, POINT cursor) {
-    const std::array<RECT, 12> controls {
-        layout.menu.fileRect,
-        layout.menu.editRect,
-        layout.menu.viewRect,
+bool IsToolbarControlRect(const ToolbarLayout& layout, const ToolbarTitleLayout& titleLayout, POINT cursor) {
+    const std::array<RECT, 11> controls {
+        titleLayout.fileTitleRect,
+        titleLayout.zoomRect,
         layout.minimizeRect,
         layout.maximizeRect,
         layout.closeRect,
@@ -1792,6 +1867,7 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
     pdfSidebarScrollY_ = 0;
     copiedSidebarPage_.reset();
     CancelPageJumpInput();
+    CancelToolbarZoomInput();
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
     ClearSelection();
@@ -1948,6 +2024,7 @@ void App::ToggleQuickSizePopup() {
 
     quickSizePopupAnchor_ = cursor;
     quickSizePopupTool_ = activeTool_;
+    CancelToolbarZoomInput();
     CancelToolbarBrushSizeInput();
     InvalidateRect(window_, nullptr, FALSE);
 }
@@ -2050,10 +2127,18 @@ void App::InvalidateStrokeRegion(const Stroke& stroke, std::size_t pageIndex, bo
 }
 
 void App::ResetView() {
+    CancelToolbarZoomInput();
     zoom_ = 1.0f;
     targetZoom_ = 1.0f;
     panX_ = 0.0f;
     panY_ = 0.0f;
+    if (window_ != nullptr) {
+        RECT clientRect {};
+        GetClientRect(window_, &clientRect);
+        RECT toolbarRect = clientRect;
+        toolbarRect.bottom = ToolbarHeight(IsZoomed(window_));
+        InvalidateRect(window_, &toolbarRect, FALSE);
+    }
 }
 
 void App::SetActiveTool(Tool tool) {
@@ -2777,6 +2862,13 @@ std::wstring App::CurrentWindowTitle() const {
     return title;
 }
 
+std::wstring App::ZoomIndicatorLabel() const {
+    if (toolbarZoomEditing_) {
+        return toolbarZoomText_.empty() ? L"" : toolbarZoomText_;
+    }
+    return FormatZoomPercentValue(zoom_) + L"%";
+}
+
 std::wstring App::PageIndicatorLabel() const {
     if (pageJumpEditing_) {
         return pageJumpText_.empty() ? L"" : pageJumpText_;
@@ -3055,6 +3147,7 @@ void App::CancelPageJumpInput() {
 
 void App::BeginPageJumpInput() {
     CancelToolbarBrushSizeInput();
+    CancelToolbarZoomInput();
     pageJumpEditing_ = true;
     pageJumpText_ = std::to_wstring(document_.CurrentPageIndex() + 1U);
     pageJumpReplaceOnType_ = true;
@@ -3115,6 +3208,7 @@ void App::BeginToolbarBrushSizeInput() {
     pageJumpEditing_ = false;
     pageJumpReplaceOnType_ = false;
     pageJumpText_.clear();
+    CancelToolbarZoomInput();
     toolbarBrushSizeEditing_ = true;
     toolbarBrushSizeReplaceOnType_ = true;
     toolbarBrushSizeEditTool_ = tool;
@@ -3134,6 +3228,35 @@ void App::ApplyToolbarBrushSizeInput() {
 
     SetBrushSizeForTool(*toolbarBrushSizeEditTool_, parsed);
     toolbarBrushSizeText_ = FormatBrushSizeValue(BrushSizeForTool(*toolbarBrushSizeEditTool_));
+}
+
+void App::CancelToolbarZoomInput() {
+    toolbarZoomEditing_ = false;
+    toolbarZoomReplaceOnType_ = false;
+    toolbarZoomText_.clear();
+}
+
+void App::BeginToolbarZoomInput() {
+    CancelPageJumpInput();
+    CancelToolbarBrushSizeInput();
+    toolbarZoomEditing_ = true;
+    toolbarZoomReplaceOnType_ = true;
+    toolbarZoomText_ = FormatZoomPercentValue(zoom_);
+}
+
+void App::ApplyToolbarZoomInput() {
+    if (toolbarZoomText_.empty()) {
+        return;
+    }
+
+    wchar_t* end = nullptr;
+    const float parsedPercent = std::wcstof(toolbarZoomText_.c_str(), &end);
+    if (end == toolbarZoomText_.c_str() || *end != L'\0' || parsedPercent <= 0.0f) {
+        return;
+    }
+
+    SetZoom(parsedPercent / 100.0f);
+    toolbarZoomText_ = FormatZoomPercentValue(zoom_);
 }
 
 void App::BeginToolbarBrushSliderDrag(POINT cursor) {
@@ -4447,38 +4570,12 @@ void App::ExecuteCommand(unsigned int commandId) {
     case kCommandFileExit:
         PostMessageW(window_, WM_CLOSE, 0, 0);
         break;
-    case kCommandEditUndo:
-        Undo();
-        break;
-    case kCommandEditRedo:
-        Redo();
-        break;
-    case kCommandEditCopy:
-        static_cast<void>(CopySelectionToClipboard());
-        break;
-    case kCommandEditPaste:
-        if (!PasteSelectionFromClipboard()) {
-            static_cast<void>(PasteImageFromClipboard());
-        }
-        break;
     case kCommandEditBrushSettings:
         ToggleBrushSettings();
         break;
     case kCommandSelectLasso:
         selectionMode_ = SelectionMode::Lasso;
         SetActiveTool(Tool::Select);
-        break;
-    case kCommandViewReset:
-        CancelDeferredRasterRefresh();
-        ResetView();
-        EnsureVisiblePageRasterQuality();
-        InvalidateRect(window_, nullptr, FALSE);
-        break;
-    case kCommandViewPreviousPage:
-        PreviousPage();
-        break;
-    case kCommandViewNextPage:
-        NextPage();
         break;
     default:
         break;
@@ -4493,46 +4590,51 @@ bool App::HandleToolbarClick(POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
+    HDC windowDc = GetDC(window_);
+    HFONT bodyFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
+    HGDIOBJ previousFont = windowDc != nullptr && bodyFont != nullptr ? SelectObject(windowDc, bodyFont) : nullptr;
+    const ToolbarTitleLayout titleLayout = windowDc != nullptr
+        ? ResolveToolbarTitleLayout(layout, windowDc, CurrentWindowTitle(), ZoomIndicatorLabel())
+        : ToolbarTitleLayout {};
+    if (windowDc != nullptr && previousFont != nullptr) {
+        SelectObject(windowDc, previousFont);
+    }
+    if (bodyFont != nullptr) {
+        DeleteObject(bodyFont);
+    }
+    if (windowDc != nullptr) {
+        ReleaseDC(window_, windowDc);
+    }
+
     CancelPageJumpInput();
     CancelQuickSizePopup();
+    if (toolbarZoomEditing_ && PtInRect(&titleLayout.zoomRect, cursor) == 0) {
+        ApplyToolbarZoomInput();
+        CancelToolbarZoomInput();
+    }
 
-    const auto openMenu = [&](RECT rect, unsigned int kind) {
+    const auto openTitleMenu = [&](RECT rect) {
         HMENU menu = CreatePopupMenu();
         if (menu == nullptr) {
             return;
         }
 
-        switch (kind) {
-        case 0:
-            AppendMenuW(menu, MF_STRING, kCommandFileNew, L"New");
-            AppendMenuW(menu, MF_STRING, kCommandFileOpen, L"Open...");
-            AppendMenuW(menu, MF_STRING, kCommandFileSaveCnote, HasSavedCnotePath() ? L"Save Cnote" : L"Save as Cnote...");
-            AppendMenuW(menu, MF_STRING, kCommandFileExportPdf, L"Export as PDF...");
-            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(menu, MF_STRING, kCommandFileExit, L"Exit");
-            break;
-        case 1:
-            AppendMenuW(menu, MF_STRING | (CanUndo() ? 0 : MF_GRAYED), kCommandEditUndo, L"Undo");
-            AppendMenuW(menu, MF_STRING | (CanRedo() ? 0 : MF_GRAYED), kCommandEditRedo, L"Redo");
-            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(menu, MF_STRING, kCommandEditCopy, L"Copy");
-            AppendMenuW(menu, MF_STRING, kCommandEditPaste, L"Paste");
-            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(menu, MF_STRING, kCommandEditBrushSettings, IsSettingsWindowOpen() ? L"Hide Settings" : L"Settings");
-            break;
-        case 2:
-            AppendMenuW(menu, MF_STRING, kCommandViewReset, L"Reset View");
-            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(menu, MF_STRING | (CanGoToPreviousPage() ? 0 : MF_GRAYED), kCommandViewPreviousPage, L"Previous Page");
-            AppendMenuW(menu, MF_STRING | (CanGoToNextPage() ? 0 : MF_GRAYED), kCommandViewNextPage, L"Next Page");
-            break;
-        case 3:
-            AppendMenuW(menu, MF_STRING | (selectionMode_ == SelectionMode::Lasso ? MF_CHECKED : 0), kCommandSelectLasso, L"Lasso Select");
-            break;
-        default:
-            DestroyMenu(menu);
-            return;
-        }
+        AppendMenuW(menu, MF_STRING, kCommandFileNew, L"New");
+        AppendMenuW(menu, MF_STRING, kCommandFileOpen, L"Open...");
+        AppendMenuW(menu, MF_STRING, kCommandFileSaveCnote, HasSavedCnotePath() ? L"Save Cnote" : L"Save as Cnote...");
+        AppendMenuW(menu, MF_STRING, kCommandFileExportPdf, L"Export as PDF...");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, kCommandEditBrushSettings, IsSettingsWindowOpen() ? L"Hide Settings" : L"Settings");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, kCommandFileExit, L"Exit");
+
+        titleMenuActive_ = true;
+        RECT clientRectForMenu {};
+        GetClientRect(window_, &clientRectForMenu);
+        clientRectForMenu.bottom = ToolbarHeight(IsZoomed(window_));
+        InvalidateRect(window_, &clientRectForMenu, FALSE);
+        UpdateWindow(window_);
 
         POINT anchor { rect.left, rect.bottom + 2 };
         ClientToScreen(window_, &anchor);
@@ -4545,6 +4647,8 @@ bool App::HandleToolbarClick(POINT cursor) {
             window_,
             nullptr);
         DestroyMenu(menu);
+        titleMenuActive_ = false;
+        InvalidateRect(window_, &clientRectForMenu, FALSE);
 
         if (selected != 0U) {
             ExecuteCommand(selected);
@@ -4569,21 +4673,18 @@ bool App::HandleToolbarClick(POINT cursor) {
         return true;
     }
 
-    if (PtInRect(&layout.menu.fileRect, cursor) != 0) {
+    if (PtInRect(&titleLayout.fileTitleRect, cursor) != 0) {
         ClosePaletteOverlays();
-        openMenu(layout.menu.fileRect, 0);
+        openTitleMenu(titleLayout.fileTitleRect);
         return true;
     }
 
-    if (PtInRect(&layout.menu.editRect, cursor) != 0) {
+    if (PtInRect(&titleLayout.zoomRect, cursor) != 0) {
         ClosePaletteOverlays();
-        openMenu(layout.menu.editRect, 1);
-        return true;
-    }
-
-    if (PtInRect(&layout.menu.viewRect, cursor) != 0) {
-        ClosePaletteOverlays();
-        openMenu(layout.menu.viewRect, 2);
+        if (!toolbarZoomEditing_) {
+            BeginToolbarZoomInput();
+            InvalidateRect(window_, nullptr, FALSE);
+        }
         return true;
     }
 
@@ -4650,6 +4751,10 @@ bool App::HandleSidebarClick(POINT cursor) {
     if (pageJumpEditing_ && !clickedPageLabel) {
         CancelPageJumpInput();
     }
+    if (toolbarZoomEditing_) {
+        ApplyToolbarZoomInput();
+        CancelToolbarZoomInput();
+    }
 
     CancelQuickSizePopup();
 
@@ -4704,6 +4809,10 @@ bool App::HandleQuickSizePopupClick(POINT cursor) {
 
     if (toolbarBrushSizeEditing_ && !clickedValue) {
         CancelToolbarBrushSizeInput();
+    }
+    if (toolbarZoomEditing_) {
+        ApplyToolbarZoomInput();
+        CancelToolbarZoomInput();
     }
 
     if (clickedSlider) {
@@ -4774,6 +4883,10 @@ bool App::HandlePaletteClick(POINT cursor) {
     const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
 
     if (PtInRect(&toolbarLayout.currentColorRect, cursor) != 0) {
+        if (toolbarZoomEditing_) {
+            ApplyToolbarZoomInput();
+            CancelToolbarZoomInput();
+        }
         CancelToolbarBrushSizeInput();
         wheel_.paletteMenuOpen = !wheel_.paletteMenuOpen;
         wheel_.paletteWheelOpen = false;
@@ -4785,6 +4898,10 @@ bool App::HandlePaletteClick(POINT cursor) {
         const PaletteMenuLayout menuLayout = BuildPaletteMenuLayout(toolbarLayout, palette_.size());
         for (std::size_t index = 0; index < menuLayout.swatchRects.size(); ++index) {
             if (PtInRect(&menuLayout.swatchRects[index], cursor) != 0) {
+                if (toolbarZoomEditing_) {
+                    ApplyToolbarZoomInput();
+                    CancelToolbarZoomInput();
+                }
                 CancelToolbarBrushSizeInput();
                 SetColorIndex(index);
                 return true;
@@ -4792,10 +4909,18 @@ bool App::HandlePaletteClick(POINT cursor) {
         }
 
         if (PtInRect(&menuLayout.panelRect, cursor) != 0) {
+            if (toolbarZoomEditing_) {
+                ApplyToolbarZoomInput();
+                CancelToolbarZoomInput();
+            }
             CancelToolbarBrushSizeInput();
             return true;
         }
 
+        if (toolbarZoomEditing_) {
+            ApplyToolbarZoomInput();
+            CancelToolbarZoomInput();
+        }
         CancelToolbarBrushSizeInput();
         ClosePaletteOverlays();
         InvalidateRect(window_, nullptr, FALSE);
@@ -4807,9 +4932,17 @@ bool App::HandlePaletteClick(POINT cursor) {
         const PaletteWheelLayout wheelLayout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, ToolbarHeight(IsZoomed(window_)));
         if (const auto index = PaletteWheelIndexAtPoint(wheelLayout, cursor, wheelEntryCount); index.has_value()) {
             if (*index < palette_.size()) {
+                if (toolbarZoomEditing_) {
+                    ApplyToolbarZoomInput();
+                    CancelToolbarZoomInput();
+                }
                 CancelToolbarBrushSizeInput();
                 SetColorIndex(*index);
             } else {
+                if (toolbarZoomEditing_) {
+                    ApplyToolbarZoomInput();
+                    CancelToolbarZoomInput();
+                }
                 CancelToolbarBrushSizeInput();
                 SetActiveTool(wheel_.tools[*index - palette_.size()]);
                 ClosePaletteOverlays();
@@ -4818,6 +4951,10 @@ bool App::HandlePaletteClick(POINT cursor) {
             return true;
         }
 
+        if (toolbarZoomEditing_) {
+            ApplyToolbarZoomInput();
+            CancelToolbarZoomInput();
+        }
         CancelToolbarBrushSizeInput();
         ClosePaletteOverlays();
         InvalidateRect(window_, nullptr, FALSE);
@@ -4832,6 +4969,74 @@ void App::PanBy(float dx, float dy) {
     panY_ += dy;
     SyncCurrentPageToViewport();
     InvalidateCanvas();
+}
+
+void App::SetZoom(float zoom, std::optional<POINT> anchor) {
+    const float newZoom = std::clamp(zoom, kMinZoom, kMaxZoom);
+    if (std::abs(newZoom - zoom_) < 0.0001f) {
+        return;
+    }
+
+    const bool wasEditingZoom = toolbarZoomEditing_;
+
+    std::optional<POINT> zoomAnchor = anchor;
+    if (!zoomAnchor.has_value() && window_ != nullptr) {
+        RECT clientRect {};
+        GetClientRect(window_, &clientRect);
+        const RECT canvasRect = CanvasRect(clientRect);
+        zoomAnchor = POINT {
+            (canvasRect.left + canvasRect.right) / 2,
+            (canvasRect.top + canvasRect.bottom) / 2,
+        };
+    }
+
+    bool anchorValid = false;
+    std::size_t anchorPageIndex = 0;
+    Vec2 anchorPage {};
+    if (zoomAnchor.has_value()) {
+        if (const auto hitPage = HitTestPage(*zoomAnchor); hitPage.has_value()) {
+            anchorValid = true;
+            anchorPageIndex = hitPage->pageIndex;
+            anchorPage = ScreenToPage(*zoomAnchor, nullptr);
+        }
+    }
+
+    CancelDeferredRasterRefresh();
+    zoom_ = newZoom;
+    targetZoom_ = newZoom;
+
+    if (anchorValid && zoomAnchor.has_value()) {
+        const POINT anchoredScreen = PageToScreen(anchorPageIndex, anchorPage);
+        panX_ += static_cast<float>(zoomAnchor->x - anchoredScreen.x);
+        panY_ += static_cast<float>(zoomAnchor->y - anchoredScreen.y);
+    }
+
+    if (wasEditingZoom) {
+        CancelToolbarZoomInput();
+    }
+
+    InvalidateVisiblePageSurfaceCaches();
+    EnsureVisiblePageRasterQuality();
+    InvalidateCanvas();
+    if (window_ != nullptr) {
+        RECT clientRect {};
+        GetClientRect(window_, &clientRect);
+        RECT toolbarRect = clientRect;
+        toolbarRect.bottom = ToolbarHeight(IsZoomed(window_));
+        InvalidateRect(window_, &toolbarRect, FALSE);
+    }
+}
+
+bool App::ApplyZoomPreset(std::size_t presetIndex) {
+    if (presetIndex >= settings_.zoomPresets.size()) {
+        return false;
+    }
+    const float presetZoom = settings_.zoomPresets[presetIndex];
+    if (presetZoom <= 0.0f) {
+        return false;
+    }
+    SetZoom(presetZoom);
+    return false;
 }
 
 void App::BeginZoomSession(POINT cursor) {
@@ -4856,6 +5061,9 @@ void App::ZoomAt(int delta, POINT cursor) {
         return;
     }
 
+    if (toolbarZoomEditing_) {
+        CancelToolbarZoomInput();
+    }
     CancelDeferredRasterRefresh();
     BeginZoomSession(cursor);
     zoom_ = newZoom;
@@ -4868,6 +5076,11 @@ void App::ZoomAt(int delta, POINT cursor) {
     }
 
     InvalidateCanvas();
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    RECT toolbarRect = clientRect;
+    toolbarRect.bottom = ToolbarHeight(IsZoomed(window_));
+    InvalidateRect(window_, &toolbarRect, FALSE);
 }
 
 void App::EndZoomSession() {
@@ -5475,15 +5688,12 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     HFONT labelFont = CreateFontW(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
     const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
+    HGDIOBJ previousFont = SelectObject(hdc, bodyFont);
+    const ToolbarTitleLayout titleLayout = ResolveToolbarTitleLayout(layout, hdc, CurrentWindowTitle(), ZoomIndicatorLabel());
+    SelectObject(hdc, previousFont);
 
-    HGDIOBJ previousFont = SelectObject(hdc, labelFont);
+    previousFont = SelectObject(hdc, labelFont);
     SetTextColor(hdc, primaryText);
-    RECT fileRect = layout.menu.fileRect;
-    RECT editRect = layout.menu.editRect;
-    RECT viewRect = layout.menu.viewRect;
-    DrawTextW(hdc, L"File", -1, &fileRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    DrawTextW(hdc, L"Edit", -1, &editRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    DrawTextW(hdc, L"View", -1, &viewRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     const auto paintIconToolButton = [&](RECT rect, auto&& paintFallbackIcon, const wchar_t* svgFileName, bool selected, bool enabled = true) {
         const COLORREF iconColor = enabled
@@ -5586,16 +5796,55 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     paintWindowButton(layout.maximizeRect, 1, hoveredWindowButton_ == 1);
     paintWindowButton(layout.closeRect, 2, hoveredWindowButton_ == 2);
 
-    const int titleLeftBound = layout.menu.viewRect.right + 18;
-    const int titleRightBound = (HasRect(layout.undoRect) ? layout.undoRect.left : layout.moveToolRect.left) - 16;
-    RECT titleRect = MakeRect(titleLeftBound, ToolbarTopInset(IsZoomed(window_)), titleRightBound, toolbarHeight - 1);
-    if ((titleRect.right - titleRect.left) >= 72) {
-        SetTextColor(hdc, mutedText);
+    if (HasRect(titleLayout.fileTitleRect)) {
+        SetTextColor(hdc, (hoveredTitleMenu_ || titleMenuActive_) ? accent : mutedText);
         SelectObject(hdc, bodyFont);
         std::wstring title = CurrentWindowTitle();
-        titleRect.left += 4;
-        titleRect.right -= 4;
-        DrawTextW(hdc, title.c_str(), -1, &titleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT titleTextRect = titleLayout.titleTextRect;
+        DrawTextW(hdc, title.c_str(), -1, &titleTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+
+    if (HasRect(titleLayout.fileTitleRect) && HasRect(titleLayout.zoomRect)) {
+        HPEN dividerPen = CreatePen(PS_SOLID, 1, panelBorder);
+        HGDIOBJ previousDividerPen = SelectObject(hdc, dividerPen);
+        MoveToEx(hdc, titleLayout.dividerX, titleLayout.fileTitleRect.top + 11, nullptr);
+        LineTo(hdc, titleLayout.dividerX, titleLayout.fileTitleRect.bottom - 11);
+        SelectObject(hdc, previousDividerPen);
+        DeleteObject(dividerPen);
+    }
+
+    if (HasRect(titleLayout.zoomRect)) {
+        const std::wstring zoomLabel = ZoomIndicatorLabel();
+        SetTextColor(hdc, toolbarZoomEditing_ ? RGB(244, 247, 252) : mutedText);
+        SelectObject(hdc, bodyFont);
+        if (toolbarZoomEditing_) {
+            RECT zoomEntryRect = titleLayout.zoomTextRect;
+            const int zoomTextWidth = MeasureToolbarTextWidth(hdc, zoomLabel);
+            const int visualWidth = std::clamp(zoomTextWidth + 12, 34, static_cast<int>(titleLayout.zoomRect.right - titleLayout.zoomRect.left));
+            RECT zoomVisualRect = titleLayout.zoomRect;
+            zoomVisualRect.right = zoomVisualRect.left + visualWidth;
+            zoomVisualRect.top += 7;
+            zoomVisualRect.bottom -= 7;
+            StrokeRoundedRect(hdc, zoomVisualRect, accent, 1);
+            zoomEntryRect = zoomVisualRect;
+            zoomEntryRect.left += 5;
+            zoomEntryRect.right -= 5;
+            DrawTextW(hdc, zoomLabel.c_str(), -1, &zoomEntryRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            SIZE textSize {};
+            if (GetTextExtentPoint32W(hdc, zoomLabel.c_str(), static_cast<int>(zoomLabel.size()), &textSize) != 0) {
+                const int caretX = std::min(static_cast<int>(zoomEntryRect.right) - 1, static_cast<int>(zoomEntryRect.left) + static_cast<int>(textSize.cx) + 1);
+                HPEN caretPen = CreatePen(PS_SOLID, 1, RGB(244, 247, 252));
+                HGDIOBJ oldCaretPen = SelectObject(hdc, caretPen);
+                MoveToEx(hdc, caretX, zoomVisualRect.top + 4, nullptr);
+                LineTo(hdc, caretX, zoomVisualRect.bottom - 4);
+                SelectObject(hdc, oldCaretPen);
+                DeleteObject(caretPen);
+            }
+        } else {
+            RECT zoomTextRect = titleLayout.zoomTextRect;
+            DrawTextW(hdc, zoomLabel.c_str(), -1, &zoomTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
     }
 
     FillRoundedRect(hdc, layout.currentColorRect, ToColorRef(palette_[colorIndex_]));
@@ -6572,7 +6821,23 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
             const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
-            return IsToolbarControlRect(layout, clientCursor) ? HTCLIENT : HTCAPTION;
+            HDC windowDc = GetDC(window_);
+            HFONT bodyFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
+            HGDIOBJ previousFont = windowDc != nullptr && bodyFont != nullptr ? SelectObject(windowDc, bodyFont) : nullptr;
+            const ToolbarTitleLayout titleLayout = windowDc != nullptr
+                ? ResolveToolbarTitleLayout(layout, windowDc, CurrentWindowTitle(), ZoomIndicatorLabel())
+                : ToolbarTitleLayout {};
+            if (windowDc != nullptr && previousFont != nullptr) {
+                SelectObject(windowDc, previousFont);
+            }
+            if (bodyFont != nullptr) {
+                DeleteObject(bodyFont);
+            }
+            if (windowDc != nullptr) {
+                ReleaseDC(window_, windowDc);
+            }
+            return IsToolbarControlRect(layout, titleLayout, clientCursor) ? HTCLIENT : HTCAPTION;
         }
         return HTCLIENT;
     }
@@ -6593,6 +6858,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
 
         CancelPageJumpInput();
+        ApplyToolbarZoomInput();
+        CancelToolbarZoomInput();
         CancelQuickSizePopup();
 
         ClosePaletteOverlays();
@@ -6627,10 +6894,28 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_MOUSEMOVE: {
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         int hoveredWindowButton = -1;
+        bool hoveredTitleMenu = false;
         if (cursor.y >= 0 && cursor.y < ToolbarHeight(IsZoomed(window_))) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
             const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
+            HDC windowDc = GetDC(window_);
+            HFONT bodyFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
+            HGDIOBJ previousFont = windowDc != nullptr && bodyFont != nullptr ? SelectObject(windowDc, bodyFont) : nullptr;
+            const ToolbarTitleLayout titleLayout = windowDc != nullptr
+                ? ResolveToolbarTitleLayout(layout, windowDc, CurrentWindowTitle(), ZoomIndicatorLabel())
+                : ToolbarTitleLayout {};
+            if (windowDc != nullptr && previousFont != nullptr) {
+                SelectObject(windowDc, previousFont);
+            }
+            if (bodyFont != nullptr) {
+                DeleteObject(bodyFont);
+            }
+            if (windowDc != nullptr) {
+                ReleaseDC(window_, windowDc);
+            }
+            hoveredTitleMenu = PtInRect(&titleLayout.fileTitleRect, cursor) != 0;
             if (PtInRect(&layout.minimizeRect, cursor) != 0) {
                 hoveredWindowButton = 0;
             } else if (PtInRect(&layout.maximizeRect, cursor) != 0) {
@@ -6641,6 +6926,13 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         if (hoveredWindowButton_ != hoveredWindowButton) {
             hoveredWindowButton_ = hoveredWindowButton;
+            RECT clientRect {};
+            GetClientRect(window_, &clientRect);
+            clientRect.bottom = ToolbarHeight(IsZoomed(window_));
+            InvalidateRect(window_, &clientRect, FALSE);
+        }
+        if (hoveredTitleMenu_ != hoveredTitleMenu) {
+            hoveredTitleMenu_ = hoveredTitleMenu;
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
             clientRect.bottom = ToolbarHeight(IsZoomed(window_));
@@ -6679,8 +6971,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     }
     case WM_MOUSELEAVE:
         trackingMouseLeave_ = false;
-        if (hoveredWindowButton_ != -1) {
+        if (hoveredWindowButton_ != -1 || hoveredTitleMenu_) {
             hoveredWindowButton_ = -1;
+            hoveredTitleMenu_ = false;
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
             clientRect.bottom = ToolbarHeight(IsZoomed(window_));
@@ -6920,6 +7213,44 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             InvalidateRect(window_, nullptr, FALSE);
             return 0;
         }
+        if (toolbarZoomEditing_) {
+            if (wParam == VK_BACK) {
+                if (toolbarZoomReplaceOnType_) {
+                    toolbarZoomText_.clear();
+                    toolbarZoomReplaceOnType_ = false;
+                }
+                if (!toolbarZoomText_.empty()) {
+                    toolbarZoomText_.pop_back();
+                }
+            } else if ((wParam >= L'0' && wParam <= L'9')) {
+                if (toolbarZoomReplaceOnType_) {
+                    toolbarZoomText_.clear();
+                    toolbarZoomReplaceOnType_ = false;
+                }
+                if (toolbarZoomText_.size() < 6) {
+                    toolbarZoomText_.push_back(static_cast<wchar_t>(wParam));
+                }
+            } else if (wParam == L'.') {
+                if (toolbarZoomReplaceOnType_) {
+                    toolbarZoomText_.clear();
+                    toolbarZoomReplaceOnType_ = false;
+                }
+                if (toolbarZoomText_.find(L'.') == std::wstring::npos) {
+                    if (toolbarZoomText_.empty()) {
+                        toolbarZoomText_ = L"0.";
+                    } else {
+                        toolbarZoomText_.push_back(L'.');
+                    }
+                }
+            } else if (wParam == VK_RETURN) {
+                ApplyToolbarZoomInput();
+                CancelToolbarZoomInput();
+            } else if (wParam == 27) {
+                CancelToolbarZoomInput();
+            }
+            InvalidateRect(window_, nullptr, FALSE);
+            return 0;
+        }
         break;
     case WM_KEYDOWN:
     {
@@ -6950,6 +7281,20 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             }
             if (wParam == VK_ESCAPE) {
                 CancelToolbarBrushSizeInput();
+                InvalidateRect(window_, nullptr, FALSE);
+                return 0;
+            }
+            return 0;
+        }
+        if (toolbarZoomEditing_) {
+            if (wParam == VK_RETURN) {
+                ApplyToolbarZoomInput();
+                CancelToolbarZoomInput();
+                InvalidateRect(window_, nullptr, FALSE);
+                return 0;
+            }
+            if (wParam == VK_ESCAPE) {
+                CancelToolbarZoomInput();
                 InvalidateRect(window_, nullptr, FALSE);
                 return 0;
             }
@@ -7003,13 +7348,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         case VK_ADD:
         case VK_OEM_PLUS:
             ChangeBrushSize(kBrushSizeStep);
-            return 0;
-        case '1':
-        case '2':
-        case '3':
-        case '4':
-        case '5':
-            SetColorIndex(static_cast<std::size_t>(wParam - '1'));
             return 0;
         case 'C':
             CycleColor();

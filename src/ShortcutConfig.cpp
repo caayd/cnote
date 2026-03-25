@@ -7,7 +7,7 @@ namespace cnote {
 
 namespace {
 
-constexpr std::array<ShortcutDefinition, 20> kShortcutDefinitions {{
+constexpr std::array<ShortcutDefinition, 25> kShortcutDefinitions {{
     { App::ShortcutAction::ToolDraw, L"Draw Tool", { 'D', false, false, false } },
     { App::ShortcutAction::ToolSelect, L"Select Tool", { 'S', false, false, false } },
     { App::ShortcutAction::ToolMove, L"Move Tool", { 'M', false, false, false } },
@@ -22,6 +22,11 @@ constexpr std::array<ShortcutDefinition, 20> kShortcutDefinitions {{
     { App::ShortcutAction::Copy, L"Copy", { 'C', true, false, false } },
     { App::ShortcutAction::Paste, L"Paste", { 'V', true, false, false } },
     { App::ShortcutAction::ResetView, L"Reset View", { '0', false, false, false } },
+    { App::ShortcutAction::ZoomPreset1, L"Zoom Preset 1", { 0, false, false, false } },
+    { App::ShortcutAction::ZoomPreset2, L"Zoom Preset 2", { 0, false, false, false } },
+    { App::ShortcutAction::ZoomPreset3, L"Zoom Preset 3", { 0, false, false, false } },
+    { App::ShortcutAction::ZoomPreset4, L"Zoom Preset 4", { 0, false, false, false } },
+    { App::ShortcutAction::ZoomPreset5, L"Zoom Preset 5", { 0, false, false, false } },
     { App::ShortcutAction::ToggleSettings, L"Settings", { 0, false, false, false } },
     { App::ShortcutAction::TogglePdfSidebar, L"PDF Sidebar", { 'B', true, false, false } },
     { App::ShortcutAction::ToggleQuickSize, L"Quick Size", { 'W', true, false, false } },
@@ -75,6 +80,16 @@ const char* ShortcutActionConfigName(App::ShortcutAction action) {
         return "Paste";
     case App::ShortcutAction::ResetView:
         return "ResetView";
+    case App::ShortcutAction::ZoomPreset1:
+        return "ZoomPreset1";
+    case App::ShortcutAction::ZoomPreset2:
+        return "ZoomPreset2";
+    case App::ShortcutAction::ZoomPreset3:
+        return "ZoomPreset3";
+    case App::ShortcutAction::ZoomPreset4:
+        return "ZoomPreset4";
+    case App::ShortcutAction::ZoomPreset5:
+        return "ZoomPreset5";
     case App::ShortcutAction::ToggleSettings:
         return "ToggleSettings";
     case App::ShortcutAction::TogglePdfSidebar:

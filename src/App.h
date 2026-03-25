@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <array>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -24,6 +25,8 @@ class NewPageSettingsWindow;
 
 class App {
 public:
+    static constexpr std::size_t kZoomPresetCount = 5;
+
     explicit App(HINSTANCE instance);
     ~App();
 
@@ -63,6 +66,11 @@ public:
         Copy,
         Paste,
         ResetView,
+        ZoomPreset1,
+        ZoomPreset2,
+        ZoomPreset3,
+        ZoomPreset4,
+        ZoomPreset5,
         ToggleSettings,
         TogglePdfSidebar,
         ToggleQuickSize,
@@ -168,6 +176,7 @@ public:
         float inputSmoothing = 0.3f;
         float strokeSmoothing = 0.55f;
         unsigned int autoSaveIntervalSeconds = 60;
+        std::array<float, kZoomPresetCount> zoomPresets {};
     };
 
     struct NewPageSettingsState {
@@ -273,6 +282,8 @@ private:
     [[nodiscard]] bool AppendPagesFromDocumentPath(const std::wstring& filePath);
     void PanBy(float dx, float dy);
     void ZoomAt(int delta, POINT cursor);
+    void SetZoom(float zoom, std::optional<POINT> anchor = std::nullopt);
+    [[nodiscard]] bool ApplyZoomPreset(std::size_t presetIndex);
     void BeginZoomSession(POINT cursor);
     void EndZoomSession();
     void ScheduleDeferredRasterRefresh();
@@ -332,6 +343,7 @@ private:
     [[nodiscard]] std::uint32_t ComposeColor(unsigned char red, unsigned char green, unsigned char blue) const;
     [[nodiscard]] unsigned char GetColorChannel(std::uint32_t color, int shift) const;
     [[nodiscard]] std::wstring CurrentWindowTitle() const;
+    [[nodiscard]] std::wstring ZoomIndicatorLabel() const;
     [[nodiscard]] std::wstring PageIndicatorLabel() const;
     [[nodiscard]] bool IsPdfSidebarVisible() const;
     [[nodiscard]] int PdfSidebarWidth() const;
@@ -350,6 +362,9 @@ private:
     void CancelToolbarBrushSizeInput();
     void BeginToolbarBrushSizeInput();
     void ApplyToolbarBrushSizeInput();
+    void CancelToolbarZoomInput();
+    void BeginToolbarZoomInput();
+    void ApplyToolbarZoomInput();
     void BeginToolbarBrushSliderDrag(POINT cursor);
     void UpdateToolbarBrushSliderDrag(POINT cursor);
     void EndToolbarBrushSliderDrag();
@@ -455,11 +470,16 @@ private:
     std::wstring pageJumpText_ {};
     std::optional<Tool> quickSizePopupTool_ {};
     POINT quickSizePopupAnchor_ {};
+    bool toolbarZoomEditing_ = false;
+    bool toolbarZoomReplaceOnType_ = false;
+    std::wstring toolbarZoomText_ {};
     bool toolbarBrushSizeEditing_ = false;
     bool toolbarBrushSizeReplaceOnType_ = false;
     std::optional<Tool> toolbarBrushSizeEditTool_ {};
     std::wstring toolbarBrushSizeText_ {};
     bool toolbarBrushSliderDragging_ = false;
+    bool hoveredTitleMenu_ = false;
+    bool titleMenuActive_ = false;
     int hoveredWindowButton_ = -1;
     bool trackingMouseLeave_ = false;
     bool documentDirty_ = false;

@@ -48,13 +48,14 @@ constexpr int kIdPasteHex = 103;
 constexpr int kIdShortcutList = 120;
 constexpr int kIdChangeShortcut = 121;
 constexpr int kIdClearShortcut = 122;
-constexpr int kIdRedSlider = 200;
-constexpr int kIdGreenSlider = 201;
-constexpr int kIdBlueSlider = 202;
+constexpr int kIdHueSlider = 200;
+constexpr int kIdSaturationSlider = 201;
+constexpr int kIdLightnessSlider = 202;
 constexpr int kIdStabilizationSlider = 205;
 constexpr int kIdSpacingSlider = 206;
 constexpr int kIdStrokeSmoothingSlider = 207;
 constexpr int kIdAutoSaveSlider = 208;
+constexpr int kIdZoomPresetBase = 300;
 
 struct SettingsWindowLayout {
     RECT palettePanel {};
@@ -85,6 +86,9 @@ struct SettingsWindowLayout {
     RECT strokeSmoothingSliderRect {};
     RECT autoSaveLabelRect {};
     RECT autoSaveSliderRect {};
+    std::array<RECT, App::kZoomPresetCount> zoomPresetLabelRects {};
+    std::array<RECT, App::kZoomPresetCount> zoomPresetEditRects {};
+    RECT zoomPresetHintRect {};
     RECT scrollbarTrackRect {};
     RECT scrollbarThumbRect {};
     bool showScrollbar = false;
@@ -94,12 +98,6 @@ struct SettingsWindowLayout {
 std::wstring FormatPaletteEntry(std::size_t index, std::uint32_t color) {
     wchar_t buffer[32] = {};
     std::swprintf(buffer, std::size(buffer), L"%zu. #%06X", index + 1U, color & 0xFFFFFFU);
-    return buffer;
-}
-
-std::wstring FormatSliderLabel(const wchar_t* prefix, int value) {
-    wchar_t buffer[64] = {};
-    std::swprintf(buffer, std::size(buffer), L"%ls: %d", prefix, value);
     return buffer;
 }
 
@@ -127,6 +125,112 @@ std::wstring FormatAutoSaveLabel(unsigned int seconds) {
         return L"Auto Save: " + std::to_wstring(minutes) + (minutes == 1U ? L" min" : L" mins");
     }
     return L"Auto Save: " + std::to_wstring(seconds) + L" sec";
+}
+
+std::wstring FormatZoomPresetValue(float zoom) {
+    if (zoom <= 0.0f) {
+        return L"";
+    }
+
+    wchar_t buffer[32] = {};
+    const float percent = zoom * 100.0f;
+    if (std::abs(percent - std::round(percent)) < 0.05f) {
+        std::swprintf(buffer, std::size(buffer), L"%.0f", percent);
+    } else {
+        std::swprintf(buffer, std::size(buffer), L"%.1f", percent);
+    }
+    std::wstring value = buffer;
+    while (!value.empty() && value.back() == L'0') {
+        value.pop_back();
+    }
+    if (!value.empty() && value.back() == L'.') {
+        value.pop_back();
+    }
+    return value;
+}
+
+struct HslColor {
+    float hue = 0.0f;
+    float saturation = 0.0f;
+    float lightness = 0.0f;
+};
+
+HslColor RgbToHsl(std::uint32_t color) {
+    const float red = static_cast<float>((color >> 16U) & 0xFFU) / 255.0f;
+    const float green = static_cast<float>((color >> 8U) & 0xFFU) / 255.0f;
+    const float blue = static_cast<float>(color & 0xFFU) / 255.0f;
+    const float maxChannel = std::max({ red, green, blue });
+    const float minChannel = std::min({ red, green, blue });
+    const float delta = maxChannel - minChannel;
+
+    HslColor hsl {};
+    hsl.lightness = (maxChannel + minChannel) * 0.5f;
+    if (delta <= 0.0001f) {
+        return hsl;
+    }
+
+    hsl.saturation = delta / (1.0f - std::abs((2.0f * hsl.lightness) - 1.0f));
+    if (maxChannel == red) {
+        hsl.hue = 60.0f * std::fmod(((green - blue) / delta), 6.0f);
+    } else if (maxChannel == green) {
+        hsl.hue = 60.0f * (((blue - red) / delta) + 2.0f);
+    } else {
+        hsl.hue = 60.0f * (((red - green) / delta) + 4.0f);
+    }
+    if (hsl.hue < 0.0f) {
+        hsl.hue += 360.0f;
+    }
+    return hsl;
+}
+
+std::uint32_t HslToColor(float hueDegrees, float saturation, float lightness) {
+    const float hue = std::fmod(std::max(0.0f, hueDegrees), 360.0f);
+    const float clampedSaturation = std::clamp(saturation, 0.0f, 1.0f);
+    const float clampedLightness = std::clamp(lightness, 0.0f, 1.0f);
+    const float chroma = (1.0f - std::abs((2.0f * clampedLightness) - 1.0f)) * clampedSaturation;
+    const float huePrime = hue / 60.0f;
+    const float x = chroma * (1.0f - std::abs(std::fmod(huePrime, 2.0f) - 1.0f));
+    float red = 0.0f;
+    float green = 0.0f;
+    float blue = 0.0f;
+
+    if (huePrime < 1.0f) {
+        red = chroma;
+        green = x;
+    } else if (huePrime < 2.0f) {
+        red = x;
+        green = chroma;
+    } else if (huePrime < 3.0f) {
+        green = chroma;
+        blue = x;
+    } else if (huePrime < 4.0f) {
+        green = x;
+        blue = chroma;
+    } else if (huePrime < 5.0f) {
+        red = x;
+        blue = chroma;
+    } else {
+        red = chroma;
+        blue = x;
+    }
+
+    const float match = clampedLightness - (chroma * 0.5f);
+    const auto outRed = static_cast<std::uint32_t>(std::clamp(std::lround((red + match) * 255.0f), 0L, 255L));
+    const auto outGreen = static_cast<std::uint32_t>(std::clamp(std::lround((green + match) * 255.0f), 0L, 255L));
+    const auto outBlue = static_cast<std::uint32_t>(std::clamp(std::lround((blue + match) * 255.0f), 0L, 255L));
+    return 0xFF000000U | (outRed << 16U) | (outGreen << 8U) | outBlue;
+}
+
+std::wstring FormatHueLabel(int hue) {
+    wchar_t buffer[64] = {};
+    std::swprintf(buffer, std::size(buffer), L"Hue: %d deg", hue);
+    return buffer;
+}
+
+std::wstring FormatPercentLabel(const wchar_t* prefix, int value) {
+    wchar_t buffer[64] = {};
+    std::swprintf(buffer, std::size(buffer), L"%ls: %d%%", prefix, value);
+    return buffer;
 }
 
 void SetControlText(HWND control, const std::wstring& text) {
@@ -230,7 +334,19 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, std::size_t pale
     layout.strokeSmoothingSliderRect = MakeRect(drawingSliderLeft, layout.strokeSmoothingLabelRect.bottom + 2, drawingSliderRight, layout.strokeSmoothingLabelRect.bottom + 28);
     layout.autoSaveLabelRect = MakeRect(drawingSliderLeft, layout.strokeSmoothingSliderRect.bottom + 12, drawingSliderRight, layout.strokeSmoothingSliderRect.bottom + 28);
     layout.autoSaveSliderRect = MakeRect(drawingSliderLeft, layout.autoSaveLabelRect.bottom + 2, drawingSliderRight, layout.autoSaveLabelRect.bottom + 28);
-    layout.drawingPanel.bottom = layout.autoSaveSliderRect.bottom + 18;
+    const int zoomPresetTop = layout.autoSaveSliderRect.bottom + 16;
+    const int zoomLabelWidth = 74;
+    const int zoomEditWidth = 88;
+    const int zoomRowHeight = 26;
+    const int zoomRowGap = 8;
+    for (std::size_t index = 0; index < layout.zoomPresetLabelRects.size(); ++index) {
+        const int rowTop = zoomPresetTop + static_cast<int>(index) * (zoomRowHeight + zoomRowGap);
+        layout.zoomPresetLabelRects[index] = MakeRect(drawingSliderLeft, rowTop, drawingSliderLeft + zoomLabelWidth, rowTop + zoomRowHeight);
+        layout.zoomPresetEditRects[index] = MakeRect(drawingSliderLeft + zoomLabelWidth + 10, rowTop - 2, drawingSliderLeft + zoomLabelWidth + 10 + zoomEditWidth, rowTop + zoomRowHeight);
+    }
+    const int zoomHintTop = layout.zoomPresetEditRects.back().bottom + 8;
+    layout.zoomPresetHintRect = MakeRect(drawingSliderLeft, zoomHintTop, drawingSliderRight, zoomHintTop + 34);
+    layout.drawingPanel.bottom = layout.zoomPresetHintRect.bottom + 18;
 
     const int visibleBottom = static_cast<int>(clientRect.bottom) + scrollOffset - margin;
     const int shortcutPanelBottom = std::max({ visibleBottom, static_cast<int>(layout.drawingPanel.bottom), topOffset + 600 });
@@ -292,6 +408,13 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, std::size_t pale
     OffsetRectY(layout.strokeSmoothingSliderRect, deltaY);
     OffsetRectY(layout.autoSaveLabelRect, deltaY);
     OffsetRectY(layout.autoSaveSliderRect, deltaY);
+    for (RECT& rect : layout.zoomPresetLabelRects) {
+        OffsetRectY(rect, deltaY);
+    }
+    for (RECT& rect : layout.zoomPresetEditRects) {
+        OffsetRectY(rect, deltaY);
+    }
+    OffsetRectY(layout.zoomPresetHintRect, deltaY);
 
     return layout;
 }
@@ -405,6 +528,7 @@ void SettingsWindow::Refresh() {
 
     RefreshPaletteList();
     RefreshSliderValues();
+    RefreshZoomPresetFields();
     RefreshShortcutList();
     RefreshShortcutButtons();
     InvalidateRect(window_, nullptr, FALSE);
@@ -476,17 +600,21 @@ void SettingsWindow::CreateControls() {
         return CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | TBS_HORZ | TBS_AUTOTICKS,
             x, y, width, height, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), app_.instance_, nullptr);
     };
+    const auto createEdit = [&](int id, int x, int y, int width, int height) {
+        return CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
+            x, y, width, height, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), app_.instance_, nullptr);
+    };
 
     addColorButton_ = createButton(L"Add Color", kIdAddColor, 0, 0, 120, 28);
     removeColorButton_ = createButton(L"Remove Color", kIdRemoveColor, 0, 0, 120, 28);
     pasteHexButton_ = createButton(L"Paste Hex", kIdPasteHex, 0, 0, 120, 28);
 
-    redLabel_ = createLabel(L"Red", 0, 0, 220, 20);
-    redSlider_ = createSlider(kIdRedSlider, 0, 0, 320, 30);
-    greenLabel_ = createLabel(L"Green", 0, 0, 220, 20);
-    greenSlider_ = createSlider(kIdGreenSlider, 0, 0, 320, 30);
-    blueLabel_ = createLabel(L"Blue", 0, 0, 220, 20);
-    blueSlider_ = createSlider(kIdBlueSlider, 0, 0, 320, 30);
+    redLabel_ = createLabel(L"Hue", 0, 0, 220, 20);
+    redSlider_ = createSlider(kIdHueSlider, 0, 0, 320, 30);
+    greenLabel_ = createLabel(L"Saturation", 0, 0, 220, 20);
+    greenSlider_ = createSlider(kIdSaturationSlider, 0, 0, 320, 30);
+    blueLabel_ = createLabel(L"Lightness", 0, 0, 220, 20);
+    blueSlider_ = createSlider(kIdLightnessSlider, 0, 0, 320, 30);
     stabilizationLabel_ = createLabel(L"Stabilization", 0, 0, 260, 20);
     stabilizationSlider_ = createSlider(kIdStabilizationSlider, 0, 0, 320, 30);
     spacingLabel_ = createLabel(L"Point Spacing", 0, 0, 260, 20);
@@ -495,6 +623,12 @@ void SettingsWindow::CreateControls() {
     strokeSmoothingSlider_ = createSlider(kIdStrokeSmoothingSlider, 0, 0, 320, 30);
     autoSaveLabel_ = createLabel(L"Auto Save", 0, 0, 260, 20);
     autoSaveSlider_ = createSlider(kIdAutoSaveSlider, 0, 0, 320, 30);
+    for (std::size_t index = 0; index < zoomPresetLabels_.size(); ++index) {
+        const std::wstring label = L"Preset " + std::to_wstring(index + 1U) + L" (%)";
+        zoomPresetLabels_[index] = createLabel(label.c_str(), 0, 0, 80, 20);
+        zoomPresetEdits_[index] = createEdit(kIdZoomPresetBase + static_cast<int>(index), 0, 0, 96, 24);
+    }
+    zoomPresetHintLabel_ = createLabel(L"Leave blank to keep a preset unassigned.", 0, 0, 280, 32);
 
     shortcutList_ = CreateWindowExW(
         0,
@@ -513,9 +647,9 @@ void SettingsWindow::CreateControls() {
     clearShortcutButton_ = createButton(L"Clear Shortcut", kIdClearShortcut, 0, 0, 148, 28);
     shortcutHintLabel_ = createLabel(L"Select a command to edit its binding.", 0, 0, 148, 40);
 
-    SendMessageW(redSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
-    SendMessageW(greenSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
-    SendMessageW(blueSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
+    SendMessageW(redSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 360));
+    SendMessageW(greenSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+    SendMessageW(blueSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
     SendMessageW(stabilizationSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(5, 95));
     SendMessageW(spacingSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(5, 405));
     SendMessageW(strokeSmoothingSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
@@ -565,6 +699,19 @@ void SettingsWindow::ApplyFonts() {
     if (shortcutHintLabel_ != nullptr) {
         SendMessageW(shortcutHintLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
     }
+    if (zoomPresetHintLabel_ != nullptr) {
+        SendMessageW(zoomPresetHintLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+    }
+    for (HWND control : zoomPresetLabels_) {
+        if (control != nullptr) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+        }
+    }
+    for (HWND control : zoomPresetEdits_) {
+        if (control != nullptr) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+        }
+    }
 }
 
 void SettingsWindow::LayoutControls() {
@@ -583,7 +730,7 @@ void SettingsWindow::LayoutControls() {
         contentHeight_ = layout.contentHeight;
     }
 
-    HDWP deferred = BeginDeferWindowPos(21);
+    HDWP deferred = BeginDeferWindowPos(32);
     DeferMoveControl(deferred, addColorButton_, layout.addColorButton);
     DeferMoveControl(deferred, removeColorButton_, layout.removeColorButton);
     DeferMoveControl(deferred, pasteHexButton_, layout.pasteHexButton);
@@ -601,6 +748,11 @@ void SettingsWindow::LayoutControls() {
     DeferMoveControl(deferred, strokeSmoothingSlider_, layout.strokeSmoothingSliderRect);
     DeferMoveControl(deferred, autoSaveLabel_, layout.autoSaveLabelRect);
     DeferMoveControl(deferred, autoSaveSlider_, layout.autoSaveSliderRect);
+    for (std::size_t index = 0; index < zoomPresetLabels_.size(); ++index) {
+        DeferMoveControl(deferred, zoomPresetLabels_[index], layout.zoomPresetLabelRects[index]);
+        DeferMoveControl(deferred, zoomPresetEdits_[index], layout.zoomPresetEditRects[index]);
+    }
+    DeferMoveControl(deferred, zoomPresetHintLabel_, layout.zoomPresetHintRect);
     DeferMoveControl(deferred, shortcutList_, layout.shortcutListRect);
     DeferMoveControl(deferred, changeShortcutButton_, layout.changeShortcutButton);
     DeferMoveControl(deferred, clearShortcutButton_, layout.clearShortcutButton);
@@ -643,24 +795,31 @@ void SettingsWindow::RefreshPaletteList() {
 
 void SettingsWindow::RefreshSliderValues() {
     const std::uint32_t color = app_.palette_[app_.settings_.paletteIndex];
-    const int red = app_.GetColorChannel(color, 16);
-    const int green = app_.GetColorChannel(color, 8);
-    const int blue = app_.GetColorChannel(color, 0);
-    SendMessageW(redSlider_, TBM_SETPOS, TRUE, red);
-    SendMessageW(greenSlider_, TBM_SETPOS, TRUE, green);
-    SendMessageW(blueSlider_, TBM_SETPOS, TRUE, blue);
+    const HslColor hsl = RgbToHsl(color);
+    const int hue = static_cast<int>(std::lround(hsl.hue));
+    const int saturation = static_cast<int>(std::lround(hsl.saturation * 100.0f));
+    const int lightness = static_cast<int>(std::lround(hsl.lightness * 100.0f));
+    SendMessageW(redSlider_, TBM_SETPOS, TRUE, hue);
+    SendMessageW(greenSlider_, TBM_SETPOS, TRUE, saturation);
+    SendMessageW(blueSlider_, TBM_SETPOS, TRUE, lightness);
     SendMessageW(stabilizationSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.inputSmoothing * 100.0f)));
     SendMessageW(spacingSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.inputSpacing * 100.0f)));
     SendMessageW(strokeSmoothingSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.strokeSmoothing * 100.0f)));
     SendMessageW(autoSaveSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(app_.settings_.autoSaveIntervalSeconds));
 
-    SetControlText(redLabel_, FormatSliderLabel(L"Red", red));
-    SetControlText(greenLabel_, FormatSliderLabel(L"Green", green));
-    SetControlText(blueLabel_, FormatSliderLabel(L"Blue", blue));
+    SetControlText(redLabel_, FormatHueLabel(hue));
+    SetControlText(greenLabel_, FormatPercentLabel(L"Saturation", saturation));
+    SetControlText(blueLabel_, FormatPercentLabel(L"Lightness", lightness));
     SetControlText(stabilizationLabel_, FormatFloatSliderLabel(L"Stabilization", app_.settings_.inputSmoothing, 100));
     SetControlText(spacingLabel_, FormatSpacingLabel(app_.settings_.inputSpacing));
     SetControlText(strokeSmoothingLabel_, FormatFloatSliderLabel(L"Stroke Smoothing", app_.settings_.strokeSmoothing, 100));
     SetControlText(autoSaveLabel_, FormatAutoSaveLabel(app_.settings_.autoSaveIntervalSeconds));
+}
+
+void SettingsWindow::RefreshZoomPresetFields() {
+    for (std::size_t index = 0; index < zoomPresetEdits_.size(); ++index) {
+        SetControlText(zoomPresetEdits_[index], FormatZoomPresetValue(app_.settings_.zoomPresets[index]));
+    }
 }
 
 void SettingsWindow::RefreshShortcutList() {
@@ -745,6 +904,13 @@ void SettingsWindow::HandleCommand(WPARAM wParam, LPARAM lParam) {
         }
         break;
     default:
+        if (controlId >= kIdZoomPresetBase && controlId < kIdZoomPresetBase + static_cast<int>(zoomPresetEdits_.size())) {
+            if (notification == EN_CHANGE) {
+                HandleZoomPresetEdit(reinterpret_cast<HWND>(lParam), false);
+            } else if (notification == EN_KILLFOCUS) {
+                HandleZoomPresetEdit(reinterpret_cast<HWND>(lParam), true);
+            }
+        }
         static_cast<void>(lParam);
         break;
     }
@@ -754,7 +920,7 @@ void SettingsWindow::HandleHScroll(LPARAM lParam) {
     if (reinterpret_cast<HWND>(lParam) == redSlider_
         || reinterpret_cast<HWND>(lParam) == greenSlider_
         || reinterpret_cast<HWND>(lParam) == blueSlider_) {
-        UpdatePaletteFromRgbSliders();
+        UpdatePaletteFromHslSliders();
         RefreshPaletteList();
         RefreshSliderValues();
         InvalidateRect(app_.window_, nullptr, FALSE);
@@ -782,8 +948,16 @@ void SettingsWindow::HandleHScroll(LPARAM lParam) {
 }
 
 HBRUSH SettingsWindow::HandleControlColor(HDC hdc, HWND control) {
+    const bool isZoomEdit = std::find(zoomPresetEdits_.begin(), zoomPresetEdits_.end(), control) != zoomPresetEdits_.end();
+    if (isZoomEdit) {
+        SetBkMode(hdc, OPAQUE);
+        SetBkColor(hdc, kPanelFill);
+        SetTextColor(hdc, kTextPrimary);
+        return panelBrush_;
+    }
+
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, control == shortcutHintLabel_ ? kTextMuted : kTextPrimary);
+    SetTextColor(hdc, (control == shortcutHintLabel_ || control == zoomPresetHintLabel_) ? kTextMuted : kTextPrimary);
     if (control == shortcutList_) {
         SetTextColor(hdc, kTextPrimary);
         return panelBrush_;
@@ -874,9 +1048,9 @@ void SettingsWindow::PaintWindow() {
         StrokeRoundedRect(memoryDc, thumbRect, draggingSlider_ == kind ? RGB(255, 255, 255) : RGB(120, 138, 162), 1);
     };
 
-    paintSlider(SliderKind::Red, layout.redSliderRect, 0, 255);
-    paintSlider(SliderKind::Green, layout.greenSliderRect, 0, 255);
-    paintSlider(SliderKind::Blue, layout.blueSliderRect, 0, 255);
+    paintSlider(SliderKind::Hue, layout.redSliderRect, 0, 360);
+    paintSlider(SliderKind::Saturation, layout.greenSliderRect, 0, 100);
+    paintSlider(SliderKind::Lightness, layout.blueSliderRect, 0, 100);
     paintSlider(SliderKind::Stabilization, layout.stabilizationSliderRect, 5, 95);
     paintSlider(SliderKind::Spacing, layout.spacingSliderRect, 5, 405);
     paintSlider(SliderKind::StrokeSmoothing, layout.strokeSmoothingSliderRect, 0, 100);
@@ -1031,21 +1205,64 @@ void SettingsWindow::HandleShortcutCapture(UINT key) {
     InvalidateRect(window_, nullptr, FALSE);
 }
 
-void SettingsWindow::UpdatePaletteFromRgbSliders() {
-    const auto red = static_cast<unsigned char>(SendMessageW(redSlider_, TBM_GETPOS, 0, 0));
-    const auto green = static_cast<unsigned char>(SendMessageW(greenSlider_, TBM_GETPOS, 0, 0));
-    const auto blue = static_cast<unsigned char>(SendMessageW(blueSlider_, TBM_GETPOS, 0, 0));
-    app_.palette_[app_.settings_.paletteIndex] = app_.ComposeColor(red, green, blue);
+void SettingsWindow::HandleZoomPresetEdit(HWND edit, bool normalizeText) {
+    if (edit == nullptr) {
+        return;
+    }
+
+    const auto presetIt = std::find(zoomPresetEdits_.begin(), zoomPresetEdits_.end(), edit);
+    if (presetIt == zoomPresetEdits_.end()) {
+        return;
+    }
+
+    const std::size_t presetIndex = static_cast<std::size_t>(std::distance(zoomPresetEdits_.begin(), presetIt));
+    wchar_t buffer[64] = {};
+    GetWindowTextW(edit, buffer, static_cast<int>(std::size(buffer)));
+    std::wstring text = buffer;
+    text.erase(std::remove_if(text.begin(), text.end(), [](wchar_t ch) {
+        return std::iswspace(ch) != 0 || ch == L'%';
+    }), text.end());
+
+    if (text.empty()) {
+        app_.settings_.zoomPresets[presetIndex] = 0.0f;
+        app_.SaveAppSettings();
+        if (normalizeText) {
+            SetControlText(edit, L"");
+        }
+        return;
+    }
+
+    wchar_t* end = nullptr;
+    const float parsedPercent = std::wcstof(text.c_str(), &end);
+    if (end == text.c_str() || *end != L'\0' || parsedPercent <= 0.0f) {
+        if (normalizeText) {
+            SetControlText(edit, FormatZoomPresetValue(app_.settings_.zoomPresets[presetIndex]));
+        }
+        return;
+    }
+
+    app_.settings_.zoomPresets[presetIndex] = std::clamp(parsedPercent / 100.0f, App::kMinZoom, App::kMaxZoom);
+    app_.SaveAppSettings();
+    if (normalizeText) {
+        SetControlText(edit, FormatZoomPresetValue(app_.settings_.zoomPresets[presetIndex]));
+    }
+}
+
+void SettingsWindow::UpdatePaletteFromHslSliders() {
+    const float hue = static_cast<float>(SendMessageW(redSlider_, TBM_GETPOS, 0, 0));
+    const float saturation = static_cast<float>(SendMessageW(greenSlider_, TBM_GETPOS, 0, 0)) / 100.0f;
+    const float lightness = static_cast<float>(SendMessageW(blueSlider_, TBM_GETPOS, 0, 0)) / 100.0f;
+    app_.palette_[app_.settings_.paletteIndex] = HslToColor(hue, saturation, lightness);
     app_.SaveAppSettings();
 }
 
 HWND SettingsWindow::SliderHandle(SliderKind kind) const {
     switch (kind) {
-    case SliderKind::Red:
+    case SliderKind::Hue:
         return redSlider_;
-    case SliderKind::Green:
+    case SliderKind::Saturation:
         return greenSlider_;
-    case SliderKind::Blue:
+    case SliderKind::Lightness:
         return blueSlider_;
     case SliderKind::Stabilization:
         return stabilizationSlider_;
@@ -1074,11 +1291,18 @@ void SettingsWindow::UpdateSliderValue(SliderKind kind, int value) {
 
     if (HWND slider = SliderHandle(kind); slider != nullptr) {
         switch (kind) {
-        case SliderKind::Red:
-        case SliderKind::Green:
-        case SliderKind::Blue:
-            SendMessageW(slider, TBM_SETPOS, TRUE, clampValue(0, 255));
-            UpdatePaletteFromRgbSliders();
+        case SliderKind::Hue:
+            SendMessageW(slider, TBM_SETPOS, TRUE, clampValue(0, 360));
+            UpdatePaletteFromHslSliders();
+            RefreshPaletteList();
+            RefreshSliderValues();
+            InvalidateRect(app_.window_, nullptr, FALSE);
+            InvalidateRect(window_, nullptr, FALSE);
+            return;
+        case SliderKind::Saturation:
+        case SliderKind::Lightness:
+            SendMessageW(slider, TBM_SETPOS, TRUE, clampValue(0, 100));
+            UpdatePaletteFromHslSliders();
             RefreshPaletteList();
             RefreshSliderValues();
             InvalidateRect(app_.window_, nullptr, FALSE);
@@ -1124,20 +1348,20 @@ void SettingsWindow::UpdateSliderFromPoint(SliderKind kind, POINT cursor) {
     int minimum = 0;
     int maximum = 100;
     switch (kind) {
-    case SliderKind::Red:
+    case SliderKind::Hue:
         sliderRect = layout.redSliderRect;
         minimum = 0;
-        maximum = 255;
+        maximum = 360;
         break;
-    case SliderKind::Green:
+    case SliderKind::Saturation:
         sliderRect = layout.greenSliderRect;
         minimum = 0;
-        maximum = 255;
+        maximum = 100;
         break;
-    case SliderKind::Blue:
+    case SliderKind::Lightness:
         sliderRect = layout.blueSliderRect;
         minimum = 0;
-        maximum = 255;
+        maximum = 100;
         break;
     case SliderKind::Stabilization:
         sliderRect = layout.stabilizationSliderRect;
@@ -1180,9 +1404,9 @@ std::optional<SettingsWindow::SliderKind> SettingsWindow::HitTestSlider(POINT cu
     GetClientRect(window_, &clientRect);
     const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size(), scrollOffset_);
     const std::array<std::pair<SliderKind, RECT>, 7> sliders {{
-        { SliderKind::Red, layout.redSliderRect },
-        { SliderKind::Green, layout.greenSliderRect },
-        { SliderKind::Blue, layout.blueSliderRect },
+        { SliderKind::Hue, layout.redSliderRect },
+        { SliderKind::Saturation, layout.greenSliderRect },
+        { SliderKind::Lightness, layout.blueSliderRect },
         { SliderKind::Stabilization, layout.stabilizationSliderRect },
         { SliderKind::Spacing, layout.spacingSliderRect },
         { SliderKind::StrokeSmoothing, layout.strokeSmoothingSliderRect },

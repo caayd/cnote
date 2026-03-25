@@ -15,8 +15,8 @@ What it does today:
 - opens a native window
 - creates a blank page surface
 - lets you draw freehand ink strokes on that page
-- includes a dark header with `File`, `Edit`, and `View` menus
-- includes `Edit > Brush Settings` for palette, brush-size, and smoothing controls
+- includes a dark header with a file-title dropdown for file actions/settings and a live zoom percentage control
+- includes `Settings` in the file-title dropdown for palette, brush-size, and smoothing controls
 - keeps the native Windows title bar and window buttons
 - includes tool, color, undo, and redo controls in the header
 - includes an eraser tool for deleting strokes
@@ -47,8 +47,8 @@ Run:
 ## Controls
 
 - `Left Mouse`: draw
-- `Header`: use `File`, `Edit`, and `View` dropdowns plus the tool/color/history controls
-- `Edit > Brush Settings`: edit palette colors with RGB sliders, paste hex values, add/remove palette colors, change brush size, tune stabilization/smoothing, and adjust the autosave interval
+- `Header`: click the file title for file actions/settings, click the zoom percentage to type a zoom value, then use the tool/color/history controls
+- `Settings`: edit palette colors with HSL sliders, paste hex values, add/remove palette colors, change brush size, tune stabilization/smoothing, adjust autosave, and configure zoom presets/shortcut bindings
 - `Ctrl+B`: toggle the PDF page preview sidebar and its page navigator
 - `Ctrl+W`: open the active brush/eraser size slider near the cursor
 - `Middle Mouse Hold`: pan
@@ -64,7 +64,6 @@ Run:
 - `Ctrl+Y` or `Ctrl+Shift+Z`: redo
 - `[` or `-`: smaller brush
 - `]` or `+`: larger brush
-- `1`-`5`: choose color
 - `C`: cycle color
 - `0`: reset view
 
@@ -78,7 +77,7 @@ The editor-native note format is `.cnote`.
 
 - If you open a PDF and save a note, the `.cnote` file embeds the PDF bytes plus strokes and pasted images so the note stays editable even if the original PDF moves.
 - If you start from a blank document, the `.cnote` file stores the editable page content without requiring a PDF source.
-- Use `File > Export as PDF...` to write a flattened PDF version of the current note.
+- Use the file-title dropdown's `Export as PDF...` action to write a flattened PDF version of the current note.
 
 The next natural steps are:
 

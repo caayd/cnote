@@ -20,9 +20,9 @@ public:
 
 private:
     enum class SliderKind {
-        Red,
-        Green,
-        Blue,
+        Hue,
+        Saturation,
+        Lightness,
         Stabilization,
         Spacing,
         StrokeSmoothing,
@@ -37,6 +37,7 @@ private:
     void ScrollTo(int scrollOffset);
     void RefreshPaletteList();
     void RefreshSliderValues();
+    void RefreshZoomPresetFields();
     void RefreshShortcutList();
     void RefreshShortcutButtons();
     void HandleCommand(WPARAM wParam, LPARAM lParam);
@@ -51,7 +52,8 @@ private:
     void BeginShortcutCapture();
     void ClearSelectedShortcut();
     void HandleShortcutCapture(UINT key);
-    void UpdatePaletteFromRgbSliders();
+    void HandleZoomPresetEdit(HWND edit, bool normalizeText);
+    void UpdatePaletteFromHslSliders();
     [[nodiscard]] HWND SliderHandle(SliderKind kind) const;
     [[nodiscard]] int SliderValue(SliderKind kind) const;
     void UpdateSliderValue(SliderKind kind, int value);
@@ -83,6 +85,9 @@ private:
     HWND strokeSmoothingLabel_ = nullptr;
     HWND autoSaveSlider_ = nullptr;
     HWND autoSaveLabel_ = nullptr;
+    std::array<HWND, App::kZoomPresetCount> zoomPresetLabels_ {};
+    std::array<HWND, App::kZoomPresetCount> zoomPresetEdits_ {};
+    HWND zoomPresetHintLabel_ = nullptr;
     HWND shortcutList_ = nullptr;
     HWND changeShortcutButton_ = nullptr;
     HWND clearShortcutButton_ = nullptr;

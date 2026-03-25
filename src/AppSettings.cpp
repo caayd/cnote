@@ -573,6 +573,17 @@ void App::LoadAppSettings() {
             continue;
         }
 
+        if (key.starts_with("zoom_preset_")) {
+            if (const auto index = ParseUnsignedInt(std::string_view(key).substr(12)); index.has_value()
+                && *index >= 1U
+                && *index <= settings_.zoomPresets.size()) {
+                if (const auto parsed = ParseFloat(value); parsed.has_value()) {
+                    settings_.zoomPresets[*index - 1U] = *parsed <= 0.0f ? 0.0f : std::clamp(*parsed, kMinZoom, kMaxZoom);
+                }
+            }
+            continue;
+        }
+
         if (key == "wheel_tools") {
             std::vector<Tool> loadedTools;
             for (const std::string& token : SplitAscii(value, ',')) {
@@ -664,6 +675,9 @@ void App::SaveAppSettings() const {
     output << "input_spacing=" << settings_.inputSpacing << '\n';
     output << "stroke_smoothing=" << settings_.strokeSmoothing << '\n';
     output << "auto_save_interval_seconds=" << settings_.autoSaveIntervalSeconds << '\n';
+    for (std::size_t index = 0; index < settings_.zoomPresets.size(); ++index) {
+        output << "zoom_preset_" << (index + 1U) << '=' << settings_.zoomPresets[index] << '\n';
+    }
 
     output << "wheel_tools=";
     for (std::size_t index = 0; index < wheel_.tools.size(); ++index) {
@@ -805,6 +819,21 @@ void App::ExecuteShortcutAction(ShortcutAction action) {
         ResetView();
         EnsureVisiblePageRasterQuality();
         InvalidateRect(window_, nullptr, FALSE);
+        break;
+    case ShortcutAction::ZoomPreset1:
+        static_cast<void>(ApplyZoomPreset(0));
+        break;
+    case ShortcutAction::ZoomPreset2:
+        static_cast<void>(ApplyZoomPreset(1));
+        break;
+    case ShortcutAction::ZoomPreset3:
+        static_cast<void>(ApplyZoomPreset(2));
+        break;
+    case ShortcutAction::ZoomPreset4:
+        static_cast<void>(ApplyZoomPreset(3));
+        break;
+    case ShortcutAction::ZoomPreset5:
+        static_cast<void>(ApplyZoomPreset(4));
         break;
     case ShortcutAction::ToggleSettings:
         ToggleBrushSettings();
