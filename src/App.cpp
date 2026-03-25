@@ -271,17 +271,20 @@ std::wstring FormatBrushSizeValue(float size) {
 std::wstring FormatZoomPercentValue(float zoom) {
     wchar_t buffer[32] = {};
     const float percent = zoom * 100.0f;
-    if (std::abs(percent - std::round(percent)) < 0.05f) {
+    const bool wholePercent = std::abs(percent - std::round(percent)) < 0.05f;
+    if (wholePercent) {
         std::swprintf(buffer, std::size(buffer), L"%.0f", percent);
     } else {
         std::swprintf(buffer, std::size(buffer), L"%.1f", percent);
     }
     std::wstring value = buffer;
-    while (!value.empty() && value.back() == L'0') {
-        value.pop_back();
-    }
-    if (!value.empty() && value.back() == L'.') {
-        value.pop_back();
+    if (!wholePercent) {
+        while (!value.empty() && value.back() == L'0') {
+            value.pop_back();
+        }
+        if (!value.empty() && value.back() == L'.') {
+            value.pop_back();
+        }
     }
     return value;
 }
