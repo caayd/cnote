@@ -215,8 +215,9 @@ RasterImage ComposePageRaster(
     bool includeStrokes) {
     const Page& page = document.PageAt(pageIndex);
     std::optional<RasterImage> pdfRaster;
-    if (document.HasPdfData() && page.sourcePdfPageIndex >= 0) {
-        pdfRaster = backend.RenderPage(document.PdfData(), static_cast<std::size_t>(page.sourcePdfPageIndex), renderScale);
+    if (const Document::PdfSource* pdfSource = document.PdfSourceAtIndex(page.sourcePdfSourceIndex);
+        pdfSource != nullptr && page.sourcePdfPageIndex >= 0) {
+        pdfRaster = backend.RenderPage(pdfSource->pdfData, static_cast<std::size_t>(page.sourcePdfPageIndex), renderScale);
     }
 
     const bool useStoredRaster = !pdfRaster.has_value()
@@ -385,6 +386,7 @@ std::optional<Document> PdfiumBackend::OpenFromMemory(
         Page page {};
         page.width = std::max(1.0f, FPDF_GetPageWidthF(pageHandle));
         page.height = std::max(1.0f, FPDF_GetPageHeightF(pageHandle));
+        page.sourcePdfSourceIndex = 0;
         page.sourcePdfPageIndex = pageIndex;
 
         if (const auto raster = RenderPageBitmap(pageHandle, kInitialRenderScale); raster.has_value()) {

@@ -45,6 +45,7 @@ struct RasterImage {
 struct Page {
     float width = 612.0f;
     float height = 792.0f;
+    std::int32_t sourcePdfSourceIndex = -1;
     std::int32_t sourcePdfPageIndex = -1;
     RasterImage raster {};
     std::vector<PageImage> images;
@@ -53,6 +54,11 @@ struct Page {
 
 class Document {
 public:
+    struct PdfSource {
+        std::wstring sourcePath {};
+        std::shared_ptr<std::vector<std::uint8_t>> pdfData {};
+    };
+
     struct PageDefaults {
         float width = 612.0f;
         float height = 792.0f;
@@ -74,8 +80,7 @@ public:
         PageDefaults pageDefaults);
     static Document CreateProjectDocument(
         std::wstring filePath,
-        std::wstring sourcePath,
-        std::shared_ptr<std::vector<std::uint8_t>> pdfData,
+        std::vector<PdfSource> pdfSources,
         std::vector<Page> pages,
         std::size_t currentPageIndex,
         PageDefaults pageDefaults);
@@ -85,6 +90,9 @@ public:
     [[nodiscard]] const std::wstring& SourcePath() const noexcept;
     [[nodiscard]] const std::shared_ptr<std::vector<std::uint8_t>>& PdfData() const noexcept;
     [[nodiscard]] bool HasPdfData() const noexcept;
+    [[nodiscard]] std::size_t PdfSourceCount() const noexcept;
+    [[nodiscard]] const PdfSource& PdfSourceAt(std::size_t index) const noexcept;
+    [[nodiscard]] const PdfSource* PdfSourceAtIndex(std::int32_t index) const noexcept;
     [[nodiscard]] std::size_t PageCount() const noexcept;
     [[nodiscard]] std::size_t CurrentPageIndex() const noexcept;
     [[nodiscard]] Page& CurrentPage() noexcept;
@@ -98,25 +106,24 @@ public:
     std::size_t RemovePage(std::size_t index);
     void SetFilePath(std::wstring filePath);
     void SetNewPageDefaults(PageDefaults pageDefaults);
+    std::int32_t AppendPdfSource(std::wstring sourcePath, std::shared_ptr<std::vector<std::uint8_t>> pdfData);
     void ResetToBlank();
     void ReplaceWithEditable(
         std::wstring filePath,
         std::vector<Page> pages,
         std::size_t currentPageIndex,
         PageDefaults pageDefaults);
-    void ReplaceWithPdf(
+    void ReplaceWithProject(
         std::wstring filePath,
-        std::wstring sourcePath,
-        std::shared_ptr<std::vector<std::uint8_t>> pdfData,
+        std::vector<PdfSource> pdfSources,
         std::vector<Page> pages,
         std::size_t currentPageIndex,
         PageDefaults pageDefaults);
 
 private:
     std::wstring filePath_;
-    std::wstring sourcePath_;
     bool pdfDocument_ = false;
-    std::shared_ptr<std::vector<std::uint8_t>> pdfData_ {};
+    std::vector<PdfSource> pdfSources_ {};
     std::vector<Page> pages_ { Page {} };
     std::size_t currentPageIndex_ = 0;
     PageDefaults newPageDefaults_ {};

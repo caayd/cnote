@@ -16,7 +16,7 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 3;
+constexpr std::uint32_t kProjectVersion = 4;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
 
@@ -270,24 +270,58 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
     std::uint32_t flags = 0;
     std::uint32_t currentPageIndex = 0;
     std::uint32_t pageCount = 0;
-    std::wstring sourcePath;
-    std::vector<std::uint8_t> pdfBytes;
     Document::PageDefaults pageDefaults {};
+    std::vector<Document::PdfSource> pdfSources;
 
     const bool validMagic = reader.ReadExact(magic, sizeof(magic))
         && (std::memcmp(magic, kCnoteMagic, sizeof(kCnoteMagic)) == 0
             || std::memcmp(magic, kLegacyProjectMagic, sizeof(kLegacyProjectMagic)) == 0);
     if (!validMagic
         || !reader.Read(version) || (version < 1U || version > kProjectVersion) || !reader.Read(flags)
-        || !reader.Read(currentPageIndex) || !reader.Read(pageCount) || !reader.ReadString(sourcePath)
-        || !reader.ReadBlob(pdfBytes)) {
+        || !reader.Read(currentPageIndex) || !reader.Read(pageCount)) {
         return std::nullopt;
     }
-    if (version >= 3U
-        && (!reader.Read(pageDefaults.width)
+
+    if (version >= 4U) {
+        std::uint32_t sourceCount = 0;
+        if (!reader.Read(sourceCount)) {
+            return std::nullopt;
+        }
+        pdfSources.reserve(sourceCount);
+        for (std::uint32_t sourceIndex = 0; sourceIndex < sourceCount; ++sourceIndex) {
+            std::wstring sourcePath;
+            std::vector<std::uint8_t> pdfBytes;
+            if (!reader.ReadString(sourcePath) || !reader.ReadBlob(pdfBytes)) {
+                return std::nullopt;
+            }
+            pdfSources.push_back({
+                std::move(sourcePath),
+                std::make_shared<std::vector<std::uint8_t>>(std::move(pdfBytes)),
+            });
+        }
+        if (!reader.Read(pageDefaults.width)
             || !reader.Read(pageDefaults.height)
-            || !reader.Read(pageDefaults.backgroundColor))) {
-        return std::nullopt;
+            || !reader.Read(pageDefaults.backgroundColor)) {
+            return std::nullopt;
+        }
+    } else {
+        std::wstring sourcePath;
+        std::vector<std::uint8_t> pdfBytes;
+        if (!reader.ReadString(sourcePath) || !reader.ReadBlob(pdfBytes)) {
+            return std::nullopt;
+        }
+        if (version >= 3U
+            && (!reader.Read(pageDefaults.width)
+                || !reader.Read(pageDefaults.height)
+                || !reader.Read(pageDefaults.backgroundColor))) {
+            return std::nullopt;
+        }
+        if ((flags & kProjectFlagHasPdf) != 0U && !pdfBytes.empty()) {
+            pdfSources.push_back({
+                std::move(sourcePath),
+                std::make_shared<std::vector<std::uint8_t>>(std::move(pdfBytes)),
+            });
+        }
     }
 
     std::vector<Page> savedPages;
@@ -300,12 +334,18 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
         if (!reader.Read(page.width) || !reader.Read(page.height)) {
             return std::nullopt;
         }
-        if (version >= 2U) {
+        if (version >= 4U) {
+            if (!reader.Read(page.sourcePdfSourceIndex) || !reader.Read(page.sourcePdfPageIndex)) {
+                return std::nullopt;
+            }
+        } else if (version >= 2U) {
             if (!reader.Read(page.sourcePdfPageIndex)) {
                 return std::nullopt;
             }
+            page.sourcePdfSourceIndex = page.sourcePdfPageIndex >= 0 ? 0 : -1;
         } else {
             page.sourcePdfPageIndex = (flags & kProjectFlagHasPdf) != 0U ? static_cast<std::int32_t>(pageIndex) : -1;
+            page.sourcePdfSourceIndex = page.sourcePdfPageIndex >= 0 ? 0 : -1;
         }
         if (version >= 3U) {
             if (!reader.Read(pageFlags)) {
@@ -340,41 +380,44 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
         savedPages.push_back(std::move(page));
     }
 
-    if ((flags & kProjectFlagHasPdf) != 0U) {
-        auto sharedPdfBytes = std::make_shared<std::vector<std::uint8_t>>(std::move(pdfBytes));
-        auto opened = pdfBackend.OpenFromMemory(sourcePath, sharedPdfBytes);
+    std::vector<std::optional<Document>> openedSources;
+    openedSources.reserve(pdfSources.size());
+    for (const Document::PdfSource& pdfSource : pdfSources) {
+        if (!pdfSource.pdfData || pdfSource.pdfData->empty()) {
+            openedSources.push_back(std::nullopt);
+            continue;
+        }
+        const auto opened = pdfBackend.OpenFromMemory(pdfSource.sourcePath, pdfSource.pdfData);
         if (!opened.has_value()) {
-            return std::nullopt;
+            openedSources.push_back(std::nullopt);
+        } else {
+            openedSources.push_back(std::move(*opened));
         }
+    }
 
-        std::vector<Page> pages;
-        pages.reserve(savedPages.size());
-        for (Page& savedPage : savedPages) {
-            if (savedPage.sourcePdfPageIndex >= 0
-                && static_cast<std::size_t>(savedPage.sourcePdfPageIndex) < opened->PageCount()) {
-                const Page& sourcePage = opened->PageAt(static_cast<std::size_t>(savedPage.sourcePdfPageIndex));
-                savedPage.width = sourcePage.width;
-                savedPage.height = sourcePage.height;
-                savedPage.raster = sourcePage.raster;
-            } else {
-                savedPage.sourcePdfPageIndex = -1;
-                if (savedPage.raster.pixels.empty()) {
-                    savedPage.raster = CreateSolidRaster(savedPage.width, savedPage.height, 1.5f, 0xFFFFFFFFU);
-                }
+    for (Page& savedPage : savedPages) {
+        const bool hasValidPdfSource = savedPage.sourcePdfSourceIndex >= 0
+            && static_cast<std::size_t>(savedPage.sourcePdfSourceIndex) < openedSources.size()
+            && openedSources[static_cast<std::size_t>(savedPage.sourcePdfSourceIndex)].has_value()
+            && savedPage.sourcePdfPageIndex >= 0
+            && static_cast<std::size_t>(savedPage.sourcePdfPageIndex)
+                < openedSources[static_cast<std::size_t>(savedPage.sourcePdfSourceIndex)]->PageCount();
+        if (hasValidPdfSource) {
+            const Document& sourceDocument = *openedSources[static_cast<std::size_t>(savedPage.sourcePdfSourceIndex)];
+            const Page& sourcePage = sourceDocument.PageAt(static_cast<std::size_t>(savedPage.sourcePdfPageIndex));
+            savedPage.width = sourcePage.width;
+            savedPage.height = sourcePage.height;
+            savedPage.raster = sourcePage.raster;
+        } else {
+            savedPage.sourcePdfSourceIndex = -1;
+            savedPage.sourcePdfPageIndex = -1;
+            if (savedPage.raster.pixels.empty()) {
+                savedPage.raster = CreateSolidRaster(savedPage.width, savedPage.height, 1.5f, 0xFFFFFFFFU);
             }
-            pages.push_back(std::move(savedPage));
-        }
-
-        return Document::CreateProjectDocument(filePath, sourcePath, sharedPdfBytes, std::move(pages), currentPageIndex, pageDefaults);
-    }
-
-    for (Page& page : savedPages) {
-        if (page.sourcePdfPageIndex < 0 && page.raster.pixels.empty()) {
-            page.raster = CreateSolidRaster(page.width, page.height, 1.5f, 0xFFFFFFFFU);
         }
     }
 
-    return Document::CreateEditable(filePath, std::move(savedPages), currentPageIndex, pageDefaults);
+    return Document::CreateProjectDocument(filePath, std::move(pdfSources), std::move(savedPages), currentPageIndex, pageDefaults);
 }
 
 bool ProjectFile::Save(const Document& document, const std::wstring& filePath) {
@@ -382,27 +425,31 @@ bool ProjectFile::Save(const Document& document, const std::wstring& filePath) {
     const std::uint32_t flags = document.HasPdfData() ? kProjectFlagHasPdf : 0U;
     const std::uint32_t currentPageIndex = static_cast<std::uint32_t>(document.CurrentPageIndex());
     const std::uint32_t pageCount = static_cast<std::uint32_t>(document.PageCount());
-    const std::vector<std::uint8_t> emptyPdfBytes;
-    const auto& pdfBytes = document.HasPdfData() ? *document.PdfData() : emptyPdfBytes;
+    const std::uint32_t sourceCount = static_cast<std::uint32_t>(document.PdfSourceCount());
 
     AppendBytes(bytes, kCnoteMagic, sizeof(kCnoteMagic));
     AppendValue(bytes, kProjectVersion);
     AppendValue(bytes, flags);
     AppendValue(bytes, currentPageIndex);
     AppendValue(bytes, pageCount);
-    AppendString(bytes, document.SourcePath());
-    AppendBlob(bytes, pdfBytes);
+    AppendValue(bytes, sourceCount);
+    for (std::size_t sourceIndex = 0; sourceIndex < document.PdfSourceCount(); ++sourceIndex) {
+        const Document::PdfSource& pdfSource = document.PdfSourceAt(sourceIndex);
+        AppendString(bytes, pdfSource.sourcePath);
+        AppendBlob(bytes, pdfSource.pdfData ? *pdfSource.pdfData : std::vector<std::uint8_t> {});
+    }
     AppendValue(bytes, document.NewPageDefaults().width);
     AppendValue(bytes, document.NewPageDefaults().height);
     AppendValue(bytes, document.NewPageDefaults().backgroundColor);
 
     for (std::size_t pageIndex = 0; pageIndex < document.PageCount(); ++pageIndex) {
         const Page& page = document.PageAt(pageIndex);
-        const std::uint32_t pageFlags = (page.sourcePdfPageIndex < 0 && !page.raster.pixels.empty()) ? kPageFlagHasRaster : 0U;
+        const std::uint32_t pageFlags = (page.sourcePdfSourceIndex < 0 && !page.raster.pixels.empty()) ? kPageFlagHasRaster : 0U;
         const auto strokeCount = static_cast<std::uint32_t>(page.strokes.size());
         const auto imageCount = static_cast<std::uint32_t>(page.images.size());
         AppendValue(bytes, page.width);
         AppendValue(bytes, page.height);
+        AppendValue(bytes, page.sourcePdfSourceIndex);
         AppendValue(bytes, page.sourcePdfPageIndex);
         AppendValue(bytes, pageFlags);
         if ((pageFlags & kPageFlagHasRaster) != 0U) {

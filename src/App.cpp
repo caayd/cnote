@@ -4958,12 +4958,13 @@ void App::HandleCompletedRenderResults() {
 }
 
 void App::QueuePageRasterRequest(const PageView& pageView) {
-    if (!document_.IsPdfDocument() || !document_.HasPdfData() || !pageView.valid) {
+    if (!pageView.valid) {
         return;
     }
 
     Page& page = document_.PageAt(pageView.pageIndex);
-    if (page.sourcePdfPageIndex < 0) {
+    const Document::PdfSource* pdfSource = document_.PdfSourceAtIndex(page.sourcePdfSourceIndex);
+    if (pdfSource == nullptr || page.sourcePdfPageIndex < 0) {
         return;
     }
     const float desiredScale = DesiredRenderScale(pageView);
@@ -4992,7 +4993,7 @@ void App::QueuePageRasterRequest(const PageView& pageView) {
                         && request.renderScale <= desiredScale + 0.001f;
                 }),
             renderRequests_.end());
-        renderRequests_.push_back({ document_.PdfData(), pageView.pageIndex, page.sourcePdfPageIndex, desiredScale, renderGeneration_ });
+        renderRequests_.push_back({ pdfSource->pdfData, pageView.pageIndex, page.sourcePdfPageIndex, desiredScale, renderGeneration_ });
     }
     renderCv_.notify_one();
 }

@@ -217,6 +217,7 @@ RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderSca
 }
 
 void FlattenImportedPage(Page& page) {
+    page.sourcePdfSourceIndex = -1;
     page.sourcePdfPageIndex = -1;
 }
 
@@ -296,6 +297,7 @@ void App::ApplyConfiguredSettingsToCurrentPage(float width, float height, std::u
     Page& page = document_.CurrentPage();
     page.width = std::max(72.0f, width);
     page.height = std::max(72.0f, height);
+    page.sourcePdfSourceIndex = -1;
     page.sourcePdfPageIndex = -1;
     page.raster = CreateSolidRaster(page.width, page.height, 1.5f, backgroundColor);
 
@@ -320,6 +322,7 @@ void App::ApplyConfiguredSettingsToAllPages(float width, float height, std::uint
         Page& page = document_.PageAt(pageIndex);
         page.width = clampedWidth;
         page.height = clampedHeight;
+        page.sourcePdfSourceIndex = -1;
         page.sourcePdfPageIndex = -1;
         page.raster = CreateSolidRaster(page.width, page.height, 1.5f, backgroundColor);
     }
@@ -355,8 +358,6 @@ bool App::AppendPagesFromFile() {
 }
 
 bool App::AppendPagesFromDocumentPath(const std::wstring& filePath) {
-    constexpr float kImportedPdfRenderScale = 2.5f;
-
     std::optional<Document> opened;
     if (HasExtension(filePath, kCnoteFileExtension)) {
         opened = ProjectFile::Load(filePath, pdfBackend_);
@@ -387,18 +388,25 @@ bool App::AppendPagesFromDocumentPath(const std::wstring& filePath) {
     const std::size_t previousPageIndex = document_.CurrentPageIndex();
     std::vector<Page> importedPages;
     importedPages.reserve(opened->PageCount());
+    std::vector<std::int32_t> sourceIndexRemap(opened->PdfSourceCount(), -1);
     for (std::size_t pageIndex = 0; pageIndex < opened->PageCount(); ++pageIndex) {
         Page importedPage = opened->PageAt(pageIndex);
-        if (opened->HasPdfData() && importedPage.sourcePdfPageIndex >= 0) {
-            const auto rerendered = pdfBackend_.RenderPage(
-                opened->PdfData(),
-                static_cast<std::size_t>(importedPage.sourcePdfPageIndex),
-                kImportedPdfRenderScale);
-            if (rerendered.has_value()) {
-                importedPage.raster = std::move(*rerendered);
+        if (importedPage.sourcePdfSourceIndex >= 0 && importedPage.sourcePdfPageIndex >= 0) {
+            const std::size_t sourceIndex = static_cast<std::size_t>(importedPage.sourcePdfSourceIndex);
+            if (sourceIndex < sourceIndexRemap.size()) {
+                if (sourceIndexRemap[sourceIndex] < 0) {
+                    const Document::PdfSource& source = opened->PdfSourceAt(sourceIndex);
+                    sourceIndexRemap[sourceIndex] = document_.AppendPdfSource(source.sourcePath, source.pdfData);
+                }
+                if (sourceIndexRemap[sourceIndex] >= 0) {
+                    importedPage.sourcePdfSourceIndex = sourceIndexRemap[sourceIndex];
+                } else {
+                    FlattenImportedPage(importedPage);
+                }
+            } else {
+                FlattenImportedPage(importedPage);
             }
         }
-        FlattenImportedPage(importedPage);
         importedPages.push_back(importedPage);
         document_.InsertPage(document_.PageCount(), std::move(importedPage));
     }
