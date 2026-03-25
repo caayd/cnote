@@ -20,6 +20,7 @@
 #include <windowsx.h>
 
 #include "resource.h"
+#include "NewPageSettingsWindow.h"
 #include "SettingsWindow.h"
 #include "ShortcutConfig.h"
 
@@ -76,6 +77,7 @@ struct SidebarHeaderLayout {
     RECT pageLabelRect {};
     RECT nextPageRect {};
     RECT addPageRect {};
+    RECT newPageSettingsRect {};
     RECT contentRect {};
 };
 
@@ -362,12 +364,131 @@ bool IsSvgCommandLetter(char ch) {
     case 'v':
     case 'C':
     case 'c':
+    case 'A':
+    case 'a':
     case 'Z':
     case 'z':
         return true;
     default:
         return false;
     }
+}
+
+bool AppendSvgArc(
+    Gdiplus::GraphicsPath& path,
+    const Gdiplus::PointF& start,
+    float rx,
+    float ry,
+    float xAxisRotationDegrees,
+    bool largeArcFlag,
+    bool sweepFlag,
+    const Gdiplus::PointF& end) {
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kHalfPi = kPi / 2.0;
+
+    if ((std::abs(start.X - end.X) < 0.0001f && std::abs(start.Y - end.Y) < 0.0001f)) {
+        return true;
+    }
+
+    rx = std::abs(rx);
+    ry = std::abs(ry);
+    if (rx <= 0.0001f || ry <= 0.0001f) {
+        path.AddLine(start, end);
+        return true;
+    }
+
+    const double phi = static_cast<double>(xAxisRotationDegrees) * (kPi / 180.0);
+    const double cosPhi = std::cos(phi);
+    const double sinPhi = std::sin(phi);
+    const double x1 = static_cast<double>(start.X);
+    const double y1 = static_cast<double>(start.Y);
+    const double x2 = static_cast<double>(end.X);
+    const double y2 = static_cast<double>(end.Y);
+
+    const double dx2 = (x1 - x2) * 0.5;
+    const double dy2 = (y1 - y2) * 0.5;
+    const double x1Prime = (cosPhi * dx2) + (sinPhi * dy2);
+    const double y1Prime = (-sinPhi * dx2) + (cosPhi * dy2);
+
+    double rxAdjusted = static_cast<double>(rx);
+    double ryAdjusted = static_cast<double>(ry);
+    const double rxSquared = rxAdjusted * rxAdjusted;
+    const double rySquared = ryAdjusted * ryAdjusted;
+    const double x1PrimeSquared = x1Prime * x1Prime;
+    const double y1PrimeSquared = y1Prime * y1Prime;
+
+    const double radiiScale = (x1PrimeSquared / rxSquared) + (y1PrimeSquared / rySquared);
+    if (radiiScale > 1.0) {
+        const double scale = std::sqrt(radiiScale);
+        rxAdjusted *= scale;
+        ryAdjusted *= scale;
+    }
+
+    const double adjustedRxSquared = rxAdjusted * rxAdjusted;
+    const double adjustedRySquared = ryAdjusted * ryAdjusted;
+    const double numerator = (adjustedRxSquared * adjustedRySquared)
+        - (adjustedRxSquared * y1PrimeSquared)
+        - (adjustedRySquared * x1PrimeSquared);
+    const double denominator = (adjustedRxSquared * y1PrimeSquared) + (adjustedRySquared * x1PrimeSquared);
+    const double centerFactor = denominator <= 0.0
+        ? 0.0
+        : std::sqrt(std::max(0.0, numerator / denominator)) * (largeArcFlag == sweepFlag ? -1.0 : 1.0);
+
+    const double cxPrime = centerFactor * ((rxAdjusted * y1Prime) / ryAdjusted);
+    const double cyPrime = centerFactor * (-(ryAdjusted * x1Prime) / rxAdjusted);
+    const double centerX = (cosPhi * cxPrime) - (sinPhi * cyPrime) + ((x1 + x2) * 0.5);
+    const double centerY = (sinPhi * cxPrime) + (cosPhi * cyPrime) + ((y1 + y2) * 0.5);
+
+    const double startVectorX = (x1Prime - cxPrime) / rxAdjusted;
+    const double startVectorY = (y1Prime - cyPrime) / ryAdjusted;
+    const double endVectorX = (-x1Prime - cxPrime) / rxAdjusted;
+    const double endVectorY = (-y1Prime - cyPrime) / ryAdjusted;
+
+    double theta1 = std::atan2(startVectorY, startVectorX);
+    double deltaTheta = std::atan2(
+        (startVectorX * endVectorY) - (startVectorY * endVectorX),
+        (startVectorX * endVectorX) + (startVectorY * endVectorY));
+
+    if (!sweepFlag && deltaTheta > 0.0) {
+        deltaTheta -= 2.0 * kPi;
+    } else if (sweepFlag && deltaTheta < 0.0) {
+        deltaTheta += 2.0 * kPi;
+    }
+
+    const int segmentCount = std::max(1, static_cast<int>(std::ceil(std::abs(deltaTheta) / kHalfPi)));
+    const double segmentTheta = deltaTheta / static_cast<double>(segmentCount);
+
+    auto transformPoint = [&](double localX, double localY) {
+        return Gdiplus::PointF(
+            static_cast<Gdiplus::REAL>((cosPhi * localX) - (sinPhi * localY) + centerX),
+            static_cast<Gdiplus::REAL>((sinPhi * localX) + (cosPhi * localY) + centerY));
+    };
+
+    Gdiplus::PointF currentPoint = start;
+    for (int segmentIndex = 0; segmentIndex < segmentCount; ++segmentIndex) {
+        const double theta2 = theta1 + segmentTheta;
+        const double alpha = (4.0 / 3.0) * std::tan((theta2 - theta1) * 0.25);
+        const double cosTheta1 = std::cos(theta1);
+        const double sinTheta1 = std::sin(theta1);
+        const double cosTheta2 = std::cos(theta2);
+        const double sinTheta2 = std::sin(theta2);
+
+        const Gdiplus::PointF control1 = transformPoint(
+            rxAdjusted * (cosTheta1 - (alpha * sinTheta1)),
+            ryAdjusted * (sinTheta1 + (alpha * cosTheta1)));
+        const Gdiplus::PointF control2 = transformPoint(
+            rxAdjusted * (cosTheta2 + (alpha * sinTheta2)),
+            ryAdjusted * (sinTheta2 - (alpha * cosTheta2)));
+        const Gdiplus::PointF target = transformPoint(
+            rxAdjusted * cosTheta2,
+            ryAdjusted * sinTheta2);
+
+        path.AddBezier(currentPoint, control1, control2, target);
+        currentPoint = target;
+        theta1 = theta2;
+    }
+
+    return true;
 }
 
 std::unique_ptr<Gdiplus::GraphicsPath> ParseSvgPathData(const std::string& pathData) {
@@ -487,6 +608,37 @@ std::unique_ptr<Gdiplus::GraphicsPath> ParseSvgPathData(const std::string& pathD
                 }
                 path->AddBezier(current, Gdiplus::PointF(x1, y1), Gdiplus::PointF(x2, y2), Gdiplus::PointF(x3, y3));
                 current = Gdiplus::PointF(x3, y3);
+            }
+            break;
+        case 'A':
+        case 'a':
+            while (*cursor != '\0' && !IsSvgCommandLetter(*cursor)) {
+                float rx = 0.0f;
+                float ry = 0.0f;
+                float xAxisRotation = 0.0f;
+                float largeArc = 0.0f;
+                float sweep = 0.0f;
+                float x = 0.0f;
+                float y = 0.0f;
+                if (!ConsumeSvgFloat(cursor, rx)
+                    || !ConsumeSvgFloat(cursor, ry)
+                    || !ConsumeSvgFloat(cursor, xAxisRotation)
+                    || !ConsumeSvgFloat(cursor, largeArc)
+                    || !ConsumeSvgFloat(cursor, sweep)
+                    || !ConsumeSvgFloat(cursor, x)
+                    || !ConsumeSvgFloat(cursor, y)
+                    || !hasCurrentPoint) {
+                    return {};
+                }
+                if (command == 'a') {
+                    x += current.X;
+                    y += current.Y;
+                }
+                const Gdiplus::PointF target(x, y);
+                if (!AppendSvgArc(*path, current, rx, ry, xAxisRotation, largeArc >= 0.5f, sweep >= 0.5f, target)) {
+                    return {};
+                }
+                current = target;
             }
             break;
         case 'Z':
@@ -782,15 +934,17 @@ SidebarHeaderLayout BuildSidebarHeaderLayout(RECT sidebarRect) {
     SidebarHeaderLayout layout {};
     const int padding = 12;
     const int buttonSize = 26;
-    const int gap = 8;
+    const int gap = 4;
     const int actionHeight = 24;
+    const int actionInset = 6;
     const int headerHeight = 76;
     layout.headerRect = MakeRect(sidebarRect.left + padding, sidebarRect.top + padding, sidebarRect.right - padding, sidebarRect.top + padding + headerHeight);
     layout.previousPageRect = MakeRect(layout.headerRect.left, layout.headerRect.top + 8, layout.headerRect.left + buttonSize, layout.headerRect.top + 8 + buttonSize);
     layout.nextPageRect = MakeRect(layout.headerRect.right - buttonSize, layout.headerRect.top + 8, layout.headerRect.right, layout.headerRect.top + 8 + buttonSize);
     layout.pageLabelRect = MakeRect(layout.previousPageRect.right + gap, layout.headerRect.top + 6, layout.nextPageRect.left - gap, layout.previousPageRect.bottom + 2);
     const int actionTop = layout.headerRect.bottom - actionHeight - 10;
-    layout.addPageRect = MakeRect(layout.headerRect.left, actionTop, layout.headerRect.right, actionTop + actionHeight);
+    layout.newPageSettingsRect = MakeRect(layout.headerRect.right - actionInset - actionHeight, actionTop, layout.headerRect.right - actionInset, actionTop + actionHeight);
+    layout.addPageRect = MakeRect(layout.headerRect.left + actionInset, actionTop, layout.newPageSettingsRect.left - gap, actionTop + actionHeight);
     layout.contentRect = MakeRect(sidebarRect.left, layout.headerRect.bottom + 8, sidebarRect.right, sidebarRect.bottom);
     return layout;
 }
@@ -1449,6 +1603,8 @@ App::App(HINSTANCE instance) : instance_(instance) {
 App::~App() {
     delete settings_.window;
     settings_.window = nullptr;
+    delete newPageSettings_.window;
+    newPageSettings_.window = nullptr;
     SaveAppSettings();
     StopRenderWorker();
     if (eraserCursor_ != nullptr) {
@@ -1947,15 +2103,10 @@ void App::AddBlankPageAfterCurrent() {
         return;
     }
 
-    const Page& currentPage = document_.CurrentPage();
-    Page newPage {};
-    newPage.width = currentPage.width;
-    newPage.height = currentPage.height;
-
     ResetPendingRasterWork();
     ClearSelection();
     ClearHistory();
-    const std::size_t insertIndex = document_.InsertPage(document_.CurrentPageIndex() + 1U, std::move(newPage));
+    const std::size_t insertIndex = document_.InsertPage(document_.CurrentPageIndex() + 1U, BuildConfiguredNewPage());
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
     document_.SetCurrentPageIndex(insertIndex);
@@ -4363,6 +4514,11 @@ bool App::HandleSidebarClick(POINT cursor) {
         return true;
     }
 
+    if (PtInRect(&headerLayout.newPageSettingsRect, cursor) != 0) {
+        ToggleNewPageSettings();
+        return true;
+    }
+
     if (const auto sidebarPage = HitTestSidebarPage(cursor); sidebarPage.has_value()) {
         FocusPage(*sidebarPage);
     }
@@ -5419,9 +5575,23 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
         RECT labelRect = rect;
         DrawTextW(hdc, label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     };
+    const auto paintIconActionButton = [&](RECT rect, const wchar_t* svgFileName, const wchar_t* fallbackLabel, bool enabled, bool accentFill) {
+        FillRoundedRect(hdc, rect, accentFill ? RGB(32, 63, 102) : RGB(27, 34, 43));
+        StrokeRoundedRect(hdc, rect, enabled ? panelBorder : RGB(55, 63, 75), 1);
+        const COLORREF iconColor = enabled ? primaryText : RGB(102, 111, 124);
+        if (const SvgIconData* icon = ToolbarSvgIcon(svgFileName); icon != nullptr) {
+            RECT iconRect = MakeRect(rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1);
+            PaintSvgIcon(hdc, iconRect, *icon, iconColor);
+        } else {
+            SetTextColor(hdc, iconColor);
+            RECT labelRect = rect;
+            DrawTextW(hdc, fallbackLabel, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    };
     paintHeaderButton(headerLayout.previousPageRect, L"<", CanGoToPreviousPage());
     paintHeaderButton(headerLayout.nextPageRect, L">", CanGoToNextPage());
     paintActionButton(headerLayout.addPageRect, L"New Page", true, true);
+    paintIconActionButton(headerLayout.newPageSettingsRect, L"settings.svg", L"...", true, false);
 
     const std::wstring pageLabel = PageIndicatorLabel();
     RECT pageLabelRect = headerLayout.pageLabelRect;

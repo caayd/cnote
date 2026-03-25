@@ -20,6 +20,7 @@
 namespace cnote {
 
 class SettingsWindow;
+class NewPageSettingsWindow;
 
 class App {
 public:
@@ -164,8 +165,17 @@ public:
         float strokeSmoothing = 0.55f;
     };
 
+    struct NewPageSettingsState {
+        NewPageSettingsWindow* window = nullptr;
+        float width = 612.0f;
+        float height = 792.0f;
+        std::uint32_t backgroundColor = 0xFFFFFFFFU;
+        std::vector<std::uint32_t> recentColors {};
+    };
+
 private:
     friend class SettingsWindow;
+    friend class NewPageSettingsWindow;
 
     bool CreateMainWindow(int showCommand);
     void StartRenderWorker();
@@ -240,6 +250,14 @@ private:
     void SaveAppSettings() const;
     void RefreshSettingsWindow();
     [[nodiscard]] bool IsSettingsWindowOpen() const;
+    void ToggleNewPageSettings();
+    void RefreshNewPageSettingsWindow();
+    void ResetNewPageSettings();
+    [[nodiscard]] Page BuildConfiguredNewPage() const;
+    void ApplyConfiguredSettingsToCurrentPage(float width, float height, std::uint32_t backgroundColor);
+    void ApplyConfiguredSettingsToAllPages(float width, float height, std::uint32_t backgroundColor);
+    [[nodiscard]] bool AppendPagesFromFile();
+    [[nodiscard]] bool AppendPagesFromDocumentPath(const std::wstring& filePath);
     void PanBy(float dx, float dy);
     void ZoomAt(int delta, POINT cursor);
     void BeginZoomSession(POINT cursor);
@@ -412,6 +430,7 @@ private:
     ShortcutState shortcuts_ {};
     WheelState wheel_ {};
     SettingsState settings_ {};
+    NewPageSettingsState newPageSettings_ {};
     HCURSOR eraserCursor_ = nullptr;
     bool pdfSidebarOpen_ = false;
     int pdfSidebarScrollY_ = 0;

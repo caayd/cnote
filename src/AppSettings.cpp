@@ -14,6 +14,9 @@
 #include <string_view>
 #include <system_error>
 
+#include <commdlg.h>
+
+#include "NewPageSettingsWindow.h"
 #include "SettingsWindow.h"
 #include "ShortcutConfig.h"
 
@@ -182,6 +185,41 @@ std::optional<App::Tool> ParseToolConfigName(std::string_view name) {
     return std::nullopt;
 }
 
+bool HasExtension(const std::wstring& path, const wchar_t* extension) {
+    const std::filesystem::path filePath(path);
+    return filePath.has_extension() && _wcsicmp(filePath.extension().c_str(), extension) == 0;
+}
+
+RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderScale, std::uint32_t argb) {
+    const int bitmapWidth = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageWidth) * renderScale)));
+    const int bitmapHeight = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageHeight) * renderScale)));
+    const int stride = bitmapWidth * 4;
+
+    RasterImage raster {};
+    raster.width = bitmapWidth;
+    raster.height = bitmapHeight;
+    raster.stride = stride;
+    raster.scale = renderScale;
+    raster.pixels.resize(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight));
+
+    const auto alpha = static_cast<std::uint8_t>((argb >> 24U) & 0xFFU);
+    const auto red = static_cast<std::uint8_t>((argb >> 16U) & 0xFFU);
+    const auto green = static_cast<std::uint8_t>((argb >> 8U) & 0xFFU);
+    const auto blue = static_cast<std::uint8_t>(argb & 0xFFU);
+    for (std::size_t offset = 0; offset + 3U < raster.pixels.size(); offset += 4U) {
+        raster.pixels[offset] = blue;
+        raster.pixels[offset + 1U] = green;
+        raster.pixels[offset + 2U] = red;
+        raster.pixels[offset + 3U] = alpha;
+    }
+
+    return raster;
+}
+
+void FlattenImportedPage(Page& page) {
+    page.sourcePdfPageIndex = -1;
+}
+
 }  // namespace
 
 void App::ToggleBrushSettings() {
@@ -189,6 +227,13 @@ void App::ToggleBrushSettings() {
         settings_.window = new SettingsWindow(*this);
     }
     settings_.window->Toggle(window_);
+}
+
+void App::ToggleNewPageSettings() {
+    if (newPageSettings_.window == nullptr) {
+        newPageSettings_.window = new NewPageSettingsWindow(*this);
+    }
+    newPageSettings_.window->Toggle(window_);
 }
 
 void App::TogglePdfSidebar() {
@@ -218,6 +263,137 @@ void App::RefreshSettingsWindow() {
 
 bool App::IsSettingsWindowOpen() const {
     return settings_.window && settings_.window->IsOpen();
+}
+
+void App::RefreshNewPageSettingsWindow() {
+    if (newPageSettings_.window && newPageSettings_.window->IsOpen()) {
+        newPageSettings_.window->Refresh();
+    }
+}
+
+void App::ResetNewPageSettings() {
+    newPageSettings_.width = 612.0f;
+    newPageSettings_.height = 792.0f;
+    newPageSettings_.backgroundColor = 0xFFFFFFFFU;
+    RefreshNewPageSettingsWindow();
+}
+
+Page App::BuildConfiguredNewPage() const {
+    Page page {};
+    page.width = std::max(72.0f, newPageSettings_.width);
+    page.height = std::max(72.0f, newPageSettings_.height);
+    page.raster = CreateSolidRaster(page.width, page.height, 1.5f, newPageSettings_.backgroundColor);
+    return page;
+}
+
+void App::ApplyConfiguredSettingsToCurrentPage(float width, float height, std::uint32_t backgroundColor) {
+    if (document_.PageCount() == 0U) {
+        return;
+    }
+
+    ResetPendingRasterWork();
+
+    Page& page = document_.CurrentPage();
+    page.width = std::max(72.0f, width);
+    page.height = std::max(72.0f, height);
+    page.sourcePdfPageIndex = -1;
+    page.raster = CreateSolidRaster(page.width, page.height, 1.5f, backgroundColor);
+
+    const std::size_t pageIndex = document_.CurrentPageIndex();
+    InvalidatePageSurfaceCache(pageIndex);
+    InvalidateSidebarThumbnailCache(pageIndex);
+    EnsureVisiblePageRasterQuality();
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void App::ApplyConfiguredSettingsToAllPages(float width, float height, std::uint32_t backgroundColor) {
+    if (document_.PageCount() == 0U) {
+        return;
+    }
+
+    ResetPendingRasterWork();
+
+    const float clampedWidth = std::max(72.0f, width);
+    const float clampedHeight = std::max(72.0f, height);
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        Page& page = document_.PageAt(pageIndex);
+        page.width = clampedWidth;
+        page.height = clampedHeight;
+        page.sourcePdfPageIndex = -1;
+        page.raster = CreateSolidRaster(page.width, page.height, 1.5f, backgroundColor);
+    }
+
+    pageSurfaceCaches_.assign(document_.PageCount(), {});
+    sidebarThumbnailCaches_.assign(document_.PageCount(), {});
+    EnsureVisiblePageRasterQuality();
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+bool App::AppendPagesFromFile() {
+    wchar_t fileBuffer[MAX_PATH] = {};
+
+    OPENFILENAMEW dialog {};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = window_;
+    dialog.lpstrFilter =
+        L"All Supported Files\0*.cnote;*.pdf\0"
+        L"Cnote Files\0*.cnote\0"
+        L"PDF Files\0*.pdf\0"
+        L"All Files\0*.*\0";
+    dialog.lpstrFile = fileBuffer;
+    dialog.nMaxFile = MAX_PATH;
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    dialog.lpstrDefExt = L"cnote";
+
+    if (!GetOpenFileNameW(&dialog)) {
+        return false;
+    }
+
+    return AppendPagesFromDocumentPath(fileBuffer);
+}
+
+bool App::AppendPagesFromDocumentPath(const std::wstring& filePath) {
+    std::optional<Document> opened;
+    if (HasExtension(filePath, kCnoteFileExtension)) {
+        opened = ProjectFile::Load(filePath, pdfBackend_);
+        if (!opened.has_value()) {
+            MessageBoxW(window_, L"Failed to open the cnote file for page import.", L"Append Pages", MB_OK | MB_ICONERROR);
+            return false;
+        }
+    } else if (HasExtension(filePath, L".pdf")) {
+        opened = pdfBackend_.Open(filePath);
+        if (!opened.has_value()) {
+            MessageBoxW(window_, L"Failed to open or render the PDF for page import.", L"Append Pages", MB_OK | MB_ICONERROR);
+            return false;
+        }
+    } else {
+        MessageBoxW(window_, L"Unsupported file type. Choose a PDF or a .cnote file.", L"Append Pages", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    if (!opened.has_value() || opened->PageCount() == 0U) {
+        MessageBoxW(window_, L"The selected file did not contain any pages to append.", L"Append Pages", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    ResetPendingRasterWork();
+    ClearSelection();
+    ClearHistory();
+
+    const std::size_t insertIndex = document_.PageCount();
+    for (std::size_t pageIndex = 0; pageIndex < opened->PageCount(); ++pageIndex) {
+        Page importedPage = opened->PageAt(pageIndex);
+        FlattenImportedPage(importedPage);
+        document_.InsertPage(document_.PageCount(), std::move(importedPage));
+    }
+
+    pageSurfaceCaches_.assign(document_.PageCount(), {});
+    sidebarThumbnailCaches_.assign(document_.PageCount(), {});
+    document_.SetCurrentPageIndex(insertIndex);
+    EnsureSidebarCurrentPageVisible();
+    EnsureVisiblePageRasterQuality();
+    FocusPage(insertIndex);
+    return true;
 }
 
 void App::AddPaletteColor() {

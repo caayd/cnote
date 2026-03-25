@@ -15,6 +15,7 @@ add_executable(cnote WIN32
     src/AppSettings.cpp
     src/cnote.rc
     src/Document.cpp
+    src/NewPageSettingsWindow.cpp
     src/PdfBackend.cpp
     src/ProjectFile.cpp
     src/SettingsWindow.cpp
@@ -60,6 +61,7 @@ target_link_libraries(cnote PRIVATE
     gdi32
     gdiplus
     pdfium
+    uxtheme
     user32
 )
 
