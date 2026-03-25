@@ -251,6 +251,28 @@ bool HasExtension(const std::wstring& path, const wchar_t* extension) {
     return normalizedPath.ends_with(normalizedExtension);
 }
 
+float SnapBrushSize(float size) {
+    constexpr float kMinBrushSize = 0.5f;
+    constexpr float kMaxBrushSize = 20.0f;
+    constexpr float kBrushSizeStep = 0.25f;
+    const float clamped = std::clamp(size, kMinBrushSize, kMaxBrushSize);
+    const float steps = std::round((clamped - kMinBrushSize) / kBrushSizeStep);
+    return kMinBrushSize + (steps * kBrushSizeStep);
+}
+
+std::wstring FormatBrushSizeValue(float size) {
+    wchar_t buffer[32] = {};
+    std::swprintf(buffer, std::size(buffer), L"%.2f", SnapBrushSize(size));
+    std::wstring value = buffer;
+    while (!value.empty() && value.back() == L'0') {
+        value.pop_back();
+    }
+    if (!value.empty() && value.back() == L'.') {
+        value.pop_back();
+    }
+    return value;
+}
+
 struct SvgPathStyle {
     bool fill = true;
     bool stroke = false;
@@ -1089,7 +1111,7 @@ RECT ToolbarBrushTrackRect(const RECT& sliderRect) {
 
 int ToolbarBrushThumbCenterX(const RECT& sliderRect, float brushSize) {
     const int width = std::max(1, static_cast<int>(sliderRect.right - sliderRect.left));
-    const float normalized = std::clamp((brushSize - 1.0f) / 19.0f, 0.0f, 1.0f);
+    const float normalized = std::clamp((SnapBrushSize(brushSize) - 0.5f) / 19.5f, 0.0f, 1.0f);
     return sliderRect.left + static_cast<int>(std::lround(normalized * static_cast<float>(width - 1)));
 }
 
@@ -2109,15 +2131,12 @@ void App::AddBlankPageAfterCurrent() {
 
     ResetPendingRasterWork();
     ClearSelection();
-    ClearHistory();
-    const std::size_t insertIndex = document_.InsertPage(document_.CurrentPageIndex() + 1U, BuildConfiguredNewPage());
-    pageSurfaceCaches_.assign(document_.PageCount(), {});
-    sidebarThumbnailCaches_.assign(document_.PageCount(), {});
-    document_.SetCurrentPageIndex(insertIndex);
+    const std::size_t previousPageIndex = document_.CurrentPageIndex();
+    Page newPage = BuildConfiguredNewPage();
+    const std::size_t insertIndex = document_.InsertPage(document_.CurrentPageIndex() + 1U, newPage);
+    PushPageHistoryAction(HistoryActionType::AddPages, insertIndex, { std::move(newPage) }, insertIndex, previousPageIndex);
+    RestoreAfterPageHistoryChange(insertIndex);
     NotifyDocumentMutated();
-    EnsureSidebarCurrentPageVisible();
-    EnsureVisiblePageRasterQuality();
-    FocusPage(insertIndex);
 }
 
 void App::CopyCurrentPageToSidebarBuffer() {
@@ -2136,15 +2155,12 @@ bool App::PasteSidebarPageAfterCurrent() {
 
     ResetPendingRasterWork();
     ClearSelection();
-    ClearHistory();
-    const std::size_t insertIndex = document_.InsertPage(document_.CurrentPageIndex() + 1U, *copiedSidebarPage_);
-    pageSurfaceCaches_.assign(document_.PageCount(), {});
-    sidebarThumbnailCaches_.assign(document_.PageCount(), {});
-    document_.SetCurrentPageIndex(insertIndex);
+    const std::size_t previousPageIndex = document_.CurrentPageIndex();
+    const Page insertedPage = *copiedSidebarPage_;
+    const std::size_t insertIndex = document_.InsertPage(document_.CurrentPageIndex() + 1U, insertedPage);
+    PushPageHistoryAction(HistoryActionType::AddPages, insertIndex, { insertedPage }, insertIndex, previousPageIndex);
+    RestoreAfterPageHistoryChange(insertIndex);
     NotifyDocumentMutated();
-    EnsureSidebarCurrentPageVisible();
-    EnsureVisiblePageRasterQuality();
-    FocusPage(insertIndex);
     return true;
 }
 
@@ -2155,15 +2171,12 @@ bool App::DeleteCurrentPage() {
 
     ResetPendingRasterWork();
     ClearSelection();
-    ClearHistory();
     const std::size_t currentIndex = document_.CurrentPageIndex();
+    Page removedPage = document_.PageAt(currentIndex);
     const std::size_t focusIndex = document_.RemovePage(currentIndex);
-    pageSurfaceCaches_.assign(document_.PageCount(), {});
-    sidebarThumbnailCaches_.assign(document_.PageCount(), {});
+    PushPageHistoryAction(HistoryActionType::RemovePages, currentIndex, { std::move(removedPage) }, focusIndex, currentIndex);
+    RestoreAfterPageHistoryChange(focusIndex);
     NotifyDocumentMutated();
-    EnsureSidebarCurrentPageVisible();
-    EnsureVisiblePageRasterQuality();
-    FocusPage(focusIndex);
     return true;
 }
 
@@ -2558,29 +2571,56 @@ void App::Undo() {
 
     HistoryAction action = undoActions_.back();
     undoActions_.pop_back();
-    auto& strokes = document_.PageAt(action.pageIndex).strokes;
-    document_.SetCurrentPageIndex(action.pageIndex);
     bool cacheUpdated = false;
 
-    if (action.type == HistoryActionType::AddStroke) {
-        if (action.index < strokes.size()) {
-            strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(action.index));
-            AdjustSelectionForRemoval(action.pageIndex, action.index);
+    switch (action.type) {
+    case HistoryActionType::AddStroke:
+    case HistoryActionType::RemoveStroke: {
+        auto& strokes = document_.PageAt(action.pageIndex).strokes;
+        document_.SetCurrentPageIndex(action.pageIndex);
+        if (action.type == HistoryActionType::AddStroke) {
+            if (action.index < strokes.size()) {
+                strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(action.index));
+                AdjustSelectionForRemoval(action.pageIndex, action.index);
+            }
+        } else if (action.index <= strokes.size()) {
+            AdjustSelectionForInsertion(action.pageIndex, action.index);
+            strokes.insert(strokes.begin() + static_cast<std::ptrdiff_t>(action.index), action.stroke);
+            if (action.index + 1U == strokes.size()) {
+                cacheUpdated = TryAppendStrokeToPageSurfaceCache(action.pageIndex, action.stroke);
+            }
         }
-    } else if (action.index <= strokes.size()) {
-        AdjustSelectionForInsertion(action.pageIndex, action.index);
-        strokes.insert(strokes.begin() + static_cast<std::ptrdiff_t>(action.index), action.stroke);
-        if (action.index + 1U == strokes.size()) {
-            cacheUpdated = TryAppendStrokeToPageSurfaceCache(action.pageIndex, action.stroke);
+        redoActions_.push_back(std::move(action));
+        if (!cacheUpdated) {
+            InvalidatePageSurfaceCache(redoActions_.back().pageIndex);
         }
+        NotifyDocumentMutated();
+        InvalidateStrokeRegion(redoActions_.back().stroke, redoActions_.back().pageIndex, false);
+        return;
     }
-
-    redoActions_.push_back(std::move(action));
-    if (!cacheUpdated) {
-        InvalidatePageSurfaceCache(redoActions_.back().pageIndex);
+    case HistoryActionType::AddPages: {
+        const std::size_t removeCount = std::min(action.pages.size(), document_.PageCount() > action.index ? document_.PageCount() - action.index : 0U);
+        for (std::size_t offset = 0; offset < removeCount; ++offset) {
+            document_.RemovePage(action.index);
+        }
+        redoActions_.push_back(std::move(action));
+        RestoreAfterPageHistoryChange(redoActions_.back().previousPageIndex);
+        NotifyDocumentMutated();
+        return;
     }
-    NotifyDocumentMutated();
-    InvalidateStrokeRegion(redoActions_.back().stroke, redoActions_.back().pageIndex, false);
+    case HistoryActionType::RemovePages: {
+        std::size_t insertIndex = action.index;
+        for (const Page& page : action.pages) {
+            document_.InsertPage(insertIndex++, page);
+        }
+        redoActions_.push_back(std::move(action));
+        RestoreAfterPageHistoryChange(redoActions_.back().previousPageIndex);
+        NotifyDocumentMutated();
+        return;
+    }
+    default:
+        return;
+    }
 }
 
 void App::Redo() {
@@ -2590,29 +2630,56 @@ void App::Redo() {
 
     HistoryAction action = redoActions_.back();
     redoActions_.pop_back();
-    auto& strokes = document_.PageAt(action.pageIndex).strokes;
-    document_.SetCurrentPageIndex(action.pageIndex);
     bool cacheUpdated = false;
 
-    if (action.type == HistoryActionType::AddStroke) {
-        if (action.index <= strokes.size()) {
-            AdjustSelectionForInsertion(action.pageIndex, action.index);
-            strokes.insert(strokes.begin() + static_cast<std::ptrdiff_t>(action.index), action.stroke);
-            if (action.index + 1U == strokes.size()) {
-                cacheUpdated = TryAppendStrokeToPageSurfaceCache(action.pageIndex, action.stroke);
+    switch (action.type) {
+    case HistoryActionType::AddStroke:
+    case HistoryActionType::RemoveStroke: {
+        auto& strokes = document_.PageAt(action.pageIndex).strokes;
+        document_.SetCurrentPageIndex(action.pageIndex);
+        if (action.type == HistoryActionType::AddStroke) {
+            if (action.index <= strokes.size()) {
+                AdjustSelectionForInsertion(action.pageIndex, action.index);
+                strokes.insert(strokes.begin() + static_cast<std::ptrdiff_t>(action.index), action.stroke);
+                if (action.index + 1U == strokes.size()) {
+                    cacheUpdated = TryAppendStrokeToPageSurfaceCache(action.pageIndex, action.stroke);
+                }
             }
+        } else if (action.index < strokes.size()) {
+            strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(action.index));
+            AdjustSelectionForRemoval(action.pageIndex, action.index);
         }
-    } else if (action.index < strokes.size()) {
-        strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(action.index));
-        AdjustSelectionForRemoval(action.pageIndex, action.index);
+        undoActions_.push_back(std::move(action));
+        if (!cacheUpdated) {
+            InvalidatePageSurfaceCache(undoActions_.back().pageIndex);
+        }
+        NotifyDocumentMutated();
+        InvalidateStrokeRegion(undoActions_.back().stroke, undoActions_.back().pageIndex, false);
+        return;
     }
-
-    undoActions_.push_back(std::move(action));
-    if (!cacheUpdated) {
-        InvalidatePageSurfaceCache(undoActions_.back().pageIndex);
+    case HistoryActionType::AddPages: {
+        std::size_t insertIndex = action.index;
+        for (const Page& page : action.pages) {
+            document_.InsertPage(insertIndex++, page);
+        }
+        undoActions_.push_back(std::move(action));
+        RestoreAfterPageHistoryChange(undoActions_.back().pageIndex);
+        NotifyDocumentMutated();
+        return;
     }
-    NotifyDocumentMutated();
-    InvalidateStrokeRegion(undoActions_.back().stroke, undoActions_.back().pageIndex, false);
+    case HistoryActionType::RemovePages: {
+        const std::size_t removeCount = std::min(action.pages.size(), document_.PageCount() > action.index ? document_.PageCount() - action.index : 0U);
+        for (std::size_t offset = 0; offset < removeCount; ++offset) {
+            document_.RemovePage(action.index);
+        }
+        undoActions_.push_back(std::move(action));
+        RestoreAfterPageHistoryChange(undoActions_.back().pageIndex);
+        NotifyDocumentMutated();
+        return;
+    }
+    default:
+        return;
+    }
 }
 
 bool App::CanUndo() const {
@@ -2670,6 +2737,27 @@ bool App::CanAutoSaveCurrentDocument() const {
 
 bool App::IsDocumentInteractionActive() const {
     return isDrawing_ || isErasing_ || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_;
+}
+
+void App::RestoreAfterPageHistoryChange(std::size_t focusPageIndex) {
+    ClearSelection();
+    CancelDeferredRasterRefresh();
+    pageSurfaceCaches_.assign(document_.PageCount(), {});
+    sidebarThumbnailCaches_.assign(document_.PageCount(), {});
+    document_.SetCurrentPageIndex(std::min(focusPageIndex, document_.PageCount() - 1U));
+    EnsureSidebarCurrentPageVisible();
+    EnsureVisiblePageRasterQuality();
+    FocusPage(std::min(focusPageIndex, document_.PageCount() - 1U));
+}
+
+void App::PushPageHistoryAction(
+    HistoryActionType type,
+    std::size_t index,
+    std::vector<Page> pages,
+    std::size_t focusPageIndex,
+    std::size_t previousPageIndex) {
+    undoActions_.push_back({ type, {}, std::move(pages), index, focusPageIndex, previousPageIndex });
+    redoActions_.clear();
 }
 
 std::wstring App::CurrentWindowTitle() const {
@@ -3005,7 +3093,7 @@ std::wstring App::ToolbarBrushValueLabel() const {
     }
 
     if (const auto tool = ToolbarBrushTool(); tool.has_value()) {
-        return std::to_wstring(static_cast<int>(std::lround(BrushSizeForTool(*tool))));
+        return FormatBrushSizeValue(BrushSizeForTool(*tool));
     }
 
     return L"";
@@ -3030,7 +3118,7 @@ void App::BeginToolbarBrushSizeInput() {
     toolbarBrushSizeEditing_ = true;
     toolbarBrushSizeReplaceOnType_ = true;
     toolbarBrushSizeEditTool_ = tool;
-    toolbarBrushSizeText_ = std::to_wstring(static_cast<int>(std::lround(BrushSizeForTool(*tool))));
+    toolbarBrushSizeText_ = FormatBrushSizeValue(BrushSizeForTool(*tool));
 }
 
 void App::ApplyToolbarBrushSizeInput() {
@@ -3039,14 +3127,13 @@ void App::ApplyToolbarBrushSizeInput() {
     }
 
     wchar_t* end = nullptr;
-    const long parsed = std::wcstol(toolbarBrushSizeText_.c_str(), &end, 10);
-    if (end == toolbarBrushSizeText_.c_str() || *end != L'\0' || parsed <= 0L) {
+    const float parsed = std::wcstof(toolbarBrushSizeText_.c_str(), &end);
+    if (end == toolbarBrushSizeText_.c_str() || *end != L'\0' || parsed <= 0.0f) {
         return;
     }
 
-    const int clamped = std::clamp(static_cast<int>(parsed), 1, 20);
-    SetBrushSizeForTool(*toolbarBrushSizeEditTool_, static_cast<float>(clamped));
-    toolbarBrushSizeText_ = std::to_wstring(clamped);
+    SetBrushSizeForTool(*toolbarBrushSizeEditTool_, parsed);
+    toolbarBrushSizeText_ = FormatBrushSizeValue(BrushSizeForTool(*toolbarBrushSizeEditTool_));
 }
 
 void App::BeginToolbarBrushSliderDrag(POINT cursor) {
@@ -3078,7 +3165,7 @@ void App::UpdateToolbarBrushSliderDrag(POINT cursor) {
     const int clampedX = std::clamp(cursor.x, trackRect.left, trackRect.right - 1);
     const int width = std::max(1, static_cast<int>(trackRect.right - trackRect.left - 1));
     const float normalized = static_cast<float>(clampedX - trackRect.left) / static_cast<float>(width);
-    const float size = 1.0f + std::lround(normalized * 19.0f);
+    const float size = 0.5f + (normalized * 19.5f);
     SetBrushSizeForTool(*tool, size);
 }
 
@@ -3166,7 +3253,12 @@ void App::EndStroke() {
         auto& strokes = document_.PageAt(*activeStrokePageIndex_).strokes;
         const std::size_t insertIndex = strokes.size();
         strokes.push_back(finishedStroke);
-        undoActions_.push_back({ HistoryActionType::AddStroke, std::move(finishedStroke), insertIndex, *activeStrokePageIndex_ });
+        HistoryAction action {};
+        action.type = HistoryActionType::AddStroke;
+        action.stroke = std::move(finishedStroke);
+        action.index = insertIndex;
+        action.pageIndex = *activeStrokePageIndex_;
+        undoActions_.push_back(std::move(action));
         redoActions_.clear();
         committedStroke = undoActions_.back().stroke;
         committedPageIndex = *activeStrokePageIndex_;
@@ -4271,7 +4363,12 @@ bool App::EraseAt(POINT cursor) {
             Stroke removed = strokes[strokeIndex];
             strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(strokeIndex));
             AdjustSelectionForRemoval(pageView.pageIndex, strokeIndex);
-            undoActions_.push_back({ HistoryActionType::RemoveStroke, std::move(removed), strokeIndex, pageView.pageIndex });
+            HistoryAction action {};
+            action.type = HistoryActionType::RemoveStroke;
+            action.stroke = std::move(removed);
+            action.index = strokeIndex;
+            action.pageIndex = pageView.pageIndex;
+            undoActions_.push_back(std::move(action));
             redoActions_.clear();
             NotifyDocumentMutated();
             InvalidatePageSurfaceCache(pageView.pageIndex);
@@ -4916,7 +5013,7 @@ float App::BrushSizeForTool(Tool tool) const {
 }
 
 void App::SetBrushSizeForTool(Tool tool, float size, bool refreshUi) {
-    const float clamped = std::clamp(size, 1.0f, 20.0f);
+    const float clamped = SnapBrushSize(std::clamp(size, kMinBrushSize, kMaxBrushSize));
     switch (tool) {
     case Tool::Erase:
         settings_.eraseBrushSize = clamped;
@@ -6662,6 +6759,15 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case kRenderResultsMessage:
         HandleCompletedRenderResults();
         return 0;
+    case WM_ACTIVATEAPP:
+        if (wParam == FALSE) {
+            if (CanAutoSaveCurrentDocument() && !IsDocumentInteractionActive()) {
+                static_cast<void>(SaveCnoteToPath(document_.FilePath(), false));
+            } else {
+                UpdateAutoSaveTimer();
+            }
+        }
+        break;
     case WM_TIMER:
         if (wParam == kRasterRefreshTimerId) {
             HandleDeferredRasterRefresh();
@@ -6788,9 +6894,21 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                     toolbarBrushSizeText_.clear();
                     toolbarBrushSizeReplaceOnType_ = false;
                 }
-                if (!(toolbarBrushSizeText_.empty() && wParam == L'0') && toolbarBrushSizeText_.size() < 2) {
+                if (!(toolbarBrushSizeText_.empty() && wParam == L'0') && toolbarBrushSizeText_.size() < 5) {
                     toolbarBrushSizeText_.push_back(static_cast<wchar_t>(wParam));
                     ApplyToolbarBrushSizeInput();
+                }
+            } else if (wParam == L'.') {
+                if (toolbarBrushSizeReplaceOnType_) {
+                    toolbarBrushSizeText_.clear();
+                    toolbarBrushSizeReplaceOnType_ = false;
+                }
+                if (toolbarBrushSizeText_.find(L'.') == std::wstring::npos) {
+                    if (toolbarBrushSizeText_.empty()) {
+                        toolbarBrushSizeText_ = L"0.";
+                    } else {
+                        toolbarBrushSizeText_.push_back(L'.');
+                    }
                 }
             } else if (wParam == VK_RETURN) {
                 ApplyToolbarBrushSizeInput();
@@ -6878,12 +6996,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         case VK_OEM_4:
         case VK_SUBTRACT:
         case VK_OEM_MINUS:
-            ChangeBrushSize(-1.0f);
+            ChangeBrushSize(-kBrushSizeStep);
             return 0;
         case VK_OEM_6:
         case VK_ADD:
         case VK_OEM_PLUS:
-            ChangeBrushSize(1.0f);
+            ChangeBrushSize(kBrushSizeStep);
             return 0;
         case '1':
         case '2':

@@ -44,6 +44,8 @@ public:
     enum class HistoryActionType {
         AddStroke,
         RemoveStroke,
+        AddPages,
+        RemovePages,
     };
 
     enum class ShortcutAction {
@@ -92,8 +94,10 @@ public:
     struct HistoryAction {
         HistoryActionType type = HistoryActionType::AddStroke;
         Stroke stroke {};
+        std::vector<Page> pages {};
         std::size_t index = 0;
         std::size_t pageIndex = 0;
+        std::size_t previousPageIndex = 0;
     };
 
     struct PageSurfaceCache {
@@ -212,6 +216,8 @@ private:
     [[nodiscard]] bool HasSavedCnotePath() const;
     [[nodiscard]] bool CanAutoSaveCurrentDocument() const;
     [[nodiscard]] bool IsDocumentInteractionActive() const;
+    void RestoreAfterPageHistoryChange(std::size_t focusPageIndex);
+    void PushPageHistoryAction(HistoryActionType type, std::size_t index, std::vector<Page> pages, std::size_t focusPageIndex, std::size_t previousPageIndex);
     void AddPaletteColor();
     void RemovePaletteColor();
     [[nodiscard]] bool ApplyHexColorFromClipboard();
@@ -467,6 +473,9 @@ private:
     static constexpr UINT_PTR kZoomSessionTimerId = 3;
     static constexpr UINT kRasterRefreshDelayMs = 120;
     static constexpr UINT kZoomSessionDelayMs = 100;
+    static constexpr float kMinBrushSize = 0.5f;
+    static constexpr float kMaxBrushSize = 20.0f;
+    static constexpr float kBrushSizeStep = 0.25f;
     static constexpr float kWheelScrollPixels = 72.0f;
     static constexpr float kMinZoom = 0.35f;
     static constexpr float kMaxZoom = 4.0f;

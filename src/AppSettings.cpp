@@ -355,6 +355,8 @@ bool App::AppendPagesFromFile() {
 }
 
 bool App::AppendPagesFromDocumentPath(const std::wstring& filePath) {
+    constexpr float kImportedPdfRenderScale = 2.5f;
+
     std::optional<Document> opened;
     if (HasExtension(filePath, kCnoteFileExtension)) {
         opened = ProjectFile::Load(filePath, pdfBackend_);
@@ -380,22 +382,30 @@ bool App::AppendPagesFromDocumentPath(const std::wstring& filePath) {
 
     ResetPendingRasterWork();
     ClearSelection();
-    ClearHistory();
 
     const std::size_t insertIndex = document_.PageCount();
+    const std::size_t previousPageIndex = document_.CurrentPageIndex();
+    std::vector<Page> importedPages;
+    importedPages.reserve(opened->PageCount());
     for (std::size_t pageIndex = 0; pageIndex < opened->PageCount(); ++pageIndex) {
         Page importedPage = opened->PageAt(pageIndex);
+        if (opened->HasPdfData() && importedPage.sourcePdfPageIndex >= 0) {
+            const auto rerendered = pdfBackend_.RenderPage(
+                opened->PdfData(),
+                static_cast<std::size_t>(importedPage.sourcePdfPageIndex),
+                kImportedPdfRenderScale);
+            if (rerendered.has_value()) {
+                importedPage.raster = std::move(*rerendered);
+            }
+        }
         FlattenImportedPage(importedPage);
+        importedPages.push_back(importedPage);
         document_.InsertPage(document_.PageCount(), std::move(importedPage));
     }
 
-    pageSurfaceCaches_.assign(document_.PageCount(), {});
-    sidebarThumbnailCaches_.assign(document_.PageCount(), {});
-    document_.SetCurrentPageIndex(insertIndex);
+    PushPageHistoryAction(HistoryActionType::AddPages, insertIndex, std::move(importedPages), insertIndex, previousPageIndex);
+    RestoreAfterPageHistoryChange(insertIndex);
     NotifyDocumentMutated();
-    EnsureSidebarCurrentPageVisible();
-    EnsureVisiblePageRasterQuality();
-    FocusPage(insertIndex);
     return true;
 }
 
@@ -522,14 +532,14 @@ void App::LoadAppSettings() {
 
         if (key == "draw_brush_size") {
             if (const auto parsed = ParseFloat(value); parsed.has_value()) {
-                settings_.drawBrushSize = std::clamp(*parsed, 1.0f, 20.0f);
+                settings_.drawBrushSize = std::clamp(*parsed, 0.5f, 20.0f);
             }
             continue;
         }
 
         if (key == "erase_brush_size") {
             if (const auto parsed = ParseFloat(value); parsed.has_value()) {
-                settings_.eraseBrushSize = std::clamp(*parsed, 1.0f, 20.0f);
+                settings_.eraseBrushSize = std::clamp(*parsed, 0.5f, 20.0f);
             }
             continue;
         }
