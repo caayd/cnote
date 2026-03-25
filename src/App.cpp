@@ -161,13 +161,11 @@ UINT WindowDpi(HWND window) {
 }
 
 int ScaleForDpi(int value, UINT dpi) {
-    static_cast<void>(dpi);
-    return value;
+    return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
 }
 
 float ScaleForDpi(float value, UINT dpi) {
-    static_cast<void>(dpi);
-    return value;
+    return value * static_cast<float>(dpi) / static_cast<float>(USER_DEFAULT_SCREEN_DPI);
 }
 
 int SystemMetricForDpi(int index, UINT dpi) {
@@ -209,8 +207,8 @@ int CaptionButtonReserve(UINT dpi) {
 }
 
 int FontHeightForDpi(int height, UINT dpi) {
-    static_cast<void>(dpi);
-    return height;
+    const int scaledHeight = ScaleForDpi(height, dpi);
+    return scaledHeight + (dpi > USER_DEFAULT_SCREEN_DPI ? 1 : 0);
 }
 
 constexpr int kBaseToolbarHeight = 45;
@@ -5830,25 +5828,31 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
 
         const int centerX = (rect.left + rect.right) / 2;
         const int centerY = (rect.top + rect.bottom) / 2;
+        const int lineHalfWidth = ScaleForDpi(8, dpi);
+        const int boxHalfWidth = ScaleForDpi(6, dpi);
+        const int boxHalfHeight = ScaleForDpi(5, dpi);
+        const int closeOffset = ScaleForDpi(7, dpi);
+        const int overlapOffset = ScaleForDpi(3, dpi);
         if (kind == 0) {
-            MoveToEx(hdc, centerX - 6, centerY + 4, nullptr);
-            LineTo(hdc, centerX + 7, centerY + 4);
+            const int lineY = centerY + ScaleForDpi(4, dpi);
+            MoveToEx(hdc, centerX - lineHalfWidth, lineY, nullptr);
+            LineTo(hdc, centerX + lineHalfWidth + 1, lineY);
         } else if (kind == 1) {
             if (IsZoomed(window_)) {
-                Rectangle(hdc, centerX - 5, centerY - 1, centerX + 5, centerY + 7);
-                MoveToEx(hdc, centerX - 2, centerY - 4, nullptr);
-                LineTo(hdc, centerX + 7, centerY - 4);
-                LineTo(hdc, centerX + 7, centerY + 3);
-                MoveToEx(hdc, centerX - 2, centerY - 4, nullptr);
-                LineTo(hdc, centerX - 2, centerY + 1);
+                Rectangle(hdc, centerX - boxHalfWidth, centerY - 1, centerX + boxHalfWidth + 1, centerY + boxHalfHeight + 2);
+                MoveToEx(hdc, centerX - boxHalfWidth + overlapOffset, centerY - boxHalfHeight - overlapOffset, nullptr);
+                LineTo(hdc, centerX + boxHalfWidth + overlapOffset + 1, centerY - boxHalfHeight - overlapOffset);
+                LineTo(hdc, centerX + boxHalfWidth + overlapOffset + 1, centerY + boxHalfHeight - overlapOffset + 1);
+                MoveToEx(hdc, centerX - boxHalfWidth + overlapOffset, centerY - boxHalfHeight - overlapOffset, nullptr);
+                LineTo(hdc, centerX - boxHalfWidth + overlapOffset, centerY - boxHalfHeight + overlapOffset);
             } else {
-                Rectangle(hdc, centerX - 5, centerY - 4, centerX + 5, centerY + 4);
+                Rectangle(hdc, centerX - boxHalfWidth, centerY - boxHalfHeight, centerX + boxHalfWidth + 1, centerY + boxHalfHeight + 1);
             }
         } else {
-            MoveToEx(hdc, centerX - 5, centerY - 5, nullptr);
-            LineTo(hdc, centerX + 6, centerY + 6);
-            MoveToEx(hdc, centerX + 5, centerY - 5, nullptr);
-            LineTo(hdc, centerX - 6, centerY + 6);
+            MoveToEx(hdc, centerX - closeOffset, centerY - closeOffset, nullptr);
+            LineTo(hdc, centerX + closeOffset + 1, centerY + closeOffset + 1);
+            MoveToEx(hdc, centerX + closeOffset, centerY - closeOffset, nullptr);
+            LineTo(hdc, centerX - closeOffset - 1, centerY + closeOffset + 1);
         }
 
         SelectObject(hdc, oldBrush);
