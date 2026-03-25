@@ -161,11 +161,13 @@ UINT WindowDpi(HWND window) {
 }
 
 int ScaleForDpi(int value, UINT dpi) {
-    return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
+    static_cast<void>(dpi);
+    return value;
 }
 
 float ScaleForDpi(float value, UINT dpi) {
-    return value * static_cast<float>(dpi) / static_cast<float>(USER_DEFAULT_SCREEN_DPI);
+    static_cast<void>(dpi);
+    return value;
 }
 
 int SystemMetricForDpi(int index, UINT dpi) {
@@ -176,7 +178,7 @@ int SystemMetricForDpi(int index, UINT dpi) {
         return getSystemMetricsForDpi(index, dpi);
     }
 
-    return ScaleForDpi(GetSystemMetrics(index), dpi);
+    return MulDiv(GetSystemMetrics(index), static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
 }
 
 BOOL AdjustWindowRectForDpi(RECT* rect, DWORD style, BOOL hasMenu, DWORD exStyle, UINT dpi) {
@@ -207,7 +209,8 @@ int CaptionButtonReserve(UINT dpi) {
 }
 
 int FontHeightForDpi(int height, UINT dpi) {
-    return ScaleForDpi(height, dpi);
+    static_cast<void>(dpi);
+    return height;
 }
 
 constexpr int kBaseToolbarHeight = 45;
