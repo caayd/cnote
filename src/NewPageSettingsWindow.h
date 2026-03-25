@@ -28,6 +28,7 @@ private:
     void CreateIfNeeded(HWND owner);
     void CreateControls();
     void ApplyFonts();
+    void RebuildDpiResources(UINT dpi);
     void LayoutControls();
     void UpdateScrollInfo();
     void ScrollTo(int scrollOffset);
@@ -49,6 +50,8 @@ private:
     [[nodiscard]] int SliderValue(SliderKind kind) const;
     void SetSliderValue(SliderKind kind, int value);
     void HandleDimensionEdit(HWND edit, float& value, bool normalizeText);
+    [[nodiscard]] UINT CurrentDpi() const;
+    [[nodiscard]] int Scale(int value) const;
     static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
 
@@ -73,6 +76,7 @@ private:
     float draftHeight_ = 792.0f;
     std::uint32_t draftBackgroundColor_ = 0xFFFFFFFFU;
     std::optional<SliderKind> draggingSlider_ {};
+    UINT currentDpi_ = USER_DEFAULT_SCREEN_DPI;
     bool suppressEditRefresh_ = false;
     int scrollOffset_ = 0;
     int contentHeight_ = 0;

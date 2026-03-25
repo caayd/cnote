@@ -14,6 +14,7 @@ add_executable(cnote WIN32
     src/App.cpp
     src/AppSettings.cpp
     src/cnote.rc
+    src/DpiUtil.cpp
     src/Document.cpp
     src/NewPageSettingsWindow.cpp
     src/PdfBackend.cpp

@@ -32,6 +32,7 @@ private:
     void CreateIfNeeded(HWND owner);
     void CreateControls();
     void ApplyFonts();
+    void RebuildDpiResources(UINT dpi);
     void LayoutControls();
     void UpdateScrollInfo();
     void ScrollTo(int scrollOffset);
@@ -63,6 +64,8 @@ private:
     void UpdateSliderValue(SliderKind kind, int value);
     void UpdateSliderFromPoint(SliderKind kind, POINT cursor);
     [[nodiscard]] std::optional<SliderKind> HitTestSlider(POINT cursor) const;
+    [[nodiscard]] UINT CurrentDpi() const;
+    [[nodiscard]] int Scale(int value) const;
     static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
 
@@ -104,6 +107,7 @@ private:
     HWND shortcutHintLabel_ = nullptr;
     std::optional<App::ShortcutAction> capturingShortcutAction_ {};
     std::optional<SliderKind> draggingSlider_ {};
+    UINT currentDpi_ = USER_DEFAULT_SCREEN_DPI;
     int scrollOffset_ = 0;
     int contentHeight_ = 0;
     bool draggingScrollbar_ = false;

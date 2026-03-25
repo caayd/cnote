@@ -14,6 +14,7 @@
 #include <uxtheme.h>
 #include <windowsx.h>
 
+#include "DpiUtil.h"
 #include "resource.h"
 
 namespace cnote {
@@ -23,6 +24,8 @@ namespace {
 constexpr wchar_t kWindowClassName[] = L"CnoteNewPageSettingsWindow";
 constexpr int kWindowWidth = 780;
 constexpr int kWindowHeight = 600;
+constexpr DWORD kNewPageWindowStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_CLIPCHILDREN;
+constexpr DWORD kNewPageWindowExStyle = WS_EX_DLGMODALFRAME;
 constexpr COLORREF kWindowBackground = RGB(18, 22, 29);
 constexpr COLORREF kPanelFill = RGB(18, 24, 32);
 constexpr COLORREF kPanelBorder = RGB(46, 58, 74);
@@ -235,9 +238,13 @@ void StrokeRoundedRect(HDC hdc, RECT rect, COLORREF color, int width) {
     graphics.DrawPath(&pen, path.get());
 }
 
-RECT SliderTrackRect(const RECT& sliderRect) {
+RECT SliderTrackRect(const RECT& sliderRect, UINT dpi) {
     const int centerY = (sliderRect.top + sliderRect.bottom) / 2;
-    return MakeRect(sliderRect.left + 10, centerY - 3, sliderRect.right - 10, centerY + 3);
+    return MakeRect(
+        sliderRect.left + ScaleForDpi(10, dpi),
+        centerY - ScaleForDpi(3, dpi),
+        sliderRect.right - ScaleForDpi(10, dpi),
+        centerY + ScaleForDpi(3, dpi));
 }
 
 int SliderThumbCenterX(const RECT& trackRect, int value, int minimum, int maximum) {
@@ -270,20 +277,23 @@ bool RectFullyInside(const RECT& outer, const RECT& inner) {
         && inner.bottom <= outer.bottom;
 }
 
-NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount, int scrollOffset) {
+NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount, int scrollOffset, UINT dpi) {
     NewPageSettingsLayout layout {};
-    const int margin = 16;
-    const int gap = 16;
-    const int top = 48;
-    const int actionBarHeight = 60;
-    const int actionBarTop = std::max(top + 120, static_cast<int>(clientRect.bottom) - margin - actionBarHeight);
+    const auto px = [dpi](int value) {
+        return ScaleForDpi(value, dpi);
+    };
+    const int margin = px(16);
+    const int gap = px(16);
+    const int top = px(48);
+    const int actionBarHeight = px(45);
+    const int actionBarTop = std::max(top + px(90), static_cast<int>(clientRect.bottom) - margin - actionBarHeight);
     const int actionBarBottom = std::max(actionBarTop + actionBarHeight, static_cast<int>(clientRect.bottom) - margin);
-    const int scrollViewportBottom = actionBarTop - 12;
-    const int scrollbarReserve = kScrollbarGap + kScrollbarWidth;
-    const int rightPanelWidth = std::clamp((static_cast<int>(clientRect.right) - (margin * 2)) / 3, 240, 280);
-    const int leftPanelWidth = std::max(420, static_cast<int>(clientRect.right) - (margin * 2) - gap - rightPanelWidth - scrollbarReserve);
+    const int scrollViewportBottom = actionBarTop - px(12);
+    const int scrollbarReserve = px(kScrollbarGap + kScrollbarWidth);
+    const int rightPanelWidth = std::clamp((static_cast<int>(clientRect.right) - (margin * 2)) / 3, px(240), px(280));
+    const int leftPanelWidth = std::max(px(420), static_cast<int>(clientRect.right) - (margin * 2) - gap - rightPanelWidth - scrollbarReserve);
     const int rightLeft = margin + leftPanelWidth + gap;
-    const int panelPadding = 16;
+    const int panelPadding = px(16);
     layout.actionBarRect = MakeRect(margin, actionBarTop, static_cast<int>(clientRect.right) - margin, actionBarBottom);
     layout.scrollViewportRect = MakeRect(margin, top, static_cast<int>(clientRect.right) - margin, scrollViewportBottom);
 
@@ -293,17 +303,17 @@ NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount,
     const int contentLeft = defaultsLeft + panelPadding;
     const int contentRight = defaultsRight - panelPadding;
 
-    layout.colorPreviewRect = MakeRect(contentLeft, top + 34, contentRight, top + 110);
+    layout.colorPreviewRect = MakeRect(contentLeft, top + px(34), contentRight, top + px(110));
 
-    layout.defaultColorsLabelRect = MakeRect(contentLeft, layout.colorPreviewRect.bottom + 12, contentRight, layout.colorPreviewRect.bottom + 30);
+    layout.defaultColorsLabelRect = MakeRect(contentLeft, layout.colorPreviewRect.bottom + px(12), contentRight, layout.colorPreviewRect.bottom + px(30));
     const int defaultColumns = std::max(1, std::min(5, static_cast<int>(kDefaultPageColors.size())));
-    const int defaultGap = 10;
+    const int defaultGap = px(10);
     const int defaultSwatchSize = std::clamp(
         (contentRight - contentLeft - (defaultGap * (defaultColumns - 1))) / defaultColumns,
-        40,
-        62);
-    const int defaultSwatchHeight = 38;
-    const int defaultSwatchTop = layout.defaultColorsLabelRect.bottom + 8;
+        px(40),
+        px(62));
+    const int defaultSwatchHeight = px(38);
+    const int defaultSwatchTop = layout.defaultColorsLabelRect.bottom + px(8);
     for (std::size_t index = 0; index < kDefaultPageColors.size(); ++index) {
         const int column = static_cast<int>(index % static_cast<std::size_t>(defaultColumns));
         const int row = static_cast<int>(index / static_cast<std::size_t>(defaultColumns));
@@ -317,13 +327,13 @@ NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount,
         + (defaultRows * defaultSwatchHeight)
         + (std::max(0, defaultRows - 1) * defaultGap);
 
-    layout.previousColorsLabelRect = MakeRect(contentLeft, defaultGridBottom + 12, contentRight - 132, defaultGridBottom + 30);
-    layout.pasteHexButtonRect = MakeRect(contentRight - 120, defaultGridBottom + 4, contentRight, defaultGridBottom + 32);
+    layout.previousColorsLabelRect = MakeRect(contentLeft, defaultGridBottom + px(12), contentRight - px(132), defaultGridBottom + px(30));
+    layout.pasteHexButtonRect = MakeRect(contentRight - px(120), defaultGridBottom + px(4), contentRight, defaultGridBottom + px(32));
 
     const int recentColumns = 6;
-    const int recentGap = 8;
-    const int recentSwatchSize = std::clamp((contentRight - contentLeft - (recentGap * (recentColumns - 1))) / recentColumns, 34, 44);
-    const int recentTop = layout.previousColorsLabelRect.bottom + 8;
+    const int recentGap = px(8);
+    const int recentSwatchSize = std::clamp((contentRight - contentLeft - (recentGap * (recentColumns - 1))) / recentColumns, px(34), px(44));
+    const int recentTop = layout.previousColorsLabelRect.bottom + px(8);
     const std::size_t swatchCount = std::min<std::size_t>(recentColorCount, 8U);
     for (std::size_t index = 0; index < swatchCount; ++index) {
         const int column = static_cast<int>(index % static_cast<std::size_t>(recentColumns));
@@ -335,65 +345,65 @@ NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount,
     const int recentRows = std::max(1, static_cast<int>((swatchCount + static_cast<std::size_t>(recentColumns) - 1U) / static_cast<std::size_t>(recentColumns)));
     layout.previousColorsEmptyRect = MakeRect(contentLeft, recentTop, contentRight, recentTop + (recentSwatchSize * recentRows));
 
-    const int slidersTop = recentTop + (recentSwatchSize * recentRows) + (recentGap * std::max(0, recentRows - 1)) + 16;
-    layout.redLabelRect = MakeRect(contentLeft, slidersTop, contentRight, slidersTop + 18);
-    layout.redSliderRect = MakeRect(contentLeft, layout.redLabelRect.bottom + 2, contentRight, layout.redLabelRect.bottom + 26);
-    layout.greenLabelRect = MakeRect(contentLeft, layout.redSliderRect.bottom + 6, contentRight, layout.redSliderRect.bottom + 24);
-    layout.greenSliderRect = MakeRect(contentLeft, layout.greenLabelRect.bottom + 2, contentRight, layout.greenLabelRect.bottom + 26);
-    layout.blueLabelRect = MakeRect(contentLeft, layout.greenSliderRect.bottom + 6, contentRight, layout.greenSliderRect.bottom + 24);
-    layout.blueSliderRect = MakeRect(contentLeft, layout.blueLabelRect.bottom + 2, contentRight, layout.blueLabelRect.bottom + 26);
+    const int slidersTop = recentTop + (recentSwatchSize * recentRows) + (recentGap * std::max(0, recentRows - 1)) + px(16);
+    layout.redLabelRect = MakeRect(contentLeft, slidersTop, contentRight, slidersTop + px(18));
+    layout.redSliderRect = MakeRect(contentLeft, layout.redLabelRect.bottom + px(2), contentRight, layout.redLabelRect.bottom + px(26));
+    layout.greenLabelRect = MakeRect(contentLeft, layout.redSliderRect.bottom + px(6), contentRight, layout.redSliderRect.bottom + px(24));
+    layout.greenSliderRect = MakeRect(contentLeft, layout.greenLabelRect.bottom + px(2), contentRight, layout.greenLabelRect.bottom + px(26));
+    layout.blueLabelRect = MakeRect(contentLeft, layout.greenSliderRect.bottom + px(6), contentRight, layout.greenSliderRect.bottom + px(24));
+    layout.blueSliderRect = MakeRect(contentLeft, layout.blueLabelRect.bottom + px(2), contentRight, layout.blueLabelRect.bottom + px(26));
 
-    const int fieldGap = 18;
-    const int fieldWidth = std::clamp((contentRight - contentLeft - fieldGap) / 2, 132, 164);
-    const int fieldHeight = 28;
-    layout.widthLabelRect = MakeRect(contentLeft, layout.blueSliderRect.bottom + 14, contentLeft + fieldWidth, layout.blueSliderRect.bottom + 32);
-    layout.widthEditRect = MakeRect(contentLeft, layout.widthLabelRect.bottom + 4, contentLeft + fieldWidth, layout.widthLabelRect.bottom + 4 + fieldHeight);
-    layout.heightLabelRect = MakeRect(contentLeft + fieldWidth + fieldGap, layout.blueSliderRect.bottom + 14, contentLeft + (fieldWidth * 2) + fieldGap, layout.blueSliderRect.bottom + 32);
-    layout.heightEditRect = MakeRect(contentLeft + fieldWidth + fieldGap, layout.heightLabelRect.bottom + 4, contentLeft + (fieldWidth * 2) + fieldGap, layout.heightLabelRect.bottom + 4 + fieldHeight);
-    layout.dimensionsLabelRect = MakeRect(contentLeft, layout.heightEditRect.bottom + 12, contentRight, layout.heightEditRect.bottom + 30);
-    layout.dimensionsComboRect = MakeRect(contentLeft, layout.dimensionsLabelRect.bottom + 4, contentRight, layout.dimensionsLabelRect.bottom + 32);
+    const int fieldGap = px(18);
+    const int fieldWidth = std::clamp((contentRight - contentLeft - fieldGap) / 2, px(132), px(164));
+    const int fieldHeight = px(28);
+    layout.widthLabelRect = MakeRect(contentLeft, layout.blueSliderRect.bottom + px(14), contentLeft + fieldWidth, layout.blueSliderRect.bottom + px(32));
+    layout.widthEditRect = MakeRect(contentLeft, layout.widthLabelRect.bottom + px(4), contentLeft + fieldWidth, layout.widthLabelRect.bottom + px(4) + fieldHeight);
+    layout.heightLabelRect = MakeRect(contentLeft + fieldWidth + fieldGap, layout.blueSliderRect.bottom + px(14), contentLeft + (fieldWidth * 2) + fieldGap, layout.blueSliderRect.bottom + px(32));
+    layout.heightEditRect = MakeRect(contentLeft + fieldWidth + fieldGap, layout.heightLabelRect.bottom + px(4), contentLeft + (fieldWidth * 2) + fieldGap, layout.heightLabelRect.bottom + px(4) + fieldHeight);
+    layout.dimensionsLabelRect = MakeRect(contentLeft, layout.heightEditRect.bottom + px(12), contentRight, layout.heightEditRect.bottom + px(30));
+    layout.dimensionsComboRect = MakeRect(contentLeft, layout.dimensionsLabelRect.bottom + px(4), contentRight, layout.dimensionsLabelRect.bottom + px(32));
 
     const int importContentLeft = rightLeft + panelPadding;
     const int importContentRight = importRight - panelPadding;
     layout.appendButtonRect = MakeRect(
         importContentLeft,
-        top + 44,
+        top + px(44),
         importContentRight,
-        top + 76);
+        top + px(76));
     layout.importHintRect = MakeRect(
         importContentLeft,
-        layout.appendButtonRect.bottom + 18,
+        layout.appendButtonRect.bottom + px(18),
         importContentRight,
-        layout.appendButtonRect.bottom + 180);
+        layout.appendButtonRect.bottom + px(180));
 
     const int leftContentBottom = layout.dimensionsComboRect.bottom + panelPadding;
     const int rightContentBottom = layout.importHintRect.bottom + panelPadding;
     layout.defaultsPanel = MakeRect(defaultsLeft, top, defaultsRight, std::max(scrollViewportBottom, leftContentBottom));
     layout.importPanel = MakeRect(rightLeft, top, importRight, std::max(scrollViewportBottom, rightContentBottom));
 
-    constexpr int buttonGap = 12;
-    constexpr int resetButtonWidth = 136;
-    constexpr int applyCurrentWidth = 164;
-    constexpr int applyFutureWidth = 170;
-    constexpr int applyAllWidth = 118;
-    const int actionButtonTop = layout.actionBarRect.top + ((actionBarHeight - 28) / 2);
-    int actionButtonLeft = layout.actionBarRect.left + 16;
-    layout.resetButtonRect = MakeRect(actionButtonLeft, actionButtonTop, actionButtonLeft + resetButtonWidth, actionButtonTop + 28);
+    const int buttonGap = px(12);
+    const int resetButtonWidth = px(136);
+    const int applyCurrentWidth = px(164);
+    const int applyFutureWidth = px(170);
+    const int applyAllWidth = px(118);
+    const int actionButtonTop = layout.actionBarRect.top + ((actionBarHeight - px(28)) / 2);
+    int actionButtonLeft = layout.actionBarRect.left + px(16);
+    layout.resetButtonRect = MakeRect(actionButtonLeft, actionButtonTop, actionButtonLeft + resetButtonWidth, actionButtonTop + px(28));
     actionButtonLeft = layout.resetButtonRect.right + buttonGap;
-    layout.applyCurrentButtonRect = MakeRect(actionButtonLeft, actionButtonTop, actionButtonLeft + applyCurrentWidth, actionButtonTop + 28);
+    layout.applyCurrentButtonRect = MakeRect(actionButtonLeft, actionButtonTop, actionButtonLeft + applyCurrentWidth, actionButtonTop + px(28));
     actionButtonLeft = layout.applyCurrentButtonRect.right + buttonGap;
-    layout.applyFutureButtonRect = MakeRect(actionButtonLeft, actionButtonTop, actionButtonLeft + applyFutureWidth, actionButtonTop + 28);
+    layout.applyFutureButtonRect = MakeRect(actionButtonLeft, actionButtonTop, actionButtonLeft + applyFutureWidth, actionButtonTop + px(28));
     actionButtonLeft = layout.applyFutureButtonRect.right + buttonGap;
-    layout.applyAllButtonRect = MakeRect(actionButtonLeft, actionButtonTop, actionButtonLeft + applyAllWidth, actionButtonTop + 28);
+    layout.applyAllButtonRect = MakeRect(actionButtonLeft, actionButtonTop, actionButtonLeft + applyAllWidth, actionButtonTop + px(28));
 
     layout.contentHeight = std::max(layout.defaultsPanel.bottom, layout.importPanel.bottom) - top + margin;
-    layout.scrollbarTrackRect = MakeRect(clientRect.right - margin - kScrollbarWidth, top, clientRect.right - margin, scrollViewportBottom);
+    layout.scrollbarTrackRect = MakeRect(clientRect.right - margin - px(kScrollbarWidth), top, clientRect.right - margin, scrollViewportBottom);
     const int viewportHeight = std::max(1, scrollViewportBottom - top);
     const int maxScroll = std::max(0, layout.contentHeight - viewportHeight);
     layout.showScrollbar = maxScroll > 0 && (layout.scrollbarTrackRect.bottom - layout.scrollbarTrackRect.top) > 0;
     if (layout.showScrollbar) {
         const int trackHeight = layout.scrollbarTrackRect.bottom - layout.scrollbarTrackRect.top;
-        const int thumbHeight = std::clamp((viewportHeight * trackHeight) / std::max(1, layout.contentHeight), kScrollbarMinThumbHeight, trackHeight);
+        const int thumbHeight = std::clamp((viewportHeight * trackHeight) / std::max(1, layout.contentHeight), px(kScrollbarMinThumbHeight), trackHeight);
         const int travel = std::max(0, trackHeight - thumbHeight);
         const int thumbTop = layout.scrollbarTrackRect.top + ((travel * scrollOffset) / std::max(1, maxScroll));
         layout.scrollbarThumbRect = MakeRect(layout.scrollbarTrackRect.left, thumbTop, layout.scrollbarTrackRect.right, thumbTop + thumbHeight);
@@ -526,15 +536,18 @@ void NewPageSettingsWindow::CreateIfNeeded(HWND owner) {
         classRegistered = true;
     }
 
+    currentDpi_ = owner != nullptr ? WindowDpi(owner) : SystemDpi();
+    RECT windowRect { 0, 0, Scale(kWindowWidth), Scale(kWindowHeight) };
+    AdjustWindowRectForDpi(&windowRect, kNewPageWindowStyle, FALSE, kNewPageWindowExStyle, currentDpi_);
     window_ = CreateWindowExW(
-        WS_EX_DLGMODALFRAME,
+        kNewPageWindowExStyle,
         kWindowClassName,
         L"New Page Settings",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_CLIPCHILDREN,
+        kNewPageWindowStyle,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        kWindowWidth,
-        kWindowHeight,
+        windowRect.right - windowRect.left,
+        windowRect.bottom - windowRect.top,
         owner,
         nullptr,
         app_.instance_,
@@ -544,6 +557,7 @@ void NewPageSettingsWindow::CreateIfNeeded(HWND owner) {
         return;
     }
 
+    currentDpi_ = WindowDpi(window_);
     constexpr DWORD kDwmDarkModeAttribute = 20;
     constexpr DWORD kDwmBorderColorAttribute = 34;
     constexpr DWORD kDwmCaptionColorAttribute = 35;
@@ -561,6 +575,7 @@ void NewPageSettingsWindow::CreateIfNeeded(HWND owner) {
 }
 
 void NewPageSettingsWindow::CreateControls() {
+    const UINT dpi = CurrentDpi();
     const auto createButton = [&](const wchar_t* text, int id, int width) {
         return CreateWindowExW(
             0,
@@ -570,7 +585,7 @@ void NewPageSettingsWindow::CreateControls() {
             0,
             0,
             width,
-            28,
+            ScaleForDpi(28, dpi),
             window_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
             app_.instance_,
@@ -584,8 +599,8 @@ void NewPageSettingsWindow::CreateControls() {
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
             0,
             0,
-            148,
-            28,
+            ScaleForDpi(148, dpi),
+            ScaleForDpi(28, dpi),
             window_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
             app_.instance_,
@@ -599,8 +614,8 @@ void NewPageSettingsWindow::CreateControls() {
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
             0,
             0,
-            220,
-            240,
+            ScaleForDpi(220, dpi),
+            ScaleForDpi(240, dpi),
             window_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
             app_.instance_,
@@ -610,12 +625,12 @@ void NewPageSettingsWindow::CreateControls() {
     widthEdit_ = createEdit(kIdWidthEdit);
     heightEdit_ = createEdit(kIdHeightEdit);
     dimensionPresetCombo_ = createComboBox(kIdDimensionPresetCombo);
-    pasteHexButton_ = createButton(L"Paste Hex", kIdPasteHex, 120);
-    appendButton_ = createButton(L"Append Pages...", kIdAppendPages, 164);
-    resetButton_ = createButton(L"Reset Defaults", kIdResetDefaults, 164);
-    applyCurrentButton_ = createButton(L"Apply to Current Page", kIdApplyCurrent, 180);
-    applyAllButton_ = createButton(L"Apply to All", kIdApplyAll, 118);
-    applyFutureButton_ = createButton(L"Apply to Future Pages", kIdApplyFuture, 180);
+    pasteHexButton_ = createButton(L"Paste Hex", kIdPasteHex, ScaleForDpi(120, dpi));
+    appendButton_ = createButton(L"Append Pages...", kIdAppendPages, ScaleForDpi(164, dpi));
+    resetButton_ = createButton(L"Reset Defaults", kIdResetDefaults, ScaleForDpi(164, dpi));
+    applyCurrentButton_ = createButton(L"Apply to Current Page", kIdApplyCurrent, ScaleForDpi(180, dpi));
+    applyAllButton_ = createButton(L"Apply to All", kIdApplyAll, ScaleForDpi(118, dpi));
+    applyFutureButton_ = createButton(L"Apply to Future Pages", kIdApplyFuture, ScaleForDpi(180, dpi));
 
     SendMessageW(dimensionPresetCombo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Custom"));
     for (const DimensionPreset& preset : kDimensionPresets) {
@@ -629,9 +644,39 @@ void NewPageSettingsWindow::CreateControls() {
 }
 
 void NewPageSettingsWindow::ApplyFonts() {
-    font_ = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+    RebuildDpiResources(CurrentDpi());
+}
+
+void NewPageSettingsWindow::RebuildDpiResources(UINT dpi) {
+    currentDpi_ = dpi == 0 ? USER_DEFAULT_SCREEN_DPI : dpi;
+    if (font_ != nullptr) {
+        DeleteObject(font_);
+        font_ = nullptr;
+    }
+    if (titleFont_ != nullptr) {
+        DeleteObject(titleFont_);
+        titleFont_ = nullptr;
+    }
+    if (backgroundBrush_ != nullptr) {
+        DeleteObject(backgroundBrush_);
+        backgroundBrush_ = nullptr;
+    }
+    if (panelBrush_ != nullptr) {
+        DeleteObject(panelBrush_);
+        panelBrush_ = nullptr;
+    }
+    if (inputBrush_ != nullptr) {
+        DeleteObject(inputBrush_);
+        inputBrush_ = nullptr;
+    }
+    if (toolbarBrush_ != nullptr) {
+        DeleteObject(toolbarBrush_);
+        toolbarBrush_ = nullptr;
+    }
+
+    font_ = CreateFontW(FontHeightForDpi(14, currentDpi_), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
-    titleFont_ = CreateFontW(18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+    titleFont_ = CreateFontW(FontHeightForDpi(18, currentDpi_), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
     backgroundBrush_ = CreateSolidBrush(kWindowBackground);
     panelBrush_ = CreateSolidBrush(kPanelFill);
@@ -677,12 +722,12 @@ void NewPageSettingsWindow::LayoutControls() {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_);
+    NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
     contentHeight_ = layout.contentHeight;
     const int previousScrollOffset = scrollOffset_;
     UpdateScrollInfo();
     if (scrollOffset_ != previousScrollOffset) {
-        layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_);
+        layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
         contentHeight_ = layout.contentHeight;
     }
 
@@ -696,7 +741,7 @@ void NewPageSettingsWindow::LayoutControls() {
             layout.dimensionsComboRect.left,
             layout.dimensionsComboRect.top,
             layout.dimensionsComboRect.right,
-            layout.dimensionsComboRect.top + 240));
+            layout.dimensionsComboRect.top + Scale(240)));
     DeferMoveControl(deferred, pasteHexButton_, layout.pasteHexButtonRect);
     DeferMoveControl(deferred, appendButton_, layout.appendButtonRect);
     DeferMoveControl(deferred, resetButton_, layout.resetButtonRect);
@@ -714,7 +759,7 @@ void NewPageSettingsWindow::LayoutControls() {
 
         RECT visibleRect = rect;
         if (dropdownHeight > 0) {
-            visibleRect.bottom = visibleRect.top + 28;
+            visibleRect.bottom = visibleRect.top + Scale(28);
         }
         const bool fullyVisible = RectFullyInside(layout.scrollViewportRect, visibleRect);
         ShowWindow(control, fullyVisible ? SW_SHOWNA : SW_HIDE);
@@ -743,16 +788,24 @@ void NewPageSettingsWindow::UpdateScrollInfo() {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_);
+    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
     const int viewportHeight = std::max(1, static_cast<int>(layout.scrollViewportRect.bottom - layout.scrollViewportRect.top));
     const int maxScroll = std::max(0, contentHeight_ - viewportHeight);
     scrollOffset_ = std::clamp(scrollOffset_, 0, maxScroll);
 }
 
+UINT NewPageSettingsWindow::CurrentDpi() const {
+    return currentDpi_ == 0 ? USER_DEFAULT_SCREEN_DPI : currentDpi_;
+}
+
+int NewPageSettingsWindow::Scale(int value) const {
+    return ScaleForDpi(value, CurrentDpi());
+}
+
 void NewPageSettingsWindow::ScrollTo(int scrollOffset) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_);
+    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
     const int viewportHeight = std::max(1, static_cast<int>(layout.scrollViewportRect.bottom - layout.scrollViewportRect.top));
     const int maxScroll = std::max(0, contentHeight_ - viewportHeight);
     const int clamped = std::clamp(scrollOffset, 0, maxScroll);
@@ -860,7 +913,7 @@ void NewPageSettingsWindow::PaintWindow() {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_);
+    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
 
     HDC memoryDc = CreateCompatibleDC(windowDc);
     HBITMAP bitmap = CreateCompatibleBitmap(windowDc, clientRect.right, clientRect.bottom);
@@ -870,7 +923,7 @@ void NewPageSettingsWindow::PaintWindow() {
     SetBkMode(memoryDc, TRANSPARENT);
     HGDIOBJ previousFont = SelectObject(memoryDc, titleFont_ != nullptr ? titleFont_ : font_);
     SetTextColor(memoryDc, kTextPrimary);
-    TextOutW(memoryDc, 16, 12, L"New Page Settings", 17);
+    TextOutW(memoryDc, Scale(16), Scale(12), L"New Page Settings", 17);
 
     SaveDC(memoryDc);
     IntersectClipRect(
@@ -887,14 +940,14 @@ void NewPageSettingsWindow::PaintWindow() {
 
     SelectObject(memoryDc, font_);
     SetTextColor(memoryDc, kTextMuted);
-    TextOutW(memoryDc, layout.defaultsPanel.left + 16, layout.defaultsPanel.top + 12, L"Defaults", 8);
-    TextOutW(memoryDc, layout.importPanel.left + 16, layout.importPanel.top + 12, L"Import", 6);
+    TextOutW(memoryDc, layout.defaultsPanel.left + Scale(16), layout.defaultsPanel.top + Scale(12), L"Defaults", 8);
+    TextOutW(memoryDc, layout.importPanel.left + Scale(16), layout.importPanel.top + Scale(12), L"Import", 6);
 
     FillRoundedRect(memoryDc, layout.colorPreviewRect, app_.ToColorRef(draftBackgroundColor_));
     StrokeRoundedRect(memoryDc, layout.colorPreviewRect, kSelectionBorder, 2);
     RECT previewTextRect = layout.colorPreviewRect;
-    previewTextRect.top += 10;
-    previewTextRect.bottom -= 10;
+    previewTextRect.top += Scale(10);
+    previewTextRect.bottom -= Scale(10);
     const COLORREF previewText = (app_.GetColorChannel(draftBackgroundColor_, 16)
             + app_.GetColorChannel(draftBackgroundColor_, 8)
             + app_.GetColorChannel(draftBackgroundColor_, 0)) > 384
@@ -936,7 +989,7 @@ void NewPageSettingsWindow::PaintWindow() {
         SetTextColor(memoryDc, kTextPrimary);
         DrawTextW(memoryDc, buffer, -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        const RECT trackRect = SliderTrackRect(sliderRect);
+        const RECT trackRect = SliderTrackRect(sliderRect, CurrentDpi());
         FillRoundedRect(memoryDc, trackRect, RGB(41, 51, 66));
         const int thumbCenterX = SliderThumbCenterX(trackRect, SliderValue(kind), 0, 255);
         RECT fillRect = trackRect;
@@ -944,7 +997,11 @@ void NewPageSettingsWindow::PaintWindow() {
         FillRoundedRect(memoryDc, fillRect, kAccent);
 
         const int centerY = (sliderRect.top + sliderRect.bottom) / 2;
-        RECT thumbRect = MakeRect(thumbCenterX - 6, centerY - 6, thumbCenterX + 7, centerY + 7);
+        RECT thumbRect = MakeRect(
+            thumbCenterX - Scale(6),
+            centerY - Scale(6),
+            thumbCenterX + Scale(7),
+            centerY + Scale(7));
         FillRoundedRect(memoryDc, thumbRect, RGB(244, 247, 252));
         StrokeRoundedRect(memoryDc, thumbRect, draggingSlider_ == kind ? RGB(255, 255, 255) : RGB(120, 138, 162), 1);
     };
@@ -1126,7 +1183,7 @@ bool NewPageSettingsWindow::PasteHexColorFromClipboard() {
 void NewPageSettingsWindow::UpdateSliderFromPoint(SliderKind kind, POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_);
+    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
 
     RECT sliderRect {};
     switch (kind) {
@@ -1141,7 +1198,7 @@ void NewPageSettingsWindow::UpdateSliderFromPoint(SliderKind kind, POINT cursor)
         break;
     }
 
-    const RECT trackRect = SliderTrackRect(sliderRect);
+    const RECT trackRect = SliderTrackRect(sliderRect, CurrentDpi());
     const int clampedX = std::clamp(static_cast<int>(cursor.x), static_cast<int>(trackRect.left), static_cast<int>(trackRect.right - 1));
     const int width = std::max(1, static_cast<int>(trackRect.right - trackRect.left));
     const int value = static_cast<int>(std::lround(static_cast<float>(clampedX - trackRect.left) * 255.0f / static_cast<float>(width - 1)));
@@ -1155,15 +1212,19 @@ std::optional<NewPageSettingsWindow::SliderKind> NewPageSettingsWindow::HitTestS
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_);
-    if (PtInRect(&layout.redSliderRect, cursor) != 0) {
-        return SliderKind::Red;
-    }
-    if (PtInRect(&layout.greenSliderRect, cursor) != 0) {
-        return SliderKind::Green;
-    }
-    if (PtInRect(&layout.blueSliderRect, cursor) != 0) {
-        return SliderKind::Blue;
+    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
+    const std::array<std::pair<SliderKind, RECT>, 3> sliders {{
+        { SliderKind::Red, layout.redSliderRect },
+        { SliderKind::Green, layout.greenSliderRect },
+        { SliderKind::Blue, layout.blueSliderRect },
+    }};
+    for (const auto& [kind, rect] : sliders) {
+        RECT hitRect = rect;
+        hitRect.top -= Scale(4);
+        hitRect.bottom += Scale(4);
+        if (PtInRect(&hitRect, cursor) != 0) {
+            return kind;
+        }
     }
     return std::nullopt;
 }
@@ -1239,16 +1300,32 @@ LRESULT NewPageSettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM
     case WM_GETMINMAXINFO:
     {
         auto* minMax = reinterpret_cast<MINMAXINFO*>(lParam);
-        minMax->ptMinTrackSize.x = 700;
-        minMax->ptMinTrackSize.y = 540;
+        minMax->ptMinTrackSize.x = Scale(700);
+        minMax->ptMinTrackSize.y = Scale(540);
         return 0;
     }
     case WM_SIZE:
         LayoutControls();
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
+    case WM_DPICHANGED:
+        currentDpi_ = HIWORD(wParam);
+        if (const RECT* suggestedRect = reinterpret_cast<const RECT*>(lParam); suggestedRect != nullptr) {
+            SetWindowPos(
+                window_,
+                nullptr,
+                suggestedRect->left,
+                suggestedRect->top,
+                suggestedRect->right - suggestedRect->left,
+                suggestedRect->bottom - suggestedRect->top,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        RebuildDpiResources(currentDpi_);
+        LayoutControls();
+        InvalidateRect(window_, nullptr, FALSE);
+        return 0;
     case WM_MOUSEWHEEL:
-        wheelRemainder_ += static_cast<int>(std::lround(static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) * 72.0f));
+        wheelRemainder_ += static_cast<int>(std::lround(static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) * static_cast<float>(Scale(72))));
         {
             const int scrollPixels = wheelRemainder_ / WHEEL_DELTA;
             wheelRemainder_ -= scrollPixels * WHEEL_DELTA;
@@ -1260,7 +1337,7 @@ LRESULT NewPageSettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         RECT clientRect {};
         GetClientRect(window_, &clientRect);
-        const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_);
+        const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
 
         if (layout.showScrollbar && PtInRect(&layout.scrollbarThumbRect, cursor) != 0) {
             draggingScrollbar_ = true;
@@ -1270,7 +1347,7 @@ LRESULT NewPageSettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM
             return 0;
         }
         if (layout.showScrollbar && PtInRect(&layout.scrollbarTrackRect, cursor) != 0) {
-            const int pageStep = std::max(48, static_cast<int>(layout.scrollViewportRect.bottom - layout.scrollViewportRect.top) - 96);
+            const int pageStep = std::max(Scale(48), static_cast<int>(layout.scrollViewportRect.bottom - layout.scrollViewportRect.top) - Scale(96));
             ScrollTo(scrollOffset_ + (cursor.y < layout.scrollbarThumbRect.top ? -pageStep : pageStep));
             return 0;
         }
@@ -1303,7 +1380,7 @@ LRESULT NewPageSettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM
         if (draggingScrollbar_) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
-            const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_);
+            const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
             if (!layout.showScrollbar) {
                 return 0;
             }
