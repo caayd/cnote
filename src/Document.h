@@ -53,19 +53,32 @@ struct Page {
 
 class Document {
 public:
+    struct PageDefaults {
+        float width = 612.0f;
+        float height = 792.0f;
+        std::uint32_t backgroundColor = 0xFFFFFFFFU;
+    };
+
     static Document CreateBlank();
-    static Document CreateEditable(std::wstring filePath, std::vector<Page> pages, std::size_t currentPageIndex = 0);
+    static Document CreateBlank(PageDefaults pageDefaults);
+    static Document CreateEditable(
+        std::wstring filePath,
+        std::vector<Page> pages,
+        std::size_t currentPageIndex,
+        PageDefaults pageDefaults);
     static Document CreatePdfDocument(
         std::wstring sourcePath,
         std::shared_ptr<std::vector<std::uint8_t>> pdfData,
         std::vector<Page> pages,
-        std::size_t currentPageIndex = 0);
+        std::size_t currentPageIndex,
+        PageDefaults pageDefaults);
     static Document CreateProjectDocument(
         std::wstring filePath,
         std::wstring sourcePath,
         std::shared_ptr<std::vector<std::uint8_t>> pdfData,
         std::vector<Page> pages,
-        std::size_t currentPageIndex = 0);
+        std::size_t currentPageIndex,
+        PageDefaults pageDefaults);
 
     [[nodiscard]] bool IsPdfDocument() const noexcept;
     [[nodiscard]] const std::wstring& FilePath() const noexcept;
@@ -78,19 +91,26 @@ public:
     [[nodiscard]] const Page& CurrentPage() const noexcept;
     [[nodiscard]] Page& PageAt(std::size_t index) noexcept;
     [[nodiscard]] const Page& PageAt(std::size_t index) const noexcept;
+    [[nodiscard]] const PageDefaults& NewPageDefaults() const noexcept;
 
     bool SetCurrentPageIndex(std::size_t index);
     std::size_t InsertPage(std::size_t index, Page page);
     std::size_t RemovePage(std::size_t index);
     void SetFilePath(std::wstring filePath);
+    void SetNewPageDefaults(PageDefaults pageDefaults);
     void ResetToBlank();
-    void ReplaceWithEditable(std::wstring filePath, std::vector<Page> pages, std::size_t currentPageIndex = 0);
+    void ReplaceWithEditable(
+        std::wstring filePath,
+        std::vector<Page> pages,
+        std::size_t currentPageIndex,
+        PageDefaults pageDefaults);
     void ReplaceWithPdf(
         std::wstring filePath,
         std::wstring sourcePath,
         std::shared_ptr<std::vector<std::uint8_t>> pdfData,
         std::vector<Page> pages,
-        std::size_t currentPageIndex = 0);
+        std::size_t currentPageIndex,
+        PageDefaults pageDefaults);
 
 private:
     std::wstring filePath_;
@@ -99,6 +119,7 @@ private:
     std::shared_ptr<std::vector<std::uint8_t>> pdfData_ {};
     std::vector<Page> pages_ { Page {} };
     std::size_t currentPageIndex_ = 0;
+    PageDefaults newPageDefaults_ {};
 };
 
 }  // namespace cnote

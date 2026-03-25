@@ -1735,6 +1735,7 @@ bool App::CreateMainWindow(int showCommand) {
     DwmSetWindowAttribute(window_, kDwmTextColorAttribute, &chromeText, sizeof(chromeText));
     DwmSetWindowAttribute(window_, kDwmWindowCornerPreferenceAttribute, &cornerPreference, sizeof(cornerPreference));
     UpdateWindowTitle();
+    UpdateAutoSaveTimer();
 
     ShowWindow(window_, showCommand);
     UpdateWindow(window_);
@@ -1744,6 +1745,7 @@ bool App::CreateMainWindow(int showCommand) {
 void App::CreateBlankDocument() {
     PrepareForDocumentSwitch();
     ApplyDocument(Document::CreateBlank(), true);
+    document_.SetNewPageDefaults({ newPageSettings_.width, newPageSettings_.height, newPageSettings_.backgroundColor });
 }
 
 void App::PrepareForDocumentSwitch() {
@@ -1763,6 +1765,7 @@ void App::PrepareForDocumentSwitch() {
 
 void App::ApplyDocument(Document document, bool resetBrushWidth) {
     document_ = std::move(document);
+    documentDirty_ = false;
     pdfSidebarOpen_ = pdfSidebarOpen_ && document_.PageCount() > 0U;
     pdfSidebarScrollY_ = 0;
     copiedSidebarPage_.reset();
@@ -1779,6 +1782,7 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
         SyncBrushWidthFromActiveTool();
     }
     ResetView();
+    UpdateAutoSaveTimer();
     EnsureSidebarCurrentPageVisible();
     EnsureVisiblePageRasterQuality();
     UpdateWindowTitle();
@@ -2110,6 +2114,7 @@ void App::AddBlankPageAfterCurrent() {
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
     document_.SetCurrentPageIndex(insertIndex);
+    NotifyDocumentMutated();
     EnsureSidebarCurrentPageVisible();
     EnsureVisiblePageRasterQuality();
     FocusPage(insertIndex);
@@ -2136,6 +2141,7 @@ bool App::PasteSidebarPageAfterCurrent() {
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
     document_.SetCurrentPageIndex(insertIndex);
+    NotifyDocumentMutated();
     EnsureSidebarCurrentPageVisible();
     EnsureVisiblePageRasterQuality();
     FocusPage(insertIndex);
@@ -2154,6 +2160,7 @@ bool App::DeleteCurrentPage() {
     const std::size_t focusIndex = document_.RemovePage(currentIndex);
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
+    NotifyDocumentMutated();
     EnsureSidebarCurrentPageVisible();
     EnsureVisiblePageRasterQuality();
     FocusPage(focusIndex);
@@ -2228,6 +2235,7 @@ void App::DeleteSelection() {
     strokeTransformHandle_ = ImageTransformHandle::None;
     strokeTransformInitials_.clear();
     UpdateCaptureState();
+    NotifyDocumentMutated();
     InvalidateCanvas();
 }
 
@@ -2538,6 +2546,7 @@ void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta) {
         page.images[imageIndex].y += delta.y;
     }
 
+    NotifyDocumentMutated();
     InvalidatePageSurfaceCache(pageIndex);
     InvalidateCanvas();
 }
@@ -2570,6 +2579,7 @@ void App::Undo() {
     if (!cacheUpdated) {
         InvalidatePageSurfaceCache(redoActions_.back().pageIndex);
     }
+    NotifyDocumentMutated();
     InvalidateStrokeRegion(redoActions_.back().stroke, redoActions_.back().pageIndex, false);
 }
 
@@ -2601,6 +2611,7 @@ void App::Redo() {
     if (!cacheUpdated) {
         InvalidatePageSurfaceCache(undoActions_.back().pageIndex);
     }
+    NotifyDocumentMutated();
     InvalidateStrokeRegion(undoActions_.back().stroke, undoActions_.back().pageIndex, false);
 }
 
@@ -2620,16 +2631,62 @@ bool App::CanGoToNextPage() const {
     return document_.CurrentPageIndex() + 1U < document_.PageCount();
 }
 
+void App::NotifyDocumentMutated() {
+    const bool wasDirty = documentDirty_;
+    documentDirty_ = true;
+    UpdateAutoSaveTimer();
+    if (!wasDirty) {
+        UpdateWindowTitle();
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+}
+
+void App::MarkDocumentSaved() {
+    documentDirty_ = false;
+    UpdateAutoSaveTimer();
+    UpdateWindowTitle();
+}
+
+void App::UpdateAutoSaveTimer() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    KillTimer(window_, kAutoSaveTimerId);
+    if (!documentDirty_ || !HasSavedCnotePath() || settings_.autoSaveIntervalSeconds == 0U) {
+        return;
+    }
+
+    SetTimer(window_, kAutoSaveTimerId, settings_.autoSaveIntervalSeconds * 1000U, nullptr);
+}
+
+bool App::HasSavedCnotePath() const {
+    return HasExtension(document_.FilePath(), kCnoteFileExtension);
+}
+
+bool App::CanAutoSaveCurrentDocument() const {
+    return documentDirty_ && HasSavedCnotePath();
+}
+
+bool App::IsDocumentInteractionActive() const {
+    return isDrawing_ || isErasing_ || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_;
+}
+
 std::wstring App::CurrentWindowTitle() const {
+    std::wstring title;
     if (!document_.FilePath().empty()) {
-        return BaseName(document_.FilePath());
+        title = BaseName(document_.FilePath());
+    } else if (!document_.SourcePath().empty()) {
+        title = BaseName(document_.SourcePath());
+    } else {
+        title = L"Untitled";
     }
 
-    if (!document_.SourcePath().empty()) {
-        return BaseName(document_.SourcePath());
+    if (documentDirty_) {
+        title += L"*";
     }
 
-    return L"Untitled";
+    return title;
 }
 
 std::wstring App::PageIndicatorLabel() const {
@@ -3126,6 +3183,7 @@ void App::EndStroke() {
         ScheduleDeferredRasterRefresh();
     }
     if (committedStroke.has_value() && committedPageIndex.has_value()) {
+        NotifyDocumentMutated();
         InvalidateStrokeRegion(*committedStroke, *committedPageIndex, false);
     } else {
         InvalidateCanvas();
@@ -3568,6 +3626,7 @@ void App::UpdateImageTransform(POINT cursor) {
     }
 
     page.images[*transformingImageIndex_] = updated;
+    NotifyDocumentMutated();
     InvalidatePageSurfaceCache(*transformingImagePageIndex_);
     InvalidateCanvas();
 }
@@ -3730,6 +3789,7 @@ void App::UpdateStrokeTransform(POINT cursor) {
         }
     }
 
+    NotifyDocumentMutated();
     InvalidatePageSurfaceCache(*transformingStrokePageIndex_);
     InvalidateCanvas();
 }
@@ -4063,6 +4123,7 @@ bool App::PasteSelectionFromClipboard() {
     }
 
     document_.SetCurrentPageIndex(targetPageIndex);
+    NotifyDocumentMutated();
     InvalidatePageSurfaceCache(targetPageIndex);
     InvalidateCanvas();
     return true;
@@ -4137,6 +4198,7 @@ bool App::PasteImageFromClipboard() {
     ClearSelection();
     selectedImageIndices_[targetPageIndex].push_back(mutablePage.images.size() - 1U);
     document_.SetCurrentPageIndex(targetPageIndex);
+    NotifyDocumentMutated();
     InvalidatePageSurfaceCache(targetPageIndex);
     InvalidateCanvas();
     return true;
@@ -4211,6 +4273,7 @@ bool App::EraseAt(POINT cursor) {
             AdjustSelectionForRemoval(pageView.pageIndex, strokeIndex);
             undoActions_.push_back({ HistoryActionType::RemoveStroke, std::move(removed), strokeIndex, pageView.pageIndex });
             redoActions_.clear();
+            NotifyDocumentMutated();
             InvalidatePageSurfaceCache(pageView.pageIndex);
             InvalidateRect(window_, nullptr, FALSE);
             return true;
@@ -4279,7 +4342,7 @@ void App::ExecuteCommand(unsigned int commandId) {
         OpenDocument();
         break;
     case kCommandFileSaveCnote:
-        static_cast<void>(SaveAsCnote());
+        static_cast<void>(SaveCurrentCnote());
         break;
     case kCommandFileExportPdf:
         static_cast<void>(ExportAsPdf());
@@ -4346,7 +4409,7 @@ bool App::HandleToolbarClick(POINT cursor) {
         case 0:
             AppendMenuW(menu, MF_STRING, kCommandFileNew, L"New");
             AppendMenuW(menu, MF_STRING, kCommandFileOpen, L"Open...");
-            AppendMenuW(menu, MF_STRING, kCommandFileSaveCnote, L"Save as Cnote...");
+            AppendMenuW(menu, MF_STRING, kCommandFileSaveCnote, HasSavedCnotePath() ? L"Save Cnote" : L"Save as Cnote...");
             AppendMenuW(menu, MF_STRING, kCommandFileExportPdf, L"Export as PDF...");
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(menu, MF_STRING, kCommandFileExit, L"Exit");
@@ -4961,6 +5024,10 @@ bool App::OpenProject(const std::wstring& filePath) {
 
     PrepareForDocumentSwitch();
     ApplyDocument(*opened);
+    newPageSettings_.width = document_.NewPageDefaults().width;
+    newPageSettings_.height = document_.NewPageDefaults().height;
+    newPageSettings_.backgroundColor = document_.NewPageDefaults().backgroundColor;
+    RefreshNewPageSettingsWindow();
     return true;
 }
 
@@ -4973,6 +5040,28 @@ bool App::OpenPdf(const std::wstring& filePath) {
 
     PrepareForDocumentSwitch();
     ApplyDocument(*opened);
+    document_.SetNewPageDefaults({ newPageSettings_.width, newPageSettings_.height, newPageSettings_.backgroundColor });
+    return true;
+}
+
+bool App::SaveCurrentCnote() {
+    if (HasSavedCnotePath()) {
+        return SaveCnoteToPath(document_.FilePath(), true);
+    }
+    return SaveAsCnote();
+}
+
+bool App::SaveCnoteToPath(const std::wstring& filePath, bool showError) {
+    if (!ProjectFile::Save(document_, filePath)) {
+        if (showError) {
+            MessageBoxW(window_, L"Failed to save the cnote file.", L"Save Cnote", MB_OK | MB_ICONERROR);
+        }
+        return false;
+    }
+
+    document_.SetFilePath(filePath);
+    MarkDocumentSaved();
+    InvalidateRect(window_, nullptr, FALSE);
     return true;
 }
 
@@ -4994,15 +5083,7 @@ bool App::SaveAsCnote() {
         return false;
     }
 
-    if (!ProjectFile::Save(document_, fileBuffer)) {
-        MessageBoxW(window_, L"Failed to save the cnote file.", L"Save as Cnote", MB_OK | MB_ICONERROR);
-        return false;
-    }
-
-    document_.SetFilePath(fileBuffer);
-    UpdateWindowTitle();
-    InvalidateRect(window_, nullptr, FALSE);
-    return true;
+    return SaveCnoteToPath(fileBuffer, true);
 }
 
 bool App::ExportAsPdf() {
@@ -6584,6 +6665,14 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_TIMER:
         if (wParam == kRasterRefreshTimerId) {
             HandleDeferredRasterRefresh();
+            return 0;
+        }
+        if (wParam == kAutoSaveTimerId) {
+            if (CanAutoSaveCurrentDocument() && !IsDocumentInteractionActive()) {
+                static_cast<void>(SaveCnoteToPath(document_.FilePath(), false));
+            } else {
+                UpdateAutoSaveTimer();
+            }
             return 0;
         }
         if (wParam == kZoomSessionTimerId) {

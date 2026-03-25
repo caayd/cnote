@@ -401,7 +401,7 @@ std::optional<Document> PdfiumBackend::OpenFromMemory(
         return std::nullopt;
     }
 
-    return Document::CreatePdfDocument(sourcePath, std::move(pdfBytes), std::move(pages));
+    return Document::CreatePdfDocument(sourcePath, std::move(pdfBytes), std::move(pages), 0, {});
 }
 
 std::optional<RasterImage> PdfiumBackend::RenderPage(

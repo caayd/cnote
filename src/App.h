@@ -163,6 +163,7 @@ public:
         float inputSpacing = 0.85f;
         float inputSmoothing = 0.3f;
         float strokeSmoothing = 0.55f;
+        unsigned int autoSaveIntervalSeconds = 60;
     };
 
     struct NewPageSettingsState {
@@ -205,6 +206,12 @@ private:
     [[nodiscard]] bool CanRedo() const;
     [[nodiscard]] bool CanGoToPreviousPage() const;
     [[nodiscard]] bool CanGoToNextPage() const;
+    void NotifyDocumentMutated();
+    void MarkDocumentSaved();
+    void UpdateAutoSaveTimer();
+    [[nodiscard]] bool HasSavedCnotePath() const;
+    [[nodiscard]] bool CanAutoSaveCurrentDocument() const;
+    [[nodiscard]] bool IsDocumentInteractionActive() const;
     void AddPaletteColor();
     void RemovePaletteColor();
     [[nodiscard]] bool ApplyHexColorFromClipboard();
@@ -296,6 +303,8 @@ private:
     [[nodiscard]] bool OpenDocumentPath(const std::wstring& filePath);
     [[nodiscard]] bool OpenProject(const std::wstring& filePath);
     [[nodiscard]] bool OpenPdf(const std::wstring& filePath);
+    [[nodiscard]] bool SaveCurrentCnote();
+    [[nodiscard]] bool SaveCnoteToPath(const std::wstring& filePath, bool showError);
     [[nodiscard]] bool SaveAsCnote();
     [[nodiscard]] bool ExportAsPdf();
     void PrepareForDocumentSwitch();
@@ -447,12 +456,14 @@ private:
     bool toolbarBrushSliderDragging_ = false;
     int hoveredWindowButton_ = -1;
     bool trackingMouseLeave_ = false;
+    bool documentDirty_ = false;
 
     static constexpr int kToolbarHeight = 45;
     static constexpr int kSettingsPanelWidth = 320;
     static constexpr int kPageGap = 26;
     static constexpr UINT kRenderResultsMessage = WM_APP + 1;
     static constexpr UINT_PTR kRasterRefreshTimerId = 1;
+    static constexpr UINT_PTR kAutoSaveTimerId = 2;
     static constexpr UINT_PTR kZoomSessionTimerId = 3;
     static constexpr UINT kRasterRefreshDelayMs = 120;
     static constexpr UINT kZoomSessionDelayMs = 100;

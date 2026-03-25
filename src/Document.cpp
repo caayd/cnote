@@ -5,14 +5,19 @@
 namespace cnote {
 
 Document Document::CreateBlank() {
+    return CreateBlank(PageDefaults {});
+}
+
+Document Document::CreateBlank(PageDefaults pageDefaults) {
     Document document;
     document.ResetToBlank();
+    document.SetNewPageDefaults(pageDefaults);
     return document;
 }
 
-Document Document::CreateEditable(std::wstring filePath, std::vector<Page> pages, std::size_t currentPageIndex) {
+Document Document::CreateEditable(std::wstring filePath, std::vector<Page> pages, std::size_t currentPageIndex, PageDefaults pageDefaults) {
     Document document;
-    document.ReplaceWithEditable(std::move(filePath), std::move(pages), currentPageIndex);
+    document.ReplaceWithEditable(std::move(filePath), std::move(pages), currentPageIndex, pageDefaults);
     return document;
 }
 
@@ -20,9 +25,10 @@ Document Document::CreatePdfDocument(
     std::wstring sourcePath,
     std::shared_ptr<std::vector<std::uint8_t>> pdfData,
     std::vector<Page> pages,
-    std::size_t currentPageIndex) {
+    std::size_t currentPageIndex,
+    PageDefaults pageDefaults) {
     Document document;
-    document.ReplaceWithPdf(sourcePath, std::move(sourcePath), std::move(pdfData), std::move(pages), currentPageIndex);
+    document.ReplaceWithPdf(sourcePath, std::move(sourcePath), std::move(pdfData), std::move(pages), currentPageIndex, pageDefaults);
     return document;
 }
 
@@ -31,12 +37,13 @@ Document Document::CreateProjectDocument(
     std::wstring sourcePath,
     std::shared_ptr<std::vector<std::uint8_t>> pdfData,
     std::vector<Page> pages,
-    std::size_t currentPageIndex) {
+    std::size_t currentPageIndex,
+    PageDefaults pageDefaults) {
     Document document;
     if (pdfData && !pdfData->empty()) {
-        document.ReplaceWithPdf(std::move(filePath), std::move(sourcePath), std::move(pdfData), std::move(pages), currentPageIndex);
+        document.ReplaceWithPdf(std::move(filePath), std::move(sourcePath), std::move(pdfData), std::move(pages), currentPageIndex, pageDefaults);
     } else {
-        document.ReplaceWithEditable(std::move(filePath), std::move(pages), currentPageIndex);
+        document.ReplaceWithEditable(std::move(filePath), std::move(pages), currentPageIndex, pageDefaults);
     }
     return document;
 }
@@ -85,6 +92,10 @@ const Page& Document::PageAt(std::size_t index) const noexcept {
     return pages_.at(index);
 }
 
+const Document::PageDefaults& Document::NewPageDefaults() const noexcept {
+    return newPageDefaults_;
+}
+
 bool Document::SetCurrentPageIndex(std::size_t index) {
     if (index >= pages_.size()) {
         return false;
@@ -121,6 +132,10 @@ void Document::SetFilePath(std::wstring filePath) {
     filePath_ = std::move(filePath);
 }
 
+void Document::SetNewPageDefaults(PageDefaults pageDefaults) {
+    newPageDefaults_ = pageDefaults;
+}
+
 void Document::ResetToBlank() {
     filePath_.clear();
     sourcePath_.clear();
@@ -128,9 +143,10 @@ void Document::ResetToBlank() {
     pdfData_.reset();
     pages_ = { Page {} };
     currentPageIndex_ = 0;
+    newPageDefaults_ = {};
 }
 
-void Document::ReplaceWithEditable(std::wstring filePath, std::vector<Page> pages, std::size_t currentPageIndex) {
+void Document::ReplaceWithEditable(std::wstring filePath, std::vector<Page> pages, std::size_t currentPageIndex, PageDefaults pageDefaults) {
     filePath_ = std::move(filePath);
     sourcePath_.clear();
     pdfDocument_ = false;
@@ -141,6 +157,7 @@ void Document::ReplaceWithEditable(std::wstring filePath, std::vector<Page> page
         pages_ = std::move(pages);
     }
     currentPageIndex_ = pages_.empty() ? 0 : std::min(currentPageIndex, pages_.size() - 1U);
+    newPageDefaults_ = pageDefaults;
 }
 
 void Document::ReplaceWithPdf(
@@ -148,7 +165,8 @@ void Document::ReplaceWithPdf(
     std::wstring sourcePath,
     std::shared_ptr<std::vector<std::uint8_t>> pdfData,
     std::vector<Page> pages,
-    std::size_t currentPageIndex) {
+    std::size_t currentPageIndex,
+    PageDefaults pageDefaults) {
     filePath_ = std::move(filePath);
     sourcePath_ = std::move(sourcePath);
     pdfDocument_ = true;
@@ -161,6 +179,7 @@ void Document::ReplaceWithPdf(
         pages_ = std::move(pages);
     }
     currentPageIndex_ = pages_.empty() ? 0 : std::min(currentPageIndex, pages_.size() - 1U);
+    newPageDefaults_ = pageDefaults;
 }
 
 }  // namespace cnote

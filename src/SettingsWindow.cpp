@@ -54,6 +54,7 @@ constexpr int kIdBlueSlider = 202;
 constexpr int kIdStabilizationSlider = 205;
 constexpr int kIdSpacingSlider = 206;
 constexpr int kIdStrokeSmoothingSlider = 207;
+constexpr int kIdAutoSaveSlider = 208;
 
 struct SettingsWindowLayout {
     RECT palettePanel {};
@@ -82,6 +83,8 @@ struct SettingsWindowLayout {
     RECT spacingSliderRect {};
     RECT strokeSmoothingLabelRect {};
     RECT strokeSmoothingSliderRect {};
+    RECT autoSaveLabelRect {};
+    RECT autoSaveSliderRect {};
     RECT scrollbarTrackRect {};
     RECT scrollbarThumbRect {};
     bool showScrollbar = false;
@@ -110,6 +113,20 @@ std::wstring FormatSpacingLabel(float spacing) {
     wchar_t buffer[64] = {};
     std::swprintf(buffer, std::size(buffer), L"Point Spacing: %.2f", spacing);
     return buffer;
+}
+
+std::wstring FormatAutoSaveLabel(unsigned int seconds) {
+    if (seconds == 0U) {
+        return L"Auto Save: Off";
+    }
+    if (seconds < 60U) {
+        return L"Auto Save: " + std::to_wstring(seconds) + L" sec";
+    }
+    if (seconds % 60U == 0U) {
+        const unsigned int minutes = seconds / 60U;
+        return L"Auto Save: " + std::to_wstring(minutes) + (minutes == 1U ? L" min" : L" mins");
+    }
+    return L"Auto Save: " + std::to_wstring(seconds) + L" sec";
 }
 
 void SetControlText(HWND control, const std::wstring& text) {
@@ -211,7 +228,9 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, std::size_t pale
     layout.spacingSliderRect = MakeRect(drawingSliderLeft, layout.spacingLabelRect.bottom + 2, drawingSliderRight, layout.spacingLabelRect.bottom + 28);
     layout.strokeSmoothingLabelRect = MakeRect(drawingSliderLeft, layout.spacingSliderRect.bottom + 12, drawingSliderRight, layout.spacingSliderRect.bottom + 28);
     layout.strokeSmoothingSliderRect = MakeRect(drawingSliderLeft, layout.strokeSmoothingLabelRect.bottom + 2, drawingSliderRight, layout.strokeSmoothingLabelRect.bottom + 28);
-    layout.drawingPanel.bottom = layout.strokeSmoothingSliderRect.bottom + 18;
+    layout.autoSaveLabelRect = MakeRect(drawingSliderLeft, layout.strokeSmoothingSliderRect.bottom + 12, drawingSliderRight, layout.strokeSmoothingSliderRect.bottom + 28);
+    layout.autoSaveSliderRect = MakeRect(drawingSliderLeft, layout.autoSaveLabelRect.bottom + 2, drawingSliderRight, layout.autoSaveLabelRect.bottom + 28);
+    layout.drawingPanel.bottom = layout.autoSaveSliderRect.bottom + 18;
 
     const int visibleBottom = static_cast<int>(clientRect.bottom) + scrollOffset - margin;
     const int shortcutPanelBottom = std::max({ visibleBottom, static_cast<int>(layout.drawingPanel.bottom), topOffset + 600 });
@@ -271,6 +290,8 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, std::size_t pale
     OffsetRectY(layout.spacingSliderRect, deltaY);
     OffsetRectY(layout.strokeSmoothingLabelRect, deltaY);
     OffsetRectY(layout.strokeSmoothingSliderRect, deltaY);
+    OffsetRectY(layout.autoSaveLabelRect, deltaY);
+    OffsetRectY(layout.autoSaveSliderRect, deltaY);
 
     return layout;
 }
@@ -472,6 +493,8 @@ void SettingsWindow::CreateControls() {
     spacingSlider_ = createSlider(kIdSpacingSlider, 0, 0, 320, 30);
     strokeSmoothingLabel_ = createLabel(L"Stroke Smoothing", 0, 0, 260, 20);
     strokeSmoothingSlider_ = createSlider(kIdStrokeSmoothingSlider, 0, 0, 320, 30);
+    autoSaveLabel_ = createLabel(L"Auto Save", 0, 0, 260, 20);
+    autoSaveSlider_ = createSlider(kIdAutoSaveSlider, 0, 0, 320, 30);
 
     shortcutList_ = CreateWindowExW(
         0,
@@ -496,6 +519,8 @@ void SettingsWindow::CreateControls() {
     SendMessageW(stabilizationSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(5, 95));
     SendMessageW(spacingSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(5, 405));
     SendMessageW(strokeSmoothingSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+    SendMessageW(autoSaveSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 300));
+    SendMessageW(autoSaveSlider_, TBM_SETTICFREQ, 15, 0);
     SendMessageW(shortcutList_, LB_SETITEMHEIGHT, 0, 26);
     LayoutControls();
 }
@@ -507,7 +532,7 @@ void SettingsWindow::ApplyFonts() {
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
     backgroundBrush_ = CreateSolidBrush(kWindowBackground);
     panelBrush_ = CreateSolidBrush(kPanelFill);
-    const std::array<HWND, 17> controls {
+    const std::array<HWND, 19> controls {
         addColorButton_,
         removeColorButton_,
         pasteHexButton_,
@@ -523,6 +548,8 @@ void SettingsWindow::ApplyFonts() {
         spacingSlider_,
         strokeSmoothingLabel_,
         strokeSmoothingSlider_,
+        autoSaveLabel_,
+        autoSaveSlider_,
         shortcutList_,
         changeShortcutButton_,
     };
@@ -556,7 +583,7 @@ void SettingsWindow::LayoutControls() {
         contentHeight_ = layout.contentHeight;
     }
 
-    HDWP deferred = BeginDeferWindowPos(19);
+    HDWP deferred = BeginDeferWindowPos(21);
     DeferMoveControl(deferred, addColorButton_, layout.addColorButton);
     DeferMoveControl(deferred, removeColorButton_, layout.removeColorButton);
     DeferMoveControl(deferred, pasteHexButton_, layout.pasteHexButton);
@@ -572,6 +599,8 @@ void SettingsWindow::LayoutControls() {
     DeferMoveControl(deferred, spacingSlider_, layout.spacingSliderRect);
     DeferMoveControl(deferred, strokeSmoothingLabel_, layout.strokeSmoothingLabelRect);
     DeferMoveControl(deferred, strokeSmoothingSlider_, layout.strokeSmoothingSliderRect);
+    DeferMoveControl(deferred, autoSaveLabel_, layout.autoSaveLabelRect);
+    DeferMoveControl(deferred, autoSaveSlider_, layout.autoSaveSliderRect);
     DeferMoveControl(deferred, shortcutList_, layout.shortcutListRect);
     DeferMoveControl(deferred, changeShortcutButton_, layout.changeShortcutButton);
     DeferMoveControl(deferred, clearShortcutButton_, layout.clearShortcutButton);
@@ -623,6 +652,7 @@ void SettingsWindow::RefreshSliderValues() {
     SendMessageW(stabilizationSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.inputSmoothing * 100.0f)));
     SendMessageW(spacingSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.inputSpacing * 100.0f)));
     SendMessageW(strokeSmoothingSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.strokeSmoothing * 100.0f)));
+    SendMessageW(autoSaveSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(app_.settings_.autoSaveIntervalSeconds));
 
     SetControlText(redLabel_, FormatSliderLabel(L"Red", red));
     SetControlText(greenLabel_, FormatSliderLabel(L"Green", green));
@@ -630,6 +660,7 @@ void SettingsWindow::RefreshSliderValues() {
     SetControlText(stabilizationLabel_, FormatFloatSliderLabel(L"Stabilization", app_.settings_.inputSmoothing, 100));
     SetControlText(spacingLabel_, FormatSpacingLabel(app_.settings_.inputSpacing));
     SetControlText(strokeSmoothingLabel_, FormatFloatSliderLabel(L"Stroke Smoothing", app_.settings_.strokeSmoothing, 100));
+    SetControlText(autoSaveLabel_, FormatAutoSaveLabel(app_.settings_.autoSaveIntervalSeconds));
 }
 
 void SettingsWindow::RefreshShortcutList() {
@@ -736,11 +767,16 @@ void SettingsWindow::HandleHScroll(LPARAM lParam) {
         app_.settings_.inputSpacing = static_cast<float>(SendMessageW(spacingSlider_, TBM_GETPOS, 0, 0)) / 100.0f;
     } else if (reinterpret_cast<HWND>(lParam) == strokeSmoothingSlider_) {
         app_.settings_.strokeSmoothing = static_cast<float>(SendMessageW(strokeSmoothingSlider_, TBM_GETPOS, 0, 0)) / 100.0f;
+    } else if (reinterpret_cast<HWND>(lParam) == autoSaveSlider_) {
+        const int value = static_cast<int>(SendMessageW(autoSaveSlider_, TBM_GETPOS, 0, 0));
+        app_.settings_.autoSaveIntervalSeconds = static_cast<unsigned int>(std::clamp(std::lround(static_cast<float>(value) / 15.0f) * 15, 0L, 300L));
+        SendMessageW(autoSaveSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(app_.settings_.autoSaveIntervalSeconds));
     } else {
         return;
     }
 
     app_.SaveAppSettings();
+    app_.UpdateAutoSaveTimer();
     RefreshSliderValues();
     InvalidateRect(window_, nullptr, FALSE);
 }
@@ -844,6 +880,7 @@ void SettingsWindow::PaintWindow() {
     paintSlider(SliderKind::Stabilization, layout.stabilizationSliderRect, 5, 95);
     paintSlider(SliderKind::Spacing, layout.spacingSliderRect, 5, 405);
     paintSlider(SliderKind::StrokeSmoothing, layout.strokeSmoothingSliderRect, 0, 100);
+    paintSlider(SliderKind::AutoSave, layout.autoSaveSliderRect, 0, 300);
 
     if (layout.showScrollbar) {
         FillRoundedRect(memoryDc, layout.scrollbarTrackRect, kScrollbarTrackFill);
@@ -1016,6 +1053,8 @@ HWND SettingsWindow::SliderHandle(SliderKind kind) const {
         return spacingSlider_;
     case SliderKind::StrokeSmoothing:
         return strokeSmoothingSlider_;
+    case SliderKind::AutoSave:
+        return autoSaveSlider_;
     default:
         return nullptr;
     }
@@ -1057,12 +1096,18 @@ void SettingsWindow::UpdateSliderValue(SliderKind kind, int value) {
             SendMessageW(slider, TBM_SETPOS, TRUE, clampValue(0, 100));
             app_.settings_.strokeSmoothing = static_cast<float>(SliderValue(kind)) / 100.0f;
             break;
+        case SliderKind::AutoSave:
+            SendMessageW(slider, TBM_SETPOS, TRUE, clampValue(0, 300));
+            app_.settings_.autoSaveIntervalSeconds = static_cast<unsigned int>(std::clamp(std::lround(static_cast<float>(SliderValue(kind)) / 15.0f) * 15, 0L, 300L));
+            SendMessageW(slider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app_.settings_.autoSaveIntervalSeconds));
+            break;
         default:
             break;
         }
     }
 
     app_.SaveAppSettings();
+    app_.UpdateAutoSaveTimer();
     RefreshSliderValues();
     InvalidateRect(window_, nullptr, FALSE);
 }
@@ -1109,6 +1154,11 @@ void SettingsWindow::UpdateSliderFromPoint(SliderKind kind, POINT cursor) {
         minimum = 0;
         maximum = 100;
         break;
+    case SliderKind::AutoSave:
+        sliderRect = layout.autoSaveSliderRect;
+        minimum = 0;
+        maximum = 300;
+        break;
     default:
         return;
     }
@@ -1129,13 +1179,14 @@ std::optional<SettingsWindow::SliderKind> SettingsWindow::HitTestSlider(POINT cu
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size(), scrollOffset_);
-    const std::array<std::pair<SliderKind, RECT>, 6> sliders {{
+    const std::array<std::pair<SliderKind, RECT>, 7> sliders {{
         { SliderKind::Red, layout.redSliderRect },
         { SliderKind::Green, layout.greenSliderRect },
         { SliderKind::Blue, layout.blueSliderRect },
         { SliderKind::Stabilization, layout.stabilizationSliderRect },
         { SliderKind::Spacing, layout.spacingSliderRect },
         { SliderKind::StrokeSmoothing, layout.strokeSmoothingSliderRect },
+        { SliderKind::AutoSave, layout.autoSaveSliderRect },
     }};
 
     for (const auto& [kind, rect] : sliders) {

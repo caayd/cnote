@@ -300,6 +300,7 @@ void App::ApplyConfiguredSettingsToCurrentPage(float width, float height, std::u
     page.raster = CreateSolidRaster(page.width, page.height, 1.5f, backgroundColor);
 
     const std::size_t pageIndex = document_.CurrentPageIndex();
+    NotifyDocumentMutated();
     InvalidatePageSurfaceCache(pageIndex);
     InvalidateSidebarThumbnailCache(pageIndex);
     EnsureVisiblePageRasterQuality();
@@ -325,6 +326,7 @@ void App::ApplyConfiguredSettingsToAllPages(float width, float height, std::uint
 
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
+    NotifyDocumentMutated();
     EnsureVisiblePageRasterQuality();
     InvalidateRect(window_, nullptr, FALSE);
 }
@@ -390,6 +392,7 @@ bool App::AppendPagesFromDocumentPath(const std::wstring& filePath) {
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
     document_.SetCurrentPageIndex(insertIndex);
+    NotifyDocumentMutated();
     EnsureSidebarCurrentPageVisible();
     EnsureVisiblePageRasterQuality();
     FocusPage(insertIndex);
@@ -545,6 +548,13 @@ void App::LoadAppSettings() {
             continue;
         }
 
+        if (key == "auto_save_interval_seconds") {
+            if (const auto parsed = ParseUnsignedInt(value); parsed.has_value()) {
+                settings_.autoSaveIntervalSeconds = std::min(*parsed, 300U);
+            }
+            continue;
+        }
+
         if (key == "wheel_tools") {
             std::vector<Tool> loadedTools;
             for (const std::string& token : SplitAscii(value, ',')) {
@@ -635,6 +645,7 @@ void App::SaveAppSettings() const {
     output << "input_smoothing=" << settings_.inputSmoothing << '\n';
     output << "input_spacing=" << settings_.inputSpacing << '\n';
     output << "stroke_smoothing=" << settings_.strokeSmoothing << '\n';
+    output << "auto_save_interval_seconds=" << settings_.autoSaveIntervalSeconds << '\n';
 
     output << "wheel_tools=";
     for (std::size_t index = 0; index < wheel_.tools.size(); ++index) {
@@ -751,7 +762,7 @@ void App::ExecuteShortcutAction(ShortcutAction action) {
         OpenDocument();
         break;
     case ShortcutAction::Save:
-        static_cast<void>(SaveAsCnote());
+        static_cast<void>(SaveCurrentCnote());
         break;
     case ShortcutAction::ExportPdf:
         static_cast<void>(ExportAsPdf());

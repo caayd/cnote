@@ -26,6 +26,7 @@ private:
         Stabilization,
         Spacing,
         StrokeSmoothing,
+        AutoSave,
     };
 
     void CreateIfNeeded(HWND owner);
@@ -80,6 +81,8 @@ private:
     HWND spacingLabel_ = nullptr;
     HWND strokeSmoothingSlider_ = nullptr;
     HWND strokeSmoothingLabel_ = nullptr;
+    HWND autoSaveSlider_ = nullptr;
+    HWND autoSaveLabel_ = nullptr;
     HWND shortcutList_ = nullptr;
     HWND changeShortcutButton_ = nullptr;
     HWND clearShortcutButton_ = nullptr;

@@ -1,6 +1,7 @@
 #include "ProjectFile.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -15,8 +16,9 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 2;
+constexpr std::uint32_t kProjectVersion = 3;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
+constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
 
 std::string WideToUtf8(const std::wstring& value) {
     if (value.empty()) {
@@ -213,6 +215,47 @@ bool ReadImage(ByteReader& reader, PageImage& image) {
     return reader.ReadBlob(image.pixels);
 }
 
+void AppendRaster(std::vector<std::uint8_t>& output, const RasterImage& raster) {
+    AppendValue(output, raster.width);
+    AppendValue(output, raster.height);
+    AppendValue(output, raster.stride);
+    AppendValue(output, raster.scale);
+    AppendBlob(output, raster.pixels);
+}
+
+bool ReadRaster(ByteReader& reader, RasterImage& raster) {
+    if (!reader.Read(raster.width) || !reader.Read(raster.height) || !reader.Read(raster.stride) || !reader.Read(raster.scale)) {
+        return false;
+    }
+    return reader.ReadBlob(raster.pixels);
+}
+
+RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderScale, std::uint32_t argb) {
+    const int bitmapWidth = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageWidth) * renderScale)));
+    const int bitmapHeight = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageHeight) * renderScale)));
+    const int stride = bitmapWidth * 4;
+
+    RasterImage raster {};
+    raster.width = bitmapWidth;
+    raster.height = bitmapHeight;
+    raster.stride = stride;
+    raster.scale = renderScale;
+    raster.pixels.resize(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight));
+
+    const auto alpha = static_cast<std::uint8_t>((argb >> 24U) & 0xFFU);
+    const auto red = static_cast<std::uint8_t>((argb >> 16U) & 0xFFU);
+    const auto green = static_cast<std::uint8_t>((argb >> 8U) & 0xFFU);
+    const auto blue = static_cast<std::uint8_t>(argb & 0xFFU);
+    for (std::size_t offset = 0; offset + 3U < raster.pixels.size(); offset += 4U) {
+        raster.pixels[offset] = blue;
+        raster.pixels[offset + 1U] = green;
+        raster.pixels[offset + 2U] = red;
+        raster.pixels[offset + 3U] = alpha;
+    }
+
+    return raster;
+}
+
 }  // namespace
 
 std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBackend& pdfBackend) {
@@ -229,14 +272,21 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
     std::uint32_t pageCount = 0;
     std::wstring sourcePath;
     std::vector<std::uint8_t> pdfBytes;
+    Document::PageDefaults pageDefaults {};
 
     const bool validMagic = reader.ReadExact(magic, sizeof(magic))
         && (std::memcmp(magic, kCnoteMagic, sizeof(kCnoteMagic)) == 0
             || std::memcmp(magic, kLegacyProjectMagic, sizeof(kLegacyProjectMagic)) == 0);
     if (!validMagic
-        || !reader.Read(version) || (version != 1U && version != kProjectVersion) || !reader.Read(flags)
+        || !reader.Read(version) || (version < 1U || version > kProjectVersion) || !reader.Read(flags)
         || !reader.Read(currentPageIndex) || !reader.Read(pageCount) || !reader.ReadString(sourcePath)
         || !reader.ReadBlob(pdfBytes)) {
+        return std::nullopt;
+    }
+    if (version >= 3U
+        && (!reader.Read(pageDefaults.width)
+            || !reader.Read(pageDefaults.height)
+            || !reader.Read(pageDefaults.backgroundColor))) {
         return std::nullopt;
     }
 
@@ -244,6 +294,7 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
     savedPages.reserve(pageCount);
     for (std::uint32_t pageIndex = 0; pageIndex < pageCount; ++pageIndex) {
         Page page {};
+        std::uint32_t pageFlags = 0;
         std::uint32_t strokeCount = 0;
         std::uint32_t imageCount = 0;
         if (!reader.Read(page.width) || !reader.Read(page.height)) {
@@ -255,6 +306,14 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
             }
         } else {
             page.sourcePdfPageIndex = (flags & kProjectFlagHasPdf) != 0U ? static_cast<std::int32_t>(pageIndex) : -1;
+        }
+        if (version >= 3U) {
+            if (!reader.Read(pageFlags)) {
+                return std::nullopt;
+            }
+            if ((pageFlags & kPageFlagHasRaster) != 0U && !ReadRaster(reader, page.raster)) {
+                return std::nullopt;
+            }
         }
         if (!reader.Read(strokeCount) || !reader.Read(imageCount)) {
             return std::nullopt;
@@ -299,15 +358,23 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
                 savedPage.raster = sourcePage.raster;
             } else {
                 savedPage.sourcePdfPageIndex = -1;
-                savedPage.raster = {};
+                if (savedPage.raster.pixels.empty()) {
+                    savedPage.raster = CreateSolidRaster(savedPage.width, savedPage.height, 1.5f, 0xFFFFFFFFU);
+                }
             }
             pages.push_back(std::move(savedPage));
         }
 
-        return Document::CreateProjectDocument(filePath, sourcePath, sharedPdfBytes, std::move(pages), currentPageIndex);
+        return Document::CreateProjectDocument(filePath, sourcePath, sharedPdfBytes, std::move(pages), currentPageIndex, pageDefaults);
     }
 
-    return Document::CreateEditable(filePath, std::move(savedPages), currentPageIndex);
+    for (Page& page : savedPages) {
+        if (page.sourcePdfPageIndex < 0 && page.raster.pixels.empty()) {
+            page.raster = CreateSolidRaster(page.width, page.height, 1.5f, 0xFFFFFFFFU);
+        }
+    }
+
+    return Document::CreateEditable(filePath, std::move(savedPages), currentPageIndex, pageDefaults);
 }
 
 bool ProjectFile::Save(const Document& document, const std::wstring& filePath) {
@@ -325,14 +392,22 @@ bool ProjectFile::Save(const Document& document, const std::wstring& filePath) {
     AppendValue(bytes, pageCount);
     AppendString(bytes, document.SourcePath());
     AppendBlob(bytes, pdfBytes);
+    AppendValue(bytes, document.NewPageDefaults().width);
+    AppendValue(bytes, document.NewPageDefaults().height);
+    AppendValue(bytes, document.NewPageDefaults().backgroundColor);
 
     for (std::size_t pageIndex = 0; pageIndex < document.PageCount(); ++pageIndex) {
         const Page& page = document.PageAt(pageIndex);
+        const std::uint32_t pageFlags = (page.sourcePdfPageIndex < 0 && !page.raster.pixels.empty()) ? kPageFlagHasRaster : 0U;
         const auto strokeCount = static_cast<std::uint32_t>(page.strokes.size());
         const auto imageCount = static_cast<std::uint32_t>(page.images.size());
         AppendValue(bytes, page.width);
         AppendValue(bytes, page.height);
         AppendValue(bytes, page.sourcePdfPageIndex);
+        AppendValue(bytes, pageFlags);
+        if ((pageFlags & kPageFlagHasRaster) != 0U) {
+            AppendRaster(bytes, page.raster);
+        }
         AppendValue(bytes, strokeCount);
         AppendValue(bytes, imageCount);
         for (const Stroke& stroke : page.strokes) {

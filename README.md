@@ -48,7 +48,7 @@ Run:
 
 - `Left Mouse`: draw
 - `Header`: use `File`, `Edit`, and `View` dropdowns plus the tool/color/history controls
-- `Edit > Brush Settings`: edit palette colors with RGB sliders, paste hex values, add/remove palette colors, change brush size, and tune stabilization/smoothing
+- `Edit > Brush Settings`: edit palette colors with RGB sliders, paste hex values, add/remove palette colors, change brush size, tune stabilization/smoothing, and adjust the autosave interval
 - `Ctrl+B`: toggle the PDF page preview sidebar and its page navigator
 - `Ctrl+W`: open the active brush/eraser size slider near the cursor
 - `Middle Mouse Hold`: pan
@@ -59,7 +59,7 @@ Run:
 - `Arrow Keys`: pan
 - `Ctrl+N`: new blank document
 - `Ctrl+O`: open a `.pdf` or `.cnote`
-- `Ctrl+S`: choose a save location and write a `.cnote` file
+- `Ctrl+S`: save the current `.cnote` immediately, or prompt for a `.cnote` path if the document has not been saved yet
 - `Ctrl+Z`: undo
 - `Ctrl+Y` or `Ctrl+Shift+Z`: redo
 - `[` or `-`: smaller brush

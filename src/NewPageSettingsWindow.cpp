@@ -1034,6 +1034,12 @@ void NewPageSettingsWindow::ApplyDraftToFuturePages() {
     app_.newPageSettings_.width = std::max(72.0f, draftWidth_);
     app_.newPageSettings_.height = std::max(72.0f, draftHeight_);
     app_.newPageSettings_.backgroundColor = draftBackgroundColor_;
+    app_.document_.SetNewPageDefaults({
+        app_.newPageSettings_.width,
+        app_.newPageSettings_.height,
+        app_.newPageSettings_.backgroundColor,
+    });
+    app_.NotifyDocumentMutated();
 
     if (previousColor != draftBackgroundColor_) {
         auto& recentColors = app_.newPageSettings_.recentColors;
