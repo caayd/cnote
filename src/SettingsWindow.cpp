@@ -305,6 +305,22 @@ int SliderThumbCenterX(const RECT& trackRect, int value, int minimum, int maximu
     return trackRect.left + static_cast<int>(std::lround(normalized * static_cast<float>(width - 1)));
 }
 
+void DeferMoveControl(HDWP& deferred, HWND control, const RECT& rect) {
+    if (deferred == nullptr || control == nullptr) {
+        return;
+    }
+
+    deferred = DeferWindowPos(
+        deferred,
+        control,
+        nullptr,
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 }  // namespace
 
 SettingsWindow::SettingsWindow(App& app) : app_(app) {
@@ -397,7 +413,7 @@ void SettingsWindow::CreateIfNeeded(HWND owner) {
         WS_EX_DLGMODALFRAME,
         kSettingsWindowClassName,
         L"Settings",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         kWindowWidth,
@@ -540,28 +556,29 @@ void SettingsWindow::LayoutControls() {
         contentHeight_ = layout.contentHeight;
     }
 
-    MoveWindow(addColorButton_, layout.addColorButton.left, layout.addColorButton.top, layout.addColorButton.right - layout.addColorButton.left, layout.addColorButton.bottom - layout.addColorButton.top, FALSE);
-    MoveWindow(removeColorButton_, layout.removeColorButton.left, layout.removeColorButton.top, layout.removeColorButton.right - layout.removeColorButton.left, layout.removeColorButton.bottom - layout.removeColorButton.top, FALSE);
-    MoveWindow(pasteHexButton_, layout.pasteHexButton.left, layout.pasteHexButton.top, layout.pasteHexButton.right - layout.pasteHexButton.left, layout.pasteHexButton.bottom - layout.pasteHexButton.top, FALSE);
-
-    MoveWindow(redLabel_, layout.redLabelRect.left, layout.redLabelRect.top, layout.redLabelRect.right - layout.redLabelRect.left, layout.redLabelRect.bottom - layout.redLabelRect.top, FALSE);
-    MoveWindow(redSlider_, layout.redSliderRect.left, layout.redSliderRect.top, layout.redSliderRect.right - layout.redSliderRect.left, layout.redSliderRect.bottom - layout.redSliderRect.top, FALSE);
-    MoveWindow(greenLabel_, layout.greenLabelRect.left, layout.greenLabelRect.top, layout.greenLabelRect.right - layout.greenLabelRect.left, layout.greenLabelRect.bottom - layout.greenLabelRect.top, FALSE);
-    MoveWindow(greenSlider_, layout.greenSliderRect.left, layout.greenSliderRect.top, layout.greenSliderRect.right - layout.greenSliderRect.left, layout.greenSliderRect.bottom - layout.greenSliderRect.top, FALSE);
-    MoveWindow(blueLabel_, layout.blueLabelRect.left, layout.blueLabelRect.top, layout.blueLabelRect.right - layout.blueLabelRect.left, layout.blueLabelRect.bottom - layout.blueLabelRect.top, FALSE);
-    MoveWindow(blueSlider_, layout.blueSliderRect.left, layout.blueSliderRect.top, layout.blueSliderRect.right - layout.blueSliderRect.left, layout.blueSliderRect.bottom - layout.blueSliderRect.top, FALSE);
-
-    MoveWindow(stabilizationLabel_, layout.stabilizationLabelRect.left, layout.stabilizationLabelRect.top, layout.stabilizationLabelRect.right - layout.stabilizationLabelRect.left, layout.stabilizationLabelRect.bottom - layout.stabilizationLabelRect.top, FALSE);
-    MoveWindow(stabilizationSlider_, layout.stabilizationSliderRect.left, layout.stabilizationSliderRect.top, layout.stabilizationSliderRect.right - layout.stabilizationSliderRect.left, layout.stabilizationSliderRect.bottom - layout.stabilizationSliderRect.top, FALSE);
-    MoveWindow(spacingLabel_, layout.spacingLabelRect.left, layout.spacingLabelRect.top, layout.spacingLabelRect.right - layout.spacingLabelRect.left, layout.spacingLabelRect.bottom - layout.spacingLabelRect.top, FALSE);
-    MoveWindow(spacingSlider_, layout.spacingSliderRect.left, layout.spacingSliderRect.top, layout.spacingSliderRect.right - layout.spacingSliderRect.left, layout.spacingSliderRect.bottom - layout.spacingSliderRect.top, FALSE);
-    MoveWindow(strokeSmoothingLabel_, layout.strokeSmoothingLabelRect.left, layout.strokeSmoothingLabelRect.top, layout.strokeSmoothingLabelRect.right - layout.strokeSmoothingLabelRect.left, layout.strokeSmoothingLabelRect.bottom - layout.strokeSmoothingLabelRect.top, FALSE);
-    MoveWindow(strokeSmoothingSlider_, layout.strokeSmoothingSliderRect.left, layout.strokeSmoothingSliderRect.top, layout.strokeSmoothingSliderRect.right - layout.strokeSmoothingSliderRect.left, layout.strokeSmoothingSliderRect.bottom - layout.strokeSmoothingSliderRect.top, FALSE);
-
-    MoveWindow(shortcutList_, layout.shortcutListRect.left, layout.shortcutListRect.top, layout.shortcutListRect.right - layout.shortcutListRect.left, layout.shortcutListRect.bottom - layout.shortcutListRect.top, FALSE);
-    MoveWindow(changeShortcutButton_, layout.changeShortcutButton.left, layout.changeShortcutButton.top, layout.changeShortcutButton.right - layout.changeShortcutButton.left, layout.changeShortcutButton.bottom - layout.changeShortcutButton.top, FALSE);
-    MoveWindow(clearShortcutButton_, layout.clearShortcutButton.left, layout.clearShortcutButton.top, layout.clearShortcutButton.right - layout.clearShortcutButton.left, layout.clearShortcutButton.bottom - layout.clearShortcutButton.top, FALSE);
-    MoveWindow(shortcutHintLabel_, layout.shortcutHintRect.left, layout.shortcutHintRect.top, layout.shortcutHintRect.right - layout.shortcutHintRect.left, layout.shortcutHintRect.bottom - layout.shortcutHintRect.top, FALSE);
+    HDWP deferred = BeginDeferWindowPos(19);
+    DeferMoveControl(deferred, addColorButton_, layout.addColorButton);
+    DeferMoveControl(deferred, removeColorButton_, layout.removeColorButton);
+    DeferMoveControl(deferred, pasteHexButton_, layout.pasteHexButton);
+    DeferMoveControl(deferred, redLabel_, layout.redLabelRect);
+    DeferMoveControl(deferred, redSlider_, layout.redSliderRect);
+    DeferMoveControl(deferred, greenLabel_, layout.greenLabelRect);
+    DeferMoveControl(deferred, greenSlider_, layout.greenSliderRect);
+    DeferMoveControl(deferred, blueLabel_, layout.blueLabelRect);
+    DeferMoveControl(deferred, blueSlider_, layout.blueSliderRect);
+    DeferMoveControl(deferred, stabilizationLabel_, layout.stabilizationLabelRect);
+    DeferMoveControl(deferred, stabilizationSlider_, layout.stabilizationSliderRect);
+    DeferMoveControl(deferred, spacingLabel_, layout.spacingLabelRect);
+    DeferMoveControl(deferred, spacingSlider_, layout.spacingSliderRect);
+    DeferMoveControl(deferred, strokeSmoothingLabel_, layout.strokeSmoothingLabelRect);
+    DeferMoveControl(deferred, strokeSmoothingSlider_, layout.strokeSmoothingSliderRect);
+    DeferMoveControl(deferred, shortcutList_, layout.shortcutListRect);
+    DeferMoveControl(deferred, changeShortcutButton_, layout.changeShortcutButton);
+    DeferMoveControl(deferred, clearShortcutButton_, layout.clearShortcutButton);
+    DeferMoveControl(deferred, shortcutHintLabel_, layout.shortcutHintRect);
+    if (deferred != nullptr) {
+        EndDeferWindowPos(deferred);
+    }
 }
 
 void SettingsWindow::UpdateScrollInfo() {
@@ -588,7 +605,7 @@ void SettingsWindow::ScrollTo(int scrollOffset) {
 
     scrollOffset_ = clamped;
     LayoutControls();
-    RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+    InvalidateRect(window_, nullptr, FALSE);
 }
 
 void SettingsWindow::RefreshPaletteList() {
@@ -641,7 +658,7 @@ void SettingsWindow::RefreshShortcutList() {
         SendMessageW(shortcutList_, LB_SETCURSEL, static_cast<WPARAM>(selection), 0);
     }
     SendMessageW(shortcutList_, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(shortcutList_, nullptr, TRUE);
+    InvalidateRect(shortcutList_, nullptr, FALSE);
 }
 
 void SettingsWindow::RefreshShortcutButtons() {
@@ -746,76 +763,79 @@ RECT SettingsWindow::ColorPreviewRect() const {
 
 void SettingsWindow::PaintWindow() {
     PAINTSTRUCT paint {};
-    HDC hdc = BeginPaint(window_, &paint);
+    HDC windowDc = BeginPaint(window_, &paint);
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    FillRect(hdc, &clientRect, backgroundBrush_);
+    HDC memoryDc = CreateCompatibleDC(windowDc);
+    HBITMAP bitmap = CreateCompatibleBitmap(windowDc, clientRect.right, clientRect.bottom);
+    HGDIOBJ previousBitmap = SelectObject(memoryDc, bitmap);
+    FillRect(memoryDc, &clientRect, backgroundBrush_);
     const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, app_.palette_.size(), ShortcutDefinitions().size(), scrollOffset_);
 
-    SetBkMode(hdc, TRANSPARENT);
-    HGDIOBJ previousFont = SelectObject(hdc, titleFont_ != nullptr ? titleFont_ : font_);
-    SetTextColor(hdc, kTextPrimary);
-    TextOutW(hdc, 16, 12, L"Settings", 8);
+    SetBkMode(memoryDc, TRANSPARENT);
+    HGDIOBJ previousFont = SelectObject(memoryDc, titleFont_ != nullptr ? titleFont_ : font_);
+    SetTextColor(memoryDc, kTextPrimary);
+    TextOutW(memoryDc, 16, 12, L"Settings", 8);
 
-    FillRoundedRect(hdc, layout.palettePanel, kPanelFill);
-    FillRoundedRect(hdc, layout.shortcutPanel, kPanelFill);
-    FillRoundedRect(hdc, layout.colorPanel, kPanelFill);
-    FillRoundedRect(hdc, layout.drawingPanel, kPanelFill);
-    StrokeRoundedRect(hdc, layout.palettePanel, kPanelBorder, 1);
-    StrokeRoundedRect(hdc, layout.shortcutPanel, kPanelBorder, 1);
-    StrokeRoundedRect(hdc, layout.colorPanel, kPanelBorder, 1);
-    StrokeRoundedRect(hdc, layout.drawingPanel, kPanelBorder, 1);
+    FillRoundedRect(memoryDc, layout.palettePanel, kPanelFill);
+    FillRoundedRect(memoryDc, layout.shortcutPanel, kPanelFill);
+    FillRoundedRect(memoryDc, layout.colorPanel, kPanelFill);
+    FillRoundedRect(memoryDc, layout.drawingPanel, kPanelFill);
+    StrokeRoundedRect(memoryDc, layout.palettePanel, kPanelBorder, 1);
+    StrokeRoundedRect(memoryDc, layout.shortcutPanel, kPanelBorder, 1);
+    StrokeRoundedRect(memoryDc, layout.colorPanel, kPanelBorder, 1);
+    StrokeRoundedRect(memoryDc, layout.drawingPanel, kPanelBorder, 1);
 
-    SelectObject(hdc, font_);
-    SetTextColor(hdc, kTextMuted);
-    TextOutW(hdc, layout.palettePanel.left + 14, layout.palettePanel.top + 12, L"Palette", 7);
-    TextOutW(hdc, layout.colorPanel.left + 14, layout.colorPanel.top + 12, L"Selected Color", 14);
-    TextOutW(hdc, layout.drawingPanel.left + 14, layout.drawingPanel.top + 12, L"Drawing", 7);
-    TextOutW(hdc, layout.shortcutPanel.left + 12, layout.shortcutPanel.top + 12, L"Shortcuts", 9);
+    SelectObject(memoryDc, font_);
+    SetTextColor(memoryDc, kTextMuted);
+    TextOutW(memoryDc, layout.palettePanel.left + 14, layout.palettePanel.top + 12, L"Palette", 7);
+    TextOutW(memoryDc, layout.colorPanel.left + 14, layout.colorPanel.top + 12, L"Selected Color", 14);
+    TextOutW(memoryDc, layout.drawingPanel.left + 14, layout.drawingPanel.top + 12, L"Drawing", 7);
+    TextOutW(memoryDc, layout.shortcutPanel.left + 12, layout.shortcutPanel.top + 12, L"Shortcuts", 9);
 
     for (std::size_t index = 0; index < layout.paletteSwatches.size(); ++index) {
         const RECT swatchRect = layout.paletteSwatches[index];
-        FillRoundedRect(hdc, swatchRect, app_.ToColorRef(app_.palette_[index]));
-        StrokeRoundedRect(hdc, swatchRect, index == app_.settings_.paletteIndex ? kSelectionBorder : kPanelBorder, index == app_.settings_.paletteIndex ? 3 : 1);
+        FillRoundedRect(memoryDc, swatchRect, app_.ToColorRef(app_.palette_[index]));
+        StrokeRoundedRect(memoryDc, swatchRect, index == app_.settings_.paletteIndex ? kSelectionBorder : kPanelBorder, index == app_.settings_.paletteIndex ? 3 : 1);
         RECT textRect = swatchRect;
         textRect.top = swatchRect.bottom - 18;
-        SetTextColor(hdc, (app_.GetColorChannel(app_.palette_[index], 16)
+        SetTextColor(memoryDc, (app_.GetColorChannel(app_.palette_[index], 16)
                 + app_.GetColorChannel(app_.palette_[index], 8)
                 + app_.GetColorChannel(app_.palette_[index], 0)) > 384
             ? RGB(22, 28, 36)
             : RGB(248, 250, 252));
         wchar_t number[8] = {};
         std::swprintf(number, std::size(number), L"%zu", index + 1U);
-        DrawTextW(hdc, number, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(memoryDc, number, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
     RECT previewRect = layout.colorPreviewRect;
-    FillRoundedRect(hdc, previewRect, app_.ToColorRef(app_.palette_[app_.settings_.paletteIndex]));
-    StrokeRoundedRect(hdc, previewRect, kSelectionBorder, 2);
+    FillRoundedRect(memoryDc, previewRect, app_.ToColorRef(app_.palette_[app_.settings_.paletteIndex]));
+    StrokeRoundedRect(memoryDc, previewRect, kSelectionBorder, 2);
 
     RECT previewLabel = previewRect;
     previewLabel.top += 10;
-    SetTextColor(hdc, (app_.GetColorChannel(app_.palette_[app_.settings_.paletteIndex], 16)
+    SetTextColor(memoryDc, (app_.GetColorChannel(app_.palette_[app_.settings_.paletteIndex], 16)
             + app_.GetColorChannel(app_.palette_[app_.settings_.paletteIndex], 8)
             + app_.GetColorChannel(app_.palette_[app_.settings_.paletteIndex], 0)) > 384
         ? RGB(22, 28, 36)
         : RGB(248, 250, 252));
     const std::wstring previewText = FormatPaletteEntry(app_.settings_.paletteIndex, app_.palette_[app_.settings_.paletteIndex]);
-    DrawTextW(hdc, previewText.c_str(), -1, &previewLabel, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(memoryDc, previewText.c_str(), -1, &previewLabel, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     const auto paintSlider = [&](SliderKind kind, RECT sliderRect, int minimum, int maximum) {
         const RECT trackRect = SliderTrackRect(sliderRect);
-        FillRoundedRect(hdc, trackRect, RGB(41, 51, 66));
+        FillRoundedRect(memoryDc, trackRect, RGB(41, 51, 66));
         const int thumbCenterX = SliderThumbCenterX(trackRect, SliderValue(kind), minimum, maximum);
         RECT fillRect = trackRect;
         fillRect.right = static_cast<LONG>(std::max<int>(fillRect.left + 1, thumbCenterX + 1));
-        FillRoundedRect(hdc, fillRect, RGB(92, 137, 187));
+        FillRoundedRect(memoryDc, fillRect, RGB(92, 137, 187));
 
         const int centerY = (sliderRect.top + sliderRect.bottom) / 2;
         RECT thumbRect = MakeRect(thumbCenterX - 6, centerY - 6, thumbCenterX + 7, centerY + 7);
-        FillRoundedRect(hdc, thumbRect, RGB(244, 247, 252));
-        StrokeRoundedRect(hdc, thumbRect, draggingSlider_ == kind ? RGB(255, 255, 255) : RGB(120, 138, 162), 1);
+        FillRoundedRect(memoryDc, thumbRect, RGB(244, 247, 252));
+        StrokeRoundedRect(memoryDc, thumbRect, draggingSlider_ == kind ? RGB(255, 255, 255) : RGB(120, 138, 162), 1);
     };
 
     paintSlider(SliderKind::Red, layout.redSliderRect, 0, 255);
@@ -826,12 +846,17 @@ void SettingsWindow::PaintWindow() {
     paintSlider(SliderKind::StrokeSmoothing, layout.strokeSmoothingSliderRect, 0, 100);
 
     if (layout.showScrollbar) {
-        FillRoundedRect(hdc, layout.scrollbarTrackRect, kScrollbarTrackFill);
-        StrokeRoundedRect(hdc, layout.scrollbarTrackRect, kPanelBorder, 1);
-        FillRoundedRect(hdc, layout.scrollbarThumbRect, draggingScrollbar_ ? kScrollbarThumbActiveFill : kScrollbarThumbFill);
+        FillRoundedRect(memoryDc, layout.scrollbarTrackRect, kScrollbarTrackFill);
+        StrokeRoundedRect(memoryDc, layout.scrollbarTrackRect, kPanelBorder, 1);
+        FillRoundedRect(memoryDc, layout.scrollbarThumbRect, draggingScrollbar_ ? kScrollbarThumbActiveFill : kScrollbarThumbFill);
     }
 
-    SelectObject(hdc, previousFont);
+    BitBlt(windowDc, 0, 0, clientRect.right, clientRect.bottom, memoryDc, 0, 0, SRCCOPY);
+
+    SelectObject(memoryDc, previousFont);
+    SelectObject(memoryDc, previousBitmap);
+    DeleteObject(bitmap);
+    DeleteDC(memoryDc);
     EndPaint(window_, &paint);
 }
 
