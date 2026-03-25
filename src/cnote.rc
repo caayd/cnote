@@ -1,3 +1,4 @@
 #include "resource.h"
 
+1 RT_MANIFEST "cnote.manifest"
 IDI_APP_ICON ICON "../assets/cnote.ico"

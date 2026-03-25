@@ -126,16 +126,88 @@ RECT InflateRectCopy(RECT rect, int amount) {
     return rect;
 }
 
-int WindowFrameThicknessX() {
-    return GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+#endif
+
+UINT SystemDpi() {
+    using GetDpiForSystemFn = UINT(WINAPI*)();
+    static const auto getDpiForSystem = reinterpret_cast<GetDpiForSystemFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForSystem"));
+    if (getDpiForSystem != nullptr) {
+        return getDpiForSystem();
+    }
+
+    HDC screenDc = GetDC(nullptr);
+    if (screenDc == nullptr) {
+        return USER_DEFAULT_SCREEN_DPI;
+    }
+
+    const int dpi = GetDeviceCaps(screenDc, LOGPIXELSX);
+    ReleaseDC(nullptr, screenDc);
+    return dpi > 0 ? static_cast<UINT>(dpi) : USER_DEFAULT_SCREEN_DPI;
 }
 
-int WindowFrameThicknessY() {
-    return GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+UINT WindowDpi(HWND window) {
+    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+    static const auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    if (getDpiForWindow != nullptr && window != nullptr) {
+        return getDpiForWindow(window);
+    }
+
+    return SystemDpi();
 }
 
-int CaptionButtonReserve() {
-    return (46 * 3) + 16;
+int ScaleForDpi(int value, UINT dpi) {
+    return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
+}
+
+float ScaleForDpi(float value, UINT dpi) {
+    return value * static_cast<float>(dpi) / static_cast<float>(USER_DEFAULT_SCREEN_DPI);
+}
+
+int SystemMetricForDpi(int index, UINT dpi) {
+    using GetSystemMetricsForDpiFn = int(WINAPI*)(int, UINT);
+    static const auto getSystemMetricsForDpi = reinterpret_cast<GetSystemMetricsForDpiFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetSystemMetricsForDpi"));
+    if (getSystemMetricsForDpi != nullptr) {
+        return getSystemMetricsForDpi(index, dpi);
+    }
+
+    return ScaleForDpi(GetSystemMetrics(index), dpi);
+}
+
+BOOL AdjustWindowRectForDpi(RECT* rect, DWORD style, BOOL hasMenu, DWORD exStyle, UINT dpi) {
+    using AdjustWindowRectExForDpiFn = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    static const auto adjustWindowRectExForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi"));
+    if (adjustWindowRectExForDpi != nullptr) {
+        return adjustWindowRectExForDpi(rect, style, hasMenu, exStyle, dpi);
+    }
+
+    return AdjustWindowRectEx(rect, style, hasMenu, exStyle);
+}
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
+int WindowFrameThicknessX(UINT dpi) {
+    return SystemMetricForDpi(SM_CXFRAME, dpi) + SystemMetricForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
+int WindowFrameThicknessY(UINT dpi) {
+    return SystemMetricForDpi(SM_CYFRAME, dpi) + SystemMetricForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
+int CaptionButtonReserve(UINT dpi) {
+    return ScaleForDpi((46 * 3) + 16, dpi);
+}
+
+int FontHeightForDpi(int height, UINT dpi) {
+    return ScaleForDpi(height, dpi);
 }
 
 constexpr int kBaseToolbarHeight = 45;
@@ -144,12 +216,12 @@ constexpr int kTitleBarButtonHeight = 45;
 constexpr DWORD kDwmWindowCornerPreferenceAttribute = 33;
 constexpr DWORD kDwmWindowCornerRound = 2;
 
-int ToolbarHeight(bool maximized) {
-    return kBaseToolbarHeight + (maximized ? kMaximizedToolbarExtraHeight : 0);
+int ToolbarHeight(bool maximized, UINT dpi) {
+    return ScaleForDpi(kBaseToolbarHeight + (maximized ? kMaximizedToolbarExtraHeight : 0), dpi);
 }
 
-int ToolbarTopInset(bool maximized) {
-    return maximized ? kMaximizedToolbarExtraHeight : 0;
+int ToolbarTopInset(bool maximized, UINT dpi) {
+    return maximized ? ScaleForDpi(kMaximizedToolbarExtraHeight, dpi) : 0;
 }
 
 HCURSOR CreateWhiteSquareCursor() {
@@ -301,19 +373,19 @@ int MeasureToolbarTextWidth(HDC hdc, const std::wstring& text) {
     return static_cast<int>(size.cx);
 }
 
-ToolbarTitleLayout ResolveToolbarTitleLayout(const ToolbarLayout& layout, HDC hdc, const std::wstring& title, const std::wstring& zoomLabel) {
+ToolbarTitleLayout ResolveToolbarTitleLayout(const ToolbarLayout& layout, HDC hdc, const std::wstring& title, const std::wstring& zoomLabel, UINT dpi) {
     ToolbarTitleLayout resolved {};
     if (!HasRect(layout.titleAreaRect)) {
         return resolved;
     }
 
-    constexpr int kTitleLeftInset = 4;
-    constexpr int kTitleRightInset = 4;
-    constexpr int kZoomGap = 12;
-    constexpr int kZoomHorizontalPadding = 6;
-    constexpr int kMinimumTitleWidth = 24;
-    constexpr int kMinimumZoomWidth = 44;
-    constexpr int kMaximumZoomWidth = 72;
+    const int kTitleLeftInset = ScaleForDpi(4, dpi);
+    const int kTitleRightInset = ScaleForDpi(4, dpi);
+    const int kZoomGap = ScaleForDpi(12, dpi);
+    const int kZoomHorizontalPadding = ScaleForDpi(6, dpi);
+    const int kMinimumTitleWidth = ScaleForDpi(24, dpi);
+    const int kMinimumZoomWidth = ScaleForDpi(44, dpi);
+    const int kMaximumZoomWidth = ScaleForDpi(72, dpi);
 
     const int availableWidth = static_cast<int>(layout.titleAreaRect.right - layout.titleAreaRect.left);
     const int zoomWidth = std::clamp(
@@ -961,68 +1033,70 @@ void PaintSvgIcon(HDC hdc, RECT rect, const SvgIconData& icon, COLORREF color) {
     }
 }
 
-ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool maximized, App::Tool activeTool) {
+ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool maximized, App::Tool activeTool, UINT dpi) {
     ToolbarLayout layout;
     static_cast<void>(colorCount);
     static_cast<void>(activeTool);
 
-    const int toolbarHeight = ToolbarHeight(maximized);
-    const int topInset = ToolbarTopInset(maximized);
-    const int titleBarInset = maximized ? WindowFrameThicknessX() : 0;
+    const int toolbarHeight = ToolbarHeight(maximized, dpi);
+    const int topInset = ToolbarTopInset(maximized, dpi);
+    const int titleBarInset = maximized ? WindowFrameThicknessX(dpi) : 0;
     const int buttonStripRight = clientRect.right - titleBarInset;
     const int availableWidth = clientRect.right - clientRect.left;
-    const bool compactTitle = availableWidth < 760;
-    const int toolGap = compactTitle ? 8 : 10;
-    const int outerGap = compactTitle ? 12 : 18;
+    const bool compactTitle = availableWidth < ScaleForDpi(760, dpi);
+    const int toolGap = ScaleForDpi(compactTitle ? 8 : 10, dpi);
+    const int outerGap = ScaleForDpi(compactTitle ? 12 : 18, dpi);
+    const int captionButtonWidth = ScaleForDpi(46, dpi);
 
-    layout.closeRect = MakeRect(buttonStripRight - 46, topInset, buttonStripRight, toolbarHeight);
-    layout.maximizeRect = MakeRect(layout.closeRect.left - 46, topInset, layout.closeRect.left, toolbarHeight);
-    layout.minimizeRect = MakeRect(layout.maximizeRect.left - 46, topInset, layout.maximizeRect.left, toolbarHeight);
+    layout.closeRect = MakeRect(buttonStripRight - captionButtonWidth, topInset, buttonStripRight, toolbarHeight);
+    layout.maximizeRect = MakeRect(layout.closeRect.left - captionButtonWidth, topInset, layout.closeRect.left, toolbarHeight);
+    layout.minimizeRect = MakeRect(layout.maximizeRect.left - captionButtonWidth, topInset, layout.maximizeRect.left, toolbarHeight);
 
-    const int rightEdge = buttonStripRight - CaptionButtonReserve();
-    const int toolbarTop = topInset + ((kTitleBarButtonHeight - kIconButtonSize) / 2);
-    const int colorButtonSize = kIconButtonSize;
+    const int rightEdge = buttonStripRight - CaptionButtonReserve(dpi);
+    const int toolbarTop = topInset + ((ScaleForDpi(kTitleBarButtonHeight, dpi) - ScaleForDpi(kIconButtonSize, dpi)) / 2);
+    const int colorButtonSize = ScaleForDpi(kIconButtonSize, dpi);
     const int colorsLeft = rightEdge - colorButtonSize;
 
     layout.currentColorRect = MakeRect(colorsLeft, toolbarTop, colorsLeft + colorButtonSize, toolbarTop + colorButtonSize);
 
     const int toolBandRight = colorsLeft - outerGap;
     layout.panToolRect = MakeRect(
-        toolBandRight - kIconButtonSize,
+        toolBandRight - ScaleForDpi(kIconButtonSize, dpi),
         toolbarTop,
         toolBandRight,
-        toolbarTop + kIconButtonSize);
+        toolbarTop + ScaleForDpi(kIconButtonSize, dpi));
     layout.drawToolRect = MakeRect(
-        layout.panToolRect.left - toolGap - kIconButtonSize,
+        layout.panToolRect.left - toolGap - ScaleForDpi(kIconButtonSize, dpi),
         toolbarTop,
         layout.panToolRect.left - toolGap,
-        toolbarTop + kIconButtonSize);
+        toolbarTop + ScaleForDpi(kIconButtonSize, dpi));
     layout.eraseToolRect = MakeRect(
-        layout.drawToolRect.left - toolGap - kIconButtonSize,
+        layout.drawToolRect.left - toolGap - ScaleForDpi(kIconButtonSize, dpi),
         toolbarTop,
         layout.drawToolRect.left - toolGap,
-        toolbarTop + kIconButtonSize);
+        toolbarTop + ScaleForDpi(kIconButtonSize, dpi));
     layout.selectToolRect = MakeRect(
-        layout.eraseToolRect.left - toolGap - kIconButtonSize,
+        layout.eraseToolRect.left - toolGap - ScaleForDpi(kIconButtonSize, dpi),
         toolbarTop,
         layout.eraseToolRect.left - toolGap,
-        toolbarTop + kIconButtonSize);
+        toolbarTop + ScaleForDpi(kIconButtonSize, dpi));
     layout.moveToolRect = MakeRect(
-        layout.selectToolRect.left - toolGap - kIconButtonSize,
+        layout.selectToolRect.left - toolGap - ScaleForDpi(kIconButtonSize, dpi),
         toolbarTop,
         layout.selectToolRect.left - toolGap,
-        toolbarTop + kIconButtonSize);
-    const int redoRight = layout.moveToolRect.left - (compactTitle ? 12 : 16);
-    const RECT candidateRedoRect = MakeRect(redoRight - kIconButtonSize, toolbarTop, redoRight, toolbarTop + kIconButtonSize);
-    const RECT candidateUndoRect = MakeRect(candidateRedoRect.left - toolGap - kIconButtonSize, toolbarTop, candidateRedoRect.left - toolGap, toolbarTop + kIconButtonSize);
-    const int titleLeft = 12;
-    const int minimumTitleAreaWidth = compactTitle ? 150 : 210;
+        toolbarTop + ScaleForDpi(kIconButtonSize, dpi));
+    const int redoRight = layout.moveToolRect.left - ScaleForDpi(compactTitle ? 12 : 16, dpi);
+    const int iconButtonSize = ScaleForDpi(kIconButtonSize, dpi);
+    const RECT candidateRedoRect = MakeRect(redoRight - iconButtonSize, toolbarTop, redoRight, toolbarTop + iconButtonSize);
+    const RECT candidateUndoRect = MakeRect(candidateRedoRect.left - toolGap - iconButtonSize, toolbarTop, candidateRedoRect.left - toolGap, toolbarTop + iconButtonSize);
+    const int titleLeft = ScaleForDpi(12, dpi);
+    const int minimumTitleAreaWidth = ScaleForDpi(compactTitle ? 150 : 210, dpi);
     if (candidateUndoRect.left >= titleLeft + minimumTitleAreaWidth) {
         layout.redoRect = candidateRedoRect;
         layout.undoRect = candidateUndoRect;
     }
 
-    const int titleRight = (HasRect(layout.undoRect) ? layout.undoRect.left : layout.moveToolRect.left) - 16;
+    const int titleRight = (HasRect(layout.undoRect) ? layout.undoRect.left : layout.moveToolRect.left) - ScaleForDpi(16, dpi);
     const int titleAreaWidth = std::max(0, titleRight - titleLeft);
     if (titleAreaWidth >= minimumTitleAreaWidth) {
         layout.titleAreaRect = MakeRect(titleLeft, topInset, titleRight, toolbarHeight);
@@ -1031,42 +1105,42 @@ ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool m
     return layout;
 }
 
-SidebarHeaderLayout BuildSidebarHeaderLayout(RECT sidebarRect) {
+SidebarHeaderLayout BuildSidebarHeaderLayout(RECT sidebarRect, UINT dpi) {
     SidebarHeaderLayout layout {};
-    const int padding = 12;
-    const int buttonSize = 26;
-    const int gap = 4;
-    const int actionHeight = 24;
-    const int actionInset = 6;
-    const int headerHeight = 76;
+    const int padding = ScaleForDpi(12, dpi);
+    const int buttonSize = ScaleForDpi(26, dpi);
+    const int gap = ScaleForDpi(4, dpi);
+    const int actionHeight = ScaleForDpi(24, dpi);
+    const int actionInset = ScaleForDpi(6, dpi);
+    const int headerHeight = ScaleForDpi(76, dpi);
     layout.headerRect = MakeRect(sidebarRect.left + padding, sidebarRect.top + padding, sidebarRect.right - padding, sidebarRect.top + padding + headerHeight);
-    layout.previousPageRect = MakeRect(layout.headerRect.left, layout.headerRect.top + 8, layout.headerRect.left + buttonSize, layout.headerRect.top + 8 + buttonSize);
-    layout.nextPageRect = MakeRect(layout.headerRect.right - buttonSize, layout.headerRect.top + 8, layout.headerRect.right, layout.headerRect.top + 8 + buttonSize);
-    layout.pageLabelRect = MakeRect(layout.previousPageRect.right + gap, layout.headerRect.top + 6, layout.nextPageRect.left - gap, layout.previousPageRect.bottom + 2);
-    const int actionTop = layout.headerRect.bottom - actionHeight - 10;
+    layout.previousPageRect = MakeRect(layout.headerRect.left, layout.headerRect.top + ScaleForDpi(8, dpi), layout.headerRect.left + buttonSize, layout.headerRect.top + ScaleForDpi(8, dpi) + buttonSize);
+    layout.nextPageRect = MakeRect(layout.headerRect.right - buttonSize, layout.headerRect.top + ScaleForDpi(8, dpi), layout.headerRect.right, layout.headerRect.top + ScaleForDpi(8, dpi) + buttonSize);
+    layout.pageLabelRect = MakeRect(layout.previousPageRect.right + gap, layout.headerRect.top + ScaleForDpi(6, dpi), layout.nextPageRect.left - gap, layout.previousPageRect.bottom + ScaleForDpi(2, dpi));
+    const int actionTop = layout.headerRect.bottom - actionHeight - ScaleForDpi(10, dpi);
     layout.newPageSettingsRect = MakeRect(layout.headerRect.right - actionInset - actionHeight, actionTop, layout.headerRect.right - actionInset, actionTop + actionHeight);
     layout.addPageRect = MakeRect(layout.headerRect.left + actionInset, actionTop, layout.newPageSettingsRect.left - gap, actionTop + actionHeight);
-    layout.contentRect = MakeRect(sidebarRect.left, layout.headerRect.bottom + 8, sidebarRect.right, sidebarRect.bottom);
+    layout.contentRect = MakeRect(sidebarRect.left, layout.headerRect.bottom + ScaleForDpi(8, dpi), sidebarRect.right, sidebarRect.bottom);
     return layout;
 }
 
-QuickSizePopupLayout BuildQuickSizePopupLayout(RECT clientRect, POINT anchor) {
+QuickSizePopupLayout BuildQuickSizePopupLayout(RECT clientRect, POINT anchor, UINT dpi) {
     QuickSizePopupLayout layout {};
-    constexpr int kPanelWidth = 188;
-    constexpr int kPanelHeight = 38;
-    constexpr int kPreviewBounds = 28;
-    constexpr int kCursorGap = 14;
-    constexpr int kPreviewGap = 5;
+    const int kPanelWidth = ScaleForDpi(188, dpi);
+    const int kPanelHeight = ScaleForDpi(38, dpi);
+    const int kPreviewBounds = ScaleForDpi(28, dpi);
+    const int kCursorGap = ScaleForDpi(14, dpi);
+    const int kPreviewGap = ScaleForDpi(5, dpi);
     const int totalHeight = kPreviewBounds + kPreviewGap + kPanelHeight;
     const int toolbarBottom = clientRect.top;
     int left = anchor.x - (kPanelWidth / 2);
     int top = anchor.y - totalHeight - kCursorGap;
-    left = std::clamp(left, static_cast<int>(clientRect.left) + 8, static_cast<int>(clientRect.right) - kPanelWidth - 8);
-    top = std::clamp(top, toolbarBottom + 8, static_cast<int>(clientRect.bottom) - totalHeight - 8);
+    left = std::clamp(left, static_cast<int>(clientRect.left) + ScaleForDpi(8, dpi), static_cast<int>(clientRect.right) - kPanelWidth - ScaleForDpi(8, dpi));
+    top = std::clamp(top, toolbarBottom + ScaleForDpi(8, dpi), static_cast<int>(clientRect.bottom) - totalHeight - ScaleForDpi(8, dpi));
     const int panelTop = top + kPreviewBounds + kPreviewGap;
     layout.panelRect = MakeRect(left, panelTop, left + kPanelWidth, panelTop + kPanelHeight);
-    layout.sliderRect = MakeRect(left + 10, panelTop + 10, left + 144, panelTop + 28);
-    layout.valueRect = MakeRect(left + 150, panelTop + 6, left + 178, panelTop + 32);
+    layout.sliderRect = MakeRect(left + ScaleForDpi(10, dpi), panelTop + ScaleForDpi(10, dpi), left + ScaleForDpi(144, dpi), panelTop + ScaleForDpi(28, dpi));
+    layout.valueRect = MakeRect(left + ScaleForDpi(150, dpi), panelTop + ScaleForDpi(6, dpi), left + ScaleForDpi(178, dpi), panelTop + ScaleForDpi(32, dpi));
     const int sliderCenterX = (layout.sliderRect.left + layout.sliderRect.right) / 2;
     layout.previewRect = MakeRect(
         sliderCenterX - (kPreviewBounds / 2),
@@ -1076,24 +1150,24 @@ QuickSizePopupLayout BuildQuickSizePopupLayout(RECT clientRect, POINT anchor) {
     return layout;
 }
 
-RECT QuickSizePopupBounds(const QuickSizePopupLayout& layout) {
-    return InflateRectCopy(UnionRectangles(layout.panelRect, layout.previewRect), 3);
+RECT QuickSizePopupBounds(const QuickSizePopupLayout& layout, UINT dpi) {
+    return InflateRectCopy(UnionRectangles(layout.panelRect, layout.previewRect), ScaleForDpi(3, dpi));
 }
 
-PaletteMenuLayout BuildPaletteMenuLayout(const ToolbarLayout& toolbarLayout, std::size_t colorCount) {
+PaletteMenuLayout BuildPaletteMenuLayout(const ToolbarLayout& toolbarLayout, std::size_t colorCount, UINT dpi) {
     PaletteMenuLayout layout;
     const int columns = std::min(4, std::max(1, static_cast<int>(colorCount)));
-    const int swatchSize = 28;
-    const int gap = 8;
+    const int swatchSize = ScaleForDpi(28, dpi);
+    const int gap = ScaleForDpi(8, dpi);
     const int rows = std::max(1, static_cast<int>((colorCount + static_cast<std::size_t>(columns) - 1U) / static_cast<std::size_t>(columns)));
-    const int panelPadding = 12;
+    const int panelPadding = ScaleForDpi(12, dpi);
     const int panelWidth = (columns * swatchSize) + ((columns - 1) * gap) + (panelPadding * 2);
     const int panelHeight = (rows * swatchSize) + ((rows - 1) * gap) + (panelPadding * 2);
     layout.panelRect = MakeRect(
         toolbarLayout.currentColorRect.right - panelWidth,
-        toolbarLayout.currentColorRect.bottom + 8,
+        toolbarLayout.currentColorRect.bottom + ScaleForDpi(8, dpi),
         toolbarLayout.currentColorRect.right,
-        toolbarLayout.currentColorRect.bottom + 8 + panelHeight);
+        toolbarLayout.currentColorRect.bottom + ScaleForDpi(8, dpi) + panelHeight);
 
     layout.swatchRects.reserve(colorCount);
     for (std::size_t index = 0; index < colorCount; ++index) {
@@ -1107,11 +1181,11 @@ PaletteMenuLayout BuildPaletteMenuLayout(const ToolbarLayout& toolbarLayout, std
     return layout;
 }
 
-PaletteWheelLayout BuildPaletteWheelLayout(RECT clientRect, POINT requestedCenter, std::size_t colorCount, int toolbarHeight) {
+PaletteWheelLayout BuildPaletteWheelLayout(RECT clientRect, POINT requestedCenter, std::size_t colorCount, int toolbarHeight, UINT dpi) {
     PaletteWheelLayout layout;
-    layout.innerRadius = 20;
-    layout.outerRadius = colorCount <= 1U ? 40 : 86;
-    const int margin = layout.outerRadius + 12;
+    layout.innerRadius = ScaleForDpi(20, dpi);
+    layout.outerRadius = colorCount <= 1U ? ScaleForDpi(40, dpi) : ScaleForDpi(86, dpi);
+    const int margin = layout.outerRadius + ScaleForDpi(12, dpi);
     layout.center.x = std::clamp(static_cast<int>(requestedCenter.x), margin, static_cast<int>(clientRect.right) - margin);
     layout.center.y = std::clamp(static_cast<int>(requestedCenter.y), toolbarHeight + margin, static_cast<int>(clientRect.bottom) - margin);
     return layout;
@@ -1801,6 +1875,9 @@ bool App::CreateMainWindow(int showCommand) {
         return false;
     }
 
+    const UINT initialDpi = SystemDpi();
+    RECT initialWindowRect { 0, 0, ScaleForDpi(1400, initialDpi), ScaleForDpi(960, initialDpi) };
+    AdjustWindowRectForDpi(&initialWindowRect, WS_OVERLAPPEDWINDOW, FALSE, 0, initialDpi);
     window_ = CreateWindowExW(
         0,
         kWindowClassName,
@@ -1808,8 +1885,8 @@ bool App::CreateMainWindow(int showCommand) {
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        1400,
-        960,
+        initialWindowRect.right - initialWindowRect.left,
+        initialWindowRect.bottom - initialWindowRect.top,
         nullptr,
         nullptr,
         instance_,
@@ -1952,7 +2029,8 @@ void App::CancelQuickSizePopup(bool cancelInput) {
         RECT clientRect {};
         GetClientRect(window_, &clientRect);
         const RECT canvasRect = CanvasRect(clientRect);
-        popupRect = QuickSizePopupBounds(BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_));
+        const UINT dpi = WindowDpi(window_);
+        popupRect = QuickSizePopupBounds(BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_, dpi), dpi);
         invalidatePopup = true;
     }
 
@@ -1991,7 +2069,7 @@ void App::TogglePaletteWheel() {
 
     if (cursor.x < 0 || cursor.y < 0 || cursor.x >= clientRect.right || cursor.y >= clientRect.bottom) {
         const bool maximized = IsZoomed(window_);
-        const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), maximized, activeTool_);
+        const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), maximized, activeTool_, WindowDpi(window_));
         cursor.x = (toolbarLayout.currentColorRect.left + toolbarLayout.currentColorRect.right) / 2;
         cursor.y = toolbarLayout.currentColorRect.bottom + 72;
     }
@@ -2039,7 +2117,7 @@ void App::InvalidateCanvas() {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    clientRect.top = ToolbarHeight(IsZoomed(window_));
+    clientRect.top = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
     InvalidateRect(window_, &clientRect, FALSE);
 }
 
@@ -2076,7 +2154,7 @@ void App::InvalidateVisiblePageSurfaceCaches() {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const int visibleTop = ToolbarHeight(IsZoomed(window_));
+    const int visibleTop = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
     const int visibleBottom = static_cast<int>(clientRect.bottom);
     for (const PageView& pageView : CalculatePageViews(clientRect)) {
         if (!pageView.valid) {
@@ -2139,7 +2217,7 @@ void App::ResetView() {
         RECT clientRect {};
         GetClientRect(window_, &clientRect);
         RECT toolbarRect = clientRect;
-        toolbarRect.bottom = ToolbarHeight(IsZoomed(window_));
+        toolbarRect.bottom = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
         InvalidateRect(window_, &toolbarRect, FALSE);
     }
 }
@@ -2203,7 +2281,7 @@ void App::FocusPage(std::size_t index) {
 
     document_.SetCurrentPageIndex(index);
     EnsureSidebarCurrentPageVisible();
-    const int toolbarHeight = ToolbarHeight(IsZoomed(window_));
+    const int toolbarHeight = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
     const int canvasTop = toolbarHeight;
     const int canvasHeight = std::max(1, static_cast<int>(clientRect.bottom - clientRect.top) - toolbarHeight);
     const int pageCenterY = (pageView.rect.top + pageView.rect.bottom) / 2;
@@ -2900,19 +2978,19 @@ bool App::SidebarOwnsKeyboardShortcuts() const {
 }
 
 int App::PdfSidebarWidth() const {
-    return IsPdfSidebarVisible() ? 176 : 0;
+    return IsPdfSidebarVisible() ? ScaleForDpi(176, WindowDpi(window_)) : 0;
 }
 
 RECT App::PdfSidebarRect(RECT clientRect) const {
     RECT rect = clientRect;
-    rect.top = ToolbarHeight(IsZoomed(window_));
+    rect.top = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
     rect.right = rect.left + PdfSidebarWidth();
     return rect;
 }
 
 RECT App::CanvasRect(RECT clientRect) const {
     RECT rect = clientRect;
-    rect.top = ToolbarHeight(IsZoomed(window_));
+    rect.top = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
     rect.left += PdfSidebarWidth();
     return rect;
 }
@@ -2929,7 +3007,7 @@ std::optional<std::size_t> App::HitTestSidebarPage(POINT cursor) const {
         return std::nullopt;
     }
 
-    const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect);
+    const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect, WindowDpi(window_));
     const int itemWidth = (headerLayout.contentRect.right - headerLayout.contentRect.left) - 24;
     const int left = sidebarRect.left + 12;
     int top = headerLayout.contentRect.top + 12 - pdfSidebarScrollY_;
@@ -2955,7 +3033,7 @@ void App::EnsureSidebarCurrentPageVisible() {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const RECT sidebarRect = PdfSidebarRect(clientRect);
-    const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect);
+    const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect, WindowDpi(window_));
     const int itemWidth = (headerLayout.contentRect.right - headerLayout.contentRect.left) - 24;
     int top = headerLayout.contentRect.top + 12;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
@@ -3282,7 +3360,7 @@ void App::UpdateToolbarBrushSliderDrag(POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const RECT canvasRect = CanvasRect(clientRect);
-    const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_);
+    const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_, WindowDpi(window_));
     const RECT trackRect = ToolbarBrushTrackRect(popupLayout.sliderRect);
     if (trackRect.right <= trackRect.left) {
         return;
@@ -4586,19 +4664,20 @@ void App::ExecuteCommand(unsigned int commandId) {
 }
 
 bool App::HandleToolbarClick(POINT cursor) {
-    if (cursor.y >= ToolbarHeight(IsZoomed(window_))) {
+    const UINT dpi = WindowDpi(window_);
+    if (cursor.y >= ToolbarHeight(IsZoomed(window_), dpi)) {
         return false;
     }
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
+    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_, dpi);
     HDC windowDc = GetDC(window_);
-    HFONT bodyFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+    HFONT bodyFont = CreateFontW(FontHeightForDpi(15, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
     HGDIOBJ previousFont = windowDc != nullptr && bodyFont != nullptr ? SelectObject(windowDc, bodyFont) : nullptr;
     const ToolbarTitleLayout titleLayout = windowDc != nullptr
-        ? ResolveToolbarTitleLayout(layout, windowDc, CurrentWindowTitle(), ZoomIndicatorLabel())
+        ? ResolveToolbarTitleLayout(layout, windowDc, CurrentWindowTitle(), ZoomIndicatorLabel(), dpi)
         : ToolbarTitleLayout {};
     if (windowDc != nullptr && previousFont != nullptr) {
         SelectObject(windowDc, previousFont);
@@ -4635,7 +4714,7 @@ bool App::HandleToolbarClick(POINT cursor) {
         titleMenuActive_ = true;
         RECT clientRectForMenu {};
         GetClientRect(window_, &clientRectForMenu);
-        clientRectForMenu.bottom = ToolbarHeight(IsZoomed(window_));
+        clientRectForMenu.bottom = ToolbarHeight(IsZoomed(window_), dpi);
         InvalidateRect(window_, &clientRectForMenu, FALSE);
         UpdateWindow(window_);
 
@@ -4749,7 +4828,7 @@ bool App::HandleSidebarClick(POINT cursor) {
         return false;
     }
 
-    const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect);
+    const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect, WindowDpi(window_));
     const bool clickedPageLabel = PtInRect(&headerLayout.pageLabelRect, cursor) != 0;
     if (pageJumpEditing_ && !clickedPageLabel) {
         CancelPageJumpInput();
@@ -4801,10 +4880,11 @@ bool App::HandleQuickSizePopupClick(POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const RECT canvasRect = CanvasRect(clientRect);
-    const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_);
+    const UINT dpi = WindowDpi(window_);
+    const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_, dpi);
     const bool clickedSlider = PtInRect(&popupLayout.sliderRect, cursor) != 0;
     const bool clickedValue = PtInRect(&popupLayout.valueRect, cursor) != 0;
-    const RECT popupBounds = QuickSizePopupBounds(popupLayout);
+    const RECT popupBounds = QuickSizePopupBounds(popupLayout, dpi);
     if (PtInRect(&popupBounds, cursor) == 0) {
         CancelQuickSizePopup();
         return false;
@@ -4834,13 +4914,14 @@ bool App::HandleQuickSizePopupClick(POINT cursor) {
 }
 
 bool App::HandleToolbarRightClick(POINT cursor) {
-    if (cursor.y >= ToolbarHeight(IsZoomed(window_))) {
+    const UINT dpi = WindowDpi(window_);
+    if (cursor.y >= ToolbarHeight(IsZoomed(window_), dpi)) {
         return false;
     }
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
+    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_, dpi);
 
     const auto showMenuForTool = [&](const RECT& rect, Tool tool) -> bool {
         if (PtInRect(&rect, cursor) == 0) {
@@ -4883,7 +4964,8 @@ bool App::HandleToolbarRightClick(POINT cursor) {
 bool App::HandlePaletteClick(POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
+    const UINT dpi = WindowDpi(window_);
+    const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_, dpi);
 
     if (PtInRect(&toolbarLayout.currentColorRect, cursor) != 0) {
         if (toolbarZoomEditing_) {
@@ -4898,7 +4980,7 @@ bool App::HandlePaletteClick(POINT cursor) {
     }
 
     if (wheel_.paletteMenuOpen) {
-        const PaletteMenuLayout menuLayout = BuildPaletteMenuLayout(toolbarLayout, palette_.size());
+        const PaletteMenuLayout menuLayout = BuildPaletteMenuLayout(toolbarLayout, palette_.size(), dpi);
         for (std::size_t index = 0; index < menuLayout.swatchRects.size(); ++index) {
             if (PtInRect(&menuLayout.swatchRects[index], cursor) != 0) {
                 if (toolbarZoomEditing_) {
@@ -4932,7 +5014,7 @@ bool App::HandlePaletteClick(POINT cursor) {
 
     if (wheel_.paletteWheelOpen) {
         const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
-        const PaletteWheelLayout wheelLayout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, ToolbarHeight(IsZoomed(window_)));
+        const PaletteWheelLayout wheelLayout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, ToolbarHeight(IsZoomed(window_), dpi), dpi);
         if (const auto index = PaletteWheelIndexAtPoint(wheelLayout, cursor, wheelEntryCount); index.has_value()) {
             if (*index < palette_.size()) {
                 if (toolbarZoomEditing_) {
@@ -5025,7 +5107,7 @@ void App::SetZoom(float zoom, std::optional<POINT> anchor) {
         RECT clientRect {};
         GetClientRect(window_, &clientRect);
         RECT toolbarRect = clientRect;
-        toolbarRect.bottom = ToolbarHeight(IsZoomed(window_));
+        toolbarRect.bottom = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
         InvalidateRect(window_, &toolbarRect, FALSE);
     }
 }
@@ -5082,7 +5164,7 @@ void App::ZoomAt(int delta, POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     RECT toolbarRect = clientRect;
-    toolbarRect.bottom = ToolbarHeight(IsZoomed(window_));
+    toolbarRect.bottom = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
     InvalidateRect(window_, &toolbarRect, FALSE);
 }
 
@@ -5433,8 +5515,9 @@ void App::EnsureVisiblePageRasterQuality() {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const int visibleTop = ToolbarHeight(IsZoomed(window_)) - 200;
-    const int visibleBottom = static_cast<int>(clientRect.bottom) + 200;
+    const UINT dpi = WindowDpi(window_);
+    const int visibleTop = ToolbarHeight(IsZoomed(window_), dpi) - ScaleForDpi(200, dpi);
+    const int visibleBottom = static_cast<int>(clientRect.bottom) + ScaleForDpi(200, dpi);
     std::vector<bool> keepCache(document_.PageCount(), false);
     for (const PageView& pageView : CalculatePageViews(clientRect)) {
         if (!pageView.valid) {
@@ -5447,8 +5530,8 @@ void App::EnsureVisiblePageRasterQuality() {
         QueuePageRasterRequest(pageView);
     }
 
-    const int cacheKeepTop = visibleTop - 1200;
-    const int cacheKeepBottom = visibleBottom + 1200;
+    const int cacheKeepTop = visibleTop - ScaleForDpi(1200, dpi);
+    const int cacheKeepBottom = visibleBottom + ScaleForDpi(1200, dpi);
     for (const PageView& pageView : CalculatePageViews(clientRect)) {
         if (!pageView.valid) {
             continue;
@@ -5526,6 +5609,7 @@ App::PageView App::CalculatePageView(RECT clientRect, std::size_t pageIndex) con
 }
 
 std::vector<App::PageView> App::CalculatePageViews(RECT clientRect) const {
+    const UINT dpi = WindowDpi(window_);
     const RECT canvasRect = CanvasRect(clientRect);
     const int canvasWidth = std::max(1, static_cast<int>(canvasRect.right - canvasRect.left));
     float widestPage = 1.0f;
@@ -5533,10 +5617,10 @@ std::vector<App::PageView> App::CalculatePageViews(RECT clientRect) const {
         widestPage = std::max(widestPage, document_.PageAt(pageIndex).width);
     }
 
-    const float fitScale = static_cast<float>(canvasWidth - 120) / widestPage;
+    const float fitScale = static_cast<float>(canvasWidth - ScaleForDpi(120, dpi)) / widestPage;
     const float scale = std::max(0.1f, fitScale * zoom_);
     const int canvasCenterX = canvasRect.left + (canvasWidth / 2);
-    int top = canvasRect.top + 40 + static_cast<int>(std::lround(panY_));
+    int top = canvasRect.top + ScaleForDpi(40, dpi) + static_cast<int>(std::lround(panY_));
 
     std::vector<PageView> pageViews;
     pageViews.reserve(document_.PageCount());
@@ -5551,7 +5635,7 @@ std::vector<App::PageView> App::CalculatePageViews(RECT clientRect) const {
             scale,
             pageWidth > 0 && pageHeight > 0,
         });
-        top += pageHeight + kPageGap;
+        top += pageHeight + ScaleForDpi(kPageGap, dpi);
     }
 
     return pageViews;
@@ -5663,8 +5747,9 @@ void App::Paint() {
 }
 
 void App::PaintToolbar(HDC hdc, RECT clientRect) const {
+    const UINT dpi = WindowDpi(window_);
     RECT toolbarRect = clientRect;
-    const int toolbarHeight = ToolbarHeight(IsZoomed(window_));
+    const int toolbarHeight = ToolbarHeight(IsZoomed(window_), dpi);
     toolbarRect.bottom = toolbarHeight;
 
     const COLORREF toolbarBackground = RGB(15, 18, 24);
@@ -5686,13 +5771,13 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
 
     SetBkMode(hdc, TRANSPARENT);
 
-    HFONT bodyFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+    HFONT bodyFont = CreateFontW(FontHeightForDpi(15, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
-    HFONT labelFont = CreateFontW(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+    HFONT labelFont = CreateFontW(FontHeightForDpi(13, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
-    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
+    const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_, dpi);
     HGDIOBJ previousFont = SelectObject(hdc, bodyFont);
-    const ToolbarTitleLayout titleLayout = ResolveToolbarTitleLayout(layout, hdc, CurrentWindowTitle(), ZoomIndicatorLabel());
+    const ToolbarTitleLayout titleLayout = ResolveToolbarTitleLayout(layout, hdc, CurrentWindowTitle(), ZoomIndicatorLabel(), dpi);
     SelectObject(hdc, previousFont);
 
     previousFont = SelectObject(hdc, labelFont);
@@ -5863,8 +5948,9 @@ void App::PaintPaletteMenu(HDC hdc, RECT clientRect) const {
         return;
     }
 
-    const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
-    const PaletteMenuLayout layout = BuildPaletteMenuLayout(toolbarLayout, palette_.size());
+    const UINT dpi = WindowDpi(window_);
+    const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_, dpi);
+    const PaletteMenuLayout layout = BuildPaletteMenuLayout(toolbarLayout, palette_.size(), dpi);
     const COLORREF panelFill = RGB(18, 24, 32);
     const COLORREF panelBorder = RGB(46, 58, 74);
 
@@ -5884,7 +5970,8 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
     }
 
     const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
-    const PaletteWheelLayout layout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, ToolbarHeight(IsZoomed(window_)));
+    const UINT dpi = WindowDpi(window_);
+    const PaletteWheelLayout layout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, ToolbarHeight(IsZoomed(window_), dpi), dpi);
     if (wheelEntryCount == 0U) {
         return;
     }
@@ -5982,7 +6069,7 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
     DeleteObject(dividerPen);
 
     SetBkMode(hdc, TRANSPARENT);
-    HFONT labelFont = CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+    HFONT labelFont = CreateFontW(FontHeightForDpi(12, WindowDpi(window_)), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
     HGDIOBJ previousFont = SelectObject(hdc, labelFont);
 
@@ -5990,7 +6077,7 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
     const COLORREF primaryText = RGB(236, 240, 245);
     const COLORREF mutedText = RGB(156, 165, 178);
     const COLORREF accent = RGB(92, 137, 187);
-    const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect);
+    const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect, WindowDpi(window_));
     FillRoundedRect(hdc, headerLayout.headerRect, RGB(22, 28, 36));
     StrokeRoundedRect(hdc, headerLayout.headerRect, panelBorder, 1);
 
@@ -6136,7 +6223,8 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
     }
 
     const RECT canvasRect = CanvasRect(clientRect);
-    const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_);
+    const UINT dpi = WindowDpi(window_);
+    const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_, dpi);
     const Tool popupTool = *quickSizePopupTool_;
     const COLORREF panelFill = RGB(18, 24, 32);
     const COLORREF panelBorder = RGB(46, 58, 74);
@@ -6146,7 +6234,7 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
     FillRoundedRect(hdc, popupLayout.panelRect, panelFill);
     StrokeRoundedRect(hdc, popupLayout.panelRect, panelBorder, 1);
 
-    HFONT labelFont = CreateFontW(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+    HFONT labelFont = CreateFontW(FontHeightForDpi(13, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
     HGDIOBJ previousFont = SelectObject(hdc, labelFont);
     SetBkMode(hdc, TRANSPARENT);
@@ -6782,10 +6870,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         return 0;
     case WM_NCHITTEST: {
         if (!IsZoomed(window_)) {
+            const UINT dpi = WindowDpi(window_);
             RECT windowRect {};
             GetWindowRect(window_, &windowRect);
-            const int frameX = WindowFrameThicknessX();
-            const int frameY = WindowFrameThicknessY();
+            const int frameX = WindowFrameThicknessX(dpi);
+            const int frameY = WindowFrameThicknessY(dpi);
             const POINT screenCursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             const bool onLeft = screenCursor.x < (windowRect.left + frameX);
             const bool onRight = screenCursor.x >= (windowRect.right - frameX);
@@ -6820,16 +6909,17 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 
         POINT clientCursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         ScreenToClient(window_, &clientCursor);
-        if (clientCursor.y >= 0 && clientCursor.y < ToolbarHeight(IsZoomed(window_))) {
+        const UINT dpi = WindowDpi(window_);
+        if (clientCursor.y >= 0 && clientCursor.y < ToolbarHeight(IsZoomed(window_), dpi)) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
-            const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
+            const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_, dpi);
             HDC windowDc = GetDC(window_);
-            HFONT bodyFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+            HFONT bodyFont = CreateFontW(FontHeightForDpi(15, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
             HGDIOBJ previousFont = windowDc != nullptr && bodyFont != nullptr ? SelectObject(windowDc, bodyFont) : nullptr;
             const ToolbarTitleLayout titleLayout = windowDc != nullptr
-                ? ResolveToolbarTitleLayout(layout, windowDc, CurrentWindowTitle(), ZoomIndicatorLabel())
+                ? ResolveToolbarTitleLayout(layout, windowDc, CurrentWindowTitle(), ZoomIndicatorLabel(), dpi)
                 : ToolbarTitleLayout {};
             if (windowDc != nullptr && previousFont != nullptr) {
                 SelectObject(windowDc, previousFont);
@@ -6898,16 +6988,17 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         int hoveredWindowButton = -1;
         bool hoveredTitleMenu = false;
-        if (cursor.y >= 0 && cursor.y < ToolbarHeight(IsZoomed(window_))) {
+        const UINT dpi = WindowDpi(window_);
+        if (cursor.y >= 0 && cursor.y < ToolbarHeight(IsZoomed(window_), dpi)) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
-            const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_);
+            const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_, dpi);
             HDC windowDc = GetDC(window_);
-            HFONT bodyFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+            HFONT bodyFont = CreateFontW(FontHeightForDpi(15, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
             HGDIOBJ previousFont = windowDc != nullptr && bodyFont != nullptr ? SelectObject(windowDc, bodyFont) : nullptr;
             const ToolbarTitleLayout titleLayout = windowDc != nullptr
-                ? ResolveToolbarTitleLayout(layout, windowDc, CurrentWindowTitle(), ZoomIndicatorLabel())
+                ? ResolveToolbarTitleLayout(layout, windowDc, CurrentWindowTitle(), ZoomIndicatorLabel(), dpi)
                 : ToolbarTitleLayout {};
             if (windowDc != nullptr && previousFont != nullptr) {
                 SelectObject(windowDc, previousFont);
@@ -6931,14 +7022,14 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             hoveredWindowButton_ = hoveredWindowButton;
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
-            clientRect.bottom = ToolbarHeight(IsZoomed(window_));
+            clientRect.bottom = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
             InvalidateRect(window_, &clientRect, FALSE);
         }
         if (hoveredTitleMenu_ != hoveredTitleMenu) {
             hoveredTitleMenu_ = hoveredTitleMenu;
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
-            clientRect.bottom = ToolbarHeight(IsZoomed(window_));
+            clientRect.bottom = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
             InvalidateRect(window_, &clientRect, FALSE);
         }
         if (!trackingMouseLeave_) {
@@ -6979,7 +7070,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             hoveredTitleMenu_ = false;
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
-            clientRect.bottom = ToolbarHeight(IsZoomed(window_));
+            clientRect.bottom = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
             InvalidateRect(window_, &clientRect, FALSE);
         }
         return 0;
@@ -7026,7 +7117,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             GetClientRect(window_, &clientRect);
             const RECT sidebarRect = PdfSidebarRect(clientRect);
             if (PtInRect(&sidebarRect, cursor) != 0) {
-                const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect);
+                const UINT dpi = WindowDpi(window_);
+                const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect, dpi);
                 const int itemWidth = (headerLayout.contentRect.right - headerLayout.contentRect.left) - 24;
                 int contentHeight = 12;
                 for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
@@ -7037,7 +7129,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 }
                 const int viewportHeight = std::max(1, static_cast<int>(headerLayout.contentRect.bottom - headerLayout.contentRect.top));
                 const int maxScroll = std::max(0, contentHeight - viewportHeight);
-                sidebarWheelScrollRemainder_ += static_cast<int>(std::lround(static_cast<float>(wheelDelta) * kWheelScrollPixels));
+                sidebarWheelScrollRemainder_ += static_cast<int>(std::lround(static_cast<float>(wheelDelta) * ScaleForDpi(kWheelScrollPixels, dpi)));
                 const int scrollPixels = sidebarWheelScrollRemainder_ / WHEEL_DELTA;
                 sidebarWheelScrollRemainder_ -= scrollPixels * WHEEL_DELTA;
                 pdfSidebarScrollY_ = std::clamp(pdfSidebarScrollY_ - scrollPixels, 0, maxScroll);
@@ -7112,14 +7204,15 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
             const RECT sidebarRect = PdfSidebarRect(clientRect);
-            const QuickSizePopupLayout quickSizePopupLayout = BuildQuickSizePopupLayout(CanvasRect(clientRect), quickSizePopupAnchor_);
-            const RECT quickSizePopupBounds = QuickSizePopupBounds(quickSizePopupLayout);
+            const UINT dpi = WindowDpi(window_);
+            const QuickSizePopupLayout quickSizePopupLayout = BuildQuickSizePopupLayout(CanvasRect(clientRect), quickSizePopupAnchor_, dpi);
+            const RECT quickSizePopupBounds = QuickSizePopupBounds(quickSizePopupLayout, dpi);
             if (IsPdfSidebarVisible() && PtInRect(&sidebarRect, cursor) != 0) {
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
             } else if (quickSizePopupTool_.has_value()
                 && PtInRect(&quickSizePopupBounds, cursor) != 0) {
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
-            } else if (cursor.y < ToolbarHeight(IsZoomed(window_))) {
+            } else if (cursor.y < ToolbarHeight(IsZoomed(window_), dpi)) {
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
             } else if (isPanning_ || activeTool_ == Tool::Pan) {
                 SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
@@ -7375,6 +7468,28 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         EnsureVisiblePageRasterQuality();
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
+    case WM_DPICHANGED: {
+        const RECT* suggestedRect = reinterpret_cast<const RECT*>(lParam);
+        if (suggestedRect != nullptr) {
+            SetWindowPos(
+                window_,
+                nullptr,
+                suggestedRect->left,
+                suggestedRect->top,
+                suggestedRect->right - suggestedRect->left,
+                suggestedRect->bottom - suggestedRect->top,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        CancelDeferredRasterRefresh();
+        KillTimer(window_, kZoomSessionTimerId);
+        zoomSessionActive_ = false;
+        zoomAnchorValid_ = false;
+        targetZoom_ = zoom_;
+        InvalidateAllPageSurfaceCaches();
+        EnsureVisiblePageRasterQuality();
+        InvalidateRect(window_, nullptr, FALSE);
+        return 0;
+    }
     case WM_DESTROY:
         CancelDeferredRasterRefresh();
         KillTimer(window_, kZoomSessionTimerId);
