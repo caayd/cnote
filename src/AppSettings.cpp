@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -54,6 +55,20 @@ const std::vector<std::uint32_t>& LegacyDefaultPalette() {
     return palette;
 }
 
+std::wstring TrimWide(std::wstring_view value) {
+    std::size_t start = 0;
+    while (start < value.size() && std::iswspace(value[start]) != 0) {
+        ++start;
+    }
+
+    std::size_t end = value.size();
+    while (end > start && std::iswspace(value[end - 1U]) != 0) {
+        --end;
+    }
+
+    return std::wstring(value.substr(start, end - start));
+}
+
 std::string TrimAscii(std::string_view value) {
     std::size_t start = 0;
     while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])) != 0) {
@@ -66,6 +81,36 @@ std::string TrimAscii(std::string_view value) {
     }
 
     return std::string(value.substr(start, end - start));
+}
+
+std::string WideToUtf8(std::wstring_view value) {
+    if (value.empty()) {
+        return {};
+    }
+
+    const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) {
+        return {};
+    }
+
+    std::string converted(static_cast<std::size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), converted.data(), size, nullptr, nullptr);
+    return converted;
+}
+
+std::wstring Utf8ToWide(std::string_view value) {
+    if (value.empty()) {
+        return {};
+    }
+
+    const int size = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (size <= 0) {
+        return {};
+    }
+
+    std::wstring converted(static_cast<std::size_t>(size), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), converted.data(), size);
+    return converted;
 }
 
 std::vector<std::string> SplitAscii(std::string_view value, char delimiter) {
@@ -81,6 +126,47 @@ std::vector<std::string> SplitAscii(std::string_view value, char delimiter) {
         start = end + 1U;
     }
     return parts;
+}
+
+std::optional<unsigned int> ParseUnsignedInt(std::string_view value, int base = 10);
+
+std::optional<std::vector<std::uint32_t>> ParsePaletteColors(std::string_view value) {
+    std::vector<std::uint32_t> colors;
+    for (const std::string& token : SplitAscii(value, ',')) {
+        const auto color = ParseUnsignedInt(token, 16);
+        if (!color.has_value()) {
+            return std::nullopt;
+        }
+        colors.push_back(*color);
+        if (colors.size() >= 12U) {
+            break;
+        }
+    }
+
+    if (colors.empty()) {
+        return std::nullopt;
+    }
+    return colors;
+}
+
+void WritePaletteColors(std::ostream& output, const std::vector<std::uint32_t>& colors) {
+    for (std::size_t index = 0; index < colors.size(); ++index) {
+        if (index > 0U) {
+            output << ',';
+        }
+        std::ostringstream colorValue;
+        colorValue << std::uppercase << std::hex << std::setw(8) << std::setfill('0') << colors[index];
+        output << colorValue.str();
+    }
+}
+
+bool EqualPaletteNames(std::wstring_view left, std::wstring_view right) {
+    return CompareStringOrdinal(
+        left.data(),
+        static_cast<int>(left.size()),
+        right.data(),
+        static_cast<int>(right.size()),
+        TRUE) == CSTR_EQUAL;
 }
 
 std::optional<std::uint32_t> ParseHexColor(std::wstring value) {
@@ -113,7 +199,7 @@ std::optional<std::uint32_t> ParseHexColor(std::wstring value) {
     }
 }
 
-std::optional<unsigned int> ParseUnsignedInt(std::string_view value, int base = 10) {
+std::optional<unsigned int> ParseUnsignedInt(std::string_view value, int base) {
     const std::string trimmed = TrimAscii(value);
     if (trimmed.empty()) {
         return std::nullopt;
@@ -481,8 +567,16 @@ void App::LoadAppSettings() {
         return;
     }
 
+    struct PendingNamedPalette {
+        std::wstring name {};
+        std::vector<std::uint32_t> colors {};
+        bool hasName = false;
+        bool hasColors = false;
+    };
+
     std::optional<std::size_t> loadedColorIndex;
     std::optional<std::size_t> loadedSettingsPaletteIndex;
+    std::map<unsigned int, PendingNamedPalette> pendingNamedPalettes;
     std::string line;
     while (std::getline(input, line)) {
         const std::string trimmed = TrimAscii(line);
@@ -499,20 +593,34 @@ void App::LoadAppSettings() {
         const std::string value = TrimAscii(std::string_view(trimmed).substr(separator + 1U));
 
         if (key == "palette") {
-            std::vector<std::uint32_t> loadedPalette;
-            for (const std::string& token : SplitAscii(value, ',')) {
-                const auto color = ParseUnsignedInt(token, 16);
-                if (!color.has_value()) {
-                    loadedPalette.clear();
-                    break;
-                }
-                loadedPalette.push_back(*color);
-                if (loadedPalette.size() >= 12U) {
-                    break;
-                }
+            if (const auto loadedPalette = ParsePaletteColors(value); loadedPalette.has_value()) {
+                palette_ = std::move(*loadedPalette);
             }
-            if (!loadedPalette.empty()) {
-                palette_ = std::move(loadedPalette);
+            continue;
+        }
+
+        if (key.starts_with("saved_palette_")) {
+            const std::string_view suffix(key.c_str() + 14, key.size() - 14U);
+            const std::size_t fieldSeparator = suffix.find('_');
+            if (fieldSeparator == std::string_view::npos) {
+                continue;
+            }
+
+            const auto paletteIndex = ParseUnsignedInt(suffix.substr(0, fieldSeparator));
+            if (!paletteIndex.has_value() || *paletteIndex == 0U) {
+                continue;
+            }
+
+            PendingNamedPalette& pendingPalette = pendingNamedPalettes[*paletteIndex];
+            const std::string_view field = suffix.substr(fieldSeparator + 1U);
+            if (field == "name") {
+                pendingPalette.name = TrimWide(Utf8ToWide(value));
+                pendingPalette.hasName = !pendingPalette.name.empty();
+            } else if (field == "colors") {
+                if (const auto colors = ParsePaletteColors(value); colors.has_value()) {
+                    pendingPalette.colors = std::move(*colors);
+                    pendingPalette.hasColors = true;
+                }
             }
             continue;
         }
@@ -632,6 +740,29 @@ void App::LoadAppSettings() {
         }
     }
 
+    savedPalettes_.clear();
+    for (auto& [unusedIndex, pendingPalette] : pendingNamedPalettes) {
+        static_cast<void>(unusedIndex);
+        if (!pendingPalette.hasName || !pendingPalette.hasColors || pendingPalette.colors.empty()) {
+            continue;
+        }
+
+        const std::wstring trimmedName = TrimWide(pendingPalette.name);
+        if (trimmedName.empty()) {
+            continue;
+        }
+
+        const auto existingPalette = std::find_if(savedPalettes_.begin(), savedPalettes_.end(), [&](const NamedPalette& palette) {
+            return EqualPaletteNames(palette.name, trimmedName);
+        });
+        if (existingPalette != savedPalettes_.end()) {
+            existingPalette->name = trimmedName;
+            existingPalette->colors = pendingPalette.colors;
+        } else {
+            savedPalettes_.push_back({ trimmedName, pendingPalette.colors });
+        }
+    }
+
     if (palette_ == LegacyDefaultPalette()) {
         palette_ = DefaultPalette();
     }
@@ -658,15 +789,18 @@ void App::SaveAppSettings() const {
     }
 
     output << "palette=";
-    for (std::size_t index = 0; index < palette_.size(); ++index) {
-        if (index > 0U) {
-            output << ',';
-        }
-        std::ostringstream colorValue;
-        colorValue << std::uppercase << std::hex << std::setw(8) << std::setfill('0') << palette_[index];
-        output << colorValue.str();
-    }
+    WritePaletteColors(output, palette_);
     output << '\n';
+    for (std::size_t index = 0; index < savedPalettes_.size(); ++index) {
+        const NamedPalette& palette = savedPalettes_[index];
+        if (palette.name.empty() || palette.colors.empty()) {
+            continue;
+        }
+        output << "saved_palette_" << (index + 1U) << "_name=" << WideToUtf8(palette.name) << '\n';
+        output << "saved_palette_" << (index + 1U) << "_colors=";
+        WritePaletteColors(output, palette.colors);
+        output << '\n';
+    }
     output << "active_color=" << colorIndex_ << '\n';
     output << "settings_palette_index=" << settings_.paletteIndex << '\n';
     output << "draw_brush_size=" << settings_.drawBrushSize << '\n';
@@ -695,6 +829,53 @@ void App::SaveAppSettings() const {
                << (shortcut.second.shift ? 1 : 0) << ','
                << (shortcut.second.alt ? 1 : 0) << '\n';
     }
+}
+
+bool App::SaveNamedPalette(const std::wstring& name) {
+    const std::wstring trimmedName = TrimWide(name);
+    if (trimmedName.empty() || palette_.empty()) {
+        return false;
+    }
+
+    const auto existingPalette = std::find_if(savedPalettes_.begin(), savedPalettes_.end(), [&](const NamedPalette& palette) {
+        return EqualPaletteNames(palette.name, trimmedName);
+    });
+    if (existingPalette != savedPalettes_.end()) {
+        existingPalette->name = trimmedName;
+        existingPalette->colors = palette_;
+    } else {
+        savedPalettes_.push_back({ trimmedName, palette_ });
+    }
+
+    SaveAppSettings();
+    RefreshSettingsWindow();
+    return true;
+}
+
+bool App::ApplyNamedPalette(std::size_t index) {
+    if (index >= savedPalettes_.size() || savedPalettes_[index].colors.empty()) {
+        return false;
+    }
+
+    palette_ = savedPalettes_[index].colors;
+    settings_.paletteIndex = std::min(settings_.paletteIndex, palette_.size() - 1U);
+    colorIndex_ = std::min(colorIndex_, palette_.size() - 1U);
+    SaveAppSettings();
+    RefreshSettingsWindow();
+    ClosePaletteOverlays();
+    InvalidateRect(window_, nullptr, FALSE);
+    return true;
+}
+
+bool App::DeleteNamedPalette(std::size_t index) {
+    if (index >= savedPalettes_.size()) {
+        return false;
+    }
+
+    savedPalettes_.erase(savedPalettes_.begin() + static_cast<std::ptrdiff_t>(index));
+    SaveAppSettings();
+    RefreshSettingsWindow();
+    return true;
 }
 
 std::wstring App::FormatKeyBinding(const KeyBinding& binding) const {

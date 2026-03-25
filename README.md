@@ -48,7 +48,7 @@ Run:
 
 - `Left Mouse`: draw
 - `Header`: click the file title for file actions/settings, click the zoom percentage to type a zoom value, then use the tool/color/history controls
-- `Settings`: edit palette colors with HSL sliders, paste hex values, add/remove palette colors, change brush size, tune stabilization/smoothing, adjust autosave, and configure zoom presets/shortcut bindings
+- `Settings`: edit palette colors with HSL sliders, paste hex values, add/remove palette colors, save named palette sets for reuse, change brush size, tune stabilization/smoothing, adjust autosave, and configure zoom presets/shortcut bindings
 - `Ctrl+B`: toggle the PDF page preview sidebar and its page navigator
 - `Ctrl+W`: open the active brush/eraser size slider near the cursor
 - `Middle Mouse Hold`: pan

@@ -45,6 +45,11 @@ constexpr int kIdPaletteList = 100;
 constexpr int kIdAddColor = 101;
 constexpr int kIdRemoveColor = 102;
 constexpr int kIdPasteHex = 103;
+constexpr int kIdSavedPaletteName = 104;
+constexpr int kIdSavePalette = 105;
+constexpr int kIdApplyPalette = 106;
+constexpr int kIdDeletePalette = 107;
+constexpr int kIdSavedPaletteList = 108;
 constexpr int kIdShortcutList = 120;
 constexpr int kIdChangeShortcut = 121;
 constexpr int kIdClearShortcut = 122;
@@ -64,6 +69,13 @@ struct SettingsWindowLayout {
     RECT addColorButton {};
     RECT removeColorButton {};
     RECT pasteHexButton {};
+    RECT savedPaletteLabelRect {};
+    RECT savedPaletteNameRect {};
+    RECT savePaletteButton {};
+    RECT applyPaletteButton {};
+    RECT deletePaletteButton {};
+    RECT savedPaletteListRect {};
+    RECT savedPaletteHintRect {};
     RECT colorPanel {};
     RECT colorPreviewRect {};
     RECT shortcutPanel {};
@@ -147,6 +159,20 @@ std::wstring FormatZoomPresetValue(float zoom) {
         value.pop_back();
     }
     return value;
+}
+
+std::wstring TrimWide(std::wstring_view value) {
+    std::size_t start = 0;
+    while (start < value.size() && std::iswspace(value[start]) != 0) {
+        ++start;
+    }
+
+    std::size_t end = value.size();
+    while (end > start && std::iswspace(value[end - 1U]) != 0) {
+        --end;
+    }
+
+    return std::wstring(value.substr(start, end - start));
 }
 
 struct HslColor {
@@ -286,7 +312,7 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, std::size_t pale
     const int left = margin;
     const int rightColumnLeft = left + leftColumnWidth + gap;
 
-    layout.palettePanel = MakeRect(left, topOffset, left + leftColumnWidth, topOffset + 220);
+    layout.palettePanel = MakeRect(left, topOffset, left + leftColumnWidth, topOffset + 470);
     layout.colorPanel = MakeRect(left, layout.palettePanel.bottom + gap, left + leftColumnWidth, layout.palettePanel.bottom + gap + 272);
     layout.drawingPanel = MakeRect(left, layout.colorPanel.bottom + gap, left + leftColumnWidth, layout.colorPanel.bottom + gap + 10);
 
@@ -309,10 +335,50 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, std::size_t pale
         layout.paletteSwatches.push_back(MakeRect(leftPos, topPos, leftPos + swatchWidth, topPos + swatchHeight));
     }
 
-    const int buttonTop = layout.palettePanel.bottom - 42;
+    const int buttonTop = layout.paletteGridRect.bottom + 12;
     layout.addColorButton = MakeRect(layout.palettePanel.left + panelPadding, buttonTop, layout.palettePanel.left + panelPadding + 108, buttonTop + 28);
     layout.removeColorButton = MakeRect(layout.addColorButton.right + 10, buttonTop, layout.addColorButton.right + 118, buttonTop + 28);
     layout.pasteHexButton = MakeRect(layout.removeColorButton.right + 10, buttonTop, layout.palettePanel.right - panelPadding, buttonTop + 28);
+
+    layout.savedPaletteLabelRect = MakeRect(
+        layout.palettePanel.left + panelPadding,
+        layout.addColorButton.bottom + 14,
+        layout.palettePanel.right - panelPadding,
+        layout.addColorButton.bottom + 32);
+    layout.savedPaletteHintRect = MakeRect(
+        layout.savedPaletteLabelRect.left,
+        layout.savedPaletteLabelRect.bottom,
+        layout.savedPaletteLabelRect.right,
+        layout.savedPaletteLabelRect.bottom + 32);
+    layout.savedPaletteNameRect = MakeRect(
+        layout.palettePanel.left + panelPadding,
+        layout.savedPaletteHintRect.bottom + 4,
+        layout.palettePanel.right - panelPadding,
+        layout.savedPaletteHintRect.bottom + 30);
+
+    const int savedButtonTop = layout.savedPaletteNameRect.bottom + 10;
+    const int savedButtonGap = 8;
+    const int savedButtonWidth = std::max(78, ((leftColumnWidth - (panelPadding * 2)) - (savedButtonGap * 2)) / 3);
+    layout.savePaletteButton = MakeRect(
+        layout.palettePanel.left + panelPadding,
+        savedButtonTop,
+        layout.palettePanel.left + panelPadding + savedButtonWidth,
+        savedButtonTop + 28);
+    layout.applyPaletteButton = MakeRect(
+        layout.savePaletteButton.right + savedButtonGap,
+        savedButtonTop,
+        layout.savePaletteButton.right + savedButtonGap + savedButtonWidth,
+        savedButtonTop + 28);
+    layout.deletePaletteButton = MakeRect(
+        layout.applyPaletteButton.right + savedButtonGap,
+        savedButtonTop,
+        layout.palettePanel.right - panelPadding,
+        savedButtonTop + 28);
+    layout.savedPaletteListRect = MakeRect(
+        layout.palettePanel.left + panelPadding,
+        layout.savePaletteButton.bottom + 10,
+        layout.palettePanel.right - panelPadding,
+        layout.palettePanel.bottom - panelPadding);
 
     layout.colorPreviewRect = MakeRect(layout.colorPanel.left + 14, layout.colorPanel.top + 34, layout.colorPanel.right - 14, layout.colorPanel.top + 100);
     const int sliderLeft = layout.colorPanel.left + 14;
@@ -386,6 +452,13 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, std::size_t pale
     OffsetRectY(layout.addColorButton, deltaY);
     OffsetRectY(layout.removeColorButton, deltaY);
     OffsetRectY(layout.pasteHexButton, deltaY);
+    OffsetRectY(layout.savedPaletteLabelRect, deltaY);
+    OffsetRectY(layout.savedPaletteNameRect, deltaY);
+    OffsetRectY(layout.savePaletteButton, deltaY);
+    OffsetRectY(layout.applyPaletteButton, deltaY);
+    OffsetRectY(layout.deletePaletteButton, deltaY);
+    OffsetRectY(layout.savedPaletteListRect, deltaY);
+    OffsetRectY(layout.savedPaletteHintRect, deltaY);
     OffsetRectY(layout.colorPanel, deltaY);
     OffsetRectY(layout.colorPreviewRect, deltaY);
     OffsetRectY(layout.shortcutPanel, deltaY);
@@ -527,10 +600,12 @@ void SettingsWindow::Refresh() {
     }
 
     RefreshPaletteList();
+    RefreshSavedPaletteList();
     RefreshSliderValues();
     RefreshZoomPresetFields();
     RefreshShortcutList();
     RefreshShortcutButtons();
+    RefreshSavedPaletteButtons();
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -608,6 +683,24 @@ void SettingsWindow::CreateControls() {
     addColorButton_ = createButton(L"Add Color", kIdAddColor, 0, 0, 120, 28);
     removeColorButton_ = createButton(L"Remove Color", kIdRemoveColor, 0, 0, 120, 28);
     pasteHexButton_ = createButton(L"Paste Hex", kIdPasteHex, 0, 0, 120, 28);
+    savedPaletteNameEdit_ = createEdit(kIdSavedPaletteName, 0, 0, 220, 24);
+    savePaletteButton_ = createButton(L"Save Current", kIdSavePalette, 0, 0, 120, 28);
+    applyPaletteButton_ = createButton(L"Apply Saved", kIdApplyPalette, 0, 0, 120, 28);
+    deletePaletteButton_ = createButton(L"Delete Saved", kIdDeletePalette, 0, 0, 120, 28);
+    savedPaletteList_ = CreateWindowExW(
+        0,
+        L"LISTBOX",
+        nullptr,
+        WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_TABSTOP | WS_VSCROLL | LBS_HASSTRINGS,
+        0,
+        0,
+        200,
+        120,
+        window_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdSavedPaletteList)),
+        app_.instance_,
+        nullptr);
+    savedPaletteHintLabel_ = createLabel(L"Save the current swatches under a name, then select and apply them later.", 0, 0, 280, 32);
 
     redLabel_ = createLabel(L"Hue", 0, 0, 220, 20);
     redSlider_ = createSlider(kIdHueSlider, 0, 0, 320, 30);
@@ -656,6 +749,7 @@ void SettingsWindow::CreateControls() {
     SendMessageW(autoSaveSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 300));
     SendMessageW(autoSaveSlider_, TBM_SETTICFREQ, 15, 0);
     SendMessageW(shortcutList_, LB_SETITEMHEIGHT, 0, 26);
+    SendMessageW(savedPaletteNameEdit_, EM_LIMITTEXT, 48, 0);
     LayoutControls();
 }
 
@@ -666,10 +760,15 @@ void SettingsWindow::ApplyFonts() {
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
     backgroundBrush_ = CreateSolidBrush(kWindowBackground);
     panelBrush_ = CreateSolidBrush(kPanelFill);
-    const std::array<HWND, 19> controls {
+    const std::array<HWND, 24> controls {
         addColorButton_,
         removeColorButton_,
         pasteHexButton_,
+        savedPaletteNameEdit_,
+        savePaletteButton_,
+        applyPaletteButton_,
+        deletePaletteButton_,
+        savedPaletteList_,
         redLabel_,
         redSlider_,
         greenLabel_,
@@ -701,6 +800,9 @@ void SettingsWindow::ApplyFonts() {
     }
     if (zoomPresetHintLabel_ != nullptr) {
         SendMessageW(zoomPresetHintLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+    }
+    if (savedPaletteHintLabel_ != nullptr) {
+        SendMessageW(savedPaletteHintLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
     }
     for (HWND control : zoomPresetLabels_) {
         if (control != nullptr) {
@@ -734,6 +836,12 @@ void SettingsWindow::LayoutControls() {
     DeferMoveControl(deferred, addColorButton_, layout.addColorButton);
     DeferMoveControl(deferred, removeColorButton_, layout.removeColorButton);
     DeferMoveControl(deferred, pasteHexButton_, layout.pasteHexButton);
+    DeferMoveControl(deferred, savedPaletteNameEdit_, layout.savedPaletteNameRect);
+    DeferMoveControl(deferred, savePaletteButton_, layout.savePaletteButton);
+    DeferMoveControl(deferred, applyPaletteButton_, layout.applyPaletteButton);
+    DeferMoveControl(deferred, deletePaletteButton_, layout.deletePaletteButton);
+    DeferMoveControl(deferred, savedPaletteList_, layout.savedPaletteListRect);
+    DeferMoveControl(deferred, savedPaletteHintLabel_, layout.savedPaletteHintRect);
     DeferMoveControl(deferred, redLabel_, layout.redLabelRect);
     DeferMoveControl(deferred, redSlider_, layout.redSliderRect);
     DeferMoveControl(deferred, greenLabel_, layout.greenLabelRect);
@@ -791,6 +899,29 @@ void SettingsWindow::ScrollTo(int scrollOffset) {
 
 void SettingsWindow::RefreshPaletteList() {
     InvalidateRect(window_, nullptr, FALSE);
+}
+
+void SettingsWindow::RefreshSavedPaletteList() {
+    if (savedPaletteList_ == nullptr) {
+        return;
+    }
+
+    const int previousSelection = static_cast<int>(SendMessageW(savedPaletteList_, LB_GETCURSEL, 0, 0));
+    SendMessageW(savedPaletteList_, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(savedPaletteList_, LB_RESETCONTENT, 0, 0);
+    for (const App::NamedPalette& palette : app_.savedPalettes_) {
+        SendMessageW(savedPaletteList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(palette.name.c_str()));
+    }
+
+    if (!app_.savedPalettes_.empty()) {
+        const int clampedSelection = previousSelection >= 0
+            ? std::clamp(previousSelection, 0, static_cast<int>(app_.savedPalettes_.size()) - 1)
+            : 0;
+        SendMessageW(savedPaletteList_, LB_SETCURSEL, static_cast<WPARAM>(clampedSelection), 0);
+    }
+
+    SendMessageW(savedPaletteList_, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(savedPaletteList_, nullptr, FALSE);
 }
 
 void SettingsWindow::RefreshSliderValues() {
@@ -864,6 +995,20 @@ void SettingsWindow::RefreshShortcutButtons() {
     }
 }
 
+void SettingsWindow::RefreshSavedPaletteButtons() {
+    if (savedPaletteNameEdit_ == nullptr) {
+        return;
+    }
+
+    wchar_t nameBuffer[128] = {};
+    GetWindowTextW(savedPaletteNameEdit_, nameBuffer, static_cast<int>(std::size(nameBuffer)));
+    const bool hasName = !TrimWide(nameBuffer).empty();
+    const bool hasSelection = SelectedSavedPaletteIndex().has_value();
+    EnableWindow(savePaletteButton_, hasName);
+    EnableWindow(applyPaletteButton_, hasSelection);
+    EnableWindow(deletePaletteButton_, hasSelection);
+}
+
 void SettingsWindow::HandleCommand(WPARAM wParam, LPARAM lParam) {
     const int controlId = LOWORD(wParam);
     const int notification = HIWORD(wParam);
@@ -884,6 +1029,54 @@ void SettingsWindow::HandleCommand(WPARAM wParam, LPARAM lParam) {
         if (notification == BN_CLICKED) {
             static_cast<void>(app_.ApplyHexColorFromClipboard());
             Refresh();
+        }
+        break;
+    case kIdSavedPaletteName:
+        if (notification == EN_CHANGE) {
+            RefreshSavedPaletteButtons();
+        }
+        break;
+    case kIdSavePalette:
+        if (notification == BN_CLICKED) {
+            wchar_t nameBuffer[128] = {};
+            GetWindowTextW(savedPaletteNameEdit_, nameBuffer, static_cast<int>(std::size(nameBuffer)));
+            const std::wstring trimmedName = TrimWide(nameBuffer);
+            if (app_.SaveNamedPalette(trimmedName)) {
+                if (const auto savedPalette = std::find_if(app_.savedPalettes_.begin(), app_.savedPalettes_.end(), [&](const App::NamedPalette& palette) {
+                        return palette.name == trimmedName;
+                    });
+                    savedPalette != app_.savedPalettes_.end()) {
+                    const std::size_t savedIndex = static_cast<std::size_t>(std::distance(app_.savedPalettes_.begin(), savedPalette));
+                    SendMessageW(savedPaletteList_, LB_SETCURSEL, static_cast<WPARAM>(savedIndex), 0);
+                }
+                HandleSavedPaletteSelectionChanged(false);
+            }
+        }
+        break;
+    case kIdApplyPalette:
+        if (notification == BN_CLICKED) {
+            if (const auto selected = SelectedSavedPaletteIndex(); selected.has_value()) {
+                static_cast<void>(app_.ApplyNamedPalette(*selected));
+                HandleSavedPaletteSelectionChanged(true);
+            }
+        }
+        break;
+    case kIdDeletePalette:
+        if (notification == BN_CLICKED) {
+            if (const auto selected = SelectedSavedPaletteIndex(); selected.has_value()) {
+                static_cast<void>(app_.DeleteNamedPalette(*selected));
+                HandleSavedPaletteSelectionChanged(true);
+            }
+        }
+        break;
+    case kIdSavedPaletteList:
+        if (notification == LBN_SELCHANGE) {
+            HandleSavedPaletteSelectionChanged(true);
+        } else if (notification == LBN_DBLCLK) {
+            if (const auto selected = SelectedSavedPaletteIndex(); selected.has_value()) {
+                static_cast<void>(app_.ApplyNamedPalette(*selected));
+                HandleSavedPaletteSelectionChanged(true);
+            }
         }
         break;
     case kIdShortcutList:
@@ -949,7 +1142,7 @@ void SettingsWindow::HandleHScroll(LPARAM lParam) {
 
 HBRUSH SettingsWindow::HandleControlColor(HDC hdc, HWND control) {
     const bool isZoomEdit = std::find(zoomPresetEdits_.begin(), zoomPresetEdits_.end(), control) != zoomPresetEdits_.end();
-    if (isZoomEdit) {
+    if (isZoomEdit || control == savedPaletteNameEdit_) {
         SetBkMode(hdc, OPAQUE);
         SetBkColor(hdc, kPanelFill);
         SetTextColor(hdc, kTextPrimary);
@@ -957,8 +1150,8 @@ HBRUSH SettingsWindow::HandleControlColor(HDC hdc, HWND control) {
     }
 
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, (control == shortcutHintLabel_ || control == zoomPresetHintLabel_) ? kTextMuted : kTextPrimary);
-    if (control == shortcutList_) {
+    SetTextColor(hdc, (control == shortcutHintLabel_ || control == zoomPresetHintLabel_ || control == savedPaletteHintLabel_) ? kTextMuted : kTextPrimary);
+    if (control == shortcutList_ || control == savedPaletteList_) {
         SetTextColor(hdc, kTextPrimary);
         return panelBrush_;
     }
@@ -1000,6 +1193,8 @@ void SettingsWindow::PaintWindow() {
     SelectObject(memoryDc, font_);
     SetTextColor(memoryDc, kTextMuted);
     TextOutW(memoryDc, layout.palettePanel.left + 14, layout.palettePanel.top + 12, L"Palette", 7);
+    RECT savedPaletteLabelRect = layout.savedPaletteLabelRect;
+    DrawTextW(memoryDc, L"Saved Palettes", -1, &savedPaletteLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     TextOutW(memoryDc, layout.colorPanel.left + 14, layout.colorPanel.top + 12, L"Selected Color", 14);
     TextOutW(memoryDc, layout.drawingPanel.left + 14, layout.drawingPanel.top + 12, L"Drawing", 7);
     TextOutW(memoryDc, layout.shortcutPanel.left + 12, layout.shortcutPanel.top + 12, L"Shortcuts", 9);
@@ -1118,6 +1313,17 @@ void SettingsWindow::HandleShortcutSelectionChanged() {
     RefreshShortcutButtons();
 }
 
+void SettingsWindow::HandleSavedPaletteSelectionChanged(bool syncNameField) {
+    if (syncNameField) {
+        if (const auto selected = SelectedSavedPaletteIndex(); selected.has_value() && *selected < app_.savedPalettes_.size()) {
+            SetControlText(savedPaletteNameEdit_, app_.savedPalettes_[*selected].name);
+        } else {
+            SetControlText(savedPaletteNameEdit_, L"");
+        }
+    }
+    RefreshSavedPaletteButtons();
+}
+
 void SettingsWindow::BeginShortcutCapture() {
     const int selection = static_cast<int>(SendMessageW(shortcutList_, LB_GETCURSEL, 0, 0));
     const auto definitions = ShortcutDefinitions();
@@ -1203,6 +1409,18 @@ void SettingsWindow::HandleShortcutCapture(UINT key) {
     RefreshShortcutList();
     RefreshShortcutButtons();
     InvalidateRect(window_, nullptr, FALSE);
+}
+
+std::optional<std::size_t> SettingsWindow::SelectedSavedPaletteIndex() const {
+    if (savedPaletteList_ == nullptr) {
+        return std::nullopt;
+    }
+
+    const int selection = static_cast<int>(SendMessageW(savedPaletteList_, LB_GETCURSEL, 0, 0));
+    if (selection < 0) {
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(selection);
 }
 
 void SettingsWindow::HandleZoomPresetEdit(HWND edit, bool normalizeText) {

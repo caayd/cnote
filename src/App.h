@@ -179,6 +179,11 @@ public:
         std::array<float, kZoomPresetCount> zoomPresets {};
     };
 
+    struct NamedPalette {
+        std::wstring name {};
+        std::vector<std::uint32_t> colors {};
+    };
+
     struct NewPageSettingsState {
         NewPageSettingsWindow* window = nullptr;
         float width = 612.0f;
@@ -230,6 +235,9 @@ private:
     void AddPaletteColor();
     void RemovePaletteColor();
     [[nodiscard]] bool ApplyHexColorFromClipboard();
+    [[nodiscard]] bool SaveNamedPalette(const std::wstring& name);
+    [[nodiscard]] bool ApplyNamedPalette(std::size_t index);
+    [[nodiscard]] bool DeleteNamedPalette(std::size_t index);
     void UpdateWindowTitle();
     void BeginStroke(POINT cursor);
     void ExtendStroke(POINT cursor);
@@ -457,6 +465,7 @@ private:
         0xFF059669,
         0xFFF59E0B,
     };
+    std::vector<NamedPalette> savedPalettes_ {};
     ShortcutState shortcuts_ {};
     WheelState wheel_ {};
     SettingsState settings_ {};
