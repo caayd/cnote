@@ -111,8 +111,46 @@ RECT MakeRect(int left, int top, int right, int bottom) {
     return rect;
 }
 
+RECT MakeRectFromFloatBounds(float left, float top, float right, float bottom) {
+    return MakeRect(
+        static_cast<int>(std::floor(left)),
+        static_cast<int>(std::floor(top)),
+        static_cast<int>(std::ceil(right)),
+        static_cast<int>(std::ceil(bottom)));
+}
+
 bool HasRect(const RECT& rect) {
     return rect.right > rect.left && rect.bottom > rect.top;
+}
+
+bool RectsOverlap(const RECT& a, const RECT& b) {
+    RECT overlap {};
+    return IntersectRect(&overlap, &a, &b) != 0;
+}
+
+std::optional<RECT> StrokeBoundsRect(const Stroke& stroke, float scale, int extraPadding = 0) {
+    if (stroke.points.empty() || scale <= 0.0f) {
+        return std::nullopt;
+    }
+
+    float minX = stroke.points.front().x;
+    float minY = stroke.points.front().y;
+    float maxX = stroke.points.front().x;
+    float maxY = stroke.points.front().y;
+    for (const Vec2& point : stroke.points) {
+        minX = std::min(minX, point.x);
+        minY = std::min(minY, point.y);
+        maxX = std::max(maxX, point.x);
+        maxY = std::max(maxY, point.y);
+    }
+
+    const float penWidth = std::max(1.25f, stroke.style.width * scale / 2.15f);
+    const float padding = static_cast<float>(static_cast<int>(std::ceil(penWidth)) + extraPadding);
+    return MakeRectFromFloatBounds(
+        (minX * scale) - padding,
+        (minY * scale) - padding,
+        (maxX * scale) + padding + 1.0f,
+        (maxY * scale) + padding + 1.0f);
 }
 
 RECT UnionRectangles(RECT a, RECT b) {
@@ -2808,6 +2846,7 @@ void App::Undo() {
             if (action.index < strokes.size()) {
                 strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(action.index));
                 AdjustSelectionForRemoval(action.pageIndex, action.index);
+                cacheUpdated = TryRefreshPageSurfaceCacheForStroke(action.pageIndex, action.stroke);
             }
         } else if (action.index <= strokes.size()) {
             AdjustSelectionForInsertion(action.pageIndex, action.index);
@@ -2874,6 +2913,7 @@ void App::Redo() {
         } else if (action.index < strokes.size()) {
             strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(action.index));
             AdjustSelectionForRemoval(action.pageIndex, action.index);
+            cacheUpdated = TryRefreshPageSurfaceCacheForStroke(action.pageIndex, action.stroke);
         }
         undoActions_.push_back(std::move(action));
         if (!cacheUpdated) {
@@ -4644,14 +4684,16 @@ bool App::EraseAt(POINT cursor) {
             AdjustSelectionForRemoval(pageView.pageIndex, strokeIndex);
             HistoryAction action {};
             action.type = HistoryActionType::RemoveStroke;
-            action.stroke = std::move(removed);
+            action.stroke = removed;
             action.index = strokeIndex;
             action.pageIndex = pageView.pageIndex;
             undoActions_.push_back(std::move(action));
             redoActions_.clear();
             NotifyDocumentMutated();
-            InvalidatePageSurfaceCache(pageView.pageIndex);
-            InvalidateRect(window_, nullptr, FALSE);
+            if (!TryRefreshPageSurfaceCacheForStroke(pageView.pageIndex, removed)) {
+                InvalidatePageSurfaceCache(pageView.pageIndex);
+            }
+            InvalidateStrokeRegion(removed, pageView.pageIndex, false);
             return true;
         }
     }
@@ -6543,6 +6585,182 @@ bool App::TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke&
     std::copy_n(static_cast<const std::uint8_t*>(bits), cache.pixels.size(), cache.pixels.data());
     cache.strokeCount = page.strokes.size();
     cache.pageScale = cacheView.scale;
+
+    SelectObject(cacheDc, previousBitmap);
+    DeleteObject(cacheBitmap);
+    DeleteDC(cacheDc);
+    return true;
+}
+
+bool App::TryRefreshPageSurfaceCacheForStroke(std::size_t pageIndex, const Stroke& stroke) {
+    if (pageIndex >= pageSurfaceCaches_.size()) {
+        return false;
+    }
+
+    const PageSurfaceCache& cache = pageSurfaceCaches_[pageIndex];
+    if (!cache.valid || cache.pageScale <= 0.0f) {
+        return false;
+    }
+
+    const std::optional<RECT> strokeBounds = StrokeBoundsRect(stroke, cache.pageScale, 8);
+    if (!strokeBounds.has_value()) {
+        return false;
+    }
+
+    return TryRefreshPageSurfaceCacheRegion(pageIndex, *strokeBounds);
+}
+
+bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect) {
+    if (pageIndex >= pageSurfaceCaches_.size() || !HasRect(dirtyRect)) {
+        return false;
+    }
+
+    const Page& page = document_.PageAt(pageIndex);
+    PageSurfaceCache& cache = pageSurfaceCaches_[pageIndex];
+    if (!cache.valid
+        || cache.pixels.empty()
+        || cache.width <= 0
+        || cache.height <= 0
+        || cache.pageIndex != pageIndex
+        || cache.imageCount != page.images.size()
+        || cache.rasterWidth != page.raster.width
+        || cache.rasterHeight != page.raster.height
+        || std::abs(cache.rasterScale - page.raster.scale) >= 0.001f
+        || cache.pageScale <= 0.0f) {
+        return false;
+    }
+
+    RECT cacheBounds = MakeRect(0, 0, cache.width, cache.height);
+    RECT clippedDirtyRect {};
+    if (IntersectRect(&clippedDirtyRect, &dirtyRect, &cacheBounds) == 0) {
+        return true;
+    }
+
+    BITMAPINFO bitmapInfo {};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = cache.width;
+    bitmapInfo.bmiHeader.biHeight = -cache.height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    HDC cacheDc = CreateCompatibleDC(nullptr);
+    if (cacheDc == nullptr) {
+        return false;
+    }
+
+    void* bits = nullptr;
+    HBITMAP cacheBitmap = CreateTopDown32BitDibSection(cacheDc, cache.width, cache.height, &bits);
+    if (cacheBitmap == nullptr || bits == nullptr) {
+        if (cacheBitmap != nullptr) {
+            DeleteObject(cacheBitmap);
+        }
+        DeleteDC(cacheDc);
+        return false;
+    }
+
+    HGDIOBJ previousBitmap = SelectObject(cacheDc, cacheBitmap);
+    std::copy(cache.pixels.begin(), cache.pixels.end(), static_cast<std::uint8_t*>(bits));
+
+    SaveDC(cacheDc);
+    IntersectClipRect(cacheDc, clippedDirtyRect.left, clippedDirtyRect.top, clippedDirtyRect.right, clippedDirtyRect.bottom);
+
+    HBRUSH pageBrush = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(cacheDc, &clippedDirtyRect, pageBrush);
+    DeleteObject(pageBrush);
+
+    if (!page.raster.pixels.empty() && page.raster.width > 0 && page.raster.height > 0) {
+        BITMAPINFO pageBitmapInfo {};
+        pageBitmapInfo.bmiHeader.biSize = sizeof(pageBitmapInfo.bmiHeader);
+        pageBitmapInfo.bmiHeader.biWidth = page.raster.width;
+        pageBitmapInfo.bmiHeader.biHeight = -page.raster.height;
+        pageBitmapInfo.bmiHeader.biPlanes = 1;
+        pageBitmapInfo.bmiHeader.biBitCount = 32;
+        pageBitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+        SetStretchBltMode(cacheDc, HALFTONE);
+        StretchDIBits(
+            cacheDc,
+            0,
+            0,
+            cache.width,
+            cache.height,
+            0,
+            0,
+            page.raster.width,
+            page.raster.height,
+            page.raster.pixels.data(),
+            &pageBitmapInfo,
+            DIB_RGB_COLORS,
+            SRCCOPY);
+    }
+
+    const PageView cacheView {
+        MakeRect(0, 0, cache.width, cache.height),
+        pageIndex,
+        cache.pageScale,
+        true,
+    };
+    const RECT dirtyPageRect = MakeRectFromFloatBounds(
+        static_cast<float>(clippedDirtyRect.left) / cache.pageScale,
+        static_cast<float>(clippedDirtyRect.top) / cache.pageScale,
+        static_cast<float>(clippedDirtyRect.right) / cache.pageScale,
+        static_cast<float>(clippedDirtyRect.bottom) / cache.pageScale);
+
+    Gdiplus::Graphics imageGraphics(cacheDc);
+    imageGraphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    imageGraphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+    imageGraphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+    for (const PageImage& image : page.images) {
+        if (image.pixels.empty() || image.pixelWidth <= 0 || image.pixelHeight <= 0) {
+            continue;
+        }
+
+        const auto corners = ImageCorners(image);
+        float minX = corners[0].x;
+        float minY = corners[0].y;
+        float maxX = corners[0].x;
+        float maxY = corners[0].y;
+        for (const Vec2& corner : corners) {
+            minX = std::min(minX, corner.x);
+            minY = std::min(minY, corner.y);
+            maxX = std::max(maxX, corner.x);
+            maxY = std::max(maxY, corner.y);
+        }
+        const RECT imageBounds = MakeRectFromFloatBounds(minX, minY, maxX, maxY);
+        if (!RectsOverlap(imageBounds, dirtyPageRect)) {
+            continue;
+        }
+
+        Gdiplus::Bitmap bitmap(
+            image.pixelWidth,
+            image.pixelHeight,
+            image.stride,
+            PixelFormat32bppRGB,
+            const_cast<BYTE*>(reinterpret_cast<const BYTE*>(image.pixels.data())));
+        const Gdiplus::REAL centerX = static_cast<Gdiplus::REAL>((image.x + (image.width * 0.5f)) * cacheView.scale);
+        const Gdiplus::REAL centerY = static_cast<Gdiplus::REAL>((image.y + (image.height * 0.5f)) * cacheView.scale);
+        const Gdiplus::REAL drawWidth = static_cast<Gdiplus::REAL>(image.width * cacheView.scale);
+        const Gdiplus::REAL drawHeight = static_cast<Gdiplus::REAL>(image.height * cacheView.scale);
+
+        imageGraphics.ResetTransform();
+        imageGraphics.TranslateTransform(centerX, centerY);
+        imageGraphics.RotateTransform(image.rotationDegrees);
+        imageGraphics.DrawImage(&bitmap, -drawWidth * 0.5f, -drawHeight * 0.5f, drawWidth, drawHeight);
+    }
+    imageGraphics.ResetTransform();
+    for (const Stroke& pageStroke : page.strokes) {
+        const std::optional<RECT> strokeBounds = StrokeBoundsRect(pageStroke, 1.0f, 0);
+        if (strokeBounds.has_value() && !RectsOverlap(*strokeBounds, dirtyPageRect)) {
+            continue;
+        }
+        PaintStroke(cacheDc, pageStroke, cacheView, false);
+    }
+
+    RestoreDC(cacheDc, -1);
+    std::copy_n(static_cast<const std::uint8_t*>(bits), cache.pixels.size(), cache.pixels.data());
+    cache.strokeCount = page.strokes.size();
+    cache.imageCount = page.images.size();
 
     SelectObject(cacheDc, previousBitmap);
     DeleteObject(cacheBitmap);

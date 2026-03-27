@@ -400,6 +400,8 @@ private:
     void PaintPage(HDC hdc, const PageView& pageView);
     void PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke) const;
     bool TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke& stroke);
+    bool TryRefreshPageSurfaceCacheForStroke(std::size_t pageIndex, const Stroke& stroke);
+    bool TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect);
     void EnsurePageSurfaceCache(const PageView& pageView);
     void EnsurePaintBackbuffer(HDC referenceDc, int width, int height);
     void ReleasePaintBackbuffer();
