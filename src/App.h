@@ -134,6 +134,15 @@ public:
         std::vector<std::uint8_t> pixels {};
     };
 
+    struct ZoomPageSnapshot {
+        int width = 0;
+        int height = 0;
+        int stride = 0;
+        std::size_t pageIndex = 0;
+        bool valid = false;
+        std::vector<std::uint8_t> pixels {};
+    };
+
     struct RenderRequest {
         std::shared_ptr<std::vector<std::uint8_t>> pdfData {};
         std::size_t pageIndex = 0;
@@ -202,6 +211,7 @@ private:
     void CreateBlankDocument();
     void ClearHistory();
     void InvalidateCanvas();
+    void InvalidateViewport();
     void InvalidatePageSurfaceCache(std::size_t pageIndex);
     void InvalidateAllPageSurfaceCaches();
     void InvalidateVisiblePageSurfaceCaches();
@@ -391,6 +401,11 @@ private:
     void PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke) const;
     bool TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke& stroke);
     void EnsurePageSurfaceCache(const PageView& pageView);
+    void EnsurePaintBackbuffer(HDC referenceDc, int width, int height);
+    void ReleasePaintBackbuffer();
+    void CaptureZoomSessionSnapshots();
+    void CaptureZoomPageSnapshot(const PageView& pageView);
+    void ClearZoomSessionSnapshots();
 
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
@@ -452,6 +467,7 @@ private:
     POINT zoomAnchorCursor_ {};
     std::vector<PageSurfaceCache> pageSurfaceCaches_ {};
     std::vector<SidebarThumbnailCache> sidebarThumbnailCaches_ {};
+    std::vector<ZoomPageSnapshot> zoomPageSnapshots_ {};
     std::uint64_t renderGeneration_ = 0;
     std::unordered_map<std::size_t, float> pendingRenderScales_ {};
     std::mutex renderMutex_ {};
@@ -495,6 +511,11 @@ private:
     int hoveredWindowButton_ = -1;
     bool trackingMouseLeave_ = false;
     bool documentDirty_ = false;
+    HDC paintBackbufferDc_ = nullptr;
+    HBITMAP paintBackbufferBitmap_ = nullptr;
+    HGDIOBJ paintBackbufferPreviousBitmap_ = nullptr;
+    int paintBackbufferWidth_ = 0;
+    int paintBackbufferHeight_ = 0;
 
     static constexpr int kToolbarHeight = 45;
     static constexpr int kSettingsPanelWidth = 320;

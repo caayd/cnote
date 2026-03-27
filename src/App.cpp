@@ -175,6 +175,21 @@ float QuantizeRenderScale(float renderScale) {
     return kRenderScaleBuckets.back();
 }
 
+HBITMAP CreateTopDown32BitDibSection(HDC dc, int width, int height, void** bits) {
+    if (bits == nullptr || width <= 0 || height <= 0) {
+        return nullptr;
+    }
+
+    BITMAPINFO bitmapInfo {};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = width;
+    bitmapInfo.bmiHeader.biHeight = -height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    return CreateDIBSection(dc, &bitmapInfo, DIB_RGB_COLORS, bits, nullptr, 0);
+}
+
 SidebarMetrics BuildSidebarMetrics(UINT dpi) {
     SidebarMetrics metrics {};
     metrics.width = ScaleForDpi(176, dpi);
@@ -1749,6 +1764,8 @@ App::~App() {
     newPageSettings_.window = nullptr;
     SaveAppSettings();
     StopRenderWorker();
+    ClearZoomSessionSnapshots();
+    ReleasePaintBackbuffer();
     if (eraserCursor_ != nullptr) {
         DestroyCursor(eraserCursor_);
         eraserCursor_ = nullptr;
@@ -1899,6 +1916,7 @@ void App::PrepareForDocumentSwitch() {
     CancelQuickSizePopup();
     zoomSessionActive_ = false;
     zoomAnchorValid_ = false;
+    ClearZoomSessionSnapshots();
     ++renderGeneration_;
     pendingRenderScales_.clear();
     {
@@ -2087,6 +2105,17 @@ void App::InvalidateCanvas() {
     GetClientRect(window_, &clientRect);
     clientRect.top = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
     InvalidateRect(window_, &clientRect, FALSE);
+}
+
+void App::InvalidateViewport() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const RECT viewportRect = CanvasRect(clientRect);
+    InvalidateRect(window_, &viewportRect, FALSE);
 }
 
 void App::InvalidatePageSurfaceCache(std::size_t pageIndex) {
@@ -5164,6 +5193,7 @@ bool App::ApplyZoomPreset(std::size_t presetIndex) {
 }
 
 void App::BeginZoomSession(POINT cursor) {
+    const bool startingNewSession = !zoomSessionActive_;
     zoomSessionActive_ = true;
     zoomAnchorValid_ = false;
 
@@ -5172,6 +5202,10 @@ void App::BeginZoomSession(POINT cursor) {
         zoomAnchorPageIndex_ = hitPage->pageIndex;
         zoomAnchorPage_ = ScreenToPage(cursor, nullptr);
         zoomAnchorCursor_ = cursor;
+    }
+
+    if (startingNewSession) {
+        CaptureZoomSessionSnapshots();
     }
 
     SetTimer(window_, kZoomSessionTimerId, kZoomSessionDelayMs, nullptr);
@@ -5199,7 +5233,7 @@ void App::ZoomAt(int delta, POINT cursor) {
         panY_ += static_cast<float>(zoomAnchorCursor_.y - anchoredScreen.y);
     }
 
-    InvalidateCanvas();
+    InvalidateViewport();
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     RECT toolbarRect = clientRect;
@@ -5215,6 +5249,7 @@ void App::EndZoomSession() {
     zoomSessionActive_ = false;
     zoomAnchorValid_ = false;
     KillTimer(window_, kZoomSessionTimerId);
+    ClearZoomSessionSnapshots();
     HandleDeferredRasterRefresh();
 }
 
@@ -5292,7 +5327,7 @@ void App::HandleCompletedRenderResults() {
         updated = true;
     }
 
-    if (updated) {
+    if (updated && !zoomSessionActive_) {
         InvalidateCanvas();
     }
 }
@@ -5749,6 +5784,57 @@ unsigned char App::GetColorChannel(std::uint32_t color, int shift) const {
     return static_cast<unsigned char>((color >> shift) & 0xFFU);
 }
 
+void App::EnsurePaintBackbuffer(HDC referenceDc, int width, int height) {
+    if (width <= 0 || height <= 0) {
+        ReleasePaintBackbuffer();
+        return;
+    }
+
+    if (paintBackbufferDc_ != nullptr
+        && paintBackbufferBitmap_ != nullptr
+        && paintBackbufferWidth_ == width
+        && paintBackbufferHeight_ == height) {
+        return;
+    }
+
+    ReleasePaintBackbuffer();
+
+    paintBackbufferDc_ = CreateCompatibleDC(referenceDc);
+    if (paintBackbufferDc_ == nullptr) {
+        return;
+    }
+
+    void* bits = nullptr;
+    paintBackbufferBitmap_ = CreateTopDown32BitDibSection(paintBackbufferDc_, width, height, &bits);
+    if (paintBackbufferBitmap_ == nullptr || bits == nullptr) {
+        ReleasePaintBackbuffer();
+        return;
+    }
+
+    paintBackbufferPreviousBitmap_ = SelectObject(paintBackbufferDc_, paintBackbufferBitmap_);
+    paintBackbufferWidth_ = width;
+    paintBackbufferHeight_ = height;
+}
+
+void App::ReleasePaintBackbuffer() {
+    if (paintBackbufferDc_ != nullptr && paintBackbufferPreviousBitmap_ != nullptr) {
+        SelectObject(paintBackbufferDc_, paintBackbufferPreviousBitmap_);
+    }
+    paintBackbufferPreviousBitmap_ = nullptr;
+
+    if (paintBackbufferBitmap_ != nullptr) {
+        DeleteObject(paintBackbufferBitmap_);
+        paintBackbufferBitmap_ = nullptr;
+    }
+    if (paintBackbufferDc_ != nullptr) {
+        DeleteDC(paintBackbufferDc_);
+        paintBackbufferDc_ = nullptr;
+    }
+
+    paintBackbufferWidth_ = 0;
+    paintBackbufferHeight_ = 0;
+}
+
 void App::Paint() {
     PAINTSTRUCT paint {};
     HDC windowDc = BeginPaint(window_, &paint);
@@ -5756,9 +5842,8 @@ void App::Paint() {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
 
-    HDC memoryDc = CreateCompatibleDC(windowDc);
-    HBITMAP bitmap = CreateCompatibleBitmap(windowDc, clientRect.right, clientRect.bottom);
-    HGDIOBJ previousBitmap = SelectObject(memoryDc, bitmap);
+    EnsurePaintBackbuffer(windowDc, clientRect.right, clientRect.bottom);
+    HDC memoryDc = paintBackbufferDc_ != nullptr ? paintBackbufferDc_ : windowDc;
     SaveDC(memoryDc);
     IntersectClipRect(memoryDc, paint.rcPaint.left, paint.rcPaint.top, paint.rcPaint.right, paint.rcPaint.bottom);
 
@@ -5772,21 +5857,20 @@ void App::Paint() {
     PaintPaletteMenu(memoryDc, clientRect);
     PaintPaletteWheel(memoryDc, clientRect);
 
-    BitBlt(
-        windowDc,
-        paint.rcPaint.left,
-        paint.rcPaint.top,
-        paint.rcPaint.right - paint.rcPaint.left,
-        paint.rcPaint.bottom - paint.rcPaint.top,
-        memoryDc,
-        paint.rcPaint.left,
-        paint.rcPaint.top,
-        SRCCOPY);
+    if (memoryDc != windowDc) {
+        BitBlt(
+            windowDc,
+            paint.rcPaint.left,
+            paint.rcPaint.top,
+            paint.rcPaint.right - paint.rcPaint.left,
+            paint.rcPaint.bottom - paint.rcPaint.top,
+            memoryDc,
+            paint.rcPaint.left,
+            paint.rcPaint.top,
+            SRCCOPY);
+    }
 
     RestoreDC(memoryDc, -1);
-    SelectObject(memoryDc, previousBitmap);
-    DeleteObject(bitmap);
-    DeleteDC(memoryDc);
 
     EndPaint(window_, &paint);
 }
@@ -6367,16 +6451,23 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
 
 void App::PaintCanvas(HDC hdc, RECT clientRect) {
     const RECT canvasRect = CanvasRect(clientRect);
+    RECT clipRect {};
+    GetClipBox(hdc, &clipRect);
 
     HBRUSH canvasBrush = CreateSolidBrush(RGB(22, 26, 33));
     FillRect(hdc, &canvasRect, canvasBrush);
     DeleteObject(canvasBrush);
 
-    PaintPdfSidebar(hdc, clientRect);
+    if (IsPdfSidebarVisible()) {
+        const RECT sidebarRect = PdfSidebarRect(clientRect);
+        RECT sidebarVisibleRect {};
+        if (IntersectRect(&sidebarVisibleRect, &sidebarRect, &clipRect) != 0) {
+            PaintPdfSidebar(hdc, clientRect);
+        }
+    }
 
     SaveDC(hdc);
     IntersectClipRect(hdc, canvasRect.left, canvasRect.top, canvasRect.right, canvasRect.bottom);
-    RECT clipRect {};
     GetClipBox(hdc, &clipRect);
     for (const PageView& pageView : CalculatePageViews(clientRect)) {
         if (!pageView.valid) {
@@ -6603,6 +6694,119 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
     DeleteDC(cacheDc);
 }
 
+void App::ClearZoomSessionSnapshots() {
+    zoomPageSnapshots_.clear();
+}
+
+void App::CaptureZoomPageSnapshot(const PageView& pageView) {
+    if (!pageView.valid) {
+        return;
+    }
+
+    const int width = static_cast<int>(std::max<LONG>(0, pageView.rect.right - pageView.rect.left));
+    const int height = static_cast<int>(std::max<LONG>(0, pageView.rect.bottom - pageView.rect.top));
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    EnsurePageSurfaceCache(pageView);
+    if (pageView.pageIndex >= pageSurfaceCaches_.size()) {
+        return;
+    }
+
+    const PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
+    if (!cache.valid || cache.pixels.empty() || cache.width <= 0 || cache.height <= 0) {
+        return;
+    }
+
+    if (pageView.pageIndex >= zoomPageSnapshots_.size()) {
+        zoomPageSnapshots_.resize(document_.PageCount());
+    }
+
+    HDC snapshotDc = CreateCompatibleDC(nullptr);
+    if (snapshotDc == nullptr) {
+        return;
+    }
+
+    void* bits = nullptr;
+    HBITMAP snapshotBitmap = CreateTopDown32BitDibSection(snapshotDc, width, height, &bits);
+    if (snapshotBitmap == nullptr || bits == nullptr) {
+        if (snapshotBitmap != nullptr) {
+            DeleteObject(snapshotBitmap);
+        }
+        DeleteDC(snapshotDc);
+        return;
+    }
+
+    HGDIOBJ previousBitmap = SelectObject(snapshotDc, snapshotBitmap);
+
+    RECT snapshotRect = MakeRect(0, 0, width, height);
+    HBRUSH pageBrush = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(snapshotDc, &snapshotRect, pageBrush);
+    DeleteObject(pageBrush);
+
+    BITMAPINFO bitmapInfo {};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = cache.width;
+    bitmapInfo.bmiHeader.biHeight = -cache.height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    SetStretchBltMode(snapshotDc, HALFTONE);
+    StretchDIBits(
+        snapshotDc,
+        0,
+        0,
+        width,
+        height,
+        0,
+        0,
+        cache.width,
+        cache.height,
+        cache.pixels.data(),
+        &bitmapInfo,
+        DIB_RGB_COLORS,
+        SRCCOPY);
+
+    ZoomPageSnapshot& snapshot = zoomPageSnapshots_[pageView.pageIndex];
+    snapshot.width = width;
+    snapshot.height = height;
+    snapshot.stride = width * 4;
+    snapshot.pageIndex = pageView.pageIndex;
+    snapshot.valid = true;
+    snapshot.pixels.resize(static_cast<std::size_t>(snapshot.stride) * static_cast<std::size_t>(snapshot.height));
+    std::copy_n(static_cast<const std::uint8_t*>(bits), snapshot.pixels.size(), snapshot.pixels.data());
+
+    SelectObject(snapshotDc, previousBitmap);
+    DeleteObject(snapshotBitmap);
+    DeleteDC(snapshotDc);
+}
+
+void App::CaptureZoomSessionSnapshots() {
+    ClearZoomSessionSnapshots();
+    if (window_ == nullptr || document_.PageCount() == 0U) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const RECT canvasRect = CanvasRect(clientRect);
+    const UINT dpi = WindowDpi(window_);
+    const int snapshotPadding = ScaleForDpi(120, dpi);
+
+    zoomPageSnapshots_.resize(document_.PageCount());
+    for (const PageView& pageView : CalculatePageViews(clientRect)) {
+        if (!pageView.valid) {
+            continue;
+        }
+        if (pageView.rect.bottom < canvasRect.top - snapshotPadding || pageView.rect.top > canvasRect.bottom + snapshotPadding) {
+            continue;
+        }
+        CaptureZoomPageSnapshot(pageView);
+    }
+}
+
 void App::PaintPage(HDC hdc, const PageView& pageView) {
     if (!zoomSessionActive_) {
         RECT shadow = pageView.rect;
@@ -6627,16 +6831,48 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     SaveDC(hdc);
     IntersectClipRect(hdc, pageView.rect.left, pageView.rect.top, pageView.rect.right, pageView.rect.bottom);
 
+    const ZoomPageSnapshot* zoomSnapshot = nullptr;
     bool canReuseFrozenCache = false;
+    if (zoomSessionActive_ && pageView.pageIndex < zoomPageSnapshots_.size()) {
+        const ZoomPageSnapshot& snapshot = zoomPageSnapshots_[pageView.pageIndex];
+        if (snapshot.valid && !snapshot.pixels.empty() && snapshot.width > 0 && snapshot.height > 0) {
+            zoomSnapshot = &snapshot;
+            canReuseFrozenCache = true;
+        }
+    }
     if (pageView.pageIndex < pageSurfaceCaches_.size()) {
         const PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
-        canReuseFrozenCache = cache.valid && !cache.pixels.empty();
+        canReuseFrozenCache = canReuseFrozenCache || (cache.valid && !cache.pixels.empty());
     }
     if (!zoomSessionActive_ || !canReuseFrozenCache) {
         EnsurePageSurfaceCache(pageView);
     }
 
-    if (pageView.pageIndex < pageSurfaceCaches_.size()) {
+    if (zoomSnapshot != nullptr) {
+        BITMAPINFO bitmapInfo {};
+        bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+        bitmapInfo.bmiHeader.biWidth = zoomSnapshot->width;
+        bitmapInfo.bmiHeader.biHeight = -zoomSnapshot->height;
+        bitmapInfo.bmiHeader.biPlanes = 1;
+        bitmapInfo.bmiHeader.biBitCount = 32;
+        bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+        SetStretchBltMode(hdc, COLORONCOLOR);
+        StretchDIBits(
+            hdc,
+            pageView.rect.left,
+            pageView.rect.top,
+            pageView.rect.right - pageView.rect.left,
+            pageView.rect.bottom - pageView.rect.top,
+            0,
+            0,
+            zoomSnapshot->width,
+            zoomSnapshot->height,
+            zoomSnapshot->pixels.data(),
+            &bitmapInfo,
+            DIB_RGB_COLORS,
+            SRCCOPY);
+    } else if (pageView.pageIndex < pageSurfaceCaches_.size()) {
         const PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
         if (cache.valid && !cache.pixels.empty()) {
             BITMAPINFO bitmapInfo {};
@@ -7550,6 +7786,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         KillTimer(window_, kZoomSessionTimerId);
         zoomSessionActive_ = false;
         zoomAnchorValid_ = false;
+        ClearZoomSessionSnapshots();
+        ReleasePaintBackbuffer();
         targetZoom_ = zoom_;
         InvalidateAllPageSurfaceCaches();
         EnsureVisiblePageRasterQuality();
@@ -7571,6 +7809,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         KillTimer(window_, kZoomSessionTimerId);
         zoomSessionActive_ = false;
         zoomAnchorValid_ = false;
+        ClearZoomSessionSnapshots();
+        ReleasePaintBackbuffer();
         targetZoom_ = zoom_;
         InvalidateAllPageSurfaceCaches();
         EnsureVisiblePageRasterQuality();
@@ -7580,6 +7820,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_DESTROY:
         CancelDeferredRasterRefresh();
         KillTimer(window_, kZoomSessionTimerId);
+        ClearZoomSessionSnapshots();
+        ReleasePaintBackbuffer();
         PostQuitMessage(0);
         return 0;
     default:
