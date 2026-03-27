@@ -164,6 +164,17 @@ int ToolbarTopInset(bool maximized, UINT dpi) {
     return maximized ? ScaleForDpi(kMaximizedToolbarExtraHeight, dpi) : 0;
 }
 
+float QuantizeRenderScale(float renderScale) {
+    constexpr std::array<float, 5> kRenderScaleBuckets { 1.5f, 2.0f, 3.0f, 4.0f, 6.0f };
+    for (const float bucket : kRenderScaleBuckets) {
+        if (renderScale <= bucket + 0.001f) {
+            return bucket;
+        }
+    }
+
+    return kRenderScaleBuckets.back();
+}
+
 SidebarMetrics BuildSidebarMetrics(UINT dpi) {
     SidebarMetrics metrics {};
     metrics.width = ScaleForDpi(176, dpi);
@@ -5273,8 +5284,11 @@ void App::HandleCompletedRenderResults() {
         }
 
         page.raster = std::move(*result.raster);
-        InvalidatePageSurfaceCache(result.pageIndex);
-        InvalidateSidebarThumbnailCache(result.pageIndex);
+        if (!zoomSessionActive_) {
+            InvalidatePageSurfaceCache(result.pageIndex);
+        } else {
+            InvalidateSidebarThumbnailCache(result.pageIndex);
+        }
         updated = true;
     }
 
@@ -5715,7 +5729,8 @@ float App::DesiredRenderScale(const PageView& pageView) const {
     constexpr float kRenderOverscan = 1.2f;
     constexpr float kMinRenderScale = 1.5f;
     constexpr float kMaxRenderScale = 6.0f;
-    return std::clamp(pageView.scale * kRenderOverscan, kMinRenderScale, kMaxRenderScale);
+    const float clampedScale = std::clamp(pageView.scale * kRenderOverscan, kMinRenderScale, kMaxRenderScale);
+    return QuantizeRenderScale(clampedScale);
 }
 
 COLORREF App::ToColorRef(std::uint32_t argb) const {
@@ -6612,7 +6627,15 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     SaveDC(hdc);
     IntersectClipRect(hdc, pageView.rect.left, pageView.rect.top, pageView.rect.right, pageView.rect.bottom);
 
-    EnsurePageSurfaceCache(pageView);
+    bool canReuseFrozenCache = false;
+    if (pageView.pageIndex < pageSurfaceCaches_.size()) {
+        const PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
+        canReuseFrozenCache = cache.valid && !cache.pixels.empty();
+    }
+    if (!zoomSessionActive_ || !canReuseFrozenCache) {
+        EnsurePageSurfaceCache(pageView);
+    }
+
     if (pageView.pageIndex < pageSurfaceCaches_.size()) {
         const PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
         if (cache.valid && !cache.pixels.empty()) {
