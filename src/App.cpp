@@ -5511,6 +5511,8 @@ bool App::SaveAsCnote() {
 }
 
 bool App::ExportAsPdf() {
+    constexpr float kPdfExportFallbackRenderScale = 4.0f;
+
     wchar_t fileBuffer[MAX_PATH] = {};
     const std::wstring suggested = SuggestedPdfExportPath();
     std::wcsncpy(fileBuffer, suggested.c_str(), std::size(fileBuffer) - 1U);
@@ -5528,7 +5530,7 @@ bool App::ExportAsPdf() {
         return false;
     }
 
-    if (!pdfBackend_.ExportPdf(document_, fileBuffer, 2.0f, settings_.strokeSmoothing)) {
+    if (!pdfBackend_.ExportPdf(document_, fileBuffer, kPdfExportFallbackRenderScale, settings_.strokeSmoothing)) {
         MessageBoxW(window_, L"Failed to export the PDF.", L"Export as PDF", MB_OK | MB_ICONERROR);
         return false;
     }

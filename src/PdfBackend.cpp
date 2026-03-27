@@ -5,6 +5,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <numbers>
 #include <string>
 #include <vector>
 
@@ -12,6 +13,7 @@
 #include <gdiplus.h>
 
 #include "fpdf_edit.h"
+#include "fpdf_ppo.h"
 #include "fpdf_save.h"
 #include "fpdfview.h"
 
@@ -320,6 +322,116 @@ bool AppendVectorStroke(FPDF_PAGE pageHandle, const Page& page, const Stroke& st
     return true;
 }
 
+bool AppendBitmapObject(
+    FPDF_DOCUMENT documentHandle,
+    FPDF_PAGE pageHandle,
+    int pixelWidth,
+    int pixelHeight,
+    int stride,
+    std::uint8_t* pixels,
+    double a,
+    double b,
+    double c,
+    double d,
+    double e,
+    double f,
+    std::vector<FPDF_BITMAP>& ownedBitmaps) {
+    if (documentHandle == nullptr || pageHandle == nullptr || pixels == nullptr
+        || pixelWidth <= 0 || pixelHeight <= 0 || stride <= 0) {
+        return false;
+    }
+
+    FPDF_BITMAP bitmapHandle = FPDFBitmap_CreateEx(
+        pixelWidth,
+        pixelHeight,
+        FPDFBitmap_BGRA,
+        pixels,
+        stride);
+    if (bitmapHandle == nullptr) {
+        return false;
+    }
+
+    FPDF_PAGEOBJECT imageObject = FPDFPageObj_NewImageObj(documentHandle);
+    if (imageObject == nullptr) {
+        FPDFBitmap_Destroy(bitmapHandle);
+        return false;
+    }
+
+    const bool ok = FPDFImageObj_SetBitmap(nullptr, 0, imageObject, bitmapHandle) != 0
+        && FPDFImageObj_SetMatrix(imageObject, a, b, c, d, e, f) != 0;
+    if (!ok) {
+        FPDFPageObj_Destroy(imageObject);
+        FPDFBitmap_Destroy(bitmapHandle);
+        return false;
+    }
+
+    ownedBitmaps.push_back(bitmapHandle);
+    FPDFPage_InsertObject(pageHandle, imageObject);
+    return true;
+}
+
+bool AppendFullPageRasterObject(
+    FPDF_DOCUMENT documentHandle,
+    FPDF_PAGE pageHandle,
+    const Page& page,
+    RasterImage& raster,
+    std::vector<FPDF_BITMAP>& ownedBitmaps) {
+    return AppendBitmapObject(
+        documentHandle,
+        pageHandle,
+        raster.width,
+        raster.height,
+        raster.stride,
+        raster.pixels.data(),
+        page.width,
+        0.0,
+        0.0,
+        page.height,
+        0.0,
+        0.0,
+        ownedBitmaps);
+}
+
+bool AppendPageImageObject(
+    FPDF_DOCUMENT documentHandle,
+    FPDF_PAGE pageHandle,
+    const Page& page,
+    const PageImage& image,
+    std::vector<FPDF_BITMAP>& ownedBitmaps) {
+    if (image.pixels.empty() || image.pixelWidth <= 0 || image.pixelHeight <= 0 || image.stride <= 0) {
+        return true;
+    }
+
+    const double rotationRadians = -static_cast<double>(image.rotationDegrees) * std::numbers::pi / 180.0;
+    const double cosine = std::cos(rotationRadians);
+    const double sine = std::sin(rotationRadians);
+    const double width = static_cast<double>(image.width);
+    const double height = static_cast<double>(image.height);
+    const double centerX = static_cast<double>(image.x) + (width * 0.5);
+    const double centerY = static_cast<double>(page.height) - static_cast<double>(image.y) - (height * 0.5);
+    const double a = cosine * width;
+    const double b = sine * width;
+    const double c = -sine * height;
+    const double d = cosine * height;
+    const double e = centerX - ((a + c) * 0.5);
+    const double f = centerY - ((b + d) * 0.5);
+
+    return AppendBitmapObject(
+        documentHandle,
+        pageHandle,
+        image.pixelWidth,
+        image.pixelHeight,
+        image.stride,
+        const_cast<std::uint8_t*>(image.pixels.data()),
+        a,
+        b,
+        c,
+        d,
+        e,
+        f,
+        ownedBitmaps);
+}
+
 struct PdfFileWriter {
     FPDF_FILEWRITE writer {};
     std::FILE* file = nullptr;
@@ -454,6 +566,7 @@ bool PdfiumBackend::ExportPdf(
 
     std::vector<RasterImage> flattenedPages;
     std::vector<FPDF_BITMAP> ownedBitmaps;
+    std::vector<FPDF_DOCUMENT> sourceDocuments(document.PdfSourceCount(), nullptr);
     std::vector<FPDF_PAGE> createdPages;
     flattenedPages.reserve(document.PageCount());
     ownedBitmaps.reserve(document.PageCount());
@@ -462,45 +575,83 @@ bool PdfiumBackend::ExportPdf(
     bool ok = true;
     for (std::size_t pageIndex = 0; ok && pageIndex < document.PageCount(); ++pageIndex) {
         const Page& sourcePage = document.PageAt(pageIndex);
-        flattenedPages.push_back(ComposePageRaster(*this, document, pageIndex, renderScale, strokeSmoothing, false));
-        RasterImage& raster = flattenedPages.back();
+        FPDF_PAGE pageHandle = nullptr;
+        bool importedSourcePage = false;
+        bool imagesAlreadyFlattened = false;
 
-        FPDF_PAGE pageHandle = FPDFPage_New(
-            outputDocument,
-            static_cast<int>(pageIndex),
-            sourcePage.width,
-            sourcePage.height);
+        if (const Document::PdfSource* pdfSource = document.PdfSourceAtIndex(sourcePage.sourcePdfSourceIndex);
+            pdfSource != nullptr && sourcePage.sourcePdfPageIndex >= 0) {
+            FPDF_DOCUMENT& sourceDocument = sourceDocuments[static_cast<std::size_t>(sourcePage.sourcePdfSourceIndex)];
+            if (sourceDocument == nullptr && pdfSource->pdfData && !pdfSource->pdfData->empty()) {
+                sourceDocument = FPDF_LoadMemDocument64(pdfSource->pdfData->data(), pdfSource->pdfData->size(), nullptr);
+            }
+
+            if (sourceDocument != nullptr) {
+                const int sourcePageIndex = sourcePage.sourcePdfPageIndex;
+                importedSourcePage = FPDF_ImportPagesByIndex(
+                    outputDocument,
+                    sourceDocument,
+                    &sourcePageIndex,
+                    1,
+                    static_cast<int>(pageIndex)) != 0;
+                if (importedSourcePage) {
+                    pageHandle = FPDF_LoadPage(outputDocument, static_cast<int>(pageIndex));
+                    if (pageHandle == nullptr) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+
         if (pageHandle == nullptr) {
-            ok = false;
-            break;
+            pageHandle = FPDFPage_New(
+                outputDocument,
+                static_cast<int>(pageIndex),
+                sourcePage.width,
+                sourcePage.height);
+            if (pageHandle == nullptr) {
+                ok = false;
+                break;
+            }
+
+            bool hasBackgroundRaster = false;
+            if (!importedSourcePage && sourcePage.sourcePdfPageIndex >= 0) {
+                flattenedPages.push_back(ComposePageRaster(*this, document, pageIndex, renderScale, strokeSmoothing, false));
+                hasBackgroundRaster = true;
+                imagesAlreadyFlattened = true;
+            } else if (!sourcePage.raster.pixels.empty()
+                && sourcePage.raster.width > 0
+                && sourcePage.raster.height > 0
+                && sourcePage.raster.stride > 0) {
+                flattenedPages.push_back(sourcePage.raster);
+                hasBackgroundRaster = true;
+            }
+
+            if (hasBackgroundRaster && !AppendFullPageRasterObject(
+                    outputDocument,
+                    pageHandle,
+                    sourcePage,
+                    flattenedPages.back(),
+                    ownedBitmaps)) {
+                ok = false;
+                break;
+            }
         }
         createdPages.push_back(pageHandle);
 
-        FPDF_BITMAP bitmapHandle = FPDFBitmap_CreateEx(
-            raster.width,
-            raster.height,
-            FPDFBitmap_BGRA,
-            raster.pixels.data(),
-            raster.stride);
-        if (bitmapHandle == nullptr) {
-            ok = false;
-            break;
-        }
-        ownedBitmaps.push_back(bitmapHandle);
-
-        FPDF_PAGEOBJECT imageObject = FPDFPageObj_NewImageObj(outputDocument);
-        if (imageObject == nullptr) {
-            ok = false;
-            break;
+        if (!imagesAlreadyFlattened) {
+            for (const PageImage& image : sourcePage.images) {
+                ok = AppendPageImageObject(outputDocument, pageHandle, sourcePage, image, ownedBitmaps);
+                if (!ok) {
+                    break;
+                }
+            }
+            if (!ok) {
+                break;
+            }
         }
 
-        ok = FPDFImageObj_SetBitmap(nullptr, 0, imageObject, bitmapHandle) != 0
-            && FPDFImageObj_SetMatrix(imageObject, sourcePage.width, 0.0, 0.0, sourcePage.height, 0.0, 0.0) != 0;
-        if (!ok) {
-            break;
-        }
-
-        FPDFPage_InsertObject(pageHandle, imageObject);
         for (const Stroke& stroke : sourcePage.strokes) {
             ok = AppendVectorStroke(pageHandle, sourcePage, stroke, strokeSmoothing);
             if (!ok) {
@@ -529,6 +680,11 @@ bool PdfiumBackend::ExportPdf(
     }
     for (FPDF_PAGE pageHandle : createdPages) {
         FPDF_ClosePage(pageHandle);
+    }
+    for (FPDF_DOCUMENT sourceDocument : sourceDocuments) {
+        if (sourceDocument != nullptr) {
+            FPDF_CloseDocument(sourceDocument);
+        }
     }
     FPDF_CloseDocument(outputDocument);
     return ok;
