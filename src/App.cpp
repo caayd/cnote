@@ -228,6 +228,7 @@ struct TextPixelMetrics {
 struct WrappedTextLayout {
     std::vector<std::wstring> lines;
     int wrapWidth = 0;
+    int widestLineWidth = 0;
     int lineHeight = 0;
     int height = 0;
 };
@@ -313,6 +314,7 @@ WrappedTextLayout LayoutPageText(const PageText& text, float pageWidth) {
         if (layout.lines.back().empty()) {
             layout.lines.back().clear();
         }
+        layout.widestLineWidth = layout.wrapWidth;
         layout.height = std::max(layout.lineHeight, static_cast<int>(layout.lines.size()) * layout.lineHeight);
         return layout;
     }
@@ -372,12 +374,23 @@ WrappedTextLayout LayoutPageText(const PageText& text, float pageWidth) {
                 if (whitespaceTake > 0) {
                     take = whitespaceTake;
                     brokeAtWhitespace = true;
+                } else {
+                    int wholeWordTake = fit;
+                    while (wholeWordTake < remaining && !std::iswspace(paragraph[index + wholeWordTake])) {
+                        ++wholeWordTake;
+                    }
+                    take = std::max(1, wholeWordTake);
                 }
             }
 
             take = std::max(1, take);
             std::wstring line = paragraph.substr(index, static_cast<std::size_t>(take));
-            layout.lines.push_back(TrimTrailingLayoutWhitespace(std::move(line)));
+            line = TrimTrailingLayoutWhitespace(std::move(line));
+            SIZE lineSize {};
+            if (!line.empty() && GetTextExtentPoint32W(dc, line.c_str(), static_cast<int>(line.size()), &lineSize) != 0) {
+                layout.widestLineWidth = std::max(layout.widestLineWidth, static_cast<int>(lineSize.cx));
+            }
+            layout.lines.push_back(std::move(line));
             index += static_cast<std::size_t>(take);
 
             if (brokeAtWhitespace) {
@@ -414,15 +427,20 @@ WrappedTextLayout LayoutPageText(const PageText& text, float pageWidth) {
     if (layout.lines.empty()) {
         layout.lines.push_back(L"");
     }
+    layout.widestLineWidth = std::max(layout.widestLineWidth, layout.wrapWidth);
     layout.height = std::max(layout.lineHeight, static_cast<int>(layout.lines.size()) * layout.lineHeight);
     return layout;
+}
+
+float LayoutPageTextWidth(const WrappedTextLayout& layout) {
+    return std::max(1.0f, static_cast<float>(std::max(layout.wrapWidth, layout.widestLineWidth)) / kTextLayoutScale);
 }
 
 TextPixelMetrics MeasurePageTextPixels(const PageText& text, float pageWidth, float scale) {
     const WrappedTextLayout layout = LayoutPageText(text, pageWidth);
     const int fontHeight = PageTextFontPixelHeight(text, scale);
     TextPixelMetrics metrics {
-        std::max(1, static_cast<int>(std::ceil(ResolvedPageTextWidth(text, pageWidth) * std::max(0.1f, scale)))),
+        std::max(1, static_cast<int>(std::ceil(LayoutPageTextWidth(layout) * std::max(0.1f, scale)))),
         fontHeight,
     };
 
@@ -470,7 +488,7 @@ PageTextBounds MeasurePageTextBounds(const PageText& text, float pageWidth) {
     return {
         text.x,
         text.y,
-        text.x + ResolvedPageTextWidth(text, pageWidth),
+        text.x + std::max(1.0f, static_cast<float>(metrics.width)),
         text.y + std::max(std::max(1.0f, static_cast<float>(metrics.height)), text.height),
     };
 }
@@ -5343,9 +5361,9 @@ void App::UpdateTextTransform(POINT cursor) {
     const float initialHeight = std::max(1.0f, initialBounds.bottom - initialBounds.top);
     const float centerX = (initialBounds.left + initialBounds.right) * 0.5f;
     const float centerY = (initialBounds.top + initialBounds.bottom) * 0.5f;
-    constexpr float kMinTextFontSize = 8.0f;
-    const float minTextBoxWidth = std::max(24.0f, textTransformInitial_.fontSize * 0.9f);
-    const float minTextBoxHeight = std::max(18.0f, textTransformInitial_.fontSize * 0.9f);
+    constexpr float kMinTextFontSize = 1.0f;
+    const float minTextBoxWidth = std::max(4.0f, textTransformInitial_.fontSize * 0.2f);
+    const float minTextBoxHeight = std::max(4.0f, textTransformInitial_.fontSize * 0.2f);
     const float minScale = std::max(0.05f, kMinTextFontSize / std::max(1.0f, textTransformInitial_.fontSize));
     const float maxScaleToFit = std::max(0.05f, std::min(page.width / initialWidth, page.height / initialHeight));
 
@@ -10326,7 +10344,7 @@ void App::PaintText(HDC hdc, const PageText& text, const PageView& pageView) con
     }
     const int left = pageView.rect.left + static_cast<int>(std::lround(text.x * pageView.scale));
     const int top = pageView.rect.top + static_cast<int>(std::lround(text.y * pageView.scale));
-    const int renderWidth = std::max(1, static_cast<int>(std::ceil(ResolvedPageTextWidth(text, page.width) * std::max(0.1f, pageView.scale))));
+    const int renderWidth = std::max(1, static_cast<int>(std::ceil(LayoutPageTextWidth(layout) * std::max(0.1f, pageView.scale))));
     const int renderHeight = std::max(
         renderLineHeight * std::max(1, static_cast<int>(layout.lines.size())),
         static_cast<int>(std::ceil(text.height * std::max(0.1f, pageView.scale))));

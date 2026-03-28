@@ -30,6 +30,7 @@ constexpr float kTextLayoutScale = 8.0f;
 struct WrappedTextLayout {
     std::vector<std::wstring> lines;
     int wrapWidth = 0;
+    int widestLineWidth = 0;
     int lineHeight = 0;
     int height = 0;
 };
@@ -224,6 +225,7 @@ WrappedTextLayout LayoutPageText(const PageText& text, float pageWidth) {
         if (layout.lines.back().empty()) {
             layout.lines.back().clear();
         }
+        layout.widestLineWidth = layout.wrapWidth;
         layout.height = std::max(layout.lineHeight, static_cast<int>(layout.lines.size()) * layout.lineHeight);
         return layout;
     }
@@ -283,12 +285,23 @@ WrappedTextLayout LayoutPageText(const PageText& text, float pageWidth) {
                 if (whitespaceTake > 0) {
                     take = whitespaceTake;
                     brokeAtWhitespace = true;
+                } else {
+                    int wholeWordTake = fit;
+                    while (wholeWordTake < remaining && !std::iswspace(paragraph[index + wholeWordTake])) {
+                        ++wholeWordTake;
+                    }
+                    take = std::max(1, wholeWordTake);
                 }
             }
 
             take = std::max(1, take);
             std::wstring line = paragraph.substr(index, static_cast<std::size_t>(take));
-            layout.lines.push_back(TrimTrailingLayoutWhitespace(std::move(line)));
+            line = TrimTrailingLayoutWhitespace(std::move(line));
+            SIZE lineSize {};
+            if (!line.empty() && GetTextExtentPoint32W(dc, line.c_str(), static_cast<int>(line.size()), &lineSize) != 0) {
+                layout.widestLineWidth = std::max(layout.widestLineWidth, static_cast<int>(lineSize.cx));
+            }
+            layout.lines.push_back(std::move(line));
             index += static_cast<std::size_t>(take);
 
             if (brokeAtWhitespace) {
@@ -325,8 +338,13 @@ WrappedTextLayout LayoutPageText(const PageText& text, float pageWidth) {
     if (layout.lines.empty()) {
         layout.lines.push_back(L"");
     }
+    layout.widestLineWidth = std::max(layout.widestLineWidth, layout.wrapWidth);
     layout.height = std::max(layout.lineHeight, static_cast<int>(layout.lines.size()) * layout.lineHeight);
     return layout;
+}
+
+float LayoutPageTextWidth(const WrappedTextLayout& layout) {
+    return std::max(1.0f, static_cast<float>(std::max(layout.wrapWidth, layout.widestLineWidth)) / kTextLayoutScale);
 }
 
 void DrawPageImage(Gdiplus::Graphics& graphics, const PageImage& image, float renderScale) {
@@ -413,7 +431,7 @@ void DrawPageText(Gdiplus::Graphics& graphics, const PageText& text, float pageW
     const Gdiplus::REAL left = static_cast<Gdiplus::REAL>(text.x * renderScale);
     const Gdiplus::REAL top = static_cast<Gdiplus::REAL>(text.y * renderScale);
     const Gdiplus::REAL renderWidth = static_cast<Gdiplus::REAL>(
-        std::max(1.0f, ResolvedPageTextWidth(text, pageWidth) * std::max(0.1f, renderScale)));
+        std::max(1.0f, LayoutPageTextWidth(layout) * std::max(0.1f, renderScale)));
     const Gdiplus::REAL fontSize = static_cast<Gdiplus::REAL>(std::max(1.0f, text.fontSize * std::max(0.1f, renderScale)));
     const Gdiplus::REAL lineHeight = static_cast<Gdiplus::REAL>(std::max(
         fontSize,
