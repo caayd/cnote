@@ -37,6 +37,13 @@ constexpr COLORREF kButtonFillHover = RGB(38, 48, 61);
 constexpr COLORREF kTextPrimary = RGB(235, 240, 246);
 constexpr COLORREF kTextMuted = RGB(141, 152, 167);
 constexpr COLORREF kSelectionBorder = RGB(244, 247, 252);
+constexpr COLORREF kScrollbarTrackFill = RGB(20, 26, 34);
+constexpr COLORREF kScrollbarThumbFill = RGB(70, 88, 111);
+constexpr COLORREF kScrollbarThumbActiveFill = RGB(92, 118, 150);
+constexpr int kScrollbarGap = 8;
+constexpr int kScrollbarWidth = 12;
+constexpr int kScrollbarMinThumbHeight = 44;
+constexpr UINT kMsgShortcutListInvalidated = WM_APP + 41;
 
 constexpr int kIdCategoryPalette = 20;
 constexpr int kIdCategoryDrawing = 21;
@@ -105,6 +112,7 @@ struct SettingsWindowLayout {
     RECT zoomPresetHintRect {};
     RECT shortcutListSection {};
     RECT shortcutListRect {};
+    RECT shortcutScrollbarTrackRect {};
     RECT shortcutActionsSection {};
     RECT changeShortcutButton {};
     RECT clearShortcutButton {};
@@ -136,6 +144,44 @@ LRESULT CALLBACK HexColorEditSubclassProc(HWND window, UINT message, WPARAM wPar
     }
 
     return DefSubclassProc(window, message, wParam, lParam);
+}
+
+LRESULT CALLBACK ShortcutListSubclassProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR) {
+    if (message == WM_MOUSEWHEEL) {
+        RECT listRect {};
+        GetClientRect(window, &listRect);
+        const int itemHeight = std::max(1, static_cast<int>(SendMessageW(window, LB_GETITEMHEIGHT, 0, 0)));
+        const int itemCount = static_cast<int>(SendMessageW(window, LB_GETCOUNT, 0, 0));
+        const int visibleItems = std::max(1, static_cast<int>((listRect.bottom - listRect.top) / itemHeight));
+        const int maxTopIndex = std::max(0, itemCount - visibleItems);
+        const int topIndex = static_cast<int>(SendMessageW(window, LB_GETTOPINDEX, 0, 0));
+        UINT wheelLines = 3;
+        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &wheelLines, 0);
+        int step = wheelLines == WHEEL_PAGESCROLL ? std::max(1, visibleItems - 1) : static_cast<int>(wheelLines);
+        if (step <= 0) {
+            step = 3;
+        }
+        const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        const int newTopIndex = std::clamp(topIndex - ((delta / WHEEL_DELTA) * step), 0, maxTopIndex);
+        if (newTopIndex != topIndex) {
+            SendMessageW(window, LB_SETTOPINDEX, static_cast<WPARAM>(newTopIndex), 0);
+            PostMessageW(GetParent(window), kMsgShortcutListInvalidated, 0, 0);
+        }
+        return 0;
+    }
+
+    const LRESULT result = DefSubclassProc(window, message, wParam, lParam);
+    switch (message) {
+    case WM_VSCROLL:
+    case WM_KEYDOWN:
+    case WM_LBUTTONUP:
+    case WM_MOUSEMOVE:
+        PostMessageW(GetParent(window), kMsgShortcutListInvalidated, 0, 0);
+        break;
+    default:
+        break;
+    }
+    return result;
 }
 
 std::wstring FormatFloatSliderLabel(const wchar_t* prefix, float value, int multiplier) {
@@ -521,11 +567,17 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, UINT dpi) {
     const int shortcutLeftWidth = (availableWidth * 62) / 100;
     layout.shortcutListSection = MakeRect(contentLeft, contentTopInner, contentLeft + shortcutLeftWidth, contentBottomInner);
     layout.shortcutActionsSection = MakeRect(layout.shortcutListSection.right + sectionGap, contentTopInner, contentRight, contentBottomInner);
+    const int shortcutScrollbarReserve = px(kScrollbarGap + kScrollbarWidth);
     layout.shortcutListRect = MakeRect(
         layout.shortcutListSection.left + sectionPadding,
         layout.shortcutListSection.top + sectionHeaderContentTop,
-        layout.shortcutListSection.right - sectionPadding,
+        layout.shortcutListSection.right - sectionPadding - shortcutScrollbarReserve,
         layout.shortcutListSection.bottom - sectionPadding);
+    layout.shortcutScrollbarTrackRect = MakeRect(
+        layout.shortcutListRect.right + px(kScrollbarGap),
+        layout.shortcutListRect.top,
+        layout.shortcutListRect.right + px(kScrollbarGap + kScrollbarWidth),
+        layout.shortcutListRect.bottom);
     layout.changeShortcutButton = MakeRect(
         layout.shortcutActionsSection.left + sectionPadding,
         layout.shortcutActionsSection.top + px(96),
@@ -579,30 +631,85 @@ int SliderThumbCenterX(const RECT& trackRect, int value, int minimum, int maximu
     return trackRect.left + static_cast<int>(std::lround(normalized * static_cast<float>(width - 1)));
 }
 
-void FillHuePreviewTrack(HDC hdc, const RECT& trackRect, float saturation, float lightness) {
+bool ComputeListScrollbarThumbRect(HWND listbox, const RECT& listRect, const RECT& trackRect, int itemHeight, UINT dpi, RECT& thumbRect) {
+    if (listbox == nullptr || itemHeight <= 0) {
+        return false;
+    }
+
+    const int itemCount = static_cast<int>(SendMessageW(listbox, LB_GETCOUNT, 0, 0));
+    if (itemCount <= 0) {
+        return false;
+    }
+
+    const int viewportHeight = std::max(1, static_cast<int>(listRect.bottom - listRect.top));
+    const int visibleItems = std::max(1, viewportHeight / itemHeight);
+    if (itemCount <= visibleItems) {
+        return false;
+    }
+
+    const int topIndex = static_cast<int>(SendMessageW(listbox, LB_GETTOPINDEX, 0, 0));
+    const int trackHeight = std::max(1, static_cast<int>(trackRect.bottom - trackRect.top));
+    const int thumbHeight = std::min(trackHeight, std::max(ScaleForDpi(kScrollbarMinThumbHeight, dpi), (trackHeight * visibleItems) / itemCount));
+    const int maxTopIndex = std::max(1, itemCount - visibleItems);
+    const int travel = std::max(1, trackHeight - thumbHeight);
+    const int thumbTop = trackRect.top + ((std::clamp(topIndex, 0, maxTopIndex) * travel) / maxTopIndex);
+    thumbRect = MakeRect(trackRect.left, thumbTop, trackRect.right, thumbTop + thumbHeight);
+    return true;
+}
+
+RECT ControlRectInParent(HWND control, HWND parent) {
+    RECT rect {};
+    if (control == nullptr || parent == nullptr) {
+        return rect;
+    }
+
+    GetWindowRect(control, &rect);
+    MapWindowPoints(HWND_DESKTOP, parent, reinterpret_cast<LPPOINT>(&rect), 2);
+    return rect;
+}
+
+template <typename ColorFn>
+void FillTrackWithColorFunction(HDC hdc, const RECT& trackRect, ColorFn&& colorFn) {
     const int width = std::max(1, static_cast<int>(trackRect.right - trackRect.left));
     const int height = std::max(1, static_cast<int>(trackRect.bottom - trackRect.top));
 
     Gdiplus::Graphics graphics(hdc);
-    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-
-    const auto clipPath = CreateRoundedRectPath(trackRect, 6.0f);
-    graphics.SetClip(clipPath.get());
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeNone);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
+    graphics.SetClip(Gdiplus::Rect(trackRect.left, trackRect.top, width, height));
 
     for (int offset = 0; offset < width; ++offset) {
         const float normalized = width > 1 ? static_cast<float>(offset) / static_cast<float>(width - 1) : 0.0f;
-        const std::uint32_t color = HslToColor(normalized * 360.0f, saturation, lightness);
-        Gdiplus::Pen pen(Gdiplus::Color(
+        const std::uint32_t color = colorFn(normalized);
+        Gdiplus::SolidBrush brush(Gdiplus::Color(
             255,
             static_cast<BYTE>((color >> 16U) & 0xFFU),
             static_cast<BYTE>((color >> 8U) & 0xFFU),
             static_cast<BYTE>(color & 0xFFU)));
-        const Gdiplus::REAL x = static_cast<Gdiplus::REAL>(trackRect.left + offset);
-        graphics.DrawLine(&pen, x, static_cast<Gdiplus::REAL>(trackRect.top), x, static_cast<Gdiplus::REAL>(trackRect.top + height));
+        graphics.FillRectangle(
+            &brush,
+            Gdiplus::Rect(trackRect.left + offset, trackRect.top, 1, height));
     }
 
     graphics.ResetClip();
+}
+
+void FillHuePreviewTrack(HDC hdc, const RECT& trackRect, float saturation, float lightness) {
+    FillTrackWithColorFunction(hdc, trackRect, [=](float normalized) {
+        return HslToColor(normalized * 360.0f, saturation, lightness);
+    });
+}
+
+void FillSaturationPreviewTrack(HDC hdc, const RECT& trackRect, float hue, float lightness) {
+    FillTrackWithColorFunction(hdc, trackRect, [=](float normalized) {
+        return HslToColor(hue, normalized, lightness);
+    });
+}
+
+void FillLightnessPreviewTrack(HDC hdc, const RECT& trackRect, float hue, float saturation) {
+    FillTrackWithColorFunction(hdc, trackRect, [=](float normalized) {
+        return HslToColor(hue, saturation, normalized);
+    });
 }
 
 void DeferMoveControl(HDWP& deferred, HWND control, const RECT& rect) {
@@ -777,7 +884,7 @@ void SettingsWindow::CreateControls() {
         0,
         L"LISTBOX",
         nullptr,
-        WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_TABSTOP | WS_VSCROLL | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+        WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_TABSTOP | WS_VSCROLL | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
         0,
         0,
         ScaleForDpi(260, dpi),
@@ -791,14 +898,14 @@ void SettingsWindow::CreateControls() {
     hexColorEdit_ = createEdit(kIdHexColorEdit, 0, 0, ScaleForDpi(124, dpi), ScaleForDpi(24, dpi));
     SetWindowSubclass(hexColorEdit_, HexColorEditSubclassProc, 0, 0);
     savedPaletteNameEdit_ = createEdit(kIdSavedPaletteName, 0, 0, ScaleForDpi(220, dpi), ScaleForDpi(24, dpi));
-    savePaletteButton_ = createButton(L"Save Current", kIdSavePalette, 0, 0, ScaleForDpi(120, dpi), ScaleForDpi(30, dpi));
-    applyPaletteButton_ = createButton(L"Apply Saved", kIdApplyPalette, 0, 0, ScaleForDpi(120, dpi), ScaleForDpi(30, dpi));
-    deletePaletteButton_ = createButton(L"Delete Saved", kIdDeletePalette, 0, 0, ScaleForDpi(120, dpi), ScaleForDpi(30, dpi));
+    savePaletteButton_ = createButton(L"Save", kIdSavePalette, 0, 0, ScaleForDpi(120, dpi), ScaleForDpi(30, dpi));
+    applyPaletteButton_ = createButton(L"Apply", kIdApplyPalette, 0, 0, ScaleForDpi(120, dpi), ScaleForDpi(30, dpi));
+    deletePaletteButton_ = createButton(L"Delete", kIdDeletePalette, 0, 0, ScaleForDpi(120, dpi), ScaleForDpi(30, dpi));
     savedPaletteList_ = CreateWindowExW(
         0,
         L"LISTBOX",
         nullptr,
-        WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_TABSTOP | WS_VSCROLL | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+        WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_TABSTOP | WS_VSCROLL | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
         0,
         0,
         ScaleForDpi(240, dpi),
@@ -834,7 +941,7 @@ void SettingsWindow::CreateControls() {
         0,
         L"LISTBOX",
         nullptr,
-        WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_TABSTOP | WS_VSCROLL | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+        WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_TABSTOP | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
         0,
         0,
         ScaleForDpi(300, dpi),
@@ -843,6 +950,8 @@ void SettingsWindow::CreateControls() {
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdShortcutList)),
         app_.instance_,
         nullptr);
+    SetWindowSubclass(shortcutList_, ShortcutListSubclassProc, 0, 0);
+    ShowScrollBar(shortcutList_, SB_VERT, FALSE);
     changeShortcutButton_ = createButton(L"Change Shortcut", kIdChangeShortcut, 0, 0, ScaleForDpi(148, dpi), ScaleForDpi(30, dpi));
     clearShortcutButton_ = createButton(L"Clear Shortcut", kIdClearShortcut, 0, 0, ScaleForDpi(148, dpi), ScaleForDpi(30, dpi));
     shortcutHintLabel_ = createLabel(L"Select a command to edit its binding.", 0, 0, ScaleForDpi(180, dpi), ScaleForDpi(84, dpi));
@@ -1060,7 +1169,7 @@ void SettingsWindow::RefreshVisibleControls() {
     setVisible(applyPaletteButton_, showPalette);
     setVisible(deletePaletteButton_, showPalette);
     setVisible(savedPaletteList_, showPalette);
-    setVisible(savedPaletteHintLabel_, showPalette);
+    setVisible(savedPaletteHintLabel_, false);
 
     setVisible(redLabel_, showPalette);
     setVisible(redSlider_, false);
@@ -1167,13 +1276,14 @@ void SettingsWindow::InvalidateSliderPresentation(SliderKind kind) {
     RECT dirtyRect {};
     switch (kind) {
     case SliderKind::Hue:
-        dirtyRect = UnionRectCopy(layout.colorPreviewRect, UnionRectCopy(layout.redLabelRect, layout.redSliderRect));
-        break;
     case SliderKind::Saturation:
-        dirtyRect = UnionRectCopy(layout.colorPreviewRect, UnionRectCopy(layout.greenLabelRect, layout.greenSliderRect));
-        break;
     case SliderKind::Lightness:
-        dirtyRect = UnionRectCopy(layout.colorPreviewRect, UnionRectCopy(layout.blueLabelRect, layout.blueSliderRect));
+        dirtyRect = UnionRectCopy(
+            layout.colorPreviewRect,
+            UnionRectCopy(
+                UnionRectCopy(layout.redLabelRect, layout.redSliderRect),
+                UnionRectCopy(layout.greenLabelRect, layout.greenSliderRect)));
+        dirtyRect = UnionRectCopy(dirtyRect, UnionRectCopy(layout.blueLabelRect, layout.blueSliderRect));
         break;
     case SliderKind::Stabilization:
         dirtyRect = UnionRectCopy(layout.stabilizationLabelRect, layout.stabilizationSliderRect);
@@ -1559,6 +1669,7 @@ void SettingsWindow::PaintWindow() {
         TextOutW(memoryDc, layout.savedPaletteSection.left + Scale(14), layout.savedPaletteSection.top + Scale(14), L"Saved Palettes", 14);
         TextOutW(memoryDc, layout.colorSection.left + Scale(14), layout.colorSection.top + Scale(14), L"Selected Color", 14);
         SetTextColor(memoryDc, kTextMuted);
+        paintWrappedDescription(layout.savedPaletteSection, L"Save the current swatches under a name, then select and apply them later.");
         paintWrappedDescription(layout.paletteSection, L"Manage your active swatches without leaving the document.");
         paintWrappedDescription(layout.colorSection, L"Adjust the active palette color in HSL.");
         RECT savedPaletteLabelRect = layout.savedPaletteLabelRect;
@@ -1601,16 +1712,25 @@ void SettingsWindow::PaintWindow() {
 
     const auto paintSlider = [&](SliderKind kind, RECT sliderRect, int minimum, int maximum) {
         const RECT trackRect = SliderTrackRect(sliderRect, CurrentDpi());
-        if (kind == SliderKind::Hue) {
-            const float saturation = static_cast<float>(SliderValue(SliderKind::Saturation)) / 100.0f;
-            const float lightness = static_cast<float>(SliderValue(SliderKind::Lightness)) / 100.0f;
+        const float hue = static_cast<float>(SliderValue(SliderKind::Hue));
+        const float saturation = static_cast<float>(SliderValue(SliderKind::Saturation)) / 100.0f;
+        const float lightness = static_cast<float>(SliderValue(SliderKind::Lightness)) / 100.0f;
+        switch (kind) {
+        case SliderKind::Hue:
             FillHuePreviewTrack(memoryDc, trackRect, saturation, lightness);
-            StrokeRoundedRect(memoryDc, trackRect, RGB(215, 223, 232), 1);
-        } else {
+            break;
+        case SliderKind::Saturation:
+            FillSaturationPreviewTrack(memoryDc, trackRect, hue, lightness);
+            break;
+        case SliderKind::Lightness:
+            FillLightnessPreviewTrack(memoryDc, trackRect, hue, saturation);
+            break;
+        default:
             FillRoundedRect(memoryDc, trackRect, RGB(41, 51, 66));
+            break;
         }
         const int thumbCenterX = SliderThumbCenterX(trackRect, SliderValue(kind), minimum, maximum);
-        if (kind != SliderKind::Hue) {
+        if (kind != SliderKind::Hue && kind != SliderKind::Saturation && kind != SliderKind::Lightness) {
             RECT fillRect = trackRect;
             fillRect.right = static_cast<LONG>(std::max<int>(fillRect.left + 1, thumbCenterX + 1));
             FillRoundedRect(memoryDc, fillRect, RGB(92, 137, 187));
@@ -1635,6 +1755,19 @@ void SettingsWindow::PaintWindow() {
         paintSlider(SliderKind::Spacing, layout.spacingSliderRect, 5, 405);
         paintSlider(SliderKind::StrokeSmoothing, layout.strokeSmoothingSliderRect, 0, 100);
         paintSlider(SliderKind::AutoSave, layout.autoSaveSliderRect, 0, 300);
+    } else if (activeCategory_ == Category::Shortcuts) {
+        const RECT shortcutListRect = ControlRectInParent(shortcutList_, window_);
+        const RECT shortcutTrackRect = MakeRect(
+            shortcutListRect.right + Scale(kScrollbarGap),
+            shortcutListRect.top,
+            shortcutListRect.right + Scale(kScrollbarGap + kScrollbarWidth),
+            shortcutListRect.bottom);
+        RECT shortcutThumbRect {};
+        if (ComputeListScrollbarThumbRect(shortcutList_, shortcutListRect, shortcutTrackRect, Scale(26), CurrentDpi(), shortcutThumbRect)) {
+            FillRoundedRect(memoryDc, shortcutTrackRect, kScrollbarTrackFill);
+            StrokeRoundedRect(memoryDc, shortcutTrackRect, kPanelBorder, 1);
+            FillRoundedRect(memoryDc, shortcutThumbRect, draggingShortcutScrollbar_ ? kScrollbarThumbActiveFill : kScrollbarThumbFill);
+        }
     }
 
     const int paintWidth = std::max(0L, paint.rcPaint.right - paint.rcPaint.left);
@@ -2212,6 +2345,25 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
         LayoutControls();
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
+    case WM_MOUSEWHEEL:
+        if (activeCategory_ == Category::Shortcuts) {
+            POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(window_, &cursor);
+            RECT clientRect {};
+            GetClientRect(window_, &clientRect);
+            const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+            const RECT shortcutListRect = ControlRectInParent(shortcutList_, window_);
+            const RECT shortcutTrackRect = MakeRect(
+                shortcutListRect.right + Scale(kScrollbarGap),
+                shortcutListRect.top,
+                shortcutListRect.right + Scale(kScrollbarGap + kScrollbarWidth),
+                shortcutListRect.bottom);
+            if (PtInRect(&layout.shortcutListSection, cursor) != 0 || PtInRect(&shortcutTrackRect, cursor) != 0) {
+                SendMessageW(shortcutList_, WM_MOUSEWHEEL, wParam, lParam);
+                return 0;
+            }
+        }
+        break;
     case WM_LBUTTONDOWN:
     {
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -2221,6 +2373,32 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
 
         if (editingHexColor_ && PtInRect(&layout.hexColorEditRect, cursor) == 0) {
             CommitHexColorEdit(true);
+        }
+        if (activeCategory_ == Category::Shortcuts) {
+            const RECT shortcutListRect = ControlRectInParent(shortcutList_, window_);
+            const RECT shortcutTrackRect = MakeRect(
+                shortcutListRect.right + Scale(kScrollbarGap),
+                shortcutListRect.top,
+                shortcutListRect.right + Scale(kScrollbarGap + kScrollbarWidth),
+                shortcutListRect.bottom);
+            RECT shortcutThumbRect {};
+            if (ComputeListScrollbarThumbRect(shortcutList_, shortcutListRect, shortcutTrackRect, Scale(26), CurrentDpi(), shortcutThumbRect)) {
+                if (PtInRect(&shortcutThumbRect, cursor) != 0) {
+                    draggingShortcutScrollbar_ = true;
+                    shortcutScrollbarDragOffset_ = cursor.y - shortcutThumbRect.top;
+                    SetCapture(window_);
+                    InvalidateWindowRegion(shortcutTrackRect);
+                    return 0;
+                }
+                if (PtInRect(&shortcutTrackRect, cursor) != 0) {
+                    const int pageStep = std::max(1, static_cast<int>((shortcutListRect.bottom - shortcutListRect.top) / Scale(26)) - 2);
+                    int topIndex = static_cast<int>(SendMessageW(shortcutList_, LB_GETTOPINDEX, 0, 0));
+                    topIndex += cursor.y < shortcutThumbRect.top ? -pageStep : pageStep;
+                    SendMessageW(shortcutList_, LB_SETTOPINDEX, static_cast<WPARAM>(std::max(0, topIndex)), 0);
+                    InvalidateWindowRegion(layout.shortcutListSection);
+                    return 0;
+                }
+            }
         }
         if (activeCategory_ == Category::Palette && PtInRect(&layout.colorPreviewRect, cursor) != 0) {
             BeginHexColorEdit();
@@ -2235,12 +2413,55 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
         break;
     }
     case WM_MOUSEMOVE:
+        if (draggingShortcutScrollbar_) {
+            RECT clientRect {};
+            GetClientRect(window_, &clientRect);
+            const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+            const RECT shortcutListRect = ControlRectInParent(shortcutList_, window_);
+            const RECT shortcutTrackRect = MakeRect(
+                shortcutListRect.right + Scale(kScrollbarGap),
+                shortcutListRect.top,
+                shortcutListRect.right + Scale(kScrollbarGap + kScrollbarWidth),
+                shortcutListRect.bottom);
+            RECT shortcutThumbRect {};
+            if (!ComputeListScrollbarThumbRect(shortcutList_, shortcutListRect, shortcutTrackRect, Scale(26), CurrentDpi(), shortcutThumbRect)) {
+                return 0;
+            }
+
+            const int thumbHeight = static_cast<int>(shortcutThumbRect.bottom - shortcutThumbRect.top);
+            const int itemCount = static_cast<int>(SendMessageW(shortcutList_, LB_GETCOUNT, 0, 0));
+            const int visibleItems = std::max(1, static_cast<int>((shortcutListRect.bottom - shortcutListRect.top) / Scale(26)));
+            const int maxTopIndex = std::max(0, itemCount - visibleItems);
+            const int travel = std::max(1, static_cast<int>(shortcutTrackRect.bottom - shortcutTrackRect.top) - thumbHeight);
+            const int thumbTop = std::clamp(
+                GET_Y_LPARAM(lParam) - shortcutScrollbarDragOffset_,
+                static_cast<int>(shortcutTrackRect.top),
+                static_cast<int>(shortcutTrackRect.bottom) - thumbHeight);
+            const int newTopIndex = maxTopIndex > 0
+                ? ((thumbTop - static_cast<int>(shortcutTrackRect.top)) * maxTopIndex) / travel
+                : 0;
+            SendMessageW(shortcutList_, LB_SETTOPINDEX, static_cast<WPARAM>(newTopIndex), 0);
+            InvalidateWindowRegion(layout.shortcutListSection);
+            return 0;
+        }
         if (draggingSlider_.has_value()) {
             UpdateSliderFromPoint(*draggingSlider_, { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) });
             return 0;
         }
         break;
     case WM_LBUTTONUP:
+        if (draggingShortcutScrollbar_) {
+            draggingShortcutScrollbar_ = false;
+            ReleaseCapture();
+            const RECT shortcutListRect = ControlRectInParent(shortcutList_, window_);
+            const RECT shortcutTrackRect = MakeRect(
+                shortcutListRect.right + Scale(kScrollbarGap),
+                shortcutListRect.top,
+                shortcutListRect.right + Scale(kScrollbarGap + kScrollbarWidth),
+                shortcutListRect.bottom);
+            InvalidateWindowRegion(shortcutTrackRect);
+            return 0;
+        }
         if (draggingSlider_.has_value()) {
             const SliderKind slider = *draggingSlider_;
             draggingSlider_.reset();
@@ -2250,6 +2471,16 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
         }
         break;
     case WM_CAPTURECHANGED:
+        if (draggingShortcutScrollbar_) {
+            draggingShortcutScrollbar_ = false;
+            const RECT shortcutListRect = ControlRectInParent(shortcutList_, window_);
+            const RECT shortcutTrackRect = MakeRect(
+                shortcutListRect.right + Scale(kScrollbarGap),
+                shortcutListRect.top,
+                shortcutListRect.right + Scale(kScrollbarGap + kScrollbarWidth),
+                shortcutListRect.bottom);
+            InvalidateWindowRegion(shortcutTrackRect);
+        }
         if (draggingSlider_.has_value()) {
             const SliderKind slider = *draggingSlider_;
             draggingSlider_.reset();
@@ -2311,6 +2542,14 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
         }
         break;
     }
+    case kMsgShortcutListInvalidated:
+    {
+        RECT clientRect {};
+        GetClientRect(window_, &clientRect);
+        const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+        InvalidateWindowRegion(layout.shortcutListSection);
+        return 0;
+    }
     case WM_COMMAND:
         HandleCommand(wParam, lParam);
         return 0;
@@ -2330,6 +2569,7 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
         window_ = nullptr;
         capturingShortcutAction_.reset();
         draggingSlider_.reset();
+        draggingShortcutScrollbar_ = false;
         activeCategory_ = Category::Palette;
         return 0;
     default:

@@ -120,6 +120,8 @@ private:
     HWND shortcutHintLabel_ = nullptr;
     std::optional<App::ShortcutAction> capturingShortcutAction_ {};
     std::optional<SliderKind> draggingSlider_ {};
+    bool draggingShortcutScrollbar_ = false;
+    int shortcutScrollbarDragOffset_ = 0;
     bool editingHexColor_ = false;
     Category activeCategory_ = Category::Palette;
     UINT currentDpi_ = USER_DEFAULT_SCREEN_DPI;

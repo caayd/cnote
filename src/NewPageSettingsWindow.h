@@ -20,9 +20,9 @@ public:
 
 private:
     enum class SliderKind {
-        Red,
-        Green,
-        Blue,
+        Hue,
+        Saturation,
+        Lightness,
     };
 
     void CreateIfNeeded(HWND owner);
@@ -38,13 +38,13 @@ private:
     HBRUSH HandleControlColor(HDC hdc, HWND control);
     void PaintWindow();
     void DrawButton(const DRAWITEMSTRUCT& drawItem);
+    void BeginHexColorEdit();
+    void CommitHexColorEdit(bool applyChanges);
+    void OpenDimensionPresetMenu();
     void ApplyDraftToCurrentPage();
     void ApplyDraftToAllPages();
     void ApplyDraftToFuturePages();
     void ResetDraftToDefaults();
-    void SyncDimensionPresetSelection();
-    void ApplySelectedDimensionPreset();
-    [[nodiscard]] bool PasteHexColorFromClipboard();
     void UpdateSliderFromPoint(SliderKind kind, POINT cursor);
     [[nodiscard]] std::optional<SliderKind> HitTestSlider(POINT cursor) const;
     [[nodiscard]] int SliderValue(SliderKind kind) const;
@@ -65,8 +65,7 @@ private:
     HBRUSH toolbarBrush_ = nullptr;
     HWND widthEdit_ = nullptr;
     HWND heightEdit_ = nullptr;
-    HWND dimensionPresetCombo_ = nullptr;
-    HWND pasteHexButton_ = nullptr;
+    HWND hexColorEdit_ = nullptr;
     HWND appendButton_ = nullptr;
     HWND resetButton_ = nullptr;
     HWND applyCurrentButton_ = nullptr;
@@ -83,7 +82,7 @@ private:
     bool draggingScrollbar_ = false;
     int scrollbarDragOffset_ = 0;
     int wheelRemainder_ = 0;
-    bool suppressPresetSelection_ = false;
+    bool editingHexColor_ = false;
 };
 
 }  // namespace cnote

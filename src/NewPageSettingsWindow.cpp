@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include <commctrl.h>
 #include <dwmapi.h>
 #include <gdiplus.h>
 #include <uxtheme.h>
@@ -31,6 +32,7 @@ constexpr COLORREF kPanelFill = RGB(18, 24, 32);
 constexpr COLORREF kPanelBorder = RGB(46, 58, 74);
 constexpr COLORREF kButtonFill = RGB(28, 34, 43);
 constexpr COLORREF kButtonFillActive = RGB(48, 68, 94);
+constexpr COLORREF kButtonFillHover = RGB(38, 48, 61);
 constexpr COLORREF kInputFill = RGB(23, 30, 39);
 constexpr COLORREF kTextPrimary = RGB(235, 240, 246);
 constexpr COLORREF kTextMuted = RGB(141, 152, 167);
@@ -49,10 +51,10 @@ constexpr int kIdHeightEdit = 101;
 constexpr int kIdAppendPages = 102;
 constexpr int kIdResetDefaults = 103;
 constexpr int kIdApplyCurrent = 104;
-constexpr int kIdPasteHex = 105;
+constexpr int kIdHexColorEdit = 105;
 constexpr int kIdApplyFuture = 106;
-constexpr int kIdDimensionPresetCombo = 107;
 constexpr int kIdApplyAll = 108;
+constexpr UINT kDimensionPresetMenuBase = 400;
 
 constexpr std::array<std::uint32_t, 10> kDefaultPageColors {
     0xFFFFFFFFU,
@@ -95,7 +97,7 @@ struct NewPageSettingsLayout {
     RECT previousColorsLabelRect {};
     std::vector<RECT> previousColorSwatches {};
     RECT previousColorsEmptyRect {};
-    RECT pasteHexButtonRect {};
+    RECT hexColorEditRect {};
     RECT redLabelRect {};
     RECT redSliderRect {};
     RECT greenLabelRect {};
@@ -144,6 +146,90 @@ std::wstring FormatHexColor(std::uint32_t color) {
 
 bool NearlyEqual(float left, float right, float epsilon = 0.5f) {
     return std::abs(left - right) <= epsilon;
+}
+
+struct HslColor {
+    float hue = 0.0f;
+    float saturation = 0.0f;
+    float lightness = 0.0f;
+};
+
+HslColor RgbToHsl(std::uint32_t color) {
+    const float red = static_cast<float>((color >> 16U) & 0xFFU) / 255.0f;
+    const float green = static_cast<float>((color >> 8U) & 0xFFU) / 255.0f;
+    const float blue = static_cast<float>(color & 0xFFU) / 255.0f;
+    const float maxChannel = std::max({ red, green, blue });
+    const float minChannel = std::min({ red, green, blue });
+    const float delta = maxChannel - minChannel;
+
+    HslColor hsl {};
+    hsl.lightness = (maxChannel + minChannel) * 0.5f;
+    if (delta <= 0.0001f) {
+        return hsl;
+    }
+
+    hsl.saturation = delta / (1.0f - std::abs((2.0f * hsl.lightness) - 1.0f));
+    if (maxChannel == red) {
+        hsl.hue = 60.0f * std::fmod(((green - blue) / delta), 6.0f);
+    } else if (maxChannel == green) {
+        hsl.hue = 60.0f * (((blue - red) / delta) + 2.0f);
+    } else {
+        hsl.hue = 60.0f * (((red - green) / delta) + 4.0f);
+    }
+    if (hsl.hue < 0.0f) {
+        hsl.hue += 360.0f;
+    }
+    return hsl;
+}
+
+std::uint32_t HslToColor(float hueDegrees, float saturation, float lightness) {
+    const float hue = std::fmod(std::max(0.0f, hueDegrees), 360.0f);
+    const float clampedSaturation = std::clamp(saturation, 0.0f, 1.0f);
+    const float clampedLightness = std::clamp(lightness, 0.0f, 1.0f);
+    const float chroma = (1.0f - std::abs((2.0f * clampedLightness) - 1.0f)) * clampedSaturation;
+    const float huePrime = hue / 60.0f;
+    const float x = chroma * (1.0f - std::abs(std::fmod(huePrime, 2.0f) - 1.0f));
+    float red = 0.0f;
+    float green = 0.0f;
+    float blue = 0.0f;
+
+    if (huePrime < 1.0f) {
+        red = chroma;
+        green = x;
+    } else if (huePrime < 2.0f) {
+        red = x;
+        green = chroma;
+    } else if (huePrime < 3.0f) {
+        green = chroma;
+        blue = x;
+    } else if (huePrime < 4.0f) {
+        green = x;
+        blue = chroma;
+    } else if (huePrime < 5.0f) {
+        red = x;
+        blue = chroma;
+    } else {
+        red = chroma;
+        blue = x;
+    }
+
+    const float match = clampedLightness - (chroma * 0.5f);
+    const auto outRed = static_cast<std::uint32_t>(std::clamp(std::lround((red + match) * 255.0f), 0L, 255L));
+    const auto outGreen = static_cast<std::uint32_t>(std::clamp(std::lround((green + match) * 255.0f), 0L, 255L));
+    const auto outBlue = static_cast<std::uint32_t>(std::clamp(std::lround((blue + match) * 255.0f), 0L, 255L));
+    return 0xFF000000U | (outRed << 16U) | (outGreen << 8U) | outBlue;
+}
+
+std::wstring FormatHueLabel(int hue) {
+    wchar_t buffer[64] = {};
+    std::swprintf(buffer, std::size(buffer), L"Hue: %d deg", hue);
+    return buffer;
+}
+
+std::wstring FormatPercentLabel(const wchar_t* prefix, int value) {
+    wchar_t buffer[64] = {};
+    std::swprintf(buffer, std::size(buffer), L"%ls: %d%%", prefix, value);
+    return buffer;
 }
 
 std::optional<float> ParsePositiveFloat(std::wstring value) {
@@ -197,6 +283,40 @@ void SetControlText(HWND control, const std::wstring& text) {
     if (control != nullptr) {
         SetWindowTextW(control, text.c_str());
     }
+}
+
+LRESULT CALLBACK HexColorEditSubclassProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR) {
+    switch (message) {
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN) {
+            SetFocus(GetParent(window));
+            return 0;
+        }
+        break;
+    default:
+        break;
+    }
+
+    return DefSubclassProc(window, message, wParam, lParam);
+}
+
+int MatchingDimensionPresetSelection(float width, float height) {
+    int selectedIndex = 0;
+    for (std::size_t index = 0; index < kDimensionPresets.size(); ++index) {
+        const DimensionPreset& preset = kDimensionPresets[index];
+        if (NearlyEqual(width, preset.width) && NearlyEqual(height, preset.height)) {
+            selectedIndex = static_cast<int>(index + 1U);
+            break;
+        }
+    }
+    return selectedIndex;
+}
+
+std::wstring DimensionPresetLabelForSelection(int selectedIndex) {
+    if (selectedIndex <= 0 || static_cast<std::size_t>(selectedIndex - 1) >= kDimensionPresets.size()) {
+        return L"Custom";
+    }
+    return kDimensionPresets[static_cast<std::size_t>(selectedIndex - 1)].label;
 }
 
 std::unique_ptr<Gdiplus::GraphicsPath> CreateRoundedRectPath(const RECT& rect, float radius) {
@@ -254,6 +374,50 @@ int SliderThumbCenterX(const RECT& trackRect, int value, int minimum, int maximu
     return trackRect.left + static_cast<int>(std::lround(normalized * static_cast<float>(width - 1)));
 }
 
+template <typename ColorFn>
+void FillTrackWithColorFunction(HDC hdc, const RECT& trackRect, ColorFn&& colorFn) {
+    const int width = std::max(1, static_cast<int>(trackRect.right - trackRect.left));
+    const int height = std::max(1, static_cast<int>(trackRect.bottom - trackRect.top));
+
+    Gdiplus::Graphics graphics(hdc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeNone);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
+    graphics.SetClip(Gdiplus::Rect(trackRect.left, trackRect.top, width, height));
+
+    for (int offset = 0; offset < width; ++offset) {
+        const float normalized = width > 1 ? static_cast<float>(offset) / static_cast<float>(width - 1) : 0.0f;
+        const std::uint32_t color = colorFn(normalized);
+        Gdiplus::SolidBrush brush(Gdiplus::Color(
+            255,
+            static_cast<BYTE>((color >> 16U) & 0xFFU),
+            static_cast<BYTE>((color >> 8U) & 0xFFU),
+            static_cast<BYTE>(color & 0xFFU)));
+        graphics.FillRectangle(
+            &brush,
+            Gdiplus::Rect(trackRect.left + offset, trackRect.top, 1, height));
+    }
+
+    graphics.ResetClip();
+}
+
+void FillHuePreviewTrack(HDC hdc, const RECT& trackRect, float saturation, float lightness) {
+    FillTrackWithColorFunction(hdc, trackRect, [=](float normalized) {
+        return HslToColor(normalized * 360.0f, saturation, lightness);
+    });
+}
+
+void FillSaturationPreviewTrack(HDC hdc, const RECT& trackRect, float hue, float lightness) {
+    FillTrackWithColorFunction(hdc, trackRect, [=](float normalized) {
+        return HslToColor(hue, normalized, lightness);
+    });
+}
+
+void FillLightnessPreviewTrack(HDC hdc, const RECT& trackRect, float hue, float saturation) {
+    FillTrackWithColorFunction(hdc, trackRect, [=](float normalized) {
+        return HslToColor(hue, saturation, normalized);
+    });
+}
+
 void DeferMoveControl(HDWP& deferred, HWND control, const RECT& rect) {
     if (deferred == nullptr || control == nullptr) {
         return;
@@ -267,7 +431,7 @@ void DeferMoveControl(HDWP& deferred, HWND control, const RECT& rect) {
         rect.top,
         rect.right - rect.left,
         rect.bottom - rect.top,
-        SWP_NOZORDER | SWP_NOACTIVATE);
+        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
 }
 
 bool RectFullyInside(const RECT& outer, const RECT& inner) {
@@ -275,6 +439,36 @@ bool RectFullyInside(const RECT& outer, const RECT& inner) {
         && inner.top >= outer.top
         && inner.right <= outer.right
         && inner.bottom <= outer.bottom;
+}
+
+void SyncScrollableControl(HWND control, const RECT& rect, const RECT& viewportRect, bool visible) {
+    if (control == nullptr) {
+        return;
+    }
+
+    const bool fullyVisible = visible && RectFullyInside(viewportRect, rect);
+    if (!fullyVisible) {
+        SetWindowRgn(control, nullptr, FALSE);
+        SetWindowPos(
+            control,
+            nullptr,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_HIDEWINDOW);
+        return;
+    }
+
+    SetWindowRgn(control, nullptr, FALSE);
+    SetWindowPos(
+        control,
+        nullptr,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_SHOWWINDOW);
 }
 
 NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount, int scrollOffset, UINT dpi) {
@@ -304,6 +498,13 @@ NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount,
     const int contentRight = defaultsRight - panelPadding;
 
     layout.colorPreviewRect = MakeRect(contentLeft, top + px(34), contentRight, top + px(110));
+    const int previewWidth = static_cast<int>(layout.colorPreviewRect.right - layout.colorPreviewRect.left);
+    const int hexEditWidth = std::max(px(84), std::min(px(132), previewWidth - px(24)));
+    layout.hexColorEditRect = MakeRect(
+        layout.colorPreviewRect.left + ((previewWidth - hexEditWidth) / 2),
+        layout.colorPreviewRect.top + px(10),
+        layout.colorPreviewRect.left + ((previewWidth - hexEditWidth) / 2) + hexEditWidth,
+        layout.colorPreviewRect.top + px(34));
 
     layout.defaultColorsLabelRect = MakeRect(contentLeft, layout.colorPreviewRect.bottom + px(12), contentRight, layout.colorPreviewRect.bottom + px(30));
     const int defaultColumns = std::max(1, std::min(5, static_cast<int>(kDefaultPageColors.size())));
@@ -327,8 +528,7 @@ NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount,
         + (defaultRows * defaultSwatchHeight)
         + (std::max(0, defaultRows - 1) * defaultGap);
 
-    layout.previousColorsLabelRect = MakeRect(contentLeft, defaultGridBottom + px(12), contentRight - px(132), defaultGridBottom + px(30));
-    layout.pasteHexButtonRect = MakeRect(contentRight - px(120), defaultGridBottom + px(4), contentRight, defaultGridBottom + px(32));
+    layout.previousColorsLabelRect = MakeRect(contentLeft, defaultGridBottom + px(12), contentRight, defaultGridBottom + px(30));
 
     const int recentColumns = 6;
     const int recentGap = px(8);
@@ -426,7 +626,7 @@ NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount,
         offsetY(rect);
     }
     offsetY(layout.previousColorsEmptyRect);
-    offsetY(layout.pasteHexButtonRect);
+    offsetY(layout.hexColorEditRect);
     offsetY(layout.redLabelRect);
     offsetY(layout.redSliderRect);
     offsetY(layout.greenLabelRect);
@@ -606,37 +806,17 @@ void NewPageSettingsWindow::CreateControls() {
             app_.instance_,
             nullptr);
     };
-    const auto createComboBox = [&](int id) {
-        return CreateWindowExW(
-            0,
-            WC_COMBOBOXW,
-            L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
-            0,
-            0,
-            ScaleForDpi(220, dpi),
-            ScaleForDpi(240, dpi),
-            window_,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
-            app_.instance_,
-            nullptr);
-    };
 
     widthEdit_ = createEdit(kIdWidthEdit);
     heightEdit_ = createEdit(kIdHeightEdit);
-    dimensionPresetCombo_ = createComboBox(kIdDimensionPresetCombo);
-    pasteHexButton_ = createButton(L"Paste Hex", kIdPasteHex, ScaleForDpi(120, dpi));
+    hexColorEdit_ = createEdit(kIdHexColorEdit);
+    SetWindowSubclass(hexColorEdit_, HexColorEditSubclassProc, 0, 0);
     appendButton_ = createButton(L"Append Pages...", kIdAppendPages, ScaleForDpi(164, dpi));
     resetButton_ = createButton(L"Reset Defaults", kIdResetDefaults, ScaleForDpi(164, dpi));
     applyCurrentButton_ = createButton(L"Apply to Current Page", kIdApplyCurrent, ScaleForDpi(180, dpi));
     applyAllButton_ = createButton(L"Apply to All", kIdApplyAll, ScaleForDpi(118, dpi));
     applyFutureButton_ = createButton(L"Apply to Future Pages", kIdApplyFuture, ScaleForDpi(180, dpi));
-
-    SendMessageW(dimensionPresetCombo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Custom"));
-    for (const DimensionPreset& preset : kDimensionPresets) {
-        SendMessageW(dimensionPresetCombo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(preset.label));
-    }
-    SendMessageW(dimensionPresetCombo_, CB_SETCURSEL, 0, 0);
+    SendMessageW(hexColorEdit_, EM_LIMITTEXT, 10, 0);
 
     SyncDraftFromApp();
     LayoutControls();
@@ -686,8 +866,7 @@ void NewPageSettingsWindow::RebuildDpiResources(UINT dpi) {
     const HWND controls[] {
         widthEdit_,
         heightEdit_,
-        dimensionPresetCombo_,
-        pasteHexButton_,
+        hexColorEdit_,
         appendButton_,
         resetButton_,
         applyCurrentButton_,
@@ -697,20 +876,6 @@ void NewPageSettingsWindow::RebuildDpiResources(UINT dpi) {
     for (HWND control : controls) {
         if (control != nullptr) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
-        }
-    }
-
-    if (dimensionPresetCombo_ != nullptr) {
-        SetWindowTheme(dimensionPresetCombo_, L"DarkMode_CFD", nullptr);
-        COMBOBOXINFO comboInfo {};
-        comboInfo.cbSize = sizeof(comboInfo);
-        if (GetComboBoxInfo(dimensionPresetCombo_, &comboInfo) != FALSE) {
-            if (comboInfo.hwndList != nullptr) {
-                SetWindowTheme(comboInfo.hwndList, L"DarkMode_Explorer", nullptr);
-            }
-            if (comboInfo.hwndItem != nullptr) {
-                SetWindowTheme(comboInfo.hwndItem, L"DarkMode_CFD", nullptr);
-            }
         }
     }
 }
@@ -731,18 +896,11 @@ void NewPageSettingsWindow::LayoutControls() {
         contentHeight_ = layout.contentHeight;
     }
 
-    HDWP deferred = BeginDeferWindowPos(9);
+    SendMessageW(window_, WM_SETREDRAW, FALSE, 0);
+    HDWP deferred = BeginDeferWindowPos(8);
     DeferMoveControl(deferred, widthEdit_, layout.widthEditRect);
     DeferMoveControl(deferred, heightEdit_, layout.heightEditRect);
-    DeferMoveControl(
-        deferred,
-        dimensionPresetCombo_,
-        MakeRect(
-            layout.dimensionsComboRect.left,
-            layout.dimensionsComboRect.top,
-            layout.dimensionsComboRect.right,
-            layout.dimensionsComboRect.top + Scale(240)));
-    DeferMoveControl(deferred, pasteHexButton_, layout.pasteHexButtonRect);
+    DeferMoveControl(deferred, hexColorEdit_, layout.hexColorEditRect);
     DeferMoveControl(deferred, appendButton_, layout.appendButtonRect);
     DeferMoveControl(deferred, resetButton_, layout.resetButtonRect);
     DeferMoveControl(deferred, applyCurrentButton_, layout.applyCurrentButtonRect);
@@ -752,33 +910,24 @@ void NewPageSettingsWindow::LayoutControls() {
         EndDeferWindowPos(deferred);
     }
 
-    const auto syncScrollableControl = [&](HWND control, RECT rect, int dropdownHeight = 0) {
-        if (control == nullptr) {
-            return;
+    SyncScrollableControl(widthEdit_, layout.widthEditRect, layout.scrollViewportRect, true);
+    SyncScrollableControl(heightEdit_, layout.heightEditRect, layout.scrollViewportRect, true);
+    SyncScrollableControl(hexColorEdit_, layout.hexColorEditRect, layout.scrollViewportRect, editingHexColor_);
+    SyncScrollableControl(appendButton_, layout.appendButtonRect, layout.scrollViewportRect, true);
+    for (HWND control : { resetButton_, applyCurrentButton_, applyFutureButton_, applyAllButton_ }) {
+        if (control != nullptr) {
+            SetWindowPos(
+                control,
+                HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_SHOWWINDOW);
         }
-
-        RECT visibleRect = rect;
-        if (dropdownHeight > 0) {
-            visibleRect.bottom = visibleRect.top + Scale(28);
-        }
-        const bool fullyVisible = RectFullyInside(layout.scrollViewportRect, visibleRect);
-        ShowWindow(control, fullyVisible ? SW_SHOWNA : SW_HIDE);
-    };
-
-    syncScrollableControl(widthEdit_, layout.widthEditRect);
-    syncScrollableControl(heightEdit_, layout.heightEditRect);
-    syncScrollableControl(dimensionPresetCombo_, layout.dimensionsComboRect, 240);
-    syncScrollableControl(pasteHexButton_, layout.pasteHexButtonRect);
-    syncScrollableControl(appendButton_, layout.appendButtonRect);
-
-    ShowWindow(resetButton_, SW_SHOWNA);
-    ShowWindow(applyCurrentButton_, SW_SHOWNA);
-    ShowWindow(applyFutureButton_, SW_SHOWNA);
-    ShowWindow(applyAllButton_, SW_SHOWNA);
-    SetWindowPos(resetButton_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    SetWindowPos(applyCurrentButton_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    SetWindowPos(applyFutureButton_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    SetWindowPos(applyAllButton_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    SendMessageW(window_, WM_SETREDRAW, TRUE, 0);
+    RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_NOERASE);
 }
 
 void NewPageSettingsWindow::UpdateScrollInfo() {
@@ -832,7 +981,9 @@ void NewPageSettingsWindow::UpdateEditValues() {
     suppressEditRefresh_ = true;
     SetControlText(widthEdit_, FormatDimensionValue(draftWidth_));
     SetControlText(heightEdit_, FormatDimensionValue(draftHeight_));
-    SyncDimensionPresetSelection();
+    if (!editingHexColor_) {
+        SetControlText(hexColorEdit_, FormatHexColor(draftBackgroundColor_));
+    }
     suppressEditRefresh_ = false;
 }
 
@@ -840,11 +991,6 @@ void NewPageSettingsWindow::HandleCommand(WPARAM wParam, LPARAM lParam) {
     const int controlId = LOWORD(wParam);
     const int notification = HIWORD(wParam);
     switch (controlId) {
-    case kIdPasteHex:
-        if (notification == BN_CLICKED) {
-            static_cast<void>(PasteHexColorFromClipboard());
-        }
-        break;
     case kIdAppendPages:
         if (notification == BN_CLICKED) {
             static_cast<void>(app_.AppendPagesFromFile());
@@ -870,9 +1016,9 @@ void NewPageSettingsWindow::HandleCommand(WPARAM wParam, LPARAM lParam) {
             ApplyDraftToFuturePages();
         }
         break;
-    case kIdDimensionPresetCombo:
-        if (notification == CBN_SELCHANGE && !suppressPresetSelection_) {
-            ApplySelectedDimensionPreset();
+    case kIdHexColorEdit:
+        if (notification == EN_KILLFOCUS) {
+            CommitHexColorEdit(true);
         }
         break;
     case kIdWidthEdit:
@@ -898,7 +1044,12 @@ void NewPageSettingsWindow::HandleCommand(WPARAM wParam, LPARAM lParam) {
 HBRUSH NewPageSettingsWindow::HandleControlColor(HDC hdc, HWND control) {
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, kTextPrimary);
-    if (control == widthEdit_ || control == heightEdit_ || control == dimensionPresetCombo_) {
+    wchar_t className[32] = {};
+    GetClassNameW(control, className, static_cast<int>(std::size(className)));
+    if (lstrcmpW(className, L"ComboLBox") == 0) {
+        return panelBrush_;
+    }
+    if (control == widthEdit_ || control == heightEdit_ || control == hexColorEdit_) {
         return inputBrush_;
     }
     if (control == applyCurrentButton_ || control == applyAllButton_ || control == applyFutureButton_ || control == resetButton_) {
@@ -954,8 +1105,10 @@ void NewPageSettingsWindow::PaintWindow() {
         ? RGB(22, 28, 36)
         : RGB(248, 250, 252);
     SetTextColor(memoryDc, previewText);
-    const std::wstring previewLabel = L"Background Preview\n" + FormatHexColor(draftBackgroundColor_);
-    DrawTextW(memoryDc, previewLabel.c_str(), -1, &previewTextRect, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+    if (!editingHexColor_) {
+        RECT previewHexRect = layout.hexColorEditRect;
+        DrawTextW(memoryDc, FormatHexColor(draftBackgroundColor_).c_str(), -1, &previewHexRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
 
     SetTextColor(memoryDc, kTextMuted);
     RECT defaultColorsLabelRect = layout.defaultColorsLabelRect;
@@ -983,18 +1136,40 @@ void NewPageSettingsWindow::PaintWindow() {
     }
 
     const auto paintSlider = [&](SliderKind kind, const RECT& labelRect, const RECT& sliderRect, const wchar_t* label) {
-        wchar_t buffer[32] = {};
-        std::swprintf(buffer, std::size(buffer), L"%ls: %d", label, SliderValue(kind));
         RECT textRect = labelRect;
         SetTextColor(memoryDc, kTextPrimary);
-        DrawTextW(memoryDc, buffer, -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        const std::wstring valueText = [&]() -> std::wstring {
+            switch (kind) {
+            case SliderKind::Hue:
+                return FormatHueLabel(SliderValue(kind));
+            case SliderKind::Saturation:
+                return FormatPercentLabel(L"Saturation", SliderValue(kind));
+            case SliderKind::Lightness:
+                return FormatPercentLabel(L"Lightness", SliderValue(kind));
+            default:
+                return label;
+            }
+        }();
+        DrawTextW(memoryDc, valueText.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         const RECT trackRect = SliderTrackRect(sliderRect, CurrentDpi());
-        FillRoundedRect(memoryDc, trackRect, RGB(41, 51, 66));
-        const int thumbCenterX = SliderThumbCenterX(trackRect, SliderValue(kind), 0, 255);
-        RECT fillRect = trackRect;
-        fillRect.right = static_cast<LONG>(std::max<int>(fillRect.left + 1, thumbCenterX + 1));
-        FillRoundedRect(memoryDc, fillRect, kAccent);
+        const HslColor hsl = RgbToHsl(draftBackgroundColor_);
+        const int maximum = kind == SliderKind::Hue ? 360 : 100;
+        switch (kind) {
+        case SliderKind::Hue:
+            FillHuePreviewTrack(memoryDc, trackRect, hsl.saturation, hsl.lightness);
+            break;
+        case SliderKind::Saturation:
+            FillSaturationPreviewTrack(memoryDc, trackRect, hsl.hue, hsl.lightness);
+            break;
+        case SliderKind::Lightness:
+            FillLightnessPreviewTrack(memoryDc, trackRect, hsl.hue, hsl.saturation);
+            break;
+        default:
+            FillRoundedRect(memoryDc, trackRect, RGB(41, 51, 66));
+            break;
+        }
+        const int thumbCenterX = SliderThumbCenterX(trackRect, SliderValue(kind), 0, maximum);
 
         const int centerY = (sliderRect.top + sliderRect.bottom) / 2;
         RECT thumbRect = MakeRect(
@@ -1006,9 +1181,9 @@ void NewPageSettingsWindow::PaintWindow() {
         StrokeRoundedRect(memoryDc, thumbRect, draggingSlider_ == kind ? RGB(255, 255, 255) : RGB(120, 138, 162), 1);
     };
 
-    paintSlider(SliderKind::Red, layout.redLabelRect, layout.redSliderRect, L"Red");
-    paintSlider(SliderKind::Green, layout.greenLabelRect, layout.greenSliderRect, L"Green");
-    paintSlider(SliderKind::Blue, layout.blueLabelRect, layout.blueSliderRect, L"Blue");
+    paintSlider(SliderKind::Hue, layout.redLabelRect, layout.redSliderRect, L"Hue");
+    paintSlider(SliderKind::Saturation, layout.greenLabelRect, layout.greenSliderRect, L"Saturation");
+    paintSlider(SliderKind::Lightness, layout.blueLabelRect, layout.blueSliderRect, L"Lightness");
 
     RECT widthLabelRect = layout.widthLabelRect;
     RECT heightLabelRect = layout.heightLabelRect;
@@ -1017,6 +1192,30 @@ void NewPageSettingsWindow::PaintWindow() {
     DrawTextW(memoryDc, L"Width (pt)", -1, &widthLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     DrawTextW(memoryDc, L"Height (pt)", -1, &heightLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     DrawTextW(memoryDc, L"Common Sizes", -1, &dimensionsLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    FillRoundedRect(memoryDc, layout.dimensionsComboRect, kInputFill);
+    StrokeRoundedRect(memoryDc, layout.dimensionsComboRect, kPanelBorder, 1);
+    RECT comboTextRect = layout.dimensionsComboRect;
+    comboTextRect.left += Scale(12);
+    comboTextRect.right -= Scale(30);
+    const std::wstring comboLabel = DimensionPresetLabelForSelection(MatchingDimensionPresetSelection(draftWidth_, draftHeight_));
+    DrawTextW(memoryDc, comboLabel.c_str(), -1, &comboTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    const int comboCenterX = layout.dimensionsComboRect.right - Scale(16);
+    const int comboCenterY = (layout.dimensionsComboRect.top + layout.dimensionsComboRect.bottom) / 2;
+    POINT comboArrow[3] {
+        { comboCenterX - Scale(4), comboCenterY - Scale(2) },
+        { comboCenterX + Scale(4), comboCenterY - Scale(2) },
+        { comboCenterX, comboCenterY + Scale(3) },
+    };
+    HBRUSH arrowBrush = CreateSolidBrush(kTextPrimary);
+    HPEN arrowPen = CreatePen(PS_SOLID, 1, kTextPrimary);
+    HGDIOBJ previousBrush = SelectObject(memoryDc, arrowBrush);
+    HGDIOBJ previousPen = SelectObject(memoryDc, arrowPen);
+    Polygon(memoryDc, comboArrow, 3);
+    SelectObject(memoryDc, previousPen);
+    SelectObject(memoryDc, previousBrush);
+    DeleteObject(arrowPen);
+    DeleteObject(arrowBrush);
 
     SetTextColor(memoryDc, kTextMuted);
     RECT importHintRect = layout.importHintRect;
@@ -1038,7 +1237,11 @@ void NewPageSettingsWindow::PaintWindow() {
     FillRoundedRect(memoryDc, layout.actionBarRect, RGB(15, 20, 27));
     StrokeRoundedRect(memoryDc, layout.actionBarRect, kPanelBorder, 1);
 
-    BitBlt(windowDc, 0, 0, clientRect.right, clientRect.bottom, memoryDc, 0, 0, SRCCOPY);
+    const int paintWidth = std::max(0L, paint.rcPaint.right - paint.rcPaint.left);
+    const int paintHeight = std::max(0L, paint.rcPaint.bottom - paint.rcPaint.top);
+    if (paintWidth > 0 && paintHeight > 0) {
+        BitBlt(windowDc, paint.rcPaint.left, paint.rcPaint.top, paintWidth, paintHeight, memoryDc, paint.rcPaint.left, paint.rcPaint.top, SRCCOPY);
+    }
 
     SelectObject(memoryDc, previousFont);
     SelectObject(memoryDc, previousBitmap);
@@ -1053,11 +1256,18 @@ void NewPageSettingsWindow::DrawButton(const DRAWITEMSTRUCT& drawItem) {
     const bool disabled = (drawItem.itemState & ODS_DISABLED) != 0;
     const int controlId = GetDlgCtrlID(drawItem.hwndItem);
     const bool emphasized = controlId == kIdApplyCurrent || controlId == kIdApplyAll || controlId == kIdApplyFuture || controlId == kIdAppendPages;
+    const COLORREF background = controlId == kIdResetDefaults || controlId == kIdApplyCurrent || controlId == kIdApplyAll || controlId == kIdApplyFuture
+        ? RGB(15, 20, 27)
+        : kPanelFill;
     const COLORREF fill = selected
         ? (emphasized ? RGB(49, 82, 125) : kButtonFillActive)
         : (emphasized ? RGB(32, 63, 102) : kButtonFill);
-    const COLORREF border = selected ? kAccent : kPanelBorder;
+    const COLORREF border = selected ? kAccent : fill;
     const COLORREF text = disabled ? RGB(102, 111, 124) : kTextPrimary;
+
+    HBRUSH backgroundBrush = CreateSolidBrush(background);
+    FillRect(drawItem.hDC, &drawItem.rcItem, backgroundBrush);
+    DeleteObject(backgroundBrush);
 
     FillRoundedRect(drawItem.hDC, drawItem.rcItem, fill);
     StrokeRoundedRect(drawItem.hDC, drawItem.rcItem, focused ? kSelectionBorder : border, focused ? 2 : 1);
@@ -1072,18 +1282,21 @@ void NewPageSettingsWindow::DrawButton(const DRAWITEMSTRUCT& drawItem) {
 }
 
 void NewPageSettingsWindow::ApplyDraftToCurrentPage() {
+    CommitHexColorEdit(true);
     HandleDimensionEdit(widthEdit_, draftWidth_, true);
     HandleDimensionEdit(heightEdit_, draftHeight_, true);
     app_.ApplyConfiguredSettingsToCurrentPage(draftWidth_, draftHeight_, draftBackgroundColor_);
 }
 
 void NewPageSettingsWindow::ApplyDraftToAllPages() {
+    CommitHexColorEdit(true);
     HandleDimensionEdit(widthEdit_, draftWidth_, true);
     HandleDimensionEdit(heightEdit_, draftHeight_, true);
     app_.ApplyConfiguredSettingsToAllPages(draftWidth_, draftHeight_, draftBackgroundColor_);
 }
 
 void NewPageSettingsWindow::ApplyDraftToFuturePages() {
+    CommitHexColorEdit(true);
     HandleDimensionEdit(widthEdit_, draftWidth_, true);
     HandleDimensionEdit(heightEdit_, draftHeight_, true);
 
@@ -1120,64 +1333,88 @@ void NewPageSettingsWindow::ResetDraftToDefaults() {
     InvalidateRect(window_, nullptr, FALSE);
 }
 
-void NewPageSettingsWindow::SyncDimensionPresetSelection() {
-    if (dimensionPresetCombo_ == nullptr) {
+void NewPageSettingsWindow::BeginHexColorEdit() {
+    if (window_ == nullptr || hexColorEdit_ == nullptr) {
         return;
     }
 
-    suppressPresetSelection_ = true;
-    int selectedIndex = 0;
-    for (std::size_t index = 0; index < kDimensionPresets.size(); ++index) {
-        const DimensionPreset& preset = kDimensionPresets[index];
-        if (NearlyEqual(draftWidth_, preset.width) && NearlyEqual(draftHeight_, preset.height)) {
-            selectedIndex = static_cast<int>(index + 1U);
-            break;
-        }
-    }
-    SendMessageW(dimensionPresetCombo_, CB_SETCURSEL, static_cast<WPARAM>(selectedIndex), 0);
-    suppressPresetSelection_ = false;
+    editingHexColor_ = true;
+    SetControlText(hexColorEdit_, FormatHexColor(draftBackgroundColor_));
+    ShowWindow(hexColorEdit_, SW_SHOWNA);
+    SetFocus(hexColorEdit_);
+    SendMessageW(hexColorEdit_, EM_SETSEL, 0, -1);
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
+    RedrawWindow(window_, &layout.colorPreviewRect, nullptr, RDW_INVALIDATE | RDW_NOERASE);
 }
 
-void NewPageSettingsWindow::ApplySelectedDimensionPreset() {
-    if (dimensionPresetCombo_ == nullptr) {
+void NewPageSettingsWindow::CommitHexColorEdit(bool applyChanges) {
+    if (hexColorEdit_ == nullptr || !editingHexColor_) {
         return;
     }
 
-    const LRESULT selected = SendMessageW(dimensionPresetCombo_, CB_GETCURSEL, 0, 0);
-    if (selected <= 0 || static_cast<std::size_t>(selected - 1) >= kDimensionPresets.size()) {
-        return;
+    if (applyChanges) {
+        wchar_t buffer[32] = {};
+        GetWindowTextW(hexColorEdit_, buffer, static_cast<int>(std::size(buffer)));
+        if (const auto parsed = ParseHexColor(buffer); parsed.has_value()) {
+            draftBackgroundColor_ = *parsed;
+        }
     }
 
-    const DimensionPreset& preset = kDimensionPresets[static_cast<std::size_t>(selected - 1)];
-    draftWidth_ = preset.width;
-    draftHeight_ = preset.height;
+    editingHexColor_ = false;
+    ShowWindow(hexColorEdit_, SW_HIDE);
     UpdateEditValues();
-    InvalidateRect(window_, nullptr, FALSE);
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
+    RedrawWindow(window_, &layout.colorPreviewRect, nullptr, RDW_INVALIDATE | RDW_NOERASE);
 }
 
-bool NewPageSettingsWindow::PasteHexColorFromClipboard() {
-    if (!OpenClipboard(window_)) {
-        return false;
+void NewPageSettingsWindow::OpenDimensionPresetMenu() {
+    if (window_ == nullptr) {
+        return;
     }
 
-    bool applied = false;
-    HANDLE clipboardData = GetClipboardData(CF_UNICODETEXT);
-    if (clipboardData != nullptr) {
-        const auto* rawText = static_cast<const wchar_t*>(GlobalLock(clipboardData));
-        if (rawText != nullptr) {
-            if (const auto parsed = ParseHexColor(rawText); parsed.has_value()) {
-                draftBackgroundColor_ = *parsed;
-                applied = true;
-            }
-            GlobalUnlock(clipboardData);
-        }
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
+
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
     }
 
-    CloseClipboard();
-    if (applied) {
-        InvalidateRect(window_, nullptr, FALSE);
+    const int selectedIndex = MatchingDimensionPresetSelection(draftWidth_, draftHeight_);
+    AppendMenuW(menu, MF_STRING | (selectedIndex == 0 ? MF_CHECKED : 0), kDimensionPresetMenuBase, L"Custom");
+    for (std::size_t index = 0; index < kDimensionPresets.size(); ++index) {
+        const UINT flags = MF_STRING | (selectedIndex == static_cast<int>(index + 1U) ? MF_CHECKED : 0);
+        AppendMenuW(menu, flags, kDimensionPresetMenuBase + 1U + static_cast<UINT>(index), kDimensionPresets[index].label);
     }
-    return applied;
+
+    POINT anchor { layout.dimensionsComboRect.left, layout.dimensionsComboRect.bottom };
+    ClientToScreen(window_, &anchor);
+    const UINT command = TrackPopupMenuEx(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY, anchor.x, anchor.y, window_, nullptr);
+    DestroyMenu(menu);
+
+    if (command <= kDimensionPresetMenuBase) {
+        RedrawWindow(window_, &layout.dimensionsComboRect, nullptr, RDW_INVALIDATE | RDW_NOERASE);
+        return;
+    }
+
+    const std::size_t presetIndex = static_cast<std::size_t>(command - kDimensionPresetMenuBase - 1U);
+    if (presetIndex < kDimensionPresets.size()) {
+        const DimensionPreset& preset = kDimensionPresets[presetIndex];
+        draftWidth_ = preset.width;
+        draftHeight_ = preset.height;
+        UpdateEditValues();
+        RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_NOERASE);
+        return;
+    }
+
+    RedrawWindow(window_, &layout.dimensionsComboRect, nullptr, RDW_INVALIDATE | RDW_NOERASE);
 }
 
 void NewPageSettingsWindow::UpdateSliderFromPoint(SliderKind kind, POINT cursor) {
@@ -1186,14 +1423,16 @@ void NewPageSettingsWindow::UpdateSliderFromPoint(SliderKind kind, POINT cursor)
     const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
 
     RECT sliderRect {};
+    int maximum = 100;
     switch (kind) {
-    case SliderKind::Red:
+    case SliderKind::Hue:
         sliderRect = layout.redSliderRect;
+        maximum = 360;
         break;
-    case SliderKind::Green:
+    case SliderKind::Saturation:
         sliderRect = layout.greenSliderRect;
         break;
-    case SliderKind::Blue:
+    case SliderKind::Lightness:
         sliderRect = layout.blueSliderRect;
         break;
     }
@@ -1201,7 +1440,7 @@ void NewPageSettingsWindow::UpdateSliderFromPoint(SliderKind kind, POINT cursor)
     const RECT trackRect = SliderTrackRect(sliderRect, CurrentDpi());
     const int clampedX = std::clamp(static_cast<int>(cursor.x), static_cast<int>(trackRect.left), static_cast<int>(trackRect.right - 1));
     const int width = std::max(1, static_cast<int>(trackRect.right - trackRect.left));
-    const int value = static_cast<int>(std::lround(static_cast<float>(clampedX - trackRect.left) * 255.0f / static_cast<float>(width - 1)));
+    const int value = static_cast<int>(std::lround(static_cast<float>(clampedX - trackRect.left) * static_cast<float>(maximum) / static_cast<float>(width - 1)));
     SetSliderValue(kind, value);
 }
 
@@ -1214,9 +1453,9 @@ std::optional<NewPageSettingsWindow::SliderKind> NewPageSettingsWindow::HitTestS
     GetClientRect(window_, &clientRect);
     const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
     const std::array<std::pair<SliderKind, RECT>, 3> sliders {{
-        { SliderKind::Red, layout.redSliderRect },
-        { SliderKind::Green, layout.greenSliderRect },
-        { SliderKind::Blue, layout.blueSliderRect },
+        { SliderKind::Hue, layout.redSliderRect },
+        { SliderKind::Saturation, layout.greenSliderRect },
+        { SliderKind::Lightness, layout.blueSliderRect },
     }};
     for (const auto& [kind, rect] : sliders) {
         RECT hitRect = rect;
@@ -1230,35 +1469,33 @@ std::optional<NewPageSettingsWindow::SliderKind> NewPageSettingsWindow::HitTestS
 }
 
 int NewPageSettingsWindow::SliderValue(SliderKind kind) const {
+    const HslColor hsl = RgbToHsl(draftBackgroundColor_);
     switch (kind) {
-    case SliderKind::Red:
-        return app_.GetColorChannel(draftBackgroundColor_, 16);
-    case SliderKind::Green:
-        return app_.GetColorChannel(draftBackgroundColor_, 8);
-    case SliderKind::Blue:
-        return app_.GetColorChannel(draftBackgroundColor_, 0);
+    case SliderKind::Hue:
+        return static_cast<int>(std::lround(hsl.hue));
+    case SliderKind::Saturation:
+        return static_cast<int>(std::lround(hsl.saturation * 100.0f));
+    case SliderKind::Lightness:
+        return static_cast<int>(std::lround(hsl.lightness * 100.0f));
     default:
         return 0;
     }
 }
 
 void NewPageSettingsWindow::SetSliderValue(SliderKind kind, int value) {
-    const int clamped = std::clamp(value, 0, 255);
-    unsigned char red = app_.GetColorChannel(draftBackgroundColor_, 16);
-    unsigned char green = app_.GetColorChannel(draftBackgroundColor_, 8);
-    unsigned char blue = app_.GetColorChannel(draftBackgroundColor_, 0);
+    HslColor hsl = RgbToHsl(draftBackgroundColor_);
     switch (kind) {
-    case SliderKind::Red:
-        red = static_cast<unsigned char>(clamped);
+    case SliderKind::Hue:
+        hsl.hue = static_cast<float>(std::clamp(value, 0, 360));
         break;
-    case SliderKind::Green:
-        green = static_cast<unsigned char>(clamped);
+    case SliderKind::Saturation:
+        hsl.saturation = static_cast<float>(std::clamp(value, 0, 100)) / 100.0f;
         break;
-    case SliderKind::Blue:
-        blue = static_cast<unsigned char>(clamped);
+    case SliderKind::Lightness:
+        hsl.lightness = static_cast<float>(std::clamp(value, 0, 100)) / 100.0f;
         break;
     }
-    draftBackgroundColor_ = app_.ComposeColor(red, green, blue);
+    draftBackgroundColor_ = HslToColor(hsl.hue, hsl.saturation, hsl.lightness);
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -1339,6 +1576,10 @@ LRESULT NewPageSettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM
         GetClientRect(window_, &clientRect);
         const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
 
+        if (editingHexColor_ && PtInRect(&layout.hexColorEditRect, cursor) == 0) {
+            CommitHexColorEdit(true);
+        }
+
         if (layout.showScrollbar && PtInRect(&layout.scrollbarThumbRect, cursor) != 0) {
             draggingScrollbar_ = true;
             scrollbarDragOffset_ = cursor.y - layout.scrollbarThumbRect.top;
@@ -1351,10 +1592,19 @@ LRESULT NewPageSettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM
             ScrollTo(scrollOffset_ + (cursor.y < layout.scrollbarThumbRect.top ? -pageStep : pageStep));
             return 0;
         }
+        if (PtInRect(&layout.dimensionsComboRect, cursor) != 0) {
+            OpenDimensionPresetMenu();
+            return 0;
+        }
+        if (PtInRect(&layout.colorPreviewRect, cursor) != 0) {
+            BeginHexColorEdit();
+            return 0;
+        }
 
         for (std::size_t index = 0; index < layout.defaultColorSwatches.size(); ++index) {
             if (PtInRect(&layout.defaultColorSwatches[index], cursor) != 0) {
                 draftBackgroundColor_ = kDefaultPageColors[index];
+                UpdateEditValues();
                 InvalidateRect(window_, nullptr, FALSE);
                 return 0;
             }
@@ -1363,6 +1613,7 @@ LRESULT NewPageSettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM
         for (std::size_t index = 0; index < layout.previousColorSwatches.size(); ++index) {
             if (PtInRect(&layout.previousColorSwatches[index], cursor) != 0 && index < app_.newPageSettings_.recentColors.size()) {
                 draftBackgroundColor_ = app_.newPageSettings_.recentColors[index];
+                UpdateEditValues();
                 InvalidateRect(window_, nullptr, FALSE);
                 return 0;
             }
@@ -1452,6 +1703,7 @@ LRESULT NewPageSettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM
     case WM_DESTROY:
         window_ = nullptr;
         draggingSlider_.reset();
+        editingHexColor_ = false;
         return 0;
     default:
         break;
