@@ -7,6 +7,18 @@
 
 namespace cnote {
 
+enum class TextAlignment : std::uint8_t {
+    Left = 0,
+    Center = 1,
+    Right = 2,
+};
+
+enum class TextFontFamily : std::uint8_t {
+    Sans = 0,
+    Serif = 1,
+    Monospace = 2,
+};
+
 struct Vec2 {
     float x = 0.0f;
     float y = 0.0f;
@@ -41,6 +53,11 @@ struct PageText {
     float height = 0.0f;
     float fontSize = 24.0f;
     std::uint32_t color = 0xFF111827;
+    TextAlignment alignment = TextAlignment::Left;
+    TextFontFamily fontFamily = TextFontFamily::Sans;
+    bool bold = false;
+    bool italic = false;
+    bool underline = false;
     std::wstring content {};
 };
 

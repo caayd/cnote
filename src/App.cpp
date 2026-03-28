@@ -96,6 +96,19 @@ struct QuickSizePopupLayout {
     RECT valueRect {};
 };
 
+struct TextFormatPopupLayout {
+    RECT panelRect {};
+    RECT alignLeftRect {};
+    RECT alignCenterRect {};
+    RECT alignRightRect {};
+    RECT boldRect {};
+    RECT italicRect {};
+    RECT underlineRect {};
+    RECT fontDropdownRect {};
+    RECT fontMenuRect {};
+    std::array<RECT, 3> fontOptionRects {};
+};
+
 struct PaletteMenuLayout {
     RECT panelRect {};
     std::vector<RECT> swatchRects;
@@ -172,6 +185,11 @@ bool PageTextEqual(const PageText& a, const PageText& b) {
         && a.height == b.height
         && a.fontSize == b.fontSize
         && a.color == b.color
+        && a.alignment == b.alignment
+        && a.fontFamily == b.fontFamily
+        && a.bold == b.bold
+        && a.italic == b.italic
+        && a.underline == b.underline
         && a.content == b.content;
 }
 
@@ -234,6 +252,64 @@ struct WrappedTextLayout {
 
 constexpr float kTextLayoutScale = 8.0f;
 
+const wchar_t* PageTextFontFace(TextFontFamily family) {
+    switch (family) {
+    case TextFontFamily::Serif:
+        return L"Times New Roman";
+    case TextFontFamily::Monospace:
+        return L"Consolas";
+    case TextFontFamily::Sans:
+    default:
+        return L"Segoe UI";
+    }
+}
+
+int PageTextFontWeight(const PageText& text) {
+    return text.bold ? FW_BOLD : FW_NORMAL;
+}
+
+DWORD TextEditAlignmentStyle(TextAlignment alignment) {
+    switch (alignment) {
+    case TextAlignment::Center:
+        return ES_CENTER;
+    case TextAlignment::Right:
+        return ES_RIGHT;
+    case TextAlignment::Left:
+    default:
+        return ES_LEFT;
+    }
+}
+
+UINT DrawTextAlignmentFlags(TextAlignment alignment) {
+    switch (alignment) {
+    case TextAlignment::Center:
+        return DT_CENTER;
+    case TextAlignment::Right:
+        return DT_RIGHT;
+    case TextAlignment::Left:
+    default:
+        return DT_LEFT;
+    }
+}
+
+HFONT CreatePageTextFont(const PageText& text, int pixelHeight, DWORD quality = CLEARTYPE_QUALITY) {
+    return CreateFontW(
+        -pixelHeight,
+        0,
+        0,
+        0,
+        PageTextFontWeight(text),
+        text.italic ? TRUE : FALSE,
+        text.underline ? TRUE : FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        quality,
+        DEFAULT_PITCH,
+        PageTextFontFace(text.fontFamily));
+}
+
 int PageTextFontPixelHeight(const PageText& text, float scale) {
     return std::max(1, static_cast<int>(std::lround(std::max(1.0f, text.fontSize) * std::max(0.1f, scale))));
 }
@@ -271,21 +347,7 @@ float ResolvedPageTextWidth(const PageText& text, float pageWidth) {
         return estimatedWidth;
     }
 
-    HFONT font = CreateFontW(
-        -fontHeight,
-        0,
-        0,
-        0,
-        FW_NORMAL,
-        FALSE,
-        FALSE,
-        FALSE,
-        DEFAULT_CHARSET,
-        OUT_OUTLINE_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY,
-        VARIABLE_PITCH,
-        L"Segoe UI");
+    HFONT font = CreatePageTextFont(text, fontHeight);
     HGDIOBJ previousFont = font != nullptr ? SelectObject(dc, font) : nullptr;
     RECT measureRect = MakeRect(0, 0, 32767, 0);
     if (!measureText.empty()) {
@@ -317,21 +379,7 @@ WrappedTextLayout LayoutPageText(const PageText& text, float pageWidth) {
         return layout;
     }
 
-    HFONT font = CreateFontW(
-        -layout.lineHeight,
-        0,
-        0,
-        0,
-        FW_NORMAL,
-        FALSE,
-        FALSE,
-        FALSE,
-        DEFAULT_CHARSET,
-        OUT_OUTLINE_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY,
-        VARIABLE_PITCH,
-        L"Segoe UI");
+    HFONT font = CreatePageTextFont(text, layout.lineHeight);
     HGDIOBJ previousFont = font != nullptr ? SelectObject(dc, font) : nullptr;
 
     TEXTMETRICW textMetrics {};
@@ -428,21 +476,7 @@ TextPixelMetrics MeasurePageTextPixels(const PageText& text, float pageWidth, fl
 
     HDC dc = GetDC(nullptr);
     if (dc != nullptr) {
-        HFONT font = CreateFontW(
-            -fontHeight,
-            0,
-            0,
-            0,
-            FW_NORMAL,
-            FALSE,
-            FALSE,
-            FALSE,
-            DEFAULT_CHARSET,
-            OUT_OUTLINE_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            VARIABLE_PITCH,
-            L"Segoe UI");
+        HFONT font = CreatePageTextFont(text, fontHeight);
         HGDIOBJ previousFont = font != nullptr ? SelectObject(dc, font) : nullptr;
         TEXTMETRICW textMetrics {};
         if (GetTextMetricsW(dc, &textMetrics) != 0) {
@@ -1609,6 +1643,79 @@ RECT QuickSizePopupBounds(const QuickSizePopupLayout& layout, UINT dpi) {
     return InflateRectCopy(UnionRectangles(layout.panelRect, layout.previewRect), ScaleForDpi(3, dpi));
 }
 
+TextFormatPopupLayout BuildTextFormatPopupLayout(RECT canvasRect, RECT editRect, bool fontMenuOpen, UINT dpi) {
+    TextFormatPopupLayout layout {};
+    const int panelPadding = ScaleForDpi(8, dpi);
+    const int buttonSize = ScaleForDpi(28, dpi);
+    const int itemGap = ScaleForDpi(6, dpi);
+    const int dropdownWidth = ScaleForDpi(118, dpi);
+    const int panelHeight = ScaleForDpi(44, dpi);
+    const int panelWidth = (panelPadding * 2) + (buttonSize * 6) + (itemGap * 6) + dropdownWidth;
+    const int panelGap = ScaleForDpi(10, dpi);
+    const int canvasPadding = ScaleForDpi(8, dpi);
+    int left = editRect.left;
+    const int minLeft = static_cast<int>(canvasRect.left) + canvasPadding;
+    const int maxLeft = std::max(minLeft, static_cast<int>(canvasRect.right) - panelWidth - canvasPadding);
+    left = std::clamp(left, minLeft, maxLeft);
+
+    int top = editRect.top - panelHeight - panelGap;
+    if (top < canvasRect.top + canvasPadding) {
+        top = editRect.bottom + panelGap;
+    }
+    const int minTop = static_cast<int>(canvasRect.top) + canvasPadding;
+    const int maxTop = std::max(minTop, static_cast<int>(canvasRect.bottom) - panelHeight - canvasPadding);
+    top = std::clamp(top, minTop, maxTop);
+
+    layout.panelRect = MakeRect(left, top, left + panelWidth, top + panelHeight);
+    int itemLeft = layout.panelRect.left + panelPadding;
+    const int itemTop = layout.panelRect.top + ((panelHeight - buttonSize) / 2);
+    auto advanceButton = [&](RECT& rect) {
+        rect = MakeRect(itemLeft, itemTop, itemLeft + buttonSize, itemTop + buttonSize);
+        itemLeft = rect.right + itemGap;
+    };
+
+    advanceButton(layout.alignLeftRect);
+    advanceButton(layout.alignCenterRect);
+    advanceButton(layout.alignRightRect);
+    advanceButton(layout.boldRect);
+    advanceButton(layout.italicRect);
+    advanceButton(layout.underlineRect);
+    layout.fontDropdownRect = MakeRect(itemLeft, itemTop, itemLeft + dropdownWidth, itemTop + buttonSize);
+
+    if (fontMenuOpen) {
+        const int optionHeight = ScaleForDpi(28, dpi);
+        const int menuPadding = ScaleForDpi(6, dpi);
+        const int menuGap = ScaleForDpi(6, dpi);
+        const int menuHeight = (menuPadding * 2) + (optionHeight * 3);
+        const int maxMenuTop = std::max(minTop, static_cast<int>(canvasRect.bottom) - menuHeight - canvasPadding);
+        const int belowTop = std::clamp(static_cast<int>(layout.panelRect.bottom) + menuGap, minTop, maxMenuTop);
+        const int aboveTop = std::clamp(static_cast<int>(layout.panelRect.top) - menuHeight - menuGap, minTop, maxMenuTop);
+        const RECT belowRect = MakeRect(layout.fontDropdownRect.left, belowTop, layout.fontDropdownRect.right, belowTop + menuHeight);
+        const bool canUseBelow = !RectsOverlap(belowRect, editRect)
+            && belowRect.bottom <= canvasRect.bottom - canvasPadding;
+        const int menuTop = canUseBelow ? belowTop : aboveTop;
+        layout.fontMenuRect = MakeRect(layout.fontDropdownRect.left, menuTop, layout.fontDropdownRect.right, menuTop + menuHeight);
+        for (std::size_t index = 0; index < layout.fontOptionRects.size(); ++index) {
+            const int optionTop = layout.fontMenuRect.top + menuPadding + (static_cast<int>(index) * optionHeight);
+            layout.fontOptionRects[index] = MakeRect(
+                layout.fontMenuRect.left + menuPadding,
+                optionTop,
+                layout.fontMenuRect.right - menuPadding,
+                optionTop + optionHeight);
+        }
+    }
+
+    return layout;
+}
+
+RECT TextFormatPopupBounds(const TextFormatPopupLayout& layout, UINT dpi) {
+    RECT bounds = layout.panelRect;
+    if (HasRect(layout.fontMenuRect)) {
+        bounds = UnionRectangles(bounds, layout.fontMenuRect);
+    }
+    return InflateRectCopy(bounds, ScaleForDpi(3, dpi));
+}
+
 PaletteMenuLayout BuildPaletteMenuLayout(const ToolbarLayout& toolbarLayout, std::size_t colorCount, UINT dpi) {
     PaletteMenuLayout layout;
     const int columns = std::min(4, std::max(1, static_cast<int>(colorCount)));
@@ -1795,10 +1902,40 @@ void DrawRectangleAA(HDC hdc, const RECT& rect, COLORREF color, float width, Gdi
         static_cast<Gdiplus::REAL>(rect.bottom - rect.top));
 }
 
+RECT LiveTextEditFrameRect(const RECT& editRect, UINT dpi) {
+    RECT frameRect = editRect;
+    InflateRect(&frameRect, ScaleForDpi(4, dpi), ScaleForDpi(4, dpi));
+    return frameRect;
+}
+
 void FillSolidRect(HDC hdc, RECT rect, COLORREF color) {
     HBRUSH brush = CreateSolidBrush(color);
     FillRect(hdc, &rect, brush);
     DeleteObject(brush);
+}
+
+void DrawDashedRect(HDC hdc, const RECT& rect, COLORREF color, int thickness, int dashLength, int gapLength) {
+    if (!HasRect(rect) || thickness <= 0 || dashLength <= 0) {
+        return;
+    }
+
+    const auto drawHorizontal = [&](int left, int right, int top) {
+        for (int x = left; x < right; x += dashLength + gapLength) {
+            const int dashRight = std::min(x + dashLength, right);
+            FillSolidRect(hdc, MakeRect(x, top, dashRight, top + thickness), color);
+        }
+    };
+    const auto drawVertical = [&](int top, int bottom, int left) {
+        for (int y = top; y < bottom; y += dashLength + gapLength) {
+            const int dashBottom = std::min(y + dashLength, bottom);
+            FillSolidRect(hdc, MakeRect(left, y, left + thickness, dashBottom), color);
+        }
+    };
+
+    drawHorizontal(rect.left, rect.right, rect.top);
+    drawHorizontal(rect.left, rect.right, rect.bottom - thickness);
+    drawVertical(rect.top, rect.bottom, rect.left);
+    drawVertical(rect.top, rect.bottom, rect.right - thickness);
 }
 
 template <std::size_t N>
@@ -2484,7 +2621,7 @@ bool App::CreateMainWindow(int showCommand) {
         0,
         kWindowClassName,
         kWindowTitle,
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         initialWindowRect.right - initialWindowRect.left,
@@ -2690,6 +2827,11 @@ void App::TogglePaletteWheel() {
 }
 
 void App::ToggleQuickSizePopup() {
+    if (textEditWindow_ != nullptr && editingTextPageIndex_.has_value() && editingTextIndex_.has_value()) {
+        ToggleTextFormatPopup();
+        return;
+    }
+
     if (!IsToolbarBrushTool(activeTool_) || window_ == nullptr) {
         return;
     }
@@ -4610,6 +4752,235 @@ void App::EndToolbarBrushSliderDrag() {
     UpdateCaptureState();
 }
 
+void App::ToggleTextFormatPopup() {
+    if (textEditWindow_ == nullptr
+        || !editingTextPageIndex_.has_value()
+        || !editingTextIndex_.has_value()
+        || *editingTextPageIndex_ >= document_.PageCount()
+        || *editingTextIndex_ >= document_.PageAt(*editingTextPageIndex_).texts.size()) {
+        return;
+    }
+
+    if (textFormatPopupOpen_) {
+        CancelTextFormatPopup();
+    } else {
+        textFormatPopupOpen_ = true;
+        textFormatFontMenuOpen_ = false;
+        RefreshTextEditControl();
+    }
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void App::CancelTextFormatPopup() {
+    textFormatPopupOpen_ = false;
+    textFormatFontMenuOpen_ = false;
+}
+
+void App::SetEditingTextAlignment(TextAlignment alignment) {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+        return;
+    }
+
+    Page& page = document_.PageAt(*editingTextPageIndex_);
+    if (*editingTextIndex_ >= page.texts.size()) {
+        return;
+    }
+
+    page.texts[*editingTextIndex_].alignment = alignment;
+    textFormatFontMenuOpen_ = false;
+    InvalidatePageSurfaceCache(*editingTextPageIndex_);
+    RefreshTextEditControl();
+    if (textEditWindow_ != nullptr) {
+        SetFocus(textEditWindow_);
+    }
+    if (textFormatPopupOpen_ && window_ != nullptr) {
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+}
+
+void App::CycleEditingTextAlignment() {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+        return;
+    }
+
+    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    if (*editingTextIndex_ >= page.texts.size()) {
+        return;
+    }
+
+    const TextAlignment current = page.texts[*editingTextIndex_].alignment;
+    switch (current) {
+    case TextAlignment::Left:
+        SetEditingTextAlignment(TextAlignment::Center);
+        break;
+    case TextAlignment::Center:
+        SetEditingTextAlignment(TextAlignment::Right);
+        break;
+    case TextAlignment::Right:
+    default:
+        SetEditingTextAlignment(TextAlignment::Left);
+        break;
+    }
+}
+
+void App::SetEditingTextFontFamily(TextFontFamily family) {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+        return;
+    }
+
+    Page& page = document_.PageAt(*editingTextPageIndex_);
+    if (*editingTextIndex_ >= page.texts.size()) {
+        return;
+    }
+
+    page.texts[*editingTextIndex_].fontFamily = family;
+    textFormatFontMenuOpen_ = false;
+    InvalidatePageSurfaceCache(*editingTextPageIndex_);
+    RefreshTextEditControl();
+    if (textEditWindow_ != nullptr) {
+        SetFocus(textEditWindow_);
+    }
+    if (textFormatPopupOpen_ && window_ != nullptr) {
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+}
+
+void App::ToggleEditingTextBold() {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+        return;
+    }
+
+    Page& page = document_.PageAt(*editingTextPageIndex_);
+    if (*editingTextIndex_ >= page.texts.size()) {
+        return;
+    }
+
+    page.texts[*editingTextIndex_].bold = !page.texts[*editingTextIndex_].bold;
+    textFormatFontMenuOpen_ = false;
+    InvalidatePageSurfaceCache(*editingTextPageIndex_);
+    RefreshTextEditControl();
+    if (textEditWindow_ != nullptr) {
+        SetFocus(textEditWindow_);
+    }
+    if (textFormatPopupOpen_ && window_ != nullptr) {
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+}
+
+void App::ToggleEditingTextItalic() {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+        return;
+    }
+
+    Page& page = document_.PageAt(*editingTextPageIndex_);
+    if (*editingTextIndex_ >= page.texts.size()) {
+        return;
+    }
+
+    page.texts[*editingTextIndex_].italic = !page.texts[*editingTextIndex_].italic;
+    textFormatFontMenuOpen_ = false;
+    InvalidatePageSurfaceCache(*editingTextPageIndex_);
+    RefreshTextEditControl();
+    if (textEditWindow_ != nullptr) {
+        SetFocus(textEditWindow_);
+    }
+    if (textFormatPopupOpen_ && window_ != nullptr) {
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+}
+
+void App::ToggleEditingTextUnderline() {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+        return;
+    }
+
+    Page& page = document_.PageAt(*editingTextPageIndex_);
+    if (*editingTextIndex_ >= page.texts.size()) {
+        return;
+    }
+
+    page.texts[*editingTextIndex_].underline = !page.texts[*editingTextIndex_].underline;
+    textFormatFontMenuOpen_ = false;
+    InvalidatePageSurfaceCache(*editingTextPageIndex_);
+    RefreshTextEditControl();
+    if (textEditWindow_ != nullptr) {
+        SetFocus(textEditWindow_);
+    }
+    if (textFormatPopupOpen_ && window_ != nullptr) {
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+}
+
+bool App::HandleTextFormatPopupClick(POINT cursor) {
+    if (!textFormatPopupOpen_ || window_ == nullptr || !HasRect(textEditBounds_)) {
+        return false;
+    }
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+        CancelTextFormatPopup();
+        return false;
+    }
+
+    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    if (*editingTextIndex_ >= page.texts.size()) {
+        CancelTextFormatPopup();
+        return false;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const RECT canvasRect = CanvasRect(clientRect);
+    const UINT dpi = WindowDpi(window_);
+    const TextFormatPopupLayout layout = BuildTextFormatPopupLayout(canvasRect, textEditBounds_, textFormatFontMenuOpen_, dpi);
+    const RECT popupBounds = TextFormatPopupBounds(layout, dpi);
+    if (PtInRect(&popupBounds, cursor) == 0) {
+        CancelTextFormatPopup();
+        return false;
+    }
+
+    if (textFormatFontMenuOpen_) {
+        for (std::size_t index = 0; index < layout.fontOptionRects.size(); ++index) {
+            if (PtInRect(&layout.fontOptionRects[index], cursor) != 0) {
+                switch (index) {
+                case 1:
+                    SetEditingTextFontFamily(TextFontFamily::Serif);
+                    break;
+                case 2:
+                    SetEditingTextFontFamily(TextFontFamily::Monospace);
+                    break;
+                case 0:
+                default:
+                    SetEditingTextFontFamily(TextFontFamily::Sans);
+                    break;
+                }
+                InvalidateRect(window_, nullptr, FALSE);
+                return true;
+            }
+        }
+    }
+
+    if (PtInRect(&layout.alignLeftRect, cursor) != 0) {
+        SetEditingTextAlignment(TextAlignment::Left);
+    } else if (PtInRect(&layout.alignCenterRect, cursor) != 0) {
+        SetEditingTextAlignment(TextAlignment::Center);
+    } else if (PtInRect(&layout.alignRightRect, cursor) != 0) {
+        SetEditingTextAlignment(TextAlignment::Right);
+    } else if (PtInRect(&layout.boldRect, cursor) != 0) {
+        ToggleEditingTextBold();
+    } else if (PtInRect(&layout.italicRect, cursor) != 0) {
+        ToggleEditingTextItalic();
+    } else if (PtInRect(&layout.underlineRect, cursor) != 0) {
+        ToggleEditingTextUnderline();
+    } else if (PtInRect(&layout.fontDropdownRect, cursor) != 0) {
+        textFormatFontMenuOpen_ = !textFormatFontMenuOpen_;
+    }
+
+    if (textEditWindow_ != nullptr) {
+        SetFocus(textEditWindow_);
+    }
+    InvalidateRect(window_, nullptr, FALSE);
+    return true;
+}
+
 void App::UpdateWindowTitle() {
     if (window_ != nullptr) {
         const std::wstring title = CurrentWindowTitle();
@@ -4956,7 +5327,76 @@ void App::BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, Ima
     InvalidateCanvas();
 }
 
+bool App::EnsureTextEditWindow(TextAlignment alignment) {
+    if (window_ == nullptr) {
+        return false;
+    }
+
+    const DWORD desiredAlignmentStyle = TextEditAlignmentStyle(alignment);
+    auto createWindow = [&](const std::wstring& text, DWORD selectionStart, DWORD selectionEnd) -> bool {
+        textEditWindow_ = CreateWindowExW(
+            0,
+            L"EDIT",
+            text.c_str(),
+            WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_NOHIDESEL | desiredAlignmentStyle,
+            0,
+            0,
+            0,
+            0,
+            window_,
+            reinterpret_cast<HMENU>(4001),
+            instance_,
+            nullptr);
+        if (textEditWindow_ == nullptr) {
+            textEditOriginalProc_ = nullptr;
+            return false;
+        }
+
+        textEditWindowNeedsLayout_ = true;
+        SetWindowLongPtrW(textEditWindow_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+        textEditOriginalProc_ = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(textEditWindow_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&App::TextEditProc)));
+        SendMessageW(textEditWindow_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 6));
+        SendMessageW(textEditWindow_, EM_SETSEL, selectionStart, selectionEnd);
+        if (textEditFont_ != nullptr) {
+            SendMessageW(textEditWindow_, WM_SETFONT, reinterpret_cast<WPARAM>(textEditFont_), TRUE);
+        }
+        InvalidateRect(textEditWindow_, nullptr, TRUE);
+        UpdateWindow(textEditWindow_);
+        return true;
+    };
+
+    if (textEditWindow_ == nullptr) {
+        return createWindow(L"", 0, 0);
+    }
+
+    const LONG_PTR currentStyle = GetWindowLongPtrW(textEditWindow_, GWL_STYLE);
+    if ((currentStyle & (ES_CENTER | ES_RIGHT)) == desiredAlignmentStyle) {
+        return true;
+    }
+
+    const int textLength = GetWindowTextLengthW(textEditWindow_);
+    std::wstring text;
+    if (textLength > 0) {
+        std::vector<wchar_t> buffer(static_cast<std::size_t>(textLength) + 1U, L'\0');
+        GetWindowTextW(textEditWindow_, buffer.data(), textLength + 1);
+        text.assign(buffer.data(), static_cast<std::size_t>(textLength));
+    }
+    const DWORD selection = static_cast<DWORD>(SendMessageW(textEditWindow_, EM_GETSEL, 0, 0));
+    const DWORD selectionStart = static_cast<DWORD>(LOWORD(selection));
+    const DWORD selectionEnd = static_cast<DWORD>(HIWORD(selection));
+
+    if (textEditOriginalProc_ != nullptr) {
+        SetWindowLongPtrW(textEditWindow_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(textEditOriginalProc_));
+    }
+    DestroyWindow(textEditWindow_);
+    textEditWindow_ = nullptr;
+    textEditOriginalProc_ = nullptr;
+    return createWindow(text, selectionStart, selectionEnd);
+}
+
 void App::EndTextEditControl() {
+    const RECT previousBounds = textEditBounds_;
     if (textEditWindow_ != nullptr) {
         if (textEditOriginalProc_ != nullptr) {
             SetWindowLongPtrW(textEditWindow_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(textEditOriginalProc_));
@@ -4970,8 +5410,19 @@ void App::EndTextEditControl() {
         textEditFont_ = nullptr;
     }
     textEditFontPixelHeight_ = 0;
+    textEditAlignment_ = TextAlignment::Left;
+    textEditFontFamily_ = TextFontFamily::Sans;
+    textEditBold_ = false;
+    textEditItalic_ = false;
+    textEditUnderline_ = false;
+    textEditWindowNeedsLayout_ = false;
+    CancelTextFormatPopup();
     ReleaseTextEditBackgroundBrush();
     textEditBounds_ = RECT {};
+    if (window_ != nullptr && HasRect(previousBounds)) {
+        const RECT frameRect = LiveTextEditFrameRect(previousBounds, WindowDpi(window_));
+        InvalidateRect(window_, &frameRect, FALSE);
+    }
 }
 
 void App::InvalidateEditingTextRegion() {
@@ -5064,11 +5515,13 @@ void App::RefreshTextEditBackgroundBrush(const RECT& editRect) {
 }
 
 void App::RefreshTextEditControl() {
-    if (textEditWindow_ == nullptr || !editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || window_ == nullptr) {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || window_ == nullptr) {
         return;
     }
     if (*editingTextPageIndex_ >= document_.PageCount()) {
-        ShowWindow(textEditWindow_, SW_HIDE);
+        if (textEditWindow_ != nullptr) {
+            ShowWindow(textEditWindow_, SW_HIDE);
+        }
         return;
     }
 
@@ -5077,12 +5530,17 @@ void App::RefreshTextEditControl() {
     const PageView pageView = CalculatePageView(clientRect, *editingTextPageIndex_);
     const Page& page = document_.PageAt(*editingTextPageIndex_);
     if (!pageView.valid || *editingTextIndex_ >= page.texts.size()) {
-        ShowWindow(textEditWindow_, SW_HIDE);
+        if (textEditWindow_ != nullptr) {
+            ShowWindow(textEditWindow_, SW_HIDE);
+        }
         return;
     }
 
     const PageText& text = page.texts[*editingTextIndex_];
     const PageText layoutText = CurrentEditingTextLayout().value_or(text);
+    if (!EnsureTextEditWindow(layoutText.alignment)) {
+        return;
+    }
     const TextPixelMetrics metrics = MeasurePageTextPixels(layoutText, page.width, pageView.scale);
     const int fontHeight = PageTextFontPixelHeight(layoutText, pageView.scale);
     const int minimumAutoWidth = std::max(ScaleForDpi(80, WindowDpi(window_)), fontHeight * 3);
@@ -5096,47 +5554,57 @@ void App::RefreshTextEditControl() {
 
     const float rawEditFontHeight = std::max(1.0f, layoutText.fontSize) * std::max(0.1f, pageView.scale);
     const int editFontHeight = std::max(1, static_cast<int>(std::floor(rawEditFontHeight + 0.35f)));
-    if (textEditFont_ == nullptr || textEditFontPixelHeight_ != editFontHeight) {
+    if (textEditFont_ == nullptr
+        || textEditFontPixelHeight_ != editFontHeight
+        || textEditFontFamily_ != layoutText.fontFamily
+        || textEditBold_ != layoutText.bold
+        || textEditItalic_ != layoutText.italic
+        || textEditUnderline_ != layoutText.underline) {
         if (textEditFont_ != nullptr) {
             DeleteObject(textEditFont_);
             textEditFont_ = nullptr;
         }
-        textEditFont_ = CreateFontW(
-            -editFontHeight,
-            0,
-            0,
-            0,
-            FW_NORMAL,
-            FALSE,
-            FALSE,
-            FALSE,
-            DEFAULT_CHARSET,
-            OUT_OUTLINE_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            VARIABLE_PITCH,
-            L"Segoe UI");
+        textEditFont_ = CreatePageTextFont(layoutText, editFontHeight, ANTIALIASED_QUALITY);
         textEditFontPixelHeight_ = editFontHeight;
+        textEditFontFamily_ = layoutText.fontFamily;
+        textEditBold_ = layoutText.bold;
+        textEditItalic_ = layoutText.italic;
+        textEditUnderline_ = layoutText.underline;
         if (textEditFont_ != nullptr) {
             SendMessageW(textEditWindow_, WM_SETFONT, reinterpret_cast<WPARAM>(textEditFont_), TRUE);
         }
     }
+    textEditAlignment_ = layoutText.alignment;
 
     const bool boundsChanged = EqualRect(&textEditBounds_, &editRect) == 0;
-    if (!EqualRect(&textEditBounds_, &editRect)) {
-        RECT dirtyRect = editRect;
-        if (!IsRectEmpty(&textEditBounds_)) {
-            dirtyRect = UnionRectangles(textEditBounds_, editRect);
+    const bool needsLayout = textEditWindowNeedsLayout_;
+    RECT dirtyRect {};
+    bool needsParentRedraw = false;
+    if (boundsChanged || needsLayout) {
+        dirtyRect = LiveTextEditFrameRect(editRect, WindowDpi(window_));
+        if (HasRect(textEditBounds_)) {
+            const RECT previousFrameRect = LiveTextEditFrameRect(textEditBounds_, WindowDpi(window_));
+            dirtyRect = UnionRectangles(previousFrameRect, dirtyRect);
         }
         RefreshTextEditBackgroundBrush(editRect);
         textEditBounds_ = editRect;
+        needsParentRedraw = true;
         InvalidateRect(window_, &dirtyRect, FALSE);
+        if (textFormatPopupOpen_) {
+            InvalidateRect(window_, nullptr, FALSE);
+        }
     }
-    if (boundsChanged) {
+    if (boundsChanged || needsLayout) {
         SetWindowPos(textEditWindow_, HWND_TOP, left, top, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
+        textEditWindowNeedsLayout_ = false;
     } else if (!IsWindowVisible(textEditWindow_)) {
         ShowWindow(textEditWindow_, SW_SHOW);
     }
+    if (needsParentRedraw) {
+        RedrawWindow(window_, &dirtyRect, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOCHILDREN);
+    }
+    InvalidateRect(textEditWindow_, nullptr, TRUE);
+    UpdateWindow(textEditWindow_);
 }
 
 void App::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, Page beforePage) {
@@ -5151,33 +5619,13 @@ void App::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, Page befor
     editingTextIndex_ = textIndex;
     editingTextBeforePage_ = std::move(beforePage);
 
-    if (textEditWindow_ == nullptr) {
-        textEditWindow_ = CreateWindowExW(
-            0,
-            L"EDIT",
-            L"",
-            WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_NOHIDESEL,
-            0,
-            0,
-            0,
-            0,
-            window_,
-            reinterpret_cast<HMENU>(4001),
-            instance_,
-            nullptr);
-        if (textEditWindow_ == nullptr) {
-            editingTextPageIndex_.reset();
-            editingTextIndex_.reset();
-            editingTextBeforePage_.reset();
-            return;
-        }
-        SetWindowLongPtrW(textEditWindow_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
-        textEditOriginalProc_ = reinterpret_cast<WNDPROC>(
-            SetWindowLongPtrW(textEditWindow_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&App::TextEditProc)));
-        SendMessageW(textEditWindow_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 6));
-    }
-
     const PageText& text = document_.PageAt(pageIndex).texts[textIndex];
+    if (!EnsureTextEditWindow(text.alignment)) {
+        editingTextPageIndex_.reset();
+        editingTextIndex_.reset();
+        editingTextBeforePage_.reset();
+        return;
+    }
     SetWindowTextW(textEditWindow_, text.content.c_str());
     InvalidatePageSurfaceCache(pageIndex);
     RefreshTextEditControl();
@@ -6019,7 +6467,7 @@ bool App::CopySelectionToClipboard() {
     const auto appendUint32 = [&](std::uint32_t value) { appendBytes(&value, sizeof(value)); };
     const auto appendFloat = [&](float value) { appendBytes(&value, sizeof(value)); };
 
-    const char magic[] = { 'C', 'T', 'S', '4' };
+    const char magic[] = { 'C', 'T', 'S', '5' };
     appendBytes(magic, sizeof(magic));
     appendUint32(static_cast<std::uint32_t>(strokes.size()));
     appendUint32(static_cast<std::uint32_t>(texts.size()));
@@ -6040,12 +6488,25 @@ bool App::CopySelectionToClipboard() {
     }
 
     for (const PageText& text : texts) {
+        std::uint32_t flags = 0;
+        flags |= static_cast<std::uint32_t>(text.alignment);
+        flags |= static_cast<std::uint32_t>(text.fontFamily) << 8U;
+        if (text.bold) {
+            flags |= 1U << 16U;
+        }
+        if (text.italic) {
+            flags |= 1U << 17U;
+        }
+        if (text.underline) {
+            flags |= 1U << 18U;
+        }
         appendFloat(text.x);
         appendFloat(text.y);
         appendFloat(text.width);
         appendFloat(text.height);
         appendFloat(text.fontSize);
         appendUint32(text.color);
+        appendUint32(flags);
         appendUint32(static_cast<std::uint32_t>(text.content.size()));
         appendBytes(text.content.data(), text.content.size() * sizeof(wchar_t));
     }
@@ -6126,7 +6587,8 @@ bool App::PasteSelectionFromClipboard() {
         || (std::memcmp(magic, "CTS1", 4) != 0
             && std::memcmp(magic, "CTS2", 4) != 0
             && std::memcmp(magic, "CTS3", 4) != 0
-            && std::memcmp(magic, "CTS4", 4) != 0)) {
+            && std::memcmp(magic, "CTS4", 4) != 0
+            && std::memcmp(magic, "CTS5", 4) != 0)) {
         GlobalUnlock(clipboardData);
         CloseClipboard();
         return false;
@@ -6152,7 +6614,8 @@ bool App::PasteSelectionFromClipboard() {
     float maxX = 0.0f;
     float maxY = 0.0f;
     bool headerOk = readUint32(strokeCount);
-    if (headerOk && (std::memcmp(magic, "CTS2", 4) == 0 || std::memcmp(magic, "CTS3", 4) == 0 || std::memcmp(magic, "CTS4", 4) == 0)) {
+    if (headerOk && (std::memcmp(magic, "CTS2", 4) == 0 || std::memcmp(magic, "CTS3", 4) == 0
+        || std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0)) {
         headerOk = readUint32(textCount);
     }
     headerOk = headerOk && readUint32(imageCount)
@@ -6191,24 +6654,34 @@ bool App::PasteSelectionFromClipboard() {
     for (std::uint32_t textIndex = 0; ok && textIndex < textCount; ++textIndex) {
         PageText text {};
         std::uint32_t charCount = 0;
+        std::uint32_t flags = 0;
         ok = readFloat(text.x) && readFloat(text.y);
-        if (ok && (std::memcmp(magic, "CTS3", 4) == 0 || std::memcmp(magic, "CTS4", 4) == 0)) {
+        if (ok && (std::memcmp(magic, "CTS3", 4) == 0 || std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0)) {
             ok = readFloat(text.width);
         } else {
             text.width = 0.0f;
         }
-        if (ok && std::memcmp(magic, "CTS4", 4) == 0) {
+        if (ok && (std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0)) {
             ok = readFloat(text.height);
         } else {
             text.height = 0.0f;
         }
-        ok = ok && readFloat(text.fontSize) && readUint32(text.color) && readUint32(charCount);
+        ok = ok && readFloat(text.fontSize) && readUint32(text.color);
+        if (ok && std::memcmp(magic, "CTS5", 4) == 0) {
+            ok = readUint32(flags);
+        }
+        ok = ok && readUint32(charCount);
         if (ok) {
             const std::size_t byteCount = static_cast<std::size_t>(charCount) * sizeof(wchar_t);
             text.content.resize(charCount);
             ok = readExact(offset, text.content.data(), byteCount);
             offset += ok ? byteCount : 0U;
         }
+        text.alignment = static_cast<TextAlignment>(std::min<std::uint32_t>(flags & 0xFFU, 2U));
+        text.fontFamily = static_cast<TextFontFamily>(std::min<std::uint32_t>((flags >> 8U) & 0xFFU, 2U));
+        text.bold = (flags & (1U << 16U)) != 0;
+        text.italic = (flags & (1U << 17U)) != 0;
+        text.underline = (flags & (1U << 18U)) != 0;
         if (ok) {
             texts.push_back(std::move(text));
         }
@@ -7689,12 +8162,15 @@ void App::Paint() {
     FillRect(memoryDc, &paint.rcPaint, backgroundBrush);
     DeleteObject(backgroundBrush);
 
+    RefreshTextEditControl();
     PaintToolbar(memoryDc, clientRect);
     PaintCanvas(memoryDc, clientRect);
     PaintQuickSizePopup(memoryDc, clientRect);
+    PaintTextFormatPopup(memoryDc, clientRect);
     PaintPaletteMenu(memoryDc, clientRect);
     PaintPaletteWheel(memoryDc, clientRect);
-    RefreshTextEditControl();
+
+    PaintLiveTextEditOverlay(memoryDc);
 
     if (memoryDc != windowDc) {
         BitBlt(
@@ -7712,6 +8188,27 @@ void App::Paint() {
     RestoreDC(memoryDc, -1);
 
     EndPaint(window_, &paint);
+}
+
+void App::PaintLiveTextEditOverlay(HDC hdc) const {
+    if (window_ == nullptr || textEditWindow_ == nullptr || IsWindowVisible(textEditWindow_) == FALSE) {
+        return;
+    }
+
+    RECT editRect {};
+    if (GetWindowRect(textEditWindow_, &editRect) == FALSE) {
+        return;
+    }
+    MapWindowPoints(HWND_DESKTOP, window_, reinterpret_cast<POINT*>(&editRect), 2);
+    if (!HasRect(editRect)) {
+        return;
+    }
+
+    const RECT frameRect = LiveTextEditFrameRect(editRect, WindowDpi(window_));
+    const int savedDc = SaveDC(hdc);
+    ExcludeClipRect(hdc, editRect.left, editRect.top, editRect.right, editRect.bottom);
+    DrawDashedRect(hdc, frameRect, RGB(110, 204, 255), 2, 8, 5);
+    RestoreDC(hdc, savedDc);
 }
 
 void App::PaintToolbar(HDC hdc, RECT clientRect) const {
@@ -8427,6 +8924,118 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
 
     SelectObject(hdc, previousFont);
     DeleteObject(labelFont);
+}
+
+void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
+    if (!textFormatPopupOpen_ || !editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || !HasRect(textEditBounds_)) {
+        return;
+    }
+    if (*editingTextPageIndex_ >= document_.PageCount()) {
+        return;
+    }
+
+    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    if (*editingTextIndex_ >= page.texts.size()) {
+        return;
+    }
+
+    const PageText& text = page.texts[*editingTextIndex_];
+    const UINT dpi = WindowDpi(window_);
+    const RECT canvasRect = CanvasRect(clientRect);
+    const TextFormatPopupLayout layout = BuildTextFormatPopupLayout(canvasRect, textEditBounds_, textFormatFontMenuOpen_, dpi);
+    const COLORREF panelFill = RGB(18, 24, 32);
+    const COLORREF panelBorder = RGB(46, 58, 74);
+    const COLORREF buttonFill = RGB(29, 37, 48);
+    const COLORREF buttonBorder = RGB(58, 71, 88);
+    const COLORREF primaryText = RGB(236, 240, 245);
+    const COLORREF mutedText = RGB(177, 188, 202);
+    const COLORREF accentFill = RGB(44, 79, 119);
+    const COLORREF accentBorder = RGB(92, 137, 187);
+
+    auto fontFamilyLabel = [](TextFontFamily family) -> const wchar_t* {
+        switch (family) {
+        case TextFontFamily::Serif:
+            return L"Serif";
+        case TextFontFamily::Monospace:
+            return L"Monospace";
+        case TextFontFamily::Sans:
+        default:
+            return L"Sans";
+        }
+    };
+
+    FillRoundedRect(hdc, layout.panelRect, panelFill);
+    StrokeRoundedRect(hdc, layout.panelRect, panelBorder, 1);
+
+    HFONT bodyFont = CreateFontW(FontHeightForDpi(13, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HGDIOBJ previousFont = SelectObject(hdc, bodyFont);
+    SetBkMode(hdc, TRANSPARENT);
+
+    const auto drawButton = [&](const RECT& rect, const wchar_t* iconFileName, const wchar_t* fallbackLabel, bool active) {
+        FillRoundedRect(hdc, rect, active ? accentFill : buttonFill);
+        StrokeRoundedRect(hdc, rect, active ? accentBorder : buttonBorder, 1);
+        const COLORREF iconColor = active ? primaryText : mutedText;
+        if (const SvgIconData* icon = ToolbarSvgIcon(iconFileName); icon != nullptr) {
+            PaintSvgIcon(hdc, rect, *icon, iconColor);
+            return;
+        }
+
+        SetTextColor(hdc, iconColor);
+        RECT textRect = rect;
+        DrawTextW(hdc, fallbackLabel, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    };
+
+    drawButton(layout.alignLeftRect, L"text/left-or.svg", L"L", text.alignment == TextAlignment::Left);
+    drawButton(layout.alignCenterRect, L"text/cent-or.svg", L"C", text.alignment == TextAlignment::Center);
+    drawButton(layout.alignRightRect, L"text/right-or.svg", L"R", text.alignment == TextAlignment::Right);
+    drawButton(layout.boldRect, L"text/bold.svg", L"B", text.bold);
+    drawButton(layout.italicRect, L"text/italics.svg", L"I", text.italic);
+    drawButton(layout.underlineRect, L"text/underline.svg", L"U", text.underline);
+
+    FillRoundedRect(hdc, layout.fontDropdownRect, buttonFill);
+    StrokeRoundedRect(hdc, layout.fontDropdownRect, textFormatFontMenuOpen_ ? accentBorder : buttonBorder, 1);
+    SetTextColor(hdc, primaryText);
+    RECT dropdownTextRect = layout.fontDropdownRect;
+    dropdownTextRect.left += ScaleForDpi(10, dpi);
+    dropdownTextRect.right -= ScaleForDpi(22, dpi);
+    DrawTextW(hdc, fontFamilyLabel(text.fontFamily), -1, &dropdownTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    RECT dropdownArrowRect = layout.fontDropdownRect;
+    dropdownArrowRect.left = dropdownArrowRect.right - ScaleForDpi(18, dpi);
+    SetTextColor(hdc, mutedText);
+    DrawTextW(hdc, L"v", -1, &dropdownArrowRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    if (textFormatFontMenuOpen_ && HasRect(layout.fontMenuRect)) {
+        FillRoundedRect(hdc, layout.fontMenuRect, panelFill);
+        StrokeRoundedRect(hdc, layout.fontMenuRect, panelBorder, 1);
+        for (std::size_t index = 0; index < layout.fontOptionRects.size(); ++index) {
+            TextFontFamily optionFamily = TextFontFamily::Sans;
+            switch (index) {
+            case 1:
+                optionFamily = TextFontFamily::Serif;
+                break;
+            case 2:
+                optionFamily = TextFontFamily::Monospace;
+                break;
+            default:
+                optionFamily = TextFontFamily::Sans;
+                break;
+            }
+
+            const bool active = text.fontFamily == optionFamily;
+            FillRoundedRect(hdc, layout.fontOptionRects[index], active ? accentFill : panelFill);
+            SetTextColor(hdc, active ? primaryText : mutedText);
+            RECT optionTextRect = layout.fontOptionRects[index];
+            optionTextRect.left += ScaleForDpi(8, dpi);
+            optionTextRect.right -= ScaleForDpi(8, dpi);
+            DrawTextW(hdc, fontFamilyLabel(optionFamily), -1, &optionTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+    }
+
+    SelectObject(hdc, previousFont);
+    if (bodyFont != nullptr) {
+        DeleteObject(bodyFont);
+    }
 }
 
 void App::PaintCanvas(HDC hdc, RECT clientRect) {
@@ -10098,16 +10707,36 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         if (!IsTextSelected(pageView.pageIndex, textIndex)) {
             continue;
         }
+        RECT screenRect {};
+        bool hasScreenRect = false;
         PageText overlayText = page.texts[textIndex];
         if (IsEditingText(pageView.pageIndex, textIndex)) {
-            if (const auto liveText = CurrentEditingTextLayout(); liveText.has_value()) {
+            RECT liveEditRect {};
+            if (textEditWindow_ != nullptr && IsWindowVisible(textEditWindow_) != FALSE
+                && GetWindowRect(textEditWindow_, &liveEditRect) != FALSE) {
+                MapWindowPoints(HWND_DESKTOP, window_, reinterpret_cast<POINT*>(&liveEditRect), 2);
+                screenRect = liveEditRect;
+                hasScreenRect = HasRect(screenRect);
+            } else if (HasRect(textEditBounds_)) {
+                screenRect = textEditBounds_;
+                hasScreenRect = true;
+            } else if (const auto liveText = CurrentEditingTextLayout(); liveText.has_value()) {
                 overlayText = *liveText;
             }
         }
-        if (const auto textRect = PageTextBoundsRect(overlayText, page.width, pageView.scale, 4); textRect.has_value()) {
-            RECT screenRect = *textRect;
-            OffsetRect(&screenRect, pageView.rect.left, pageView.rect.top);
-            DrawRectangleAA(hdc, screenRect, RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
+
+        if (!hasScreenRect) {
+            if (const auto textRect = PageTextBoundsRect(overlayText, page.width, pageView.scale, 4); textRect.has_value()) {
+                screenRect = *textRect;
+                OffsetRect(&screenRect, pageView.rect.left, pageView.rect.top);
+                hasScreenRect = true;
+            }
+        }
+
+        if (hasScreenRect) {
+            if (!IsEditingText(pageView.pageIndex, textIndex)) {
+                DrawRectangleAA(hdc, screenRect, RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
+            }
 
             if (singleText.has_value() && singleText->first == pageView.pageIndex && singleText->second == textIndex
                 && !IsEditingText(pageView.pageIndex, textIndex)
@@ -10303,21 +10932,7 @@ void App::PaintText(HDC hdc, const PageText& text, const PageView& pageView) con
     const Page& page = document_.PageAt(pageView.pageIndex);
     const WrappedTextLayout layout = LayoutPageText(text, page.width);
     const int fontHeight = PageTextFontPixelHeight(text, pageView.scale);
-    HFONT font = CreateFontW(
-        -fontHeight,
-        0,
-        0,
-        0,
-        FW_NORMAL,
-        FALSE,
-        FALSE,
-        FALSE,
-        DEFAULT_CHARSET,
-        OUT_OUTLINE_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY,
-        VARIABLE_PITCH,
-        L"Segoe UI");
+    HFONT font = CreatePageTextFont(text, fontHeight);
     HGDIOBJ previousFont = font != nullptr ? SelectObject(hdc, font) : nullptr;
     int renderLineHeight = fontHeight;
     TEXTMETRICW textMetrics {};
@@ -10327,24 +10942,19 @@ void App::PaintText(HDC hdc, const PageText& text, const PageView& pageView) con
     const int left = pageView.rect.left + static_cast<int>(std::lround(text.x * pageView.scale));
     const int top = pageView.rect.top + static_cast<int>(std::lround(text.y * pageView.scale));
     const int renderWidth = std::max(1, static_cast<int>(std::ceil(ResolvedPageTextWidth(text, page.width) * std::max(0.1f, pageView.scale))));
-    const int renderHeight = std::max(
-        renderLineHeight * std::max(1, static_cast<int>(layout.lines.size())),
-        static_cast<int>(std::ceil(text.height * std::max(0.1f, pageView.scale))));
-    RECT clipRect = MakeRect(left, top, left + renderWidth, top + std::max(renderLineHeight, renderHeight));
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, ToColorRef(text.color));
+    const UINT alignmentFlags = DrawTextAlignmentFlags(text.alignment);
     for (std::size_t lineIndex = 0; lineIndex < layout.lines.size(); ++lineIndex) {
         const int lineTop = top + (renderLineHeight * static_cast<int>(lineIndex));
         const std::wstring& line = layout.lines[lineIndex];
-        ExtTextOutW(
+        RECT lineRect = MakeRect(left, lineTop, left + renderWidth, lineTop + renderLineHeight);
+        DrawTextW(
             hdc,
-            left,
-            lineTop,
-            ETO_CLIPPED,
-            &clipRect,
             line.c_str(),
-            static_cast<UINT>(line.size()),
-            nullptr);
+            static_cast<int>(line.size()),
+            &lineRect,
+            alignmentFlags | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_NOCLIP);
     }
     if (previousFont != nullptr) {
         SelectObject(hdc, previousFont);
@@ -10429,6 +11039,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_LBUTTONDOWN: {
         SetFocus(window_);
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (HandleTextFormatPopupClick(cursor)) {
+            return 0;
+        }
         CommitTextEdit();
         if (HandlePaletteClick(cursor)) {
             return 0;
@@ -11092,12 +11705,21 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
         return DLGC_WANTALLKEYS;
     case WM_KEYDOWN: {
         const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        if (ctrlPressed && wParam == 'W') {
+            app->ToggleTextFormatPopup();
+            return 0;
+        }
         if (wParam == VK_RETURN) {
             app->CommitTextEdit();
             SetFocus(app->window_);
             return 0;
         }
         if (wParam == VK_ESCAPE) {
+            if (app->textFormatPopupOpen_) {
+                app->CancelTextFormatPopup();
+                InvalidateRect(app->window_, nullptr, FALSE);
+                return 0;
+            }
             app->CancelTextEdit();
             SetFocus(app->window_);
             return 0;
@@ -11113,13 +11735,11 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
         if (ctrlPressed && wParam == 'X') {
             SendMessageW(window, WM_CUT, 0, 0);
             app->RefreshTextEditControl();
-            app->InvalidateEditingTextRegion();
             return 0;
         }
         if (ctrlPressed && wParam == 'V') {
             SendMessageW(window, WM_PASTE, 0, 0);
             app->RefreshTextEditControl();
-            app->InvalidateEditingTextRegion();
             return 0;
         }
         if (ctrlPressed && wParam == VK_BACK) {
@@ -11148,7 +11768,6 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
                 SetWindowTextW(window, text.c_str());
                 SendMessageW(window, EM_SETSEL, eraseStart, eraseStart);
                 app->RefreshTextEditControl();
-                app->InvalidateEditingTextRegion();
             }
             return 0;
         }
@@ -11166,7 +11785,11 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
     const LRESULT result = CallWindowProcW(app->textEditOriginalProc_, window, message, wParam, lParam);
     if (message == WM_CHAR || message == WM_PASTE || message == WM_CUT || message == WM_CLEAR) {
         app->RefreshTextEditControl();
-        app->InvalidateEditingTextRegion();
+        InvalidateRect(window, nullptr, TRUE);
+        UpdateWindow(window);
+        if (app->textFormatPopupOpen_ && app->window_ != nullptr) {
+            InvalidateRect(app->window_, nullptr, FALSE);
+        }
     }
     return result;
 }

@@ -27,6 +27,52 @@ constexpr float kMinimumStrokeRenderWidth = 1.25f;
 constexpr float kStrokeRenderWidthDivisor = 2.15f;
 constexpr float kTextLayoutScale = 8.0f;
 
+const wchar_t* PageTextFontFace(TextFontFamily family) {
+    switch (family) {
+    case TextFontFamily::Serif:
+        return L"Times New Roman";
+    case TextFontFamily::Monospace:
+        return L"Consolas";
+    case TextFontFamily::Sans:
+    default:
+        return L"Segoe UI";
+    }
+}
+
+int PageTextFontWeight(const PageText& text) {
+    return text.bold ? FW_BOLD : FW_NORMAL;
+}
+
+HFONT CreatePageTextFont(const PageText& text, int pixelHeight) {
+    return CreateFontW(
+        -pixelHeight,
+        0,
+        0,
+        0,
+        PageTextFontWeight(text),
+        text.italic ? TRUE : FALSE,
+        text.underline ? TRUE : FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH,
+        PageTextFontFace(text.fontFamily));
+}
+
+Gdiplus::StringAlignment GdiplusAlignmentForText(TextAlignment alignment) {
+    switch (alignment) {
+    case TextAlignment::Center:
+        return Gdiplus::StringAlignmentCenter;
+    case TextAlignment::Right:
+        return Gdiplus::StringAlignmentFar;
+    case TextAlignment::Left:
+    default:
+        return Gdiplus::StringAlignmentNear;
+    }
+}
+
 struct WrappedTextLayout {
     std::vector<std::wstring> lines;
     int wrapWidth = 0;
@@ -183,21 +229,7 @@ float ResolvedPageTextWidth(const PageText& text, float pageWidth) {
         return estimatedWidth;
     }
 
-    HFONT font = CreateFontW(
-        -fontHeight,
-        0,
-        0,
-        0,
-        FW_NORMAL,
-        FALSE,
-        FALSE,
-        FALSE,
-        DEFAULT_CHARSET,
-        OUT_OUTLINE_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY,
-        VARIABLE_PITCH,
-        L"Segoe UI");
+    HFONT font = CreatePageTextFont(text, fontHeight);
     HGDIOBJ previousFont = font != nullptr ? SelectObject(dc, font) : nullptr;
     RECT measureRect { 0, 0, 32767, 0 };
     if (!measureText.empty()) {
@@ -228,21 +260,7 @@ WrappedTextLayout LayoutPageText(const PageText& text, float pageWidth) {
         return layout;
     }
 
-    HFONT font = CreateFontW(
-        -layout.lineHeight,
-        0,
-        0,
-        0,
-        FW_NORMAL,
-        FALSE,
-        FALSE,
-        FALSE,
-        DEFAULT_CHARSET,
-        OUT_OUTLINE_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY,
-        VARIABLE_PITCH,
-        L"Segoe UI");
+    HFONT font = CreatePageTextFont(text, layout.lineHeight);
     HGDIOBJ previousFont = font != nullptr ? SelectObject(dc, font) : nullptr;
 
     TEXTMETRICW textMetrics {};
@@ -423,11 +441,22 @@ void DrawPageText(Gdiplus::Graphics& graphics, const PageText& text, float pageW
     const auto green = static_cast<BYTE>((text.color >> 8U) & 0xFFU);
     const auto blue = static_cast<BYTE>(text.color & 0xFFU);
 
-    Gdiplus::FontFamily fontFamily(L"Segoe UI");
-    Gdiplus::Font font(&fontFamily, fontSize, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    Gdiplus::FontStyle fontStyle = Gdiplus::FontStyleRegular;
+    if (text.bold) {
+        fontStyle = static_cast<Gdiplus::FontStyle>(fontStyle | Gdiplus::FontStyleBold);
+    }
+    if (text.italic) {
+        fontStyle = static_cast<Gdiplus::FontStyle>(fontStyle | Gdiplus::FontStyleItalic);
+    }
+    if (text.underline) {
+        fontStyle = static_cast<Gdiplus::FontStyle>(fontStyle | Gdiplus::FontStyleUnderline);
+    }
+
+    Gdiplus::FontFamily fontFamily(PageTextFontFace(text.fontFamily));
+    Gdiplus::Font font(&fontFamily, fontSize, fontStyle, Gdiplus::UnitPixel);
     Gdiplus::SolidBrush brush(Gdiplus::Color(alpha, red, green, blue));
     Gdiplus::StringFormat format;
-    format.SetAlignment(Gdiplus::StringAlignmentNear);
+    format.SetAlignment(GdiplusAlignmentForText(text.alignment));
     format.SetLineAlignment(Gdiplus::StringAlignmentNear);
     format.SetFormatFlags(Gdiplus::StringFormatFlagsNoClip | Gdiplus::StringFormatFlagsNoWrap);
     format.SetTrimming(Gdiplus::StringTrimmingNone);

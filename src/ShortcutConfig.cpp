@@ -31,7 +31,7 @@ constexpr std::array<ShortcutDefinition, 27> kShortcutDefinitions {{
     { App::ShortcutAction::ZoomPreset5, L"Zoom Preset 5", { 0, false, false, false } },
     { App::ShortcutAction::ToggleSettings, L"Settings", { 0, false, false, false } },
     { App::ShortcutAction::TogglePdfSidebar, L"PDF Sidebar", { 'B', true, false, false } },
-    { App::ShortcutAction::ToggleQuickSize, L"Quick Size", { 'W', true, false, false } },
+    { App::ShortcutAction::ToggleQuickSize, L"Quick Popup", { 'W', true, false, false } },
     { App::ShortcutAction::ToggleWheel, L"Wheel", { 'Q', true, false, false } },
     { App::ShortcutAction::PreviousPage, L"Prev Page", { VK_PRIOR, false, false, false } },
     { App::ShortcutAction::NextPage, L"Next Page", { VK_NEXT, false, false, false } },

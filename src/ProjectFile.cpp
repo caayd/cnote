@@ -16,9 +16,12 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 7;
+constexpr std::uint32_t kProjectVersion = 8;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
+constexpr std::uint8_t kTextStyleFlagBold = 1U << 0U;
+constexpr std::uint8_t kTextStyleFlagItalic = 1U << 1U;
+constexpr std::uint8_t kTextStyleFlagUnderline = 1U << 2U;
 
 std::string WideToUtf8(const std::wstring& value) {
     if (value.empty()) {
@@ -216,23 +219,80 @@ bool ReadImage(ByteReader& reader, PageImage& image) {
 }
 
 void AppendText(std::vector<std::uint8_t>& output, const PageText& text) {
+    const auto alignment = static_cast<std::uint8_t>(text.alignment);
+    const auto fontFamily = static_cast<std::uint8_t>(text.fontFamily);
+    std::uint8_t styleFlags = 0;
+    if (text.bold) {
+        styleFlags |= kTextStyleFlagBold;
+    }
+    if (text.italic) {
+        styleFlags |= kTextStyleFlagItalic;
+    }
+    if (text.underline) {
+        styleFlags |= kTextStyleFlagUnderline;
+    }
+    constexpr std::uint8_t reserved = 0;
     AppendValue(output, text.x);
     AppendValue(output, text.y);
     AppendValue(output, text.width);
     AppendValue(output, text.height);
     AppendValue(output, text.fontSize);
     AppendValue(output, text.color);
+    AppendValue(output, alignment);
+    AppendValue(output, fontFamily);
+    AppendValue(output, styleFlags);
+    AppendValue(output, reserved);
     AppendString(output, text.content);
 }
 
 bool ReadText(ByteReader& reader, PageText& text) {
-    return reader.Read(text.x)
+    std::uint8_t alignment = 0;
+    std::uint8_t fontFamily = 0;
+    std::uint8_t styleFlags = 0;
+    std::uint8_t reserved = 0;
+    const bool ok = reader.Read(text.x)
         && reader.Read(text.y)
         && reader.Read(text.width)
         && reader.Read(text.height)
         && reader.Read(text.fontSize)
         && reader.Read(text.color)
+        && reader.Read(alignment)
+        && reader.Read(fontFamily)
+        && reader.Read(styleFlags)
+        && reader.Read(reserved)
         && reader.ReadString(text.content);
+    if (!ok) {
+        return false;
+    }
+
+    switch (alignment) {
+    case 1:
+        text.alignment = TextAlignment::Center;
+        break;
+    case 2:
+        text.alignment = TextAlignment::Right;
+        break;
+    default:
+        text.alignment = TextAlignment::Left;
+        break;
+    }
+
+    switch (fontFamily) {
+    case 1:
+        text.fontFamily = TextFontFamily::Serif;
+        break;
+    case 2:
+        text.fontFamily = TextFontFamily::Monospace;
+        break;
+    default:
+        text.fontFamily = TextFontFamily::Sans;
+        break;
+    }
+
+    text.bold = (styleFlags & kTextStyleFlagBold) != 0;
+    text.italic = (styleFlags & kTextStyleFlagItalic) != 0;
+    text.underline = (styleFlags & kTextStyleFlagUnderline) != 0;
+    return true;
 }
 
 void AppendRaster(std::vector<std::uint8_t>& output, const RasterImage& raster) {
@@ -400,8 +460,18 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
         page.texts.reserve(textCount);
         for (std::uint32_t textIndex = 0; textIndex < textCount; ++textIndex) {
             PageText text {};
-            if (version >= 7U) {
+            if (version >= 8U) {
                 if (!ReadText(reader, text)) {
+                    return std::nullopt;
+                }
+            } else if (version >= 7U) {
+                if (!reader.Read(text.x)
+                    || !reader.Read(text.y)
+                    || !reader.Read(text.width)
+                    || !reader.Read(text.height)
+                    || !reader.Read(text.fontSize)
+                    || !reader.Read(text.color)
+                    || !reader.ReadString(text.content)) {
                     return std::nullopt;
                 }
             } else if (version >= 6U) {
