@@ -128,6 +128,71 @@ bool RectsOverlap(const RECT& a, const RECT& b) {
     return IntersectRect(&overlap, &a, &b) != 0;
 }
 
+bool Vec2Equal(const Vec2& a, const Vec2& b) {
+    return a.x == b.x && a.y == b.y;
+}
+
+bool StrokeStyleEqual(const StrokeStyle& a, const StrokeStyle& b) {
+    return a.color == b.color && a.width == b.width;
+}
+
+bool StrokeEqual(const Stroke& a, const Stroke& b) {
+    if (!StrokeStyleEqual(a.style, b.style) || a.points.size() != b.points.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < a.points.size(); ++index) {
+        if (!Vec2Equal(a.points[index], b.points[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool PageImageEqual(const PageImage& a, const PageImage& b) {
+    return a.x == b.x
+        && a.y == b.y
+        && a.width == b.width
+        && a.height == b.height
+        && a.rotationDegrees == b.rotationDegrees
+        && a.pixelWidth == b.pixelWidth
+        && a.pixelHeight == b.pixelHeight
+        && a.stride == b.stride
+        && a.pixels == b.pixels;
+}
+
+bool RasterImageEqual(const RasterImage& a, const RasterImage& b) {
+    return a.width == b.width
+        && a.height == b.height
+        && a.stride == b.stride
+        && a.scale == b.scale
+        && a.pixels == b.pixels;
+}
+
+bool PageEqual(const Page& a, const Page& b) {
+    if (a.width != b.width
+        || a.height != b.height
+        || a.sourcePdfSourceIndex != b.sourcePdfSourceIndex
+        || a.sourcePdfPageIndex != b.sourcePdfPageIndex
+        || !RasterImageEqual(a.raster, b.raster)
+        || a.images.size() != b.images.size()
+        || a.strokes.size() != b.strokes.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < a.images.size(); ++index) {
+        if (!PageImageEqual(a.images[index], b.images[index])) {
+            return false;
+        }
+    }
+    for (std::size_t index = 0; index < a.strokes.size(); ++index) {
+        if (!StrokeEqual(a.strokes[index], b.strokes[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::optional<RECT> StrokeBoundsRect(const Stroke& stroke, float scale, int extraPadding = 0) {
     if (stroke.points.empty() || scale <= 0.0f) {
         return std::nullopt;
@@ -2066,6 +2131,7 @@ void App::PrepareForDocumentSwitch() {
     CancelDeferredRasterRefresh();
     KillTimer(window_, kZoomSessionTimerId);
     CancelQuickSizePopup();
+    ClearInteractionPreview();
     zoomSessionActive_ = false;
     zoomAnchorValid_ = false;
     ClearZoomSessionSnapshots();
@@ -2088,6 +2154,7 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
     CancelToolbarZoomInput();
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
+    ClearInteractionPreview();
     ClearSelection();
     ClosePaletteOverlays();
     selectionLassoCursorPoints_.clear();
@@ -2368,6 +2435,7 @@ void App::SetActiveTool(Tool tool) {
         UpdateCaptureState();
     }
     if (tool != Tool::Move) {
+        ClearInteractionPreview();
         isMovingSelection_ = false;
         moveSelectionPageIndex_.reset();
         isTransformingImage_ = false;
@@ -3189,6 +3257,22 @@ void App::Undo() {
         NotifyDocumentMutated();
         return;
     }
+    case HistoryActionType::ReplacePages: {
+        if (action.pageIndices.size() != action.pages.size()) {
+            return;
+        }
+        for (std::size_t index = 0; index < action.pageIndices.size(); ++index) {
+            const std::size_t pageIndex = action.pageIndices[index];
+            if (pageIndex < document_.PageCount()) {
+                document_.PageAt(pageIndex) = action.pages[index];
+            }
+        }
+        redoActions_.push_back(std::move(action));
+        RestoreAfterContentHistoryChange(redoActions_.back().pageIndices, redoActions_.back().focusPageIndex);
+        NotifyDocumentMutated();
+        InvalidateCanvas();
+        return;
+    }
     default:
         return;
     }
@@ -3247,6 +3331,22 @@ void App::Redo() {
         undoActions_.push_back(std::move(action));
         RestoreAfterPageHistoryChange(undoActions_.back().pageIndex);
         NotifyDocumentMutated();
+        return;
+    }
+    case HistoryActionType::ReplacePages: {
+        if (action.pageIndices.size() != action.replacementPages.size()) {
+            return;
+        }
+        for (std::size_t index = 0; index < action.pageIndices.size(); ++index) {
+            const std::size_t pageIndex = action.pageIndices[index];
+            if (pageIndex < document_.PageCount()) {
+                document_.PageAt(pageIndex) = action.replacementPages[index];
+            }
+        }
+        undoActions_.push_back(std::move(action));
+        RestoreAfterContentHistoryChange(undoActions_.back().pageIndices, undoActions_.back().focusPageIndex);
+        NotifyDocumentMutated();
+        InvalidateCanvas();
         return;
     }
     default:
@@ -3322,13 +3422,67 @@ void App::RestoreAfterPageHistoryChange(std::size_t focusPageIndex) {
     FocusPage(std::min(focusPageIndex, document_.PageCount() - 1U));
 }
 
+void App::RestoreAfterContentHistoryChange(const std::vector<std::size_t>& pageIndices, std::size_t focusPageIndex) {
+    ClearSelection();
+    CancelDeferredRasterRefresh();
+    for (std::size_t pageIndex : pageIndices) {
+        if (pageIndex >= document_.PageCount()) {
+            continue;
+        }
+        InvalidatePageSurfaceCache(pageIndex);
+        InvalidateSidebarThumbnailCache(pageIndex);
+    }
+
+    document_.SetCurrentPageIndex(std::min(focusPageIndex, document_.PageCount() - 1U));
+    EnsureSidebarCurrentPageVisible();
+    EnsureVisiblePageRasterQuality();
+}
+
 void App::PushPageHistoryAction(
     HistoryActionType type,
     std::size_t index,
     std::vector<Page> pages,
     std::size_t focusPageIndex,
     std::size_t previousPageIndex) {
-    undoActions_.push_back({ type, {}, std::move(pages), index, focusPageIndex, previousPageIndex });
+    HistoryAction action {};
+    action.type = type;
+    action.pages = std::move(pages);
+    action.index = index;
+    action.pageIndex = focusPageIndex;
+    action.focusPageIndex = focusPageIndex;
+    action.previousPageIndex = previousPageIndex;
+    undoActions_.push_back(std::move(action));
+    redoActions_.clear();
+}
+
+void App::PushReplacePagesHistoryAction(std::vector<std::size_t> pageIndices, std::vector<Page> beforePages, std::size_t focusPageIndex) {
+    if (pageIndices.size() != beforePages.size() || pageIndices.empty()) {
+        return;
+    }
+
+    std::vector<Page> afterPages;
+    afterPages.reserve(pageIndices.size());
+    bool changed = false;
+    for (std::size_t index = 0; index < pageIndices.size(); ++index) {
+        const std::size_t pageIndex = pageIndices[index];
+        if (pageIndex >= document_.PageCount()) {
+            return;
+        }
+        afterPages.push_back(document_.PageAt(pageIndex));
+        changed = changed || !PageEqual(beforePages[index], afterPages.back());
+    }
+
+    if (!changed) {
+        return;
+    }
+
+    HistoryAction action {};
+    action.type = HistoryActionType::ReplacePages;
+    action.pages = std::move(beforePages);
+    action.replacementPages = std::move(afterPages);
+    action.pageIndices = std::move(pageIndices);
+    action.focusPageIndex = std::min(focusPageIndex, document_.PageCount() - 1U);
+    undoActions_.push_back(std::move(action));
     redoActions_.clear();
 }
 
@@ -4108,7 +4262,15 @@ void App::BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, Ima
     imageTransformStartAngleDegrees_ = std::atan2(
         imageTransformStartPagePoint_.y - center.y,
         imageTransformStartPagePoint_.x - center.x) * (180.0f / kPi);
+    interactionPreviewMode_ = InteractionPreviewMode::ImageTransform;
+    interactionPreviewStartCursor_ = cursor;
+    EnsureInteractionPreviewStorage();
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    BuildInteractionPageSnapshot(CalculatePageView(clientRect, pageIndex));
+    RebuildImageTransformPreview(cursor);
     UpdateCaptureState();
+    InvalidateCanvas();
 }
 
 void App::BeginStrokeTransform(std::size_t pageIndex, ImageTransformHandle handle, POINT cursor) {
@@ -4150,7 +4312,15 @@ void App::BeginStrokeTransform(std::size_t pageIndex, ImageTransformHandle handl
     strokeTransformStartAngleDegrees_ = std::atan2(
         strokeTransformStartPagePoint_.y - center.y,
         strokeTransformStartPagePoint_.x - center.x) * (180.0f / kPi);
+    interactionPreviewMode_ = InteractionPreviewMode::StrokeTransform;
+    interactionPreviewStartCursor_ = cursor;
+    EnsureInteractionPreviewStorage();
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    BuildInteractionPageSnapshot(CalculatePageView(clientRect, pageIndex));
+    RebuildStrokeTransformPreview(cursor);
     UpdateCaptureState();
+    InvalidateCanvas();
 }
 
 void App::BeginMoveSelection(POINT cursor) {
@@ -4243,8 +4413,22 @@ void App::BeginMoveSelection(POINT cursor) {
     CancelDeferredRasterRefresh(false);
     isMovingSelection_ = true;
     moveSelectionPageIndex_ = pageIndex;
+    interactionPreviewMode_ = InteractionPreviewMode::MoveSelection;
+    interactionPreviewStartCursor_ = cursor;
     lastMoveCursor_ = cursor;
     moveSelectionScale_ = std::max(0.1f, hitPage->scale);
+    EnsureInteractionPreviewStorage();
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const std::vector<PageView> pageViews = CalculatePageViews(clientRect);
+    for (const PageView& previewPageView : pageViews) {
+        const bool hasSelectedStrokes = previewPageView.pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[previewPageView.pageIndex].empty();
+        const bool hasSelectedImages = previewPageView.pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[previewPageView.pageIndex].empty();
+        if (hasSelectedStrokes || hasSelectedImages) {
+            BuildInteractionPageSnapshot(previewPageView);
+        }
+    }
+    RebuildMoveSelectionPreview(cursor);
     document_.SetCurrentPageIndex(pageIndex);
     UpdateCaptureState();
     InvalidateCanvas();
@@ -4254,317 +4438,14 @@ void App::UpdateImageTransform(POINT cursor) {
     if (!isTransformingImage_ || !transformingImagePageIndex_.has_value() || !transformingImageIndex_.has_value()) {
         return;
     }
-
-    RECT clientRect {};
-    GetClientRect(window_, &clientRect);
-    const PageView pageView = CalculatePageView(clientRect, *transformingImagePageIndex_);
-    if (!pageView.valid) {
-        return;
-    }
-
-    Page& page = document_.PageAt(*transformingImagePageIndex_);
-    if (*transformingImageIndex_ >= page.images.size()) {
-        return;
-    }
-
-    const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-    const Vec2 currentPoint {
-        std::clamp((static_cast<float>(cursor.x - pageView.rect.left)) / pageView.scale, 0.0f, page.width),
-        std::clamp((static_cast<float>(cursor.y - pageView.rect.top)) / pageView.scale, 0.0f, page.height),
-    };
-    PageImage updated = imageTransformInitial_;
-    const Vec2 center = ImageCenter(imageTransformInitial_);
-
-    if (imageTransformHandle_ == ImageTransformHandle::Rotate) {
-        const float currentAngle = std::atan2(currentPoint.y - center.y, currentPoint.x - center.x) * (180.0f / kPi);
-        updated.rotationDegrees = imageTransformInitial_.rotationDegrees + (currentAngle - imageTransformStartAngleDegrees_);
-        if (shiftPressed) {
-            updated.rotationDegrees = std::round(updated.rotationDegrees / 15.0f) * 15.0f;
-        }
-    } else {
-        const Vec2 localPoint = ToImageLocalPoint(imageTransformInitial_, currentPoint);
-        float left = -imageTransformInitial_.width * 0.5f;
-        float right = imageTransformInitial_.width * 0.5f;
-        float top = -imageTransformInitial_.height * 0.5f;
-        float bottom = imageTransformInitial_.height * 0.5f;
-        const float localX = localPoint.x - center.x;
-        const float localY = localPoint.y - center.y;
-        constexpr float kMinImageSize = 18.0f;
-
-        switch (imageTransformHandle_) {
-        case ImageTransformHandle::ResizeNorthWest:
-            left = std::min(localX, right - kMinImageSize);
-            top = std::min(localY, bottom - kMinImageSize);
-            break;
-        case ImageTransformHandle::ResizeNorth:
-            top = std::min(localY, bottom - kMinImageSize);
-            break;
-        case ImageTransformHandle::ResizeNorthEast:
-            right = std::max(localX, left + kMinImageSize);
-            top = std::min(localY, bottom - kMinImageSize);
-            break;
-        case ImageTransformHandle::ResizeEast:
-            right = std::max(localX, left + kMinImageSize);
-            break;
-        case ImageTransformHandle::ResizeSouthEast:
-            right = std::max(localX, left + kMinImageSize);
-            bottom = std::max(localY, top + kMinImageSize);
-            break;
-        case ImageTransformHandle::ResizeSouth:
-            bottom = std::max(localY, top + kMinImageSize);
-            break;
-        case ImageTransformHandle::ResizeSouthWest:
-            left = std::min(localX, right - kMinImageSize);
-            bottom = std::max(localY, top + kMinImageSize);
-            break;
-        case ImageTransformHandle::ResizeWest:
-            left = std::min(localX, right - kMinImageSize);
-            break;
-        default:
-            break;
-        }
-
-        if (shiftPressed) {
-            const float initialWidth = std::max(kMinImageSize, imageTransformInitial_.width);
-            const float initialHeight = std::max(kMinImageSize, imageTransformInitial_.height);
-            const float aspect = initialWidth / initialHeight;
-            switch (imageTransformHandle_) {
-            case ImageTransformHandle::ResizeNorthWest:
-            case ImageTransformHandle::ResizeNorthEast:
-            case ImageTransformHandle::ResizeSouthEast:
-            case ImageTransformHandle::ResizeSouthWest: {
-                const float widthScale = std::abs(right - left) / initialWidth;
-                const float heightScale = std::abs(bottom - top) / initialHeight;
-                const float scale = std::max(widthScale, heightScale);
-                const float newWidth = std::max(kMinImageSize, initialWidth * scale);
-                const float newHeight = std::max(kMinImageSize, initialHeight * scale);
-                if (imageTransformHandle_ == ImageTransformHandle::ResizeNorthWest) {
-                    left = right - newWidth;
-                    top = bottom - newHeight;
-                } else if (imageTransformHandle_ == ImageTransformHandle::ResizeNorthEast) {
-                    right = left + newWidth;
-                    top = bottom - newHeight;
-                } else if (imageTransformHandle_ == ImageTransformHandle::ResizeSouthEast) {
-                    right = left + newWidth;
-                    bottom = top + newHeight;
-                } else {
-                    left = right - newWidth;
-                    bottom = top + newHeight;
-                }
-                break;
-            }
-            case ImageTransformHandle::ResizeEast:
-            case ImageTransformHandle::ResizeWest: {
-                const float newWidth = std::max(kMinImageSize, std::abs(right - left));
-                const float newHeight = std::max(kMinImageSize, newWidth / aspect);
-                if (imageTransformHandle_ == ImageTransformHandle::ResizeEast) {
-                    right = left + newWidth;
-                } else {
-                    left = right - newWidth;
-                }
-                top = -newHeight * 0.5f;
-                bottom = newHeight * 0.5f;
-                break;
-            }
-            case ImageTransformHandle::ResizeNorth:
-            case ImageTransformHandle::ResizeSouth: {
-                const float newHeight = std::max(kMinImageSize, std::abs(bottom - top));
-                const float newWidth = std::max(kMinImageSize, newHeight * aspect);
-                if (imageTransformHandle_ == ImageTransformHandle::ResizeNorth) {
-                    top = bottom - newHeight;
-                } else {
-                    bottom = top + newHeight;
-                }
-                left = -newWidth * 0.5f;
-                right = newWidth * 0.5f;
-                break;
-            }
-            default:
-                break;
-            }
-        }
-
-        const Vec2 localCenterOffset {
-            (left + right) * 0.5f,
-            (top + bottom) * 0.5f,
-        };
-        const Vec2 newCenter = RotatePointAround(
-            { center.x + localCenterOffset.x, center.y + localCenterOffset.y },
-            center,
-            imageTransformInitial_.rotationDegrees);
-        updated.width = std::max(kMinImageSize, right - left);
-        updated.height = std::max(kMinImageSize, bottom - top);
-        updated.x = newCenter.x - (updated.width * 0.5f);
-        updated.y = newCenter.y - (updated.height * 0.5f);
-    }
-
-    page.images[*transformingImageIndex_] = updated;
-    NotifyDocumentMutated();
-    InvalidatePageSurfaceCache(*transformingImagePageIndex_);
-    InvalidateCanvas();
+    RebuildImageTransformPreview(cursor);
 }
 
 void App::UpdateStrokeTransform(POINT cursor) {
     if (!isTransformingStroke_ || !transformingStrokePageIndex_.has_value()) {
         return;
     }
-
-    RECT clientRect {};
-    GetClientRect(window_, &clientRect);
-    const PageView pageView = CalculatePageView(clientRect, *transformingStrokePageIndex_);
-    if (!pageView.valid) {
-        return;
-    }
-
-    Page& page = document_.PageAt(*transformingStrokePageIndex_);
-    const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-    const Vec2 currentPoint {
-        std::clamp((static_cast<float>(cursor.x - pageView.rect.left)) / pageView.scale, 0.0f, page.width),
-        std::clamp((static_cast<float>(cursor.y - pageView.rect.top)) / pageView.scale, 0.0f, page.height),
-    };
-    const Vec2 center {
-        (strokeTransformBoundsMin_.x + strokeTransformBoundsMax_.x) * 0.5f,
-        (strokeTransformBoundsMin_.y + strokeTransformBoundsMax_.y) * 0.5f,
-    };
-
-    if (strokeTransformHandle_ == ImageTransformHandle::Rotate) {
-        float angleDelta = (std::atan2(currentPoint.y - center.y, currentPoint.x - center.x) * (180.0f / kPi)) - strokeTransformStartAngleDegrees_;
-        if (shiftPressed) {
-            angleDelta = std::round(angleDelta / 15.0f) * 15.0f;
-        }
-        for (const auto& [strokeIndex, originalStroke] : strokeTransformInitials_) {
-            if (strokeIndex >= page.strokes.size()) {
-                continue;
-            }
-            Stroke updated = originalStroke;
-            for (Vec2& point : updated.points) {
-                point = RotatePointAround(point, center, angleDelta);
-            }
-            page.strokes[strokeIndex] = std::move(updated);
-        }
-    } else {
-        float left = strokeTransformBoundsMin_.x - center.x;
-        float right = strokeTransformBoundsMax_.x - center.x;
-        float top = strokeTransformBoundsMin_.y - center.y;
-        float bottom = strokeTransformBoundsMax_.y - center.y;
-        const float localX = currentPoint.x - center.x;
-        const float localY = currentPoint.y - center.y;
-        constexpr float kMinStrokeSize = 12.0f;
-
-        switch (strokeTransformHandle_) {
-        case ImageTransformHandle::ResizeNorthWest:
-            left = std::min(localX, right - kMinStrokeSize);
-            top = std::min(localY, bottom - kMinStrokeSize);
-            break;
-        case ImageTransformHandle::ResizeNorth:
-            top = std::min(localY, bottom - kMinStrokeSize);
-            break;
-        case ImageTransformHandle::ResizeNorthEast:
-            right = std::max(localX, left + kMinStrokeSize);
-            top = std::min(localY, bottom - kMinStrokeSize);
-            break;
-        case ImageTransformHandle::ResizeEast:
-            right = std::max(localX, left + kMinStrokeSize);
-            break;
-        case ImageTransformHandle::ResizeSouthEast:
-            right = std::max(localX, left + kMinStrokeSize);
-            bottom = std::max(localY, top + kMinStrokeSize);
-            break;
-        case ImageTransformHandle::ResizeSouth:
-            bottom = std::max(localY, top + kMinStrokeSize);
-            break;
-        case ImageTransformHandle::ResizeSouthWest:
-            left = std::min(localX, right - kMinStrokeSize);
-            bottom = std::max(localY, top + kMinStrokeSize);
-            break;
-        case ImageTransformHandle::ResizeWest:
-            left = std::min(localX, right - kMinStrokeSize);
-            break;
-        default:
-            break;
-        }
-
-        const float initialWidth = std::max(kMinStrokeSize, strokeTransformBoundsMax_.x - strokeTransformBoundsMin_.x);
-        const float initialHeight = std::max(kMinStrokeSize, strokeTransformBoundsMax_.y - strokeTransformBoundsMin_.y);
-        if (shiftPressed) {
-            const float aspect = initialWidth / initialHeight;
-            switch (strokeTransformHandle_) {
-            case ImageTransformHandle::ResizeNorthWest:
-            case ImageTransformHandle::ResizeNorthEast:
-            case ImageTransformHandle::ResizeSouthEast:
-            case ImageTransformHandle::ResizeSouthWest: {
-                const float widthScale = std::abs(right - left) / initialWidth;
-                const float heightScale = std::abs(bottom - top) / initialHeight;
-                const float scale = std::max(widthScale, heightScale);
-                const float newWidth = std::max(kMinStrokeSize, initialWidth * scale);
-                const float newHeight = std::max(kMinStrokeSize, initialHeight * scale);
-                if (strokeTransformHandle_ == ImageTransformHandle::ResizeNorthWest) {
-                    left = right - newWidth;
-                    top = bottom - newHeight;
-                } else if (strokeTransformHandle_ == ImageTransformHandle::ResizeNorthEast) {
-                    right = left + newWidth;
-                    top = bottom - newHeight;
-                } else if (strokeTransformHandle_ == ImageTransformHandle::ResizeSouthEast) {
-                    right = left + newWidth;
-                    bottom = top + newHeight;
-                } else {
-                    left = right - newWidth;
-                    bottom = top + newHeight;
-                }
-                break;
-            }
-            case ImageTransformHandle::ResizeEast:
-            case ImageTransformHandle::ResizeWest: {
-                const float newWidth = std::max(kMinStrokeSize, std::abs(right - left));
-                const float newHeight = std::max(kMinStrokeSize, newWidth / aspect);
-                if (strokeTransformHandle_ == ImageTransformHandle::ResizeEast) {
-                    right = left + newWidth;
-                } else {
-                    left = right - newWidth;
-                }
-                top = -newHeight * 0.5f;
-                bottom = newHeight * 0.5f;
-                break;
-            }
-            case ImageTransformHandle::ResizeNorth:
-            case ImageTransformHandle::ResizeSouth: {
-                const float newHeight = std::max(kMinStrokeSize, std::abs(bottom - top));
-                const float newWidth = std::max(kMinStrokeSize, newHeight * aspect);
-                if (strokeTransformHandle_ == ImageTransformHandle::ResizeNorth) {
-                    top = bottom - newHeight;
-                } else {
-                    bottom = top + newHeight;
-                }
-                left = -newWidth * 0.5f;
-                right = newWidth * 0.5f;
-                break;
-            }
-            default:
-                break;
-            }
-        }
-
-        const Vec2 localCenterOffset { (left + right) * 0.5f, (top + bottom) * 0.5f };
-        const float scaleX = std::max(kMinStrokeSize, right - left) / initialWidth;
-        const float scaleY = std::max(kMinStrokeSize, bottom - top) / initialHeight;
-        for (const auto& [strokeIndex, originalStroke] : strokeTransformInitials_) {
-            if (strokeIndex >= page.strokes.size()) {
-                continue;
-            }
-            Stroke updated = originalStroke;
-            for (Vec2& point : updated.points) {
-                const float localXPoint = point.x - center.x;
-                const float localYPoint = point.y - center.y;
-                point.x = center.x + (localXPoint * scaleX) + localCenterOffset.x;
-                point.y = center.y + (localYPoint * scaleY) + localCenterOffset.y;
-            }
-            page.strokes[strokeIndex] = std::move(updated);
-        }
-    }
-
-    NotifyDocumentMutated();
-    InvalidatePageSurfaceCache(*transformingStrokePageIndex_);
-    InvalidateCanvas();
+    RebuildStrokeTransformPreview(cursor);
 }
 
 void App::EndStrokeTransform() {
@@ -4572,10 +4453,23 @@ void App::EndStrokeTransform() {
         return;
     }
 
+    std::vector<std::size_t> affectedPageIndices;
+    std::vector<Page> beforePages;
+    if (transformingStrokePageIndex_.has_value() && *transformingStrokePageIndex_ < document_.PageCount()) {
+        affectedPageIndices.push_back(*transformingStrokePageIndex_);
+        beforePages.push_back(document_.PageAt(*transformingStrokePageIndex_));
+    }
+    const std::size_t focusPageIndex = std::min(document_.CurrentPageIndex(), document_.PageCount() - 1U);
+
+    CommitStrokeTransformPreview();
+    PushReplacePagesHistoryAction(std::move(affectedPageIndices), std::move(beforePages), focusPageIndex);
+    ClearInteractionPreview();
     isTransformingStroke_ = false;
     transformingStrokePageIndex_.reset();
     strokeTransformHandle_ = ImageTransformHandle::None;
     strokeTransformInitials_.clear();
+    NotifyDocumentMutated();
+    InvalidateCanvas();
     UpdateCaptureState();
     if (rasterRefreshPending_) {
         ScheduleDeferredRasterRefresh();
@@ -4587,27 +4481,10 @@ void App::UpdateMoveSelection(POINT cursor) {
         return;
     }
 
-    const float scale = std::max(0.1f, moveSelectionScale_);
-    const Vec2 delta {
-        static_cast<float>(cursor.x - lastMoveCursor_.x) / scale,
-        static_cast<float>(cursor.y - lastMoveCursor_.y) / scale,
-    };
-    if (std::abs(delta.x) < 0.001f && std::abs(delta.y) < 0.001f) {
+    if (cursor.x == lastMoveCursor_.x && cursor.y == lastMoveCursor_.y) {
         return;
     }
-
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        const bool hasSelectedStrokes = pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty();
-        const bool hasSelectedImages = pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty();
-        if (!hasSelectedStrokes && !hasSelectedImages) {
-            continue;
-        }
-
-        TranslateSelectedContent(pageIndex, delta, false, false);
-    }
-    RehomeSelectedContentAcrossPages(false);
-    NotifyDocumentMutated();
-    InvalidateCanvas();
+    RebuildMoveSelectionPreview(cursor);
     lastMoveCursor_ = cursor;
 }
 
@@ -4616,10 +4493,23 @@ void App::EndImageTransform() {
         return;
     }
 
+    std::vector<std::size_t> affectedPageIndices;
+    std::vector<Page> beforePages;
+    if (transformingImagePageIndex_.has_value() && *transformingImagePageIndex_ < document_.PageCount()) {
+        affectedPageIndices.push_back(*transformingImagePageIndex_);
+        beforePages.push_back(document_.PageAt(*transformingImagePageIndex_));
+    }
+    const std::size_t focusPageIndex = std::min(document_.CurrentPageIndex(), document_.PageCount() - 1U);
+
+    CommitImageTransformPreview();
+    PushReplacePagesHistoryAction(std::move(affectedPageIndices), std::move(beforePages), focusPageIndex);
+    ClearInteractionPreview();
     isTransformingImage_ = false;
     transformingImagePageIndex_.reset();
     transformingImageIndex_.reset();
     imageTransformHandle_ = ImageTransformHandle::None;
+    NotifyDocumentMutated();
+    InvalidateCanvas();
     UpdateCaptureState();
     if (rasterRefreshPending_) {
         ScheduleDeferredRasterRefresh();
@@ -4631,13 +4521,44 @@ void App::EndMoveSelection() {
         return;
     }
 
-    if (RehomeSelectedContentAcrossPages(true)) {
-        NotifyDocumentMutated();
+    if (lastMoveCursor_.x == interactionPreviewStartCursor_.x && lastMoveCursor_.y == interactionPreviewStartCursor_.y) {
+        ClearInteractionPreview();
+        isMovingSelection_ = false;
+        moveSelectionPageIndex_.reset();
         InvalidateCanvas();
+        UpdateCaptureState();
+        if (rasterRefreshPending_) {
+            ScheduleDeferredRasterRefresh();
+        }
+        return;
     }
 
+    std::vector<std::size_t> affectedPageIndices;
+    affectedPageIndices.reserve(document_.PageCount());
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        const bool hasSelectedStrokes = pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty();
+        const bool hasSelectedImages = pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty();
+        const bool hasPreviewStrokes = pageIndex < interactionPreviewStrokes_.size() && !interactionPreviewStrokes_[pageIndex].empty();
+        const bool hasPreviewImages = pageIndex < interactionPreviewImages_.size() && !interactionPreviewImages_[pageIndex].empty();
+        if (hasSelectedStrokes || hasSelectedImages || hasPreviewStrokes || hasPreviewImages) {
+            affectedPageIndices.push_back(pageIndex);
+        }
+    }
+
+    std::vector<Page> beforePages;
+    beforePages.reserve(affectedPageIndices.size());
+    for (std::size_t pageIndex : affectedPageIndices) {
+        beforePages.push_back(document_.PageAt(pageIndex));
+    }
+    const std::size_t focusPageIndex = std::min(document_.CurrentPageIndex(), document_.PageCount() - 1U);
+
+    CommitMoveSelectionPreview();
+    PushReplacePagesHistoryAction(std::move(affectedPageIndices), std::move(beforePages), focusPageIndex);
+    ClearInteractionPreview();
     isMovingSelection_ = false;
     moveSelectionPageIndex_.reset();
+    NotifyDocumentMutated();
+    InvalidateCanvas();
     UpdateCaptureState();
     if (rasterRefreshPending_) {
         ScheduleDeferredRasterRefresh();
@@ -6826,6 +6747,97 @@ void App::PaintSelectionOverlay(HDC hdc, RECT canvasRect) const {
     RestoreDC(hdc, -1);
 }
 
+void App::PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSelectToolSelectionAffordances) const {
+    if (interactionPreviewMode_ == InteractionPreviewMode::None || pageView.pageIndex >= document_.PageCount()) {
+        return;
+    }
+
+    if (pageView.pageIndex < interactionPreviewImages_.size()) {
+        Gdiplus::Graphics imageGraphics(hdc);
+        imageGraphics.SetInterpolationMode(Gdiplus::InterpolationModeBilinear);
+        imageGraphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeDefault);
+        imageGraphics.SetCompositingQuality(Gdiplus::CompositingQualityHighSpeed);
+        for (const InteractionPreviewImage& entry : interactionPreviewImages_[pageView.pageIndex]) {
+            const PageImage& image = entry.image;
+            if (image.pixels.empty() || image.pixelWidth <= 0 || image.pixelHeight <= 0) {
+                continue;
+            }
+
+            Gdiplus::Bitmap bitmap(
+                image.pixelWidth,
+                image.pixelHeight,
+                image.stride,
+                PixelFormat32bppRGB,
+                const_cast<BYTE*>(reinterpret_cast<const BYTE*>(image.pixels.data())));
+            const Gdiplus::REAL centerX = static_cast<Gdiplus::REAL>((image.x + (image.width * 0.5f)) * pageView.scale + pageView.rect.left);
+            const Gdiplus::REAL centerY = static_cast<Gdiplus::REAL>((image.y + (image.height * 0.5f)) * pageView.scale + pageView.rect.top);
+            const Gdiplus::REAL drawWidth = static_cast<Gdiplus::REAL>(image.width * pageView.scale);
+            const Gdiplus::REAL drawHeight = static_cast<Gdiplus::REAL>(image.height * pageView.scale);
+
+            imageGraphics.ResetTransform();
+            imageGraphics.TranslateTransform(centerX, centerY);
+            imageGraphics.RotateTransform(image.rotationDegrees);
+            imageGraphics.DrawImage(&bitmap, -drawWidth * 0.5f, -drawHeight * 0.5f, drawWidth, drawHeight);
+
+            const auto corners = ImageCorners(image);
+            POINT polygon[5] {};
+            for (std::size_t index = 0; index < corners.size(); ++index) {
+                const Vec2 screenPoint = ScreenPointFromPagePoint(corners[index], pageView.rect, pageView.scale);
+                polygon[index].x = static_cast<LONG>(std::lround(screenPoint.x));
+                polygon[index].y = static_cast<LONG>(std::lround(screenPoint.y));
+            }
+            polygon[4] = polygon[0];
+            DrawPolylineAA(hdc, polygon, 5, RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
+
+            if ((interactionPreviewMode_ == InteractionPreviewMode::ImageTransform || interactionPreviewMode_ == InteractionPreviewMode::MoveSelection)
+                && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingImage_
+                    || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances))) {
+                const int handleHalf = 4;
+                const auto paintHandle = [&](int centerXInt, int centerYInt) {
+                    RECT handleRect = MakeRect(centerXInt - handleHalf, centerYInt - handleHalf, centerXInt + handleHalf + 1, centerYInt + handleHalf + 1);
+                    FillRoundedRect(hdc, handleRect, RGB(242, 247, 252));
+                    StrokeRoundedRect(hdc, handleRect, RGB(83, 112, 145), 1);
+                };
+                for (std::size_t index = 0; index < corners.size(); ++index) {
+                    const Vec2 screenPoint = ScreenPointFromPagePoint(corners[index], pageView.rect, pageView.scale);
+                    paintHandle(static_cast<int>(std::lround(screenPoint.x)), static_cast<int>(std::lround(screenPoint.y)));
+                }
+            }
+        }
+        imageGraphics.ResetTransform();
+    }
+
+    if (pageView.pageIndex < interactionPreviewStrokes_.size()) {
+        for (const InteractionPreviewStroke& entry : interactionPreviewStrokes_[pageView.pageIndex]) {
+            PaintStroke(hdc, entry.stroke, pageView, false, true);
+        }
+
+        const bool shouldDrawHandles = (interactionPreviewMode_ == InteractionPreviewMode::StrokeTransform || interactionPreviewMode_ == InteractionPreviewMode::MoveSelection)
+            && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingStroke_
+                || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances));
+        if (shouldDrawHandles && !interactionPreviewStrokes_[pageView.pageIndex].empty()) {
+            float minX = document_.PageAt(pageView.pageIndex).width;
+            float minY = document_.PageAt(pageView.pageIndex).height;
+            float maxX = 0.0f;
+            float maxY = 0.0f;
+            for (const InteractionPreviewStroke& entry : interactionPreviewStrokes_[pageView.pageIndex]) {
+                for (const Vec2& point : entry.stroke.points) {
+                    minX = std::min(minX, point.x);
+                    minY = std::min(minY, point.y);
+                    maxX = std::max(maxX, point.x);
+                    maxY = std::max(maxY, point.y);
+                }
+            }
+
+            const int left = pageView.rect.left + static_cast<int>(std::lround(minX * pageView.scale));
+            const int top = pageView.rect.top + static_cast<int>(std::lround(minY * pageView.scale));
+            const int right = pageView.rect.left + static_cast<int>(std::lround(maxX * pageView.scale));
+            const int bottom = pageView.rect.top + static_cast<int>(std::lround(maxY * pageView.scale));
+            DrawRectangleAA(hdc, MakeRect(left, top, right, bottom), RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
+        }
+    }
+}
+
 void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
     if (!quickSizePopupTool_.has_value()) {
         return;
@@ -7345,6 +7357,785 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
     DeleteDC(cacheDc);
 }
 
+void App::ClearInteractionPreview() {
+    interactionPreviewMode_ = InteractionPreviewMode::None;
+    interactionPageSnapshots_.clear();
+    interactionPreviewStrokes_.clear();
+    interactionPreviewImages_.clear();
+}
+
+void App::EnsureInteractionPreviewStorage() {
+    interactionPageSnapshots_.assign(document_.PageCount(), {});
+    interactionPreviewStrokes_.assign(document_.PageCount(), {});
+    interactionPreviewImages_.assign(document_.PageCount(), {});
+}
+
+bool App::ShouldSkipStrokeInInteractionSnapshot(std::size_t pageIndex, std::size_t strokeIndex) const {
+    if (interactionPreviewMode_ == InteractionPreviewMode::None) {
+        return false;
+    }
+
+    if (interactionPreviewMode_ == InteractionPreviewMode::MoveSelection || interactionPreviewMode_ == InteractionPreviewMode::StrokeTransform) {
+        return pageIndex < selectedStrokeIndices_.size()
+            && std::find(selectedStrokeIndices_[pageIndex].begin(), selectedStrokeIndices_[pageIndex].end(), strokeIndex) != selectedStrokeIndices_[pageIndex].end();
+    }
+
+    return false;
+}
+
+bool App::ShouldSkipImageInInteractionSnapshot(std::size_t pageIndex, std::size_t imageIndex) const {
+    if (interactionPreviewMode_ == InteractionPreviewMode::None) {
+        return false;
+    }
+
+    if (interactionPreviewMode_ == InteractionPreviewMode::MoveSelection) {
+        return pageIndex < selectedImageIndices_.size()
+            && std::find(selectedImageIndices_[pageIndex].begin(), selectedImageIndices_[pageIndex].end(), imageIndex) != selectedImageIndices_[pageIndex].end();
+    }
+
+    if (interactionPreviewMode_ == InteractionPreviewMode::ImageTransform) {
+        return transformingImagePageIndex_.has_value()
+            && transformingImageIndex_.has_value()
+            && *transformingImagePageIndex_ == pageIndex
+            && *transformingImageIndex_ == imageIndex;
+    }
+
+    return false;
+}
+
+void App::BuildInteractionPageSnapshot(const PageView& pageView) {
+    if (!pageView.valid || pageView.pageIndex >= document_.PageCount()) {
+        return;
+    }
+
+    if (pageView.pageIndex >= interactionPageSnapshots_.size()) {
+        return;
+    }
+
+    const Page& page = document_.PageAt(pageView.pageIndex);
+    PageSurfaceCache& cache = interactionPageSnapshots_[pageView.pageIndex];
+    const float cacheScale = std::max(
+        std::max(0.1f, pageView.scale),
+        (page.raster.width > 0 && page.raster.height > 0 && page.raster.scale > 0.0f) ? page.raster.scale : 0.0f);
+    const int width = std::max(1, static_cast<int>(std::lround(std::max(1.0f, page.width) * cacheScale)));
+    const int height = std::max(1, static_cast<int>(std::lround(std::max(1.0f, page.height) * cacheScale)));
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    BITMAPINFO bitmapInfo {};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = width;
+    bitmapInfo.bmiHeader.biHeight = -height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    HDC cacheDc = CreateCompatibleDC(nullptr);
+    if (cacheDc == nullptr) {
+        return;
+    }
+
+    void* bits = nullptr;
+    HBITMAP cacheBitmap = CreateDIBSection(cacheDc, &bitmapInfo, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (cacheBitmap == nullptr || bits == nullptr) {
+        if (cacheBitmap != nullptr) {
+            DeleteObject(cacheBitmap);
+        }
+        DeleteDC(cacheDc);
+        return;
+    }
+
+    HGDIOBJ previousBitmap = SelectObject(cacheDc, cacheBitmap);
+    RECT cacheRect = MakeRect(0, 0, width, height);
+    HBRUSH pageBrush = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(cacheDc, &cacheRect, pageBrush);
+    DeleteObject(pageBrush);
+
+    if (!page.raster.pixels.empty() && page.raster.width > 0 && page.raster.height > 0) {
+        BITMAPINFO pageBitmapInfo {};
+        pageBitmapInfo.bmiHeader.biSize = sizeof(pageBitmapInfo.bmiHeader);
+        pageBitmapInfo.bmiHeader.biWidth = page.raster.width;
+        pageBitmapInfo.bmiHeader.biHeight = -page.raster.height;
+        pageBitmapInfo.bmiHeader.biPlanes = 1;
+        pageBitmapInfo.bmiHeader.biBitCount = 32;
+        pageBitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+        SetStretchBltMode(cacheDc, HALFTONE);
+        StretchDIBits(
+            cacheDc,
+            0,
+            0,
+            width,
+            height,
+            0,
+            0,
+            page.raster.width,
+            page.raster.height,
+            page.raster.pixels.data(),
+            &pageBitmapInfo,
+            DIB_RGB_COLORS,
+            SRCCOPY);
+    }
+
+    const PageView cacheView {
+        MakeRect(0, 0, width, height),
+        pageView.pageIndex,
+        cacheScale,
+        true,
+    };
+    Gdiplus::Graphics imageGraphics(cacheDc);
+    imageGraphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    imageGraphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+    imageGraphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+    for (std::size_t imageIndex = 0; imageIndex < page.images.size(); ++imageIndex) {
+        if (ShouldSkipImageInInteractionSnapshot(pageView.pageIndex, imageIndex)) {
+            continue;
+        }
+
+        const PageImage& image = page.images[imageIndex];
+        if (image.pixels.empty() || image.pixelWidth <= 0 || image.pixelHeight <= 0) {
+            continue;
+        }
+
+        Gdiplus::Bitmap bitmap(
+            image.pixelWidth,
+            image.pixelHeight,
+            image.stride,
+            PixelFormat32bppRGB,
+            const_cast<BYTE*>(reinterpret_cast<const BYTE*>(image.pixels.data())));
+        const Gdiplus::REAL centerX = static_cast<Gdiplus::REAL>((image.x + (image.width * 0.5f)) * cacheView.scale);
+        const Gdiplus::REAL centerY = static_cast<Gdiplus::REAL>((image.y + (image.height * 0.5f)) * cacheView.scale);
+        const Gdiplus::REAL drawWidth = static_cast<Gdiplus::REAL>(image.width * cacheView.scale);
+        const Gdiplus::REAL drawHeight = static_cast<Gdiplus::REAL>(image.height * cacheView.scale);
+
+        imageGraphics.ResetTransform();
+        imageGraphics.TranslateTransform(centerX, centerY);
+        imageGraphics.RotateTransform(image.rotationDegrees);
+        imageGraphics.DrawImage(&bitmap, -drawWidth * 0.5f, -drawHeight * 0.5f, drawWidth, drawHeight);
+    }
+    imageGraphics.ResetTransform();
+    for (std::size_t strokeIndex = 0; strokeIndex < page.strokes.size(); ++strokeIndex) {
+        if (ShouldSkipStrokeInInteractionSnapshot(pageView.pageIndex, strokeIndex)) {
+            continue;
+        }
+        PaintStroke(cacheDc, page.strokes[strokeIndex], cacheView, false);
+    }
+
+    const int stride = width * 4;
+    const std::size_t totalBytes = static_cast<std::size_t>(stride) * static_cast<std::size_t>(height);
+    cache.pixels.resize(totalBytes);
+    std::copy_n(static_cast<const std::uint8_t*>(bits), totalBytes, cache.pixels.data());
+    cache.width = width;
+    cache.height = height;
+    cache.stride = stride;
+    cache.pageIndex = pageView.pageIndex;
+    cache.strokeCount = page.strokes.size();
+    cache.imageCount = page.images.size();
+    cache.rasterWidth = page.raster.width;
+    cache.rasterHeight = page.raster.height;
+    cache.rasterScale = page.raster.scale;
+    cache.pageScale = cacheScale;
+    cache.valid = true;
+
+    SelectObject(cacheDc, previousBitmap);
+    DeleteObject(cacheBitmap);
+    DeleteDC(cacheDc);
+}
+
+std::optional<RECT> App::InteractionPreviewBoundsForPage(std::size_t pageIndex) const {
+    if (window_ == nullptr || pageIndex >= document_.PageCount()) {
+        return std::nullopt;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, pageIndex);
+    if (!pageView.valid) {
+        return std::nullopt;
+    }
+
+    RECT bounds {};
+    bool hasBounds = false;
+    const auto includeRect = [&](RECT rect) {
+        bounds = hasBounds ? UnionRectangles(bounds, rect) : rect;
+        hasBounds = true;
+    };
+
+    if (pageIndex < interactionPreviewStrokes_.size()) {
+        for (const InteractionPreviewStroke& entry : interactionPreviewStrokes_[pageIndex]) {
+            const auto rect = StrokeBoundsRect(entry.stroke, pageView.scale, 16);
+            if (!rect.has_value()) {
+                continue;
+            }
+            RECT windowRect = *rect;
+            OffsetRect(&windowRect, pageView.rect.left, pageView.rect.top);
+            includeRect(windowRect);
+        }
+    }
+
+    if (pageIndex < interactionPreviewImages_.size()) {
+        for (const InteractionPreviewImage& entry : interactionPreviewImages_[pageIndex]) {
+            const auto corners = ImageCorners(entry.image);
+            float minX = corners[0].x;
+            float minY = corners[0].y;
+            float maxX = corners[0].x;
+            float maxY = corners[0].y;
+            for (const Vec2& corner : corners) {
+                minX = std::min(minX, corner.x);
+                minY = std::min(minY, corner.y);
+                maxX = std::max(maxX, corner.x);
+                maxY = std::max(maxY, corner.y);
+            }
+            RECT windowRect = MakeRect(
+                pageView.rect.left + static_cast<int>(std::floor(minX * pageView.scale)) - 20,
+                pageView.rect.top + static_cast<int>(std::floor(minY * pageView.scale)) - 20,
+                pageView.rect.left + static_cast<int>(std::ceil(maxX * pageView.scale)) + 21,
+                pageView.rect.top + static_cast<int>(std::ceil(maxY * pageView.scale)) + 21);
+            includeRect(windowRect);
+        }
+    }
+
+    return hasBounds ? std::optional<RECT>(bounds) : std::nullopt;
+}
+
+void App::InvalidateInteractionPreviewDelta(const std::vector<std::optional<RECT>>& previousBounds) {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        const std::optional<RECT> currentBounds = InteractionPreviewBoundsForPage(pageIndex);
+        if (pageIndex < previousBounds.size() && previousBounds[pageIndex].has_value()) {
+            if (currentBounds.has_value()) {
+                RECT dirty = UnionRectangles(*previousBounds[pageIndex], *currentBounds);
+                InvalidateRect(window_, &dirty, FALSE);
+            } else {
+                InvalidateRect(window_, &*previousBounds[pageIndex], FALSE);
+            }
+        } else if (currentBounds.has_value()) {
+            InvalidateRect(window_, &*currentBounds, FALSE);
+        }
+    }
+}
+
+void App::RebuildMoveSelectionPreview(POINT cursor) {
+    if (interactionPreviewMode_ != InteractionPreviewMode::MoveSelection || window_ == nullptr) {
+        return;
+    }
+
+    std::vector<std::optional<RECT>> previousBounds(document_.PageCount());
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        previousBounds[pageIndex] = InteractionPreviewBoundsForPage(pageIndex);
+    }
+    interactionPreviewStrokes_.assign(document_.PageCount(), {});
+    interactionPreviewImages_.assign(document_.PageCount(), {});
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const std::vector<PageView> pageViews = CalculatePageViews(clientRect);
+    if (pageViews.size() != document_.PageCount()) {
+        return;
+    }
+
+    const auto targetPageForScreenPoint = [&](POINT screenPoint, std::size_t fallbackPageIndex) {
+        std::size_t bestPageIndex = std::min(fallbackPageIndex, pageViews.size() - 1U);
+        long bestDistanceSquared = LONG_MAX;
+        for (const PageView& pageView : pageViews) {
+            if (!pageView.valid) {
+                continue;
+            }
+            if (PtInRect(&pageView.rect, screenPoint) != 0) {
+                return pageView.pageIndex;
+            }
+
+            const long dx = static_cast<long>(std::max<LONG>(pageView.rect.left - screenPoint.x, 0))
+                + static_cast<long>(std::max<LONG>(screenPoint.x - pageView.rect.right, 0));
+            const long dy = static_cast<long>(std::max<LONG>(pageView.rect.top - screenPoint.y, 0))
+                + static_cast<long>(std::max<LONG>(screenPoint.y - pageView.rect.bottom, 0));
+            const long distanceSquared = (dx * dx) + (dy * dy);
+            if (distanceSquared < bestDistanceSquared) {
+                bestDistanceSquared = distanceSquared;
+                bestPageIndex = pageView.pageIndex;
+            }
+        }
+        return bestPageIndex;
+    };
+
+    const int deltaX = cursor.x - interactionPreviewStartCursor_.x;
+    const int deltaY = cursor.y - interactionPreviewStartCursor_.y;
+
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        const PageView& sourceView = pageViews[pageIndex];
+        const Page& page = document_.PageAt(pageIndex);
+
+        if (pageIndex < selectedStrokeIndices_.size()) {
+            for (std::size_t strokeIndex : selectedStrokeIndices_[pageIndex]) {
+                if (strokeIndex >= page.strokes.size()) {
+                    continue;
+                }
+                const Stroke& originalStroke = page.strokes[strokeIndex];
+                float minX = 0.0f;
+                float minY = 0.0f;
+                float maxX = 0.0f;
+                float maxY = 0.0f;
+                if (!StrokeBounds(originalStroke, &minX, &minY, &maxX, &maxY)) {
+                    continue;
+                }
+
+                const POINT centerPoint {
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.left) + (((minX + maxX) * 0.5f) * sourceView.scale) + static_cast<float>(deltaX))),
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.top) + (((minY + maxY) * 0.5f) * sourceView.scale) + static_cast<float>(deltaY))),
+                };
+                const std::size_t targetPageIndex = targetPageForScreenPoint(centerPoint, pageIndex);
+                const PageView& targetView = pageViews[targetPageIndex];
+
+                InteractionPreviewStroke preview {};
+                preview.sourcePageIndex = pageIndex;
+                preview.sourceIndex = strokeIndex;
+                preview.stroke = originalStroke;
+                for (Vec2& point : preview.stroke.points) {
+                    const float screenX = static_cast<float>(sourceView.rect.left) + (point.x * sourceView.scale) + static_cast<float>(deltaX);
+                    const float screenY = static_cast<float>(sourceView.rect.top) + (point.y * sourceView.scale) + static_cast<float>(deltaY);
+                    point.x = (screenX - static_cast<float>(targetView.rect.left)) / std::max(0.1f, targetView.scale);
+                    point.y = (screenY - static_cast<float>(targetView.rect.top)) / std::max(0.1f, targetView.scale);
+                }
+                interactionPreviewStrokes_[targetPageIndex].push_back(std::move(preview));
+            }
+        }
+
+        if (pageIndex < selectedImageIndices_.size()) {
+            for (std::size_t imageIndex : selectedImageIndices_[pageIndex]) {
+                if (imageIndex >= page.images.size()) {
+                    continue;
+                }
+                const PageImage& originalImage = page.images[imageIndex];
+                const Vec2 center = ImageCenter(originalImage);
+                const POINT centerPoint {
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.left) + (center.x * sourceView.scale) + static_cast<float>(deltaX))),
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.top) + (center.y * sourceView.scale) + static_cast<float>(deltaY))),
+                };
+                const std::size_t targetPageIndex = targetPageForScreenPoint(centerPoint, pageIndex);
+                const PageView& targetView = pageViews[targetPageIndex];
+
+                InteractionPreviewImage preview {};
+                preview.sourcePageIndex = pageIndex;
+                preview.sourceIndex = imageIndex;
+                preview.image = originalImage;
+                const float screenX = static_cast<float>(sourceView.rect.left) + (originalImage.x * sourceView.scale) + static_cast<float>(deltaX);
+                const float screenY = static_cast<float>(sourceView.rect.top) + (originalImage.y * sourceView.scale) + static_cast<float>(deltaY);
+                preview.image.x = (screenX - static_cast<float>(targetView.rect.left)) / std::max(0.1f, targetView.scale);
+                preview.image.y = (screenY - static_cast<float>(targetView.rect.top)) / std::max(0.1f, targetView.scale);
+                interactionPreviewImages_[targetPageIndex].push_back(std::move(preview));
+            }
+        }
+    }
+
+    InvalidateInteractionPreviewDelta(previousBounds);
+}
+
+void App::CommitMoveSelectionPreview() {
+    if (interactionPreviewMode_ != InteractionPreviewMode::MoveSelection) {
+        return;
+    }
+
+    std::vector<bool> affectedPages(document_.PageCount(), false);
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        if (pageIndex < selectedStrokeIndices_.size()) {
+            auto strokeIndices = selectedStrokeIndices_[pageIndex];
+            std::sort(strokeIndices.rbegin(), strokeIndices.rend());
+            auto& strokes = document_.PageAt(pageIndex).strokes;
+            for (std::size_t strokeIndex : strokeIndices) {
+                if (strokeIndex < strokes.size()) {
+                    strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(strokeIndex));
+                    affectedPages[pageIndex] = true;
+                }
+            }
+        }
+        if (pageIndex < selectedImageIndices_.size()) {
+            auto imageIndices = selectedImageIndices_[pageIndex];
+            std::sort(imageIndices.rbegin(), imageIndices.rend());
+            auto& images = document_.PageAt(pageIndex).images;
+            for (std::size_t imageIndex : imageIndices) {
+                if (imageIndex < images.size()) {
+                    images.erase(images.begin() + static_cast<std::ptrdiff_t>(imageIndex));
+                    affectedPages[pageIndex] = true;
+                }
+            }
+        }
+    }
+
+    ClearSelection();
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        auto& page = document_.PageAt(pageIndex);
+        for (const InteractionPreviewStroke& preview : interactionPreviewStrokes_[pageIndex]) {
+            page.strokes.push_back(preview.stroke);
+            selectedStrokeIndices_[pageIndex].push_back(page.strokes.size() - 1U);
+            affectedPages[pageIndex] = true;
+        }
+        for (const InteractionPreviewImage& preview : interactionPreviewImages_[pageIndex]) {
+            page.images.push_back(preview.image);
+            selectedImageIndices_[pageIndex].push_back(page.images.size() - 1U);
+            affectedPages[pageIndex] = true;
+        }
+    }
+
+    for (std::size_t pageIndex = 0; pageIndex < affectedPages.size(); ++pageIndex) {
+        if (affectedPages[pageIndex]) {
+            InvalidatePageSurfaceCache(pageIndex);
+        }
+    }
+}
+
+void App::RebuildImageTransformPreview(POINT cursor) {
+    if (!transformingImagePageIndex_.has_value() || interactionPreviewMode_ != InteractionPreviewMode::ImageTransform || window_ == nullptr) {
+        return;
+    }
+
+    std::vector<std::optional<RECT>> previousBounds(document_.PageCount());
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        previousBounds[pageIndex] = InteractionPreviewBoundsForPage(pageIndex);
+    }
+    interactionPreviewImages_.assign(document_.PageCount(), {});
+    interactionPreviewStrokes_.assign(document_.PageCount(), {});
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, *transformingImagePageIndex_);
+    if (!pageView.valid) {
+        return;
+    }
+
+    const Page& page = document_.PageAt(*transformingImagePageIndex_);
+    const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    const Vec2 currentPoint {
+        std::clamp((static_cast<float>(cursor.x - pageView.rect.left)) / pageView.scale, 0.0f, page.width),
+        std::clamp((static_cast<float>(cursor.y - pageView.rect.top)) / pageView.scale, 0.0f, page.height),
+    };
+    PageImage updated = imageTransformInitial_;
+    const Vec2 center = ImageCenter(imageTransformInitial_);
+
+    if (imageTransformHandle_ == ImageTransformHandle::Rotate) {
+        const float currentAngle = std::atan2(currentPoint.y - center.y, currentPoint.x - center.x) * (180.0f / kPi);
+        updated.rotationDegrees = imageTransformInitial_.rotationDegrees + (currentAngle - imageTransformStartAngleDegrees_);
+        if (shiftPressed) {
+            updated.rotationDegrees = std::round(updated.rotationDegrees / 15.0f) * 15.0f;
+        }
+    } else {
+        const Vec2 localPoint = ToImageLocalPoint(imageTransformInitial_, currentPoint);
+        float left = -imageTransformInitial_.width * 0.5f;
+        float right = imageTransformInitial_.width * 0.5f;
+        float top = -imageTransformInitial_.height * 0.5f;
+        float bottom = imageTransformInitial_.height * 0.5f;
+        const float localX = localPoint.x - center.x;
+        const float localY = localPoint.y - center.y;
+        constexpr float kMinImageSize = 18.0f;
+
+        switch (imageTransformHandle_) {
+        case ImageTransformHandle::ResizeNorthWest:
+            left = std::min(localX, right - kMinImageSize);
+            top = std::min(localY, bottom - kMinImageSize);
+            break;
+        case ImageTransformHandle::ResizeNorth:
+            top = std::min(localY, bottom - kMinImageSize);
+            break;
+        case ImageTransformHandle::ResizeNorthEast:
+            right = std::max(localX, left + kMinImageSize);
+            top = std::min(localY, bottom - kMinImageSize);
+            break;
+        case ImageTransformHandle::ResizeEast:
+            right = std::max(localX, left + kMinImageSize);
+            break;
+        case ImageTransformHandle::ResizeSouthEast:
+            right = std::max(localX, left + kMinImageSize);
+            bottom = std::max(localY, top + kMinImageSize);
+            break;
+        case ImageTransformHandle::ResizeSouth:
+            bottom = std::max(localY, top + kMinImageSize);
+            break;
+        case ImageTransformHandle::ResizeSouthWest:
+            left = std::min(localX, right - kMinImageSize);
+            bottom = std::max(localY, top + kMinImageSize);
+            break;
+        case ImageTransformHandle::ResizeWest:
+            left = std::min(localX, right - kMinImageSize);
+            break;
+        default:
+            break;
+        }
+
+        if (shiftPressed) {
+            const float initialWidth = std::max(kMinImageSize, imageTransformInitial_.width);
+            const float initialHeight = std::max(kMinImageSize, imageTransformInitial_.height);
+            const float aspect = initialWidth / initialHeight;
+            switch (imageTransformHandle_) {
+            case ImageTransformHandle::ResizeNorthWest:
+            case ImageTransformHandle::ResizeNorthEast:
+            case ImageTransformHandle::ResizeSouthEast:
+            case ImageTransformHandle::ResizeSouthWest: {
+                const float widthScale = std::abs(right - left) / initialWidth;
+                const float heightScale = std::abs(bottom - top) / initialHeight;
+                const float scale = std::max(widthScale, heightScale);
+                const float newWidth = std::max(kMinImageSize, initialWidth * scale);
+                const float newHeight = std::max(kMinImageSize, initialHeight * scale);
+                if (imageTransformHandle_ == ImageTransformHandle::ResizeNorthWest) {
+                    left = right - newWidth;
+                    top = bottom - newHeight;
+                } else if (imageTransformHandle_ == ImageTransformHandle::ResizeNorthEast) {
+                    right = left + newWidth;
+                    top = bottom - newHeight;
+                } else if (imageTransformHandle_ == ImageTransformHandle::ResizeSouthEast) {
+                    right = left + newWidth;
+                    bottom = top + newHeight;
+                } else {
+                    left = right - newWidth;
+                    bottom = top + newHeight;
+                }
+                break;
+            }
+            case ImageTransformHandle::ResizeEast:
+            case ImageTransformHandle::ResizeWest: {
+                const float newWidth = std::max(kMinImageSize, std::abs(right - left));
+                const float newHeight = std::max(kMinImageSize, newWidth / aspect);
+                if (imageTransformHandle_ == ImageTransformHandle::ResizeEast) {
+                    right = left + newWidth;
+                } else {
+                    left = right - newWidth;
+                }
+                top = -newHeight * 0.5f;
+                bottom = newHeight * 0.5f;
+                break;
+            }
+            case ImageTransformHandle::ResizeNorth:
+            case ImageTransformHandle::ResizeSouth: {
+                const float newHeight = std::max(kMinImageSize, std::abs(bottom - top));
+                const float newWidth = std::max(kMinImageSize, newHeight * aspect);
+                if (imageTransformHandle_ == ImageTransformHandle::ResizeNorth) {
+                    top = bottom - newHeight;
+                } else {
+                    bottom = top + newHeight;
+                }
+                left = -newWidth * 0.5f;
+                right = newWidth * 0.5f;
+                break;
+            }
+            default:
+                break;
+            }
+        }
+
+        const Vec2 localCenterOffset { (left + right) * 0.5f, (top + bottom) * 0.5f };
+        const Vec2 newCenter = RotatePointAround(
+            { center.x + localCenterOffset.x, center.y + localCenterOffset.y },
+            center,
+            imageTransformInitial_.rotationDegrees);
+        updated.width = std::max(kMinImageSize, right - left);
+        updated.height = std::max(kMinImageSize, bottom - top);
+        updated.x = newCenter.x - (updated.width * 0.5f);
+        updated.y = newCenter.y - (updated.height * 0.5f);
+    }
+
+    interactionPreviewImages_[*transformingImagePageIndex_].push_back({
+        *transformingImagePageIndex_,
+        transformingImageIndex_.value_or(0),
+        std::move(updated),
+    });
+    InvalidateInteractionPreviewDelta(previousBounds);
+}
+
+void App::CommitImageTransformPreview() {
+    if (interactionPreviewMode_ != InteractionPreviewMode::ImageTransform
+        || !transformingImagePageIndex_.has_value()
+        || !transformingImageIndex_.has_value()
+        || *transformingImagePageIndex_ >= interactionPreviewImages_.size()
+        || interactionPreviewImages_[*transformingImagePageIndex_].empty()) {
+        return;
+    }
+
+    Page& page = document_.PageAt(*transformingImagePageIndex_);
+    if (*transformingImageIndex_ < page.images.size()) {
+        page.images[*transformingImageIndex_] = interactionPreviewImages_[*transformingImagePageIndex_].front().image;
+        InvalidatePageSurfaceCache(*transformingImagePageIndex_);
+    }
+}
+
+void App::RebuildStrokeTransformPreview(POINT cursor) {
+    if (!transformingStrokePageIndex_.has_value() || interactionPreviewMode_ != InteractionPreviewMode::StrokeTransform || window_ == nullptr) {
+        return;
+    }
+
+    std::vector<std::optional<RECT>> previousBounds(document_.PageCount());
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        previousBounds[pageIndex] = InteractionPreviewBoundsForPage(pageIndex);
+    }
+    interactionPreviewImages_.assign(document_.PageCount(), {});
+    interactionPreviewStrokes_.assign(document_.PageCount(), {});
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, *transformingStrokePageIndex_);
+    if (!pageView.valid) {
+        return;
+    }
+
+    const Page& page = document_.PageAt(*transformingStrokePageIndex_);
+    const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    const Vec2 currentPoint {
+        std::clamp((static_cast<float>(cursor.x - pageView.rect.left)) / pageView.scale, 0.0f, page.width),
+        std::clamp((static_cast<float>(cursor.y - pageView.rect.top)) / pageView.scale, 0.0f, page.height),
+    };
+    const Vec2 center {
+        (strokeTransformBoundsMin_.x + strokeTransformBoundsMax_.x) * 0.5f,
+        (strokeTransformBoundsMin_.y + strokeTransformBoundsMax_.y) * 0.5f,
+    };
+
+    for (const auto& [strokeIndex, originalStroke] : strokeTransformInitials_) {
+        Stroke updated = originalStroke;
+        if (strokeTransformHandle_ == ImageTransformHandle::Rotate) {
+            float angleDelta = (std::atan2(currentPoint.y - center.y, currentPoint.x - center.x) * (180.0f / kPi)) - strokeTransformStartAngleDegrees_;
+            if (shiftPressed) {
+                angleDelta = std::round(angleDelta / 15.0f) * 15.0f;
+            }
+            for (Vec2& point : updated.points) {
+                point = RotatePointAround(point, center, angleDelta);
+            }
+        } else {
+            float left = strokeTransformBoundsMin_.x - center.x;
+            float right = strokeTransformBoundsMax_.x - center.x;
+            float top = strokeTransformBoundsMin_.y - center.y;
+            float bottom = strokeTransformBoundsMax_.y - center.y;
+            const float localX = currentPoint.x - center.x;
+            const float localY = currentPoint.y - center.y;
+            constexpr float kMinStrokeSize = 12.0f;
+
+            switch (strokeTransformHandle_) {
+            case ImageTransformHandle::ResizeNorthWest:
+                left = std::min(localX, right - kMinStrokeSize);
+                top = std::min(localY, bottom - kMinStrokeSize);
+                break;
+            case ImageTransformHandle::ResizeNorth:
+                top = std::min(localY, bottom - kMinStrokeSize);
+                break;
+            case ImageTransformHandle::ResizeNorthEast:
+                right = std::max(localX, left + kMinStrokeSize);
+                top = std::min(localY, bottom - kMinStrokeSize);
+                break;
+            case ImageTransformHandle::ResizeEast:
+                right = std::max(localX, left + kMinStrokeSize);
+                break;
+            case ImageTransformHandle::ResizeSouthEast:
+                right = std::max(localX, left + kMinStrokeSize);
+                bottom = std::max(localY, top + kMinStrokeSize);
+                break;
+            case ImageTransformHandle::ResizeSouth:
+                bottom = std::max(localY, top + kMinStrokeSize);
+                break;
+            case ImageTransformHandle::ResizeSouthWest:
+                left = std::min(localX, right - kMinStrokeSize);
+                bottom = std::max(localY, top + kMinStrokeSize);
+                break;
+            case ImageTransformHandle::ResizeWest:
+                left = std::min(localX, right - kMinStrokeSize);
+                break;
+            default:
+                break;
+            }
+
+            const float initialWidth = std::max(kMinStrokeSize, strokeTransformBoundsMax_.x - strokeTransformBoundsMin_.x);
+            const float initialHeight = std::max(kMinStrokeSize, strokeTransformBoundsMax_.y - strokeTransformBoundsMin_.y);
+            if (shiftPressed) {
+                const float aspect = initialWidth / initialHeight;
+                switch (strokeTransformHandle_) {
+                case ImageTransformHandle::ResizeNorthWest:
+                case ImageTransformHandle::ResizeNorthEast:
+                case ImageTransformHandle::ResizeSouthEast:
+                case ImageTransformHandle::ResizeSouthWest: {
+                    const float widthScale = std::abs(right - left) / initialWidth;
+                    const float heightScale = std::abs(bottom - top) / initialHeight;
+                    const float scale = std::max(widthScale, heightScale);
+                    const float newWidth = std::max(kMinStrokeSize, initialWidth * scale);
+                    const float newHeight = std::max(kMinStrokeSize, initialHeight * scale);
+                    if (strokeTransformHandle_ == ImageTransformHandle::ResizeNorthWest) {
+                        left = right - newWidth;
+                        top = bottom - newHeight;
+                    } else if (strokeTransformHandle_ == ImageTransformHandle::ResizeNorthEast) {
+                        right = left + newWidth;
+                        top = bottom - newHeight;
+                    } else if (strokeTransformHandle_ == ImageTransformHandle::ResizeSouthEast) {
+                        right = left + newWidth;
+                        bottom = top + newHeight;
+                    } else {
+                        left = right - newWidth;
+                        bottom = top + newHeight;
+                    }
+                    break;
+                }
+                case ImageTransformHandle::ResizeEast:
+                case ImageTransformHandle::ResizeWest: {
+                    const float newWidth = std::max(kMinStrokeSize, std::abs(right - left));
+                    const float newHeight = std::max(kMinStrokeSize, newWidth / aspect);
+                    if (strokeTransformHandle_ == ImageTransformHandle::ResizeEast) {
+                        right = left + newWidth;
+                    } else {
+                        left = right - newWidth;
+                    }
+                    top = -newHeight * 0.5f;
+                    bottom = newHeight * 0.5f;
+                    break;
+                }
+                case ImageTransformHandle::ResizeNorth:
+                case ImageTransformHandle::ResizeSouth: {
+                    const float newHeight = std::max(kMinStrokeSize, std::abs(bottom - top));
+                    const float newWidth = std::max(kMinStrokeSize, newHeight * aspect);
+                    if (strokeTransformHandle_ == ImageTransformHandle::ResizeNorth) {
+                        top = bottom - newHeight;
+                    } else {
+                        bottom = top + newHeight;
+                    }
+                    left = -newWidth * 0.5f;
+                    right = newWidth * 0.5f;
+                    break;
+                }
+                default:
+                    break;
+                }
+            }
+
+            const Vec2 localCenterOffset { (left + right) * 0.5f, (top + bottom) * 0.5f };
+            const float scaleX = std::max(kMinStrokeSize, right - left) / initialWidth;
+            const float scaleY = std::max(kMinStrokeSize, bottom - top) / initialHeight;
+            for (Vec2& point : updated.points) {
+                const float localXPoint = point.x - center.x;
+                const float localYPoint = point.y - center.y;
+                point.x = center.x + (localXPoint * scaleX) + localCenterOffset.x;
+                point.y = center.y + (localYPoint * scaleY) + localCenterOffset.y;
+            }
+        }
+
+        interactionPreviewStrokes_[*transformingStrokePageIndex_].push_back({
+            *transformingStrokePageIndex_,
+            strokeIndex,
+            std::move(updated),
+        });
+    }
+
+    InvalidateInteractionPreviewDelta(previousBounds);
+}
+
+void App::CommitStrokeTransformPreview() {
+    if (interactionPreviewMode_ != InteractionPreviewMode::StrokeTransform || !transformingStrokePageIndex_.has_value()) {
+        return;
+    }
+
+    Page& page = document_.PageAt(*transformingStrokePageIndex_);
+    for (const InteractionPreviewStroke& preview : interactionPreviewStrokes_[*transformingStrokePageIndex_]) {
+        if (preview.sourceIndex < page.strokes.size()) {
+            page.strokes[preview.sourceIndex] = preview.stroke;
+        }
+    }
+    InvalidatePageSurfaceCache(*transformingStrokePageIndex_);
+}
+
 void App::ClearZoomSessionSnapshots() {
     zoomPageSnapshots_.clear();
 }
@@ -7483,7 +8274,15 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     IntersectClipRect(hdc, pageView.rect.left, pageView.rect.top, pageView.rect.right, pageView.rect.bottom);
 
     const ZoomPageSnapshot* zoomSnapshot = nullptr;
+    const PageSurfaceCache* interactionSnapshot = nullptr;
     bool canReuseFrozenCache = false;
+    if (interactionPreviewMode_ != InteractionPreviewMode::None && pageView.pageIndex < interactionPageSnapshots_.size()) {
+        const PageSurfaceCache& snapshot = interactionPageSnapshots_[pageView.pageIndex];
+        if (snapshot.valid && !snapshot.pixels.empty() && snapshot.width > 0 && snapshot.height > 0) {
+            interactionSnapshot = &snapshot;
+            canReuseFrozenCache = true;
+        }
+    }
     if (zoomSessionActive_ && pageView.pageIndex < zoomPageSnapshots_.size()) {
         const ZoomPageSnapshot& snapshot = zoomPageSnapshots_[pageView.pageIndex];
         if (snapshot.valid && !snapshot.pixels.empty() && snapshot.width > 0 && snapshot.height > 0) {
@@ -7499,7 +8298,31 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         EnsurePageSurfaceCache(pageView);
     }
 
-    if (zoomSnapshot != nullptr) {
+    if (interactionSnapshot != nullptr) {
+        BITMAPINFO bitmapInfo {};
+        bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+        bitmapInfo.bmiHeader.biWidth = interactionSnapshot->width;
+        bitmapInfo.bmiHeader.biHeight = -interactionSnapshot->height;
+        bitmapInfo.bmiHeader.biPlanes = 1;
+        bitmapInfo.bmiHeader.biBitCount = 32;
+        bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+        SetStretchBltMode(hdc, COLORONCOLOR);
+        StretchDIBits(
+            hdc,
+            pageView.rect.left,
+            pageView.rect.top,
+            pageView.rect.right - pageView.rect.left,
+            pageView.rect.bottom - pageView.rect.top,
+            0,
+            0,
+            interactionSnapshot->width,
+            interactionSnapshot->height,
+            interactionSnapshot->pixels.data(),
+            &bitmapInfo,
+            DIB_RGB_COLORS,
+            SRCCOPY);
+    } else if (zoomSnapshot != nullptr) {
         BITMAPINFO bitmapInfo {};
         bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
         bitmapInfo.bmiHeader.biWidth = zoomSnapshot->width;
@@ -7534,7 +8357,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
             bitmapInfo.bmiHeader.biBitCount = 32;
             bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
-            const int stretchMode = (isPanning_ || zoomSessionActive_) ? COLORONCOLOR : HALFTONE;
+            const int stretchMode = (isPanning_ || zoomSessionActive_ || interactionPreviewMode_ != InteractionPreviewMode::None) ? COLORONCOLOR : HALFTONE;
             SetStretchBltMode(hdc, stretchMode);
             if (stretchMode == HALFTONE) {
                 SetBrushOrgEx(hdc, 0, 0, nullptr);
@@ -7557,6 +8380,10 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     }
 
     const Page& page = document_.PageAt(pageView.pageIndex);
+    const bool pageHasInteractionPreview = interactionPreviewMode_ != InteractionPreviewMode::None
+        && ((pageView.pageIndex < interactionPreviewStrokes_.size() && !interactionPreviewStrokes_[pageView.pageIndex].empty())
+            || (pageView.pageIndex < interactionPreviewImages_.size() && !interactionPreviewImages_[pageView.pageIndex].empty())
+            || interactionSnapshot != nullptr);
     bool showSelectToolSelectionAffordances = false;
     if (activeTool_ == Tool::Select && window_ != nullptr) {
         POINT cursor {};
@@ -7566,7 +8393,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     }
     const auto singleImage = SingleSelectedImage();
     const auto singleStrokePage = SingleSelectedStrokePage();
-    for (std::size_t imageIndex = 0; imageIndex < page.images.size(); ++imageIndex) {
+    for (std::size_t imageIndex = 0; !pageHasInteractionPreview && imageIndex < page.images.size(); ++imageIndex) {
         if (!IsImageSelected(pageView.pageIndex, imageIndex)) {
             continue;
         }
@@ -7642,7 +8469,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         }
     }
 
-    for (std::size_t strokeIndex = 0; strokeIndex < page.strokes.size(); ++strokeIndex) {
+    for (std::size_t strokeIndex = 0; !pageHasInteractionPreview && strokeIndex < page.strokes.size(); ++strokeIndex) {
         if (!IsStrokeSelected(pageView.pageIndex, strokeIndex)) {
             continue;
         }
@@ -7653,7 +8480,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         PaintStroke(hdc, highlight, pageView, false);
     }
 
-    if (singleStrokePage.has_value() && *singleStrokePage == pageView.pageIndex
+    if (!pageHasInteractionPreview && singleStrokePage.has_value() && *singleStrokePage == pageView.pageIndex
         && pageView.pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageView.pageIndex].empty()
         && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingStroke_
             || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances))) {
@@ -7711,10 +8538,14 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         PaintStroke(hdc, *activeStroke_, pageView, true);
     }
 
+    if (pageHasInteractionPreview) {
+        PaintInteractionPreview(hdc, pageView, showSelectToolSelectionAffordances);
+    }
+
     RestoreDC(hdc, -1);
 }
 
-void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke) const {
+void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke, bool fastPreview) const {
     if (stroke.points.empty()) {
         return;
     }
@@ -7739,9 +8570,9 @@ void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, b
         const auto blue = static_cast<BYTE>(stroke.style.color & 0xFFU);
 
         Gdiplus::Graphics graphics(hdc);
-        graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
-        graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+        graphics.SetSmoothingMode(fastPreview ? Gdiplus::SmoothingModeHighSpeed : Gdiplus::SmoothingModeAntiAlias);
+        graphics.SetPixelOffsetMode(fastPreview ? Gdiplus::PixelOffsetModeDefault : Gdiplus::PixelOffsetModeHighQuality);
+        graphics.SetCompositingQuality(fastPreview ? Gdiplus::CompositingQualityHighSpeed : Gdiplus::CompositingQualityHighQuality);
 
         Gdiplus::Color color(alpha, red, green, blue);
         Gdiplus::Pen pen(color, penWidth);

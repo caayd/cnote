@@ -49,6 +49,7 @@ public:
         RemoveStroke,
         AddPages,
         RemovePages,
+        ReplacePages,
     };
 
     enum class ShortcutAction {
@@ -103,8 +104,11 @@ public:
         HistoryActionType type = HistoryActionType::AddStroke;
         Stroke stroke {};
         std::vector<Page> pages {};
+        std::vector<Page> replacementPages {};
+        std::vector<std::size_t> pageIndices {};
         std::size_t index = 0;
         std::size_t pageIndex = 0;
+        std::size_t focusPageIndex = 0;
         std::size_t previousPageIndex = 0;
     };
 
@@ -141,6 +145,25 @@ public:
         std::size_t pageIndex = 0;
         bool valid = false;
         std::vector<std::uint8_t> pixels {};
+    };
+
+    enum class InteractionPreviewMode {
+        None,
+        MoveSelection,
+        ImageTransform,
+        StrokeTransform,
+    };
+
+    struct InteractionPreviewStroke {
+        std::size_t sourcePageIndex = 0;
+        std::size_t sourceIndex = 0;
+        Stroke stroke {};
+    };
+
+    struct InteractionPreviewImage {
+        std::size_t sourcePageIndex = 0;
+        std::size_t sourceIndex = 0;
+        PageImage image {};
     };
 
     struct RenderRequest {
@@ -241,7 +264,9 @@ private:
     [[nodiscard]] bool CanAutoSaveCurrentDocument() const;
     [[nodiscard]] bool IsDocumentInteractionActive() const;
     void RestoreAfterPageHistoryChange(std::size_t focusPageIndex);
+    void RestoreAfterContentHistoryChange(const std::vector<std::size_t>& pageIndices, std::size_t focusPageIndex);
     void PushPageHistoryAction(HistoryActionType type, std::size_t index, std::vector<Page> pages, std::size_t focusPageIndex, std::size_t previousPageIndex);
+    void PushReplacePagesHistoryAction(std::vector<std::size_t> pageIndices, std::vector<Page> beforePages, std::size_t focusPageIndex);
     void AddPaletteColor();
     void RemovePaletteColor();
     [[nodiscard]] bool ApplyHexColorFromClipboard();
@@ -402,11 +427,25 @@ private:
     void PaintCanvas(HDC hdc, RECT clientRect);
     void PaintPage(HDC hdc, const PageView& pageView);
     void PaintSelectionOverlay(HDC hdc, RECT canvasRect) const;
-    void PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke) const;
+    void PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSelectToolSelectionAffordances) const;
+    void PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke, bool fastPreview = false) const;
     bool TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke& stroke);
     bool TryRefreshPageSurfaceCacheForStroke(std::size_t pageIndex, const Stroke& stroke);
     bool TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect);
     void EnsurePageSurfaceCache(const PageView& pageView);
+    void ClearInteractionPreview();
+    void EnsureInteractionPreviewStorage();
+    void BuildInteractionPageSnapshot(const PageView& pageView);
+    [[nodiscard]] bool ShouldSkipStrokeInInteractionSnapshot(std::size_t pageIndex, std::size_t strokeIndex) const;
+    [[nodiscard]] bool ShouldSkipImageInInteractionSnapshot(std::size_t pageIndex, std::size_t imageIndex) const;
+    void RebuildMoveSelectionPreview(POINT cursor);
+    void RebuildImageTransformPreview(POINT cursor);
+    void RebuildStrokeTransformPreview(POINT cursor);
+    void CommitMoveSelectionPreview();
+    void CommitImageTransformPreview();
+    void CommitStrokeTransformPreview();
+    [[nodiscard]] std::optional<RECT> InteractionPreviewBoundsForPage(std::size_t pageIndex) const;
+    void InvalidateInteractionPreviewDelta(const std::vector<std::optional<RECT>>& previousBounds);
     void EnsurePaintBackbuffer(HDC referenceDc, int width, int height);
     void ReleasePaintBackbuffer();
     void CaptureZoomSessionSnapshots();
@@ -472,6 +511,11 @@ private:
     Vec2 zoomAnchorPage_ {};
     POINT zoomAnchorCursor_ {};
     std::vector<PageSurfaceCache> pageSurfaceCaches_ {};
+    InteractionPreviewMode interactionPreviewMode_ = InteractionPreviewMode::None;
+    POINT interactionPreviewStartCursor_ {};
+    std::vector<PageSurfaceCache> interactionPageSnapshots_ {};
+    std::vector<std::vector<InteractionPreviewStroke>> interactionPreviewStrokes_ {};
+    std::vector<std::vector<InteractionPreviewImage>> interactionPreviewImages_ {};
     std::vector<SidebarThumbnailCache> sidebarThumbnailCaches_ {};
     std::vector<ZoomPageSnapshot> zoomPageSnapshots_ {};
     std::uint64_t renderGeneration_ = 0;
