@@ -19,6 +19,12 @@ public:
     void Refresh();
 
 private:
+    enum class Category {
+        Palette,
+        Drawing,
+        Shortcuts,
+    };
+
     enum class SliderKind {
         Hue,
         Saturation,
@@ -34,8 +40,13 @@ private:
     void ApplyFonts();
     void RebuildDpiResources(UINT dpi);
     void LayoutControls();
-    void UpdateScrollInfo();
-    void ScrollTo(int scrollOffset);
+    void SetActiveCategory(Category category);
+    void RefreshVisibleControls();
+    void RefreshCategoryButtons();
+    void InvalidateWindowRegion(const RECT& rect);
+    void InvalidateSliderPresentation(SliderKind kind);
+    void BeginHexColorEdit();
+    void CommitHexColorEdit(bool applyChanges);
     void RefreshPaletteList();
     void RefreshSavedPaletteList();
     void RefreshSliderValues();
@@ -49,8 +60,8 @@ private:
     void PaintWindow();
     void DrawButton(const DRAWITEMSTRUCT& drawItem);
     void DrawPaletteItem(const DRAWITEMSTRUCT& drawItem);
+    void DrawSavedPaletteItem(const DRAWITEMSTRUCT& drawItem);
     void DrawShortcutItem(const DRAWITEMSTRUCT& drawItem);
-    RECT ColorPreviewRect() const;
     void HandleShortcutSelectionChanged();
     void HandleSavedPaletteSelectionChanged(bool syncNameField);
     void BeginShortcutCapture();
@@ -75,9 +86,11 @@ private:
     HFONT titleFont_ = nullptr;
     HBRUSH backgroundBrush_ = nullptr;
     HBRUSH panelBrush_ = nullptr;
+    std::array<HWND, 3> categoryButtons_ {};
+    HWND paletteList_ = nullptr;
     HWND addColorButton_ = nullptr;
     HWND removeColorButton_ = nullptr;
-    HWND pasteHexButton_ = nullptr;
+    HWND hexColorEdit_ = nullptr;
     HWND savedPaletteNameEdit_ = nullptr;
     HWND savePaletteButton_ = nullptr;
     HWND applyPaletteButton_ = nullptr;
@@ -107,11 +120,9 @@ private:
     HWND shortcutHintLabel_ = nullptr;
     std::optional<App::ShortcutAction> capturingShortcutAction_ {};
     std::optional<SliderKind> draggingSlider_ {};
+    bool editingHexColor_ = false;
+    Category activeCategory_ = Category::Palette;
     UINT currentDpi_ = USER_DEFAULT_SCREEN_DPI;
-    int scrollOffset_ = 0;
-    int contentHeight_ = 0;
-    bool draggingScrollbar_ = false;
-    int scrollbarDragOffset_ = 0;
 };
 
 }  // namespace cnote
