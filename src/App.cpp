@@ -1471,6 +1471,83 @@ Vec2 Lerp(Vec2 from, Vec2 to, float amount) {
     };
 }
 
+std::array<Vec2, 4> ImageCorners(const PageImage& image);
+
+Vec2 PointToVec2(POINT point) {
+    return {
+        static_cast<float>(point.x),
+        static_cast<float>(point.y),
+    };
+}
+
+Vec2 RemapPagePointBetweenViews(const App::PageView& fromView, const App::PageView& toView, Vec2 point) {
+    const float screenX = static_cast<float>(fromView.rect.left) + (point.x * fromView.scale);
+    const float screenY = static_cast<float>(fromView.rect.top) + (point.y * fromView.scale);
+    return {
+        (screenX - static_cast<float>(toView.rect.left)) / std::max(0.1f, toView.scale),
+        (screenY - static_cast<float>(toView.rect.top)) / std::max(0.1f, toView.scale),
+    };
+}
+
+bool StrokeBounds(const Stroke& stroke, float* minX, float* minY, float* maxX, float* maxY) {
+    if (stroke.points.empty() || minX == nullptr || minY == nullptr || maxX == nullptr || maxY == nullptr) {
+        return false;
+    }
+
+    *minX = stroke.points.front().x;
+    *minY = stroke.points.front().y;
+    *maxX = stroke.points.front().x;
+    *maxY = stroke.points.front().y;
+    for (const Vec2& point : stroke.points) {
+        *minX = std::min(*minX, point.x);
+        *minY = std::min(*minY, point.y);
+        *maxX = std::max(*maxX, point.x);
+        *maxY = std::max(*maxY, point.y);
+    }
+
+    return true;
+}
+
+void TranslateStrokePoints(Stroke& stroke, Vec2 delta) {
+    for (Vec2& point : stroke.points) {
+        point.x += delta.x;
+        point.y += delta.y;
+    }
+}
+
+Vec2 ClampStrokeDeltaToPage(const Stroke& stroke, const Page& page, Vec2 delta) {
+    float minX = 0.0f;
+    float minY = 0.0f;
+    float maxX = 0.0f;
+    float maxY = 0.0f;
+    if (!StrokeBounds(stroke, &minX, &minY, &maxX, &maxY)) {
+        return {};
+    }
+
+    return {
+        std::clamp(delta.x, -minX, page.width - maxX),
+        std::clamp(delta.y, -minY, page.height - maxY),
+    };
+}
+
+Vec2 ClampImageDeltaToPage(const PageImage& image, const Page& page, Vec2 delta) {
+    float minX = page.width;
+    float minY = page.height;
+    float maxX = 0.0f;
+    float maxY = 0.0f;
+    for (const Vec2& corner : ImageCorners(image)) {
+        minX = std::min(minX, corner.x);
+        minY = std::min(minY, corner.y);
+        maxX = std::max(maxX, corner.x);
+        maxY = std::max(maxY, corner.y);
+    }
+
+    return {
+        std::clamp(delta.x, -minX, page.width - maxX),
+        std::clamp(delta.y, -minY, page.height - maxY),
+    };
+}
+
 std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float strength) {
     if (points.size() <= 2U || strength <= 0.001f) {
         return points;
@@ -2013,8 +2090,7 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
     ClearSelection();
     ClosePaletteOverlays();
-    selectionPageIndex_.reset();
-    selectionLassoPoints_.clear();
+    selectionLassoCursorPoints_.clear();
     isSelecting_ = false;
     ClearHistory();
     if (resetBrushWidth) {
@@ -2287,8 +2363,7 @@ void App::SetActiveTool(Tool tool) {
     }
     if (tool != Tool::Select) {
         isSelecting_ = false;
-        selectionPageIndex_.reset();
-        selectionLassoPoints_.clear();
+        selectionLassoCursorPoints_.clear();
         selectionBoxOverride_ = false;
         UpdateCaptureState();
     }
@@ -2719,13 +2794,17 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedStrokeHandle(POINT 
 }
 
 std::vector<Vec2> App::CurrentSelectionLassoPolygon() const {
-    std::vector<Vec2> polygon = selectionLassoPoints_;
+    std::vector<Vec2> polygon;
+    polygon.reserve(selectionLassoCursorPoints_.size() + 1U);
+    for (POINT point : selectionLassoCursorPoints_) {
+        polygon.push_back(PointToVec2(point));
+    }
     if (polygon.empty()) {
         return polygon;
     }
 
-    if (DistanceSquared(polygon.back(), selectionCurrentPage_) > 0.0001f) {
-        polygon.push_back(selectionCurrentPage_);
+    if (DistanceSquared(polygon.back(), PointToVec2(selectionCurrentCursor_)) > 0.0001f) {
+        polygon.push_back(PointToVec2(selectionCurrentCursor_));
     }
     return polygon;
 }
@@ -2775,7 +2854,7 @@ bool App::CursorInteractsWithSelection(POINT cursor) const {
         || CursorHitsSelectedContent(cursor);
 }
 
-void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta) {
+void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta, bool clampToPage, bool notify) {
     if (pageIndex >= document_.PageCount()) {
         return;
     }
@@ -2823,8 +2902,10 @@ void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta) {
         return;
     }
 
-    delta.x = std::clamp(delta.x, -minX, page.width - maxX);
-    delta.y = std::clamp(delta.y, -minY, page.height - maxY);
+    if (clampToPage) {
+        delta.x = std::clamp(delta.x, -minX, page.width - maxX);
+        delta.y = std::clamp(delta.y, -minY, page.height - maxY);
+    }
     if (std::abs(delta.x) < 0.001f && std::abs(delta.y) < 0.001f) {
         return;
     }
@@ -2847,9 +2928,210 @@ void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta) {
         page.images[imageIndex].y += delta.y;
     }
 
-    NotifyDocumentMutated();
     InvalidatePageSurfaceCache(pageIndex);
-    InvalidateCanvas();
+    if (notify) {
+        NotifyDocumentMutated();
+        InvalidateCanvas();
+    }
+}
+
+bool App::RehomeSelectedContentAcrossPages(bool clampToPage) {
+    if (window_ == nullptr || document_.PageCount() == 0U) {
+        return false;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const std::vector<PageView> pageViews = CalculatePageViews(clientRect);
+    if (pageViews.size() != document_.PageCount()) {
+        return false;
+    }
+
+    const auto targetPageForScreenPoint = [&](POINT screenPoint, std::size_t fallbackPageIndex) {
+        std::size_t bestPageIndex = std::min(fallbackPageIndex, pageViews.size() - 1U);
+        long bestDistanceSquared = LONG_MAX;
+        for (const PageView& pageView : pageViews) {
+            if (!pageView.valid) {
+                continue;
+            }
+            if (PtInRect(&pageView.rect, screenPoint) != 0) {
+                return pageView.pageIndex;
+            }
+
+            const long dx = static_cast<long>(std::max<LONG>(pageView.rect.left - screenPoint.x, 0))
+                + static_cast<long>(std::max<LONG>(screenPoint.x - pageView.rect.right, 0));
+            const long dy = static_cast<long>(std::max<LONG>(pageView.rect.top - screenPoint.y, 0))
+                + static_cast<long>(std::max<LONG>(screenPoint.y - pageView.rect.bottom, 0));
+            const long distanceSquared = (dx * dx) + (dy * dy);
+            if (distanceSquared < bestDistanceSquared) {
+                bestDistanceSquared = distanceSquared;
+                bestPageIndex = pageView.pageIndex;
+            }
+        }
+        return bestPageIndex;
+    };
+
+    bool changed = false;
+    std::vector<bool> invalidatedPages(document_.PageCount(), false);
+    std::vector<std::vector<Stroke>> movedStrokes(document_.PageCount());
+    std::vector<std::vector<PageImage>> movedImages(document_.PageCount());
+
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        Page& page = document_.PageAt(pageIndex);
+        const PageView& sourceView = pageViews[pageIndex];
+
+        if (pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty()) {
+            std::vector<bool> selectedFlags(page.strokes.size(), false);
+            for (std::size_t strokeIndex : selectedStrokeIndices_[pageIndex]) {
+                if (strokeIndex < selectedFlags.size()) {
+                    selectedFlags[strokeIndex] = true;
+                }
+            }
+
+            std::vector<Stroke> retainedStrokes;
+            retainedStrokes.reserve(page.strokes.size());
+            std::vector<std::size_t> retainedSelected;
+            for (std::size_t strokeIndex = 0; strokeIndex < page.strokes.size(); ++strokeIndex) {
+                Stroke stroke = std::move(page.strokes[strokeIndex]);
+                if (!selectedFlags[strokeIndex]) {
+                    retainedStrokes.push_back(std::move(stroke));
+                    continue;
+                }
+
+                float minX = 0.0f;
+                float minY = 0.0f;
+                float maxX = 0.0f;
+                float maxY = 0.0f;
+                if (!StrokeBounds(stroke, &minX, &minY, &maxX, &maxY)) {
+                    retainedStrokes.push_back(std::move(stroke));
+                    retainedSelected.push_back(retainedStrokes.size() - 1U);
+                    continue;
+                }
+
+                const POINT centerPoint {
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.left) + ((minX + maxX) * 0.5f * sourceView.scale))),
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.top) + ((minY + maxY) * 0.5f * sourceView.scale))),
+                };
+                const std::size_t targetPageIndex = targetPageForScreenPoint(centerPoint, pageIndex);
+                if (targetPageIndex != pageIndex) {
+                    const PageView& targetView = pageViews[targetPageIndex];
+                    for (Vec2& point : stroke.points) {
+                        point = RemapPagePointBetweenViews(sourceView, targetView, point);
+                    }
+                    if (clampToPage) {
+                        TranslateStrokePoints(stroke, ClampStrokeDeltaToPage(stroke, document_.PageAt(targetPageIndex), {}));
+                    }
+                    movedStrokes[targetPageIndex].push_back(std::move(stroke));
+                    invalidatedPages[pageIndex] = true;
+                    invalidatedPages[targetPageIndex] = true;
+                    changed = true;
+                    continue;
+                }
+
+                if (clampToPage) {
+                    const Vec2 clampDelta = ClampStrokeDeltaToPage(stroke, page, {});
+                    if (std::abs(clampDelta.x) >= 0.001f || std::abs(clampDelta.y) >= 0.001f) {
+                        TranslateStrokePoints(stroke, clampDelta);
+                        invalidatedPages[pageIndex] = true;
+                        changed = true;
+                    }
+                }
+
+                retainedStrokes.push_back(std::move(stroke));
+                retainedSelected.push_back(retainedStrokes.size() - 1U);
+            }
+
+            page.strokes = std::move(retainedStrokes);
+            selectedStrokeIndices_[pageIndex] = std::move(retainedSelected);
+        }
+
+        if (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty()) {
+            std::vector<bool> selectedFlags(page.images.size(), false);
+            for (std::size_t imageIndex : selectedImageIndices_[pageIndex]) {
+                if (imageIndex < selectedFlags.size()) {
+                    selectedFlags[imageIndex] = true;
+                }
+            }
+
+            std::vector<PageImage> retainedImages;
+            retainedImages.reserve(page.images.size());
+            std::vector<std::size_t> retainedSelected;
+            for (std::size_t imageIndex = 0; imageIndex < page.images.size(); ++imageIndex) {
+                PageImage image = std::move(page.images[imageIndex]);
+                if (!selectedFlags[imageIndex]) {
+                    retainedImages.push_back(std::move(image));
+                    continue;
+                }
+
+                const Vec2 center = ImageCenter(image);
+                const POINT centerPoint {
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.left) + (center.x * sourceView.scale))),
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.top) + (center.y * sourceView.scale))),
+                };
+                const std::size_t targetPageIndex = targetPageForScreenPoint(centerPoint, pageIndex);
+                if (targetPageIndex != pageIndex) {
+                    const PageView& targetView = pageViews[targetPageIndex];
+                    const Vec2 remappedTopLeft = RemapPagePointBetweenViews(sourceView, targetView, { image.x, image.y });
+                    image.x = remappedTopLeft.x;
+                    image.y = remappedTopLeft.y;
+                    if (clampToPage) {
+                        const Vec2 clampDelta = ClampImageDeltaToPage(image, document_.PageAt(targetPageIndex), {});
+                        image.x += clampDelta.x;
+                        image.y += clampDelta.y;
+                    }
+                    movedImages[targetPageIndex].push_back(std::move(image));
+                    invalidatedPages[pageIndex] = true;
+                    invalidatedPages[targetPageIndex] = true;
+                    changed = true;
+                    continue;
+                }
+
+                if (clampToPage) {
+                    const Vec2 clampDelta = ClampImageDeltaToPage(image, page, {});
+                    if (std::abs(clampDelta.x) >= 0.001f || std::abs(clampDelta.y) >= 0.001f) {
+                        image.x += clampDelta.x;
+                        image.y += clampDelta.y;
+                        invalidatedPages[pageIndex] = true;
+                        changed = true;
+                    }
+                }
+
+                retainedImages.push_back(std::move(image));
+                retainedSelected.push_back(retainedImages.size() - 1U);
+            }
+
+            page.images = std::move(retainedImages);
+            selectedImageIndices_[pageIndex] = std::move(retainedSelected);
+        }
+    }
+
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        if (!movedStrokes[pageIndex].empty()) {
+            auto& strokes = document_.PageAt(pageIndex).strokes;
+            for (Stroke& stroke : movedStrokes[pageIndex]) {
+                strokes.push_back(std::move(stroke));
+                selectedStrokeIndices_[pageIndex].push_back(strokes.size() - 1U);
+            }
+            invalidatedPages[pageIndex] = true;
+        }
+
+        if (!movedImages[pageIndex].empty()) {
+            auto& images = document_.PageAt(pageIndex).images;
+            for (PageImage& image : movedImages[pageIndex]) {
+                images.push_back(std::move(image));
+                selectedImageIndices_[pageIndex].push_back(images.size() - 1U);
+            }
+            invalidatedPages[pageIndex] = true;
+        }
+    }
+
+    for (std::size_t pageIndex = 0; pageIndex < invalidatedPages.size(); ++pageIndex) {
+        if (invalidatedPages[pageIndex]) {
+            InvalidatePageSurfaceCache(pageIndex);
+        }
+    }
+
+    return changed;
 }
 
 void App::Undo() {
@@ -3521,9 +3803,8 @@ void App::BeginStroke(POINT cursor) {
     }
 
     CancelDeferredRasterRefresh(false);
-    std::size_t pageIndex = 0;
-    const Vec2 pagePoint = ScreenToPage(cursor, &pageIndex);
-    if (!HitTestPage(cursor).has_value()) {
+    const auto hitPage = HitTestPage(cursor);
+    if (!hitPage.has_value()) {
         return;
     }
 
@@ -3532,15 +3813,8 @@ void App::BeginStroke(POINT cursor) {
         InvalidateCanvas();
     }
 
-    document_.SetCurrentPageIndex(pageIndex);
-    activeStroke_ = Stroke {};
-    activeStrokePageIndex_ = pageIndex;
-    activeStroke_->style.color = palette_.at(colorIndex_);
-    activeStroke_->style.width = settings_.drawBrushSize;
-    activeStroke_->points.push_back(pagePoint);
-    isDrawing_ = true;
-    UpdateCaptureState();
-    InvalidateStrokeRegion(*activeStroke_, pageIndex, true);
+    document_.SetCurrentPageIndex(hitPage->pageIndex);
+    StartStrokeSegment(hitPage->pageIndex, ScreenToPage(*hitPage, cursor, true));
 }
 
 void App::ExtendStroke(POINT cursor) {
@@ -3555,7 +3829,6 @@ void App::ExtendStroke(POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const PageView pageView = CalculatePageView(clientRect, *activeStrokePageIndex_);
-    const Page& page = document_.PageAt(*activeStrokePageIndex_);
     if (!pageView.valid || pageView.scale <= 0.0f) {
         return;
     }
@@ -3567,12 +3840,14 @@ void App::ExtendStroke(POINT cursor) {
         settings_.strokeSmoothing,
         12);
 
-    const float pageX = (static_cast<float>(cursor.x - pageView.rect.left)) / pageView.scale;
-    const float pageY = (static_cast<float>(cursor.y - pageView.rect.top)) / pageView.scale;
-    const Vec2 rawPoint {
-        std::clamp(pageX, 0.0f, page.width),
-        std::clamp(pageY, 0.0f, page.height),
-    };
+    if (const auto hitPage = HitTestPage(cursor); hitPage.has_value() && hitPage->pageIndex != *activeStrokePageIndex_) {
+        EndStroke();
+        document_.SetCurrentPageIndex(hitPage->pageIndex);
+        StartStrokeSegment(hitPage->pageIndex, ScreenToPage(*hitPage, cursor, true));
+        return;
+    }
+
+    const Vec2 rawPoint = ScreenToPage(pageView, cursor, true);
     Vec2 filteredPoint = rawPoint;
 
     if (!activeStroke_->points.empty()) {
@@ -3599,6 +3874,21 @@ void App::ExtendStroke(POINT cursor) {
         OffsetRect(&dirtyRect, pageView.rect.left, pageView.rect.top);
         InvalidateRect(window_, &dirtyRect, FALSE);
     }
+}
+
+void App::StartStrokeSegment(std::size_t pageIndex, Vec2 pagePoint) {
+    if (pageIndex >= document_.PageCount()) {
+        return;
+    }
+
+    activeStroke_ = Stroke {};
+    activeStrokePageIndex_ = pageIndex;
+    activeStroke_->style.color = palette_.at(colorIndex_);
+    activeStroke_->style.width = settings_.drawBrushSize;
+    activeStroke_->points.push_back(pagePoint);
+    isDrawing_ = true;
+    UpdateCaptureState();
+    InvalidateStrokeRegion(*activeStroke_, pageIndex, true);
 }
 
 void App::EndStroke() {
@@ -3682,55 +3972,41 @@ void App::BeginSelection(POINT cursor, bool boxOverride) {
         return;
     }
 
-    const auto hitPage = HitTestPage(cursor);
-    if (!hitPage.has_value()) {
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const RECT canvasRect = CanvasRect(clientRect);
+    if (PtInRect(&canvasRect, cursor) == 0) {
         ClearSelection();
         selectionBoxOverride_ = false;
         InvalidateCanvas();
         return;
     }
 
-    const Page& page = document_.PageAt(hitPage->pageIndex);
-    const Vec2 pagePoint = ScreenToPage(cursor, nullptr);
-    selectionPageIndex_ = hitPage->pageIndex;
-    selectionAnchorPage_ = {
-        std::clamp(pagePoint.x, 0.0f, page.width),
-        std::clamp(pagePoint.y, 0.0f, page.height),
-    };
-    selectionCurrentPage_ = selectionAnchorPage_;
-    selectionLassoPoints_.clear();
-    selectionLassoPoints_.push_back(selectionAnchorPage_);
+    selectionAnchorCursor_ = cursor;
+    selectionCurrentCursor_ = cursor;
+    selectionLassoCursorPoints_.clear();
+    selectionLassoCursorPoints_.push_back(cursor);
     selectionBoxOverride_ = boxOverride;
     isSelecting_ = true;
-    document_.SetCurrentPageIndex(hitPage->pageIndex);
+    if (const auto hitPage = HitTestPage(cursor); hitPage.has_value()) {
+        document_.SetCurrentPageIndex(hitPage->pageIndex);
+    }
     UpdateCaptureState();
     InvalidateCanvas();
 }
 
 void App::ExtendSelection(POINT cursor) {
-    if (!isSelecting_ || !selectionPageIndex_.has_value()) {
+    if (!isSelecting_) {
         return;
     }
 
-    RECT clientRect {};
-    GetClientRect(window_, &clientRect);
-    const PageView pageView = CalculatePageView(clientRect, *selectionPageIndex_);
-    if (!pageView.valid) {
-        return;
-    }
-
-    const Page& page = document_.PageAt(*selectionPageIndex_);
-    const float pageX = (static_cast<float>(cursor.x - pageView.rect.left)) / pageView.scale;
-    const float pageY = (static_cast<float>(cursor.y - pageView.rect.top)) / pageView.scale;
-    selectionCurrentPage_ = {
-        std::clamp(pageX, 0.0f, page.width),
-        std::clamp(pageY, 0.0f, page.height),
-    };
+    selectionCurrentCursor_ = cursor;
 
     if (selectionMode_ == SelectionMode::Lasso) {
-        if (selectionLassoPoints_.empty()
-            || DistanceSquared(selectionCurrentPage_, selectionLassoPoints_.back()) >= std::max(2.0f, 6.0f / pageView.scale)) {
-            selectionLassoPoints_.push_back(selectionCurrentPage_);
+        const Vec2 currentPoint = PointToVec2(selectionCurrentCursor_);
+        if (selectionLassoCursorPoints_.empty()
+            || DistanceSquared(currentPoint, PointToVec2(selectionLassoCursorPoints_.back())) >= 36.0f) {
+            selectionLassoCursorPoints_.push_back(selectionCurrentCursor_);
         }
     }
 
@@ -3742,32 +4018,52 @@ void App::EndSelection() {
         return;
     }
 
-    std::vector<std::size_t> selected;
-    std::vector<std::size_t> selectedImages;
-    if (selectionPageIndex_.has_value()) {
-        const std::size_t pageIndex = *selectionPageIndex_;
-        const Page& page = document_.PageAt(pageIndex);
-        const bool clickSelection = DistanceSquared(selectionAnchorPage_, selectionCurrentPage_) <= 18.0f;
-        const SelectionMode effectiveSelectionMode = selectionBoxOverride_ ? SelectionMode::Box : selectionMode_;
-        const std::vector<Vec2> selectionPolygon = effectiveSelectionMode == SelectionMode::Lasso
-            ? CurrentSelectionLassoPolygon()
-            : std::vector<Vec2> {};
+    const SelectionMode effectiveSelectionMode = selectionBoxOverride_ ? SelectionMode::Box : selectionMode_;
+    const bool clickSelection = DistanceSquared(
+        PointToVec2(selectionAnchorCursor_),
+        PointToVec2(selectionCurrentCursor_)) <= (18.0f * 18.0f);
+    const std::vector<Vec2> selectionPolygon = effectiveSelectionMode == SelectionMode::Lasso
+        ? CurrentSelectionLassoPolygon()
+        : std::vector<Vec2> {};
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    ClearSelection();
+    for (const PageView& pageView : CalculatePageViews(clientRect)) {
+        if (!pageView.valid || pageView.pageIndex >= document_.PageCount()) {
+            continue;
+        }
+
+        const Page& page = document_.PageAt(pageView.pageIndex);
+        const Vec2 anchorPage = ScreenToPage(pageView, selectionAnchorCursor_, false);
+        const Vec2 currentPage = ScreenToPage(pageView, selectionCurrentCursor_, false);
+        std::vector<Vec2> pagePolygon;
+        if (effectiveSelectionMode == SelectionMode::Lasso) {
+            pagePolygon.reserve(selectionPolygon.size());
+            for (const Vec2& point : selectionPolygon) {
+                const POINT screenPoint {
+                    static_cast<LONG>(std::lround(point.x)),
+                    static_cast<LONG>(std::lround(point.y)),
+                };
+                pagePolygon.push_back(ScreenToPage(pageView, screenPoint, false));
+            }
+        }
 
         for (std::size_t strokeIndex = 0; strokeIndex < page.strokes.size(); ++strokeIndex) {
             const Stroke& stroke = page.strokes[strokeIndex];
             bool hit = false;
             if (effectiveSelectionMode == SelectionMode::Box) {
                 hit = clickSelection
-                    ? StrokeHitsPoint(stroke, selectionCurrentPage_, 10.0f)
-                    : StrokeIntersectsRectSelection(stroke, selectionAnchorPage_, selectionCurrentPage_);
+                    ? StrokeHitsPoint(stroke, currentPage, 10.0f / std::max(0.1f, pageView.scale))
+                    : StrokeIntersectsRectSelection(stroke, anchorPage, currentPage);
             } else {
-                hit = (selectionPolygon.size() < 3U)
-                    ? StrokeHitsPoint(stroke, selectionCurrentPage_, 10.0f)
-                    : StrokeIntersectsPolygonSelection(stroke, selectionPolygon);
+                hit = (pagePolygon.size() < 3U)
+                    ? StrokeHitsPoint(stroke, currentPage, 10.0f / std::max(0.1f, pageView.scale))
+                    : StrokeIntersectsPolygonSelection(stroke, pagePolygon);
             }
 
-            if (hit) {
-                selected.push_back(strokeIndex);
+            if (hit && pageView.pageIndex < selectedStrokeIndices_.size()) {
+                selectedStrokeIndices_[pageView.pageIndex].push_back(strokeIndex);
             }
         }
 
@@ -3776,32 +4072,21 @@ void App::EndSelection() {
             bool hit = false;
             if (effectiveSelectionMode == SelectionMode::Box) {
                 hit = clickSelection
-                    ? ImageHitsPoint(image, selectionCurrentPage_)
-                    : ImageIntersectsRectSelection(image, selectionAnchorPage_, selectionCurrentPage_);
+                    ? ImageHitsPoint(image, currentPage)
+                    : ImageIntersectsRectSelection(image, anchorPage, currentPage);
             } else {
-                hit = (selectionPolygon.size() < 3U)
-                    ? ImageHitsPoint(image, selectionCurrentPage_)
-                    : ImageIntersectsPolygonSelection(image, selectionPolygon);
+                hit = (pagePolygon.size() < 3U)
+                    ? ImageHitsPoint(image, currentPage)
+                    : ImageIntersectsPolygonSelection(image, pagePolygon);
             }
-            if (hit) {
-                selectedImages.push_back(imageIndex);
+            if (hit && pageView.pageIndex < selectedImageIndices_.size()) {
+                selectedImageIndices_[pageView.pageIndex].push_back(imageIndex);
             }
         }
-
-        ClearSelection();
-        if (pageIndex < selectedStrokeIndices_.size()) {
-            selectedStrokeIndices_[pageIndex] = std::move(selected);
-        }
-        if (pageIndex < selectedImageIndices_.size()) {
-            selectedImageIndices_[pageIndex] = std::move(selectedImages);
-        }
-    } else {
-        ClearSelection();
     }
 
     isSelecting_ = false;
-    selectionPageIndex_.reset();
-    selectionLassoPoints_.clear();
+    selectionLassoCursorPoints_.clear();
     selectionBoxOverride_ = false;
     UpdateCaptureState();
     InvalidateCanvas();
@@ -3958,7 +4243,8 @@ void App::BeginMoveSelection(POINT cursor) {
     CancelDeferredRasterRefresh(false);
     isMovingSelection_ = true;
     moveSelectionPageIndex_ = pageIndex;
-    lastMovePagePoint_ = pagePoint;
+    lastMoveCursor_ = cursor;
+    moveSelectionScale_ = std::max(0.1f, hitPage->scale);
     document_.SetCurrentPageIndex(pageIndex);
     UpdateCaptureState();
     InvalidateCanvas();
@@ -4297,28 +4583,32 @@ void App::EndStrokeTransform() {
 }
 
 void App::UpdateMoveSelection(POINT cursor) {
-    if (!isMovingSelection_ || !moveSelectionPageIndex_.has_value()) {
+    if (!isMovingSelection_) {
         return;
     }
 
-    RECT clientRect {};
-    GetClientRect(window_, &clientRect);
-    const PageView pageView = CalculatePageView(clientRect, *moveSelectionPageIndex_);
-    if (!pageView.valid) {
-        return;
-    }
-
-    const Page& page = document_.PageAt(*moveSelectionPageIndex_);
-    const Vec2 pagePoint {
-        std::clamp((static_cast<float>(cursor.x - pageView.rect.left)) / pageView.scale, 0.0f, page.width),
-        std::clamp((static_cast<float>(cursor.y - pageView.rect.top)) / pageView.scale, 0.0f, page.height),
-    };
+    const float scale = std::max(0.1f, moveSelectionScale_);
     const Vec2 delta {
-        pagePoint.x - lastMovePagePoint_.x,
-        pagePoint.y - lastMovePagePoint_.y,
+        static_cast<float>(cursor.x - lastMoveCursor_.x) / scale,
+        static_cast<float>(cursor.y - lastMoveCursor_.y) / scale,
     };
-    TranslateSelectedContent(*moveSelectionPageIndex_, delta);
-    lastMovePagePoint_ = pagePoint;
+    if (std::abs(delta.x) < 0.001f && std::abs(delta.y) < 0.001f) {
+        return;
+    }
+
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        const bool hasSelectedStrokes = pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty();
+        const bool hasSelectedImages = pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty();
+        if (!hasSelectedStrokes && !hasSelectedImages) {
+            continue;
+        }
+
+        TranslateSelectedContent(pageIndex, delta, false, false);
+    }
+    RehomeSelectedContentAcrossPages(false);
+    NotifyDocumentMutated();
+    InvalidateCanvas();
+    lastMoveCursor_ = cursor;
 }
 
 void App::EndImageTransform() {
@@ -4339,6 +4629,11 @@ void App::EndImageTransform() {
 void App::EndMoveSelection() {
     if (!isMovingSelection_) {
         return;
+    }
+
+    if (RehomeSelectedContentAcrossPages(true)) {
+        NotifyDocumentMutated();
+        InvalidateCanvas();
     }
 
     isMovingSelection_ = false;
@@ -5794,6 +6089,24 @@ Vec2 App::ScreenToPage(POINT cursor, std::size_t* pageIndex) const {
     };
 }
 
+Vec2 App::ScreenToPage(const PageView& pageView, POINT cursor, bool clampToPage) const {
+    if (!pageView.valid || pageView.pageIndex >= document_.PageCount() || pageView.scale <= 0.0f) {
+        return {};
+    }
+
+    const Page& page = document_.PageAt(pageView.pageIndex);
+    const float pageX = (static_cast<float>(cursor.x - pageView.rect.left)) / pageView.scale;
+    const float pageY = (static_cast<float>(cursor.y - pageView.rect.top)) / pageView.scale;
+    if (!clampToPage) {
+        return { pageX, pageY };
+    }
+
+    return {
+        std::clamp(pageX, 0.0f, page.width),
+        std::clamp(pageY, 0.0f, page.height),
+    };
+}
+
 POINT App::PageToScreen(std::size_t pageIndex, Vec2 point) const {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
@@ -6478,6 +6791,41 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
     RestoreDC(hdc, -1);
 }
 
+void App::PaintSelectionOverlay(HDC hdc, RECT canvasRect) const {
+    if (!isSelecting_) {
+        return;
+    }
+
+    SaveDC(hdc);
+    IntersectClipRect(hdc, canvasRect.left, canvasRect.top, canvasRect.right, canvasRect.bottom);
+    if (selectionBoxOverride_ || selectionMode_ == SelectionMode::Box) {
+        const RECT selectionRect = MakeRect(
+            std::min(selectionAnchorCursor_.x, selectionCurrentCursor_.x),
+            std::min(selectionAnchorCursor_.y, selectionCurrentCursor_.y),
+            std::max(selectionAnchorCursor_.x, selectionCurrentCursor_.x),
+            std::max(selectionAnchorCursor_.y, selectionCurrentCursor_.y));
+        DrawRectangleAA(hdc, selectionRect, RGB(124, 211, 255), 1.5f, Gdiplus::DashStyleDash);
+    } else {
+        const std::vector<Vec2> selectionPolygon = CurrentSelectionLassoPolygon();
+        std::vector<POINT> points;
+        points.reserve(selectionPolygon.size());
+        for (const Vec2& point : selectionPolygon) {
+            points.push_back({
+                static_cast<LONG>(std::lround(point.x)),
+                static_cast<LONG>(std::lround(point.y)),
+            });
+        }
+        if (points.size() >= 2U) {
+            DrawPolylineAA(hdc, points.data(), static_cast<int>(points.size()), RGB(124, 211, 255), 1.5f, Gdiplus::DashStyleDash);
+            if (points.size() >= 3U) {
+                POINT closingLine[2] { points.back(), points.front() };
+                DrawPolylineAA(hdc, closingLine, 2, RGB(124, 211, 255), 1.5f, Gdiplus::DashStyleDash);
+            }
+        }
+    }
+    RestoreDC(hdc, -1);
+}
+
 void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
     if (!quickSizePopupTool_.has_value()) {
         return;
@@ -6610,6 +6958,7 @@ void App::PaintCanvas(HDC hdc, RECT clientRect) {
         PaintPage(hdc, pageView);
     }
     RestoreDC(hdc, -1);
+    PaintSelectionOverlay(hdc, canvasRect);
 }
 
 bool App::TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke& stroke) {
@@ -7360,33 +7709,6 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
 
     if (activeStroke_.has_value() && activeStrokePageIndex_.has_value() && *activeStrokePageIndex_ == pageView.pageIndex) {
         PaintStroke(hdc, *activeStroke_, pageView, true);
-    }
-
-    if (isSelecting_ && selectionPageIndex_.has_value() && *selectionPageIndex_ == pageView.pageIndex) {
-        if (selectionBoxOverride_ || selectionMode_ == SelectionMode::Box) {
-            const int left = pageView.rect.left + static_cast<int>(std::lround(std::min(selectionAnchorPage_.x, selectionCurrentPage_.x) * pageView.scale));
-            const int top = pageView.rect.top + static_cast<int>(std::lround(std::min(selectionAnchorPage_.y, selectionCurrentPage_.y) * pageView.scale));
-            const int right = pageView.rect.left + static_cast<int>(std::lround(std::max(selectionAnchorPage_.x, selectionCurrentPage_.x) * pageView.scale));
-            const int bottom = pageView.rect.top + static_cast<int>(std::lround(std::max(selectionAnchorPage_.y, selectionCurrentPage_.y) * pageView.scale));
-            DrawRectangleAA(hdc, MakeRect(left, top, right, bottom), RGB(124, 211, 255), 1.5f, Gdiplus::DashStyleDash);
-        } else if (!selectionLassoPoints_.empty()) {
-            const std::vector<Vec2> selectionPolygon = CurrentSelectionLassoPolygon();
-            std::vector<POINT> points;
-            points.reserve(selectionPolygon.size());
-            for (const Vec2& point : selectionPolygon) {
-                points.push_back({
-                    pageView.rect.left + static_cast<LONG>(std::lround(point.x * pageView.scale)),
-                    pageView.rect.top + static_cast<LONG>(std::lround(point.y * pageView.scale)),
-                });
-            }
-            if (points.size() >= 2U) {
-                DrawPolylineAA(hdc, points.data(), static_cast<int>(points.size()), RGB(124, 211, 255), 1.5f, Gdiplus::DashStyleDash);
-                if (points.size() >= 3U) {
-                    POINT closingLine[2] { points.back(), points.front() };
-                    DrawPolylineAA(hdc, closingLine, 2, RGB(124, 211, 255), 1.5f, Gdiplus::DashStyleDash);
-                }
-            }
-        }
     }
 
     RestoreDC(hdc, -1);

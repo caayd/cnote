@@ -252,6 +252,7 @@ private:
     void BeginStroke(POINT cursor);
     void ExtendStroke(POINT cursor);
     void EndStroke();
+    void StartStrokeSegment(std::size_t pageIndex, Vec2 pagePoint);
     void BeginSelection(POINT cursor, bool boxOverride = false);
     void ExtendSelection(POINT cursor);
     void EndSelection();
@@ -330,7 +331,8 @@ private:
     [[nodiscard]] std::optional<Vec2> DefaultPasteOrigin(std::size_t pageIndex) const;
     [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> SingleSelectedImage() const;
     [[nodiscard]] std::optional<std::size_t> SingleSelectedStrokePage() const;
-    void TranslateSelectedContent(std::size_t pageIndex, Vec2 delta);
+    void TranslateSelectedContent(std::size_t pageIndex, Vec2 delta, bool clampToPage = true, bool notify = true);
+    bool RehomeSelectedContentAcrossPages(bool clampToPage);
     void ChangeBrushSize(float delta);
     [[nodiscard]] float BrushSizeForTool(Tool tool) const;
     void SetBrushSizeForTool(Tool tool, float size, bool refreshUi = true);
@@ -355,6 +357,7 @@ private:
     [[nodiscard]] bool IsCursorInsidePage(POINT cursor) const;
     [[nodiscard]] std::optional<PageView> HitTestPage(POINT cursor) const;
     [[nodiscard]] Vec2 ScreenToPage(POINT cursor, std::size_t* pageIndex = nullptr) const;
+    [[nodiscard]] Vec2 ScreenToPage(const PageView& pageView, POINT cursor, bool clampToPage) const;
     [[nodiscard]] POINT PageToScreen(std::size_t pageIndex, Vec2 point) const;
     [[nodiscard]] PageView CalculatePageView(RECT clientRect, std::size_t pageIndex) const;
     [[nodiscard]] std::vector<PageView> CalculatePageViews(RECT clientRect) const;
@@ -398,6 +401,7 @@ private:
     void PaintPaletteWheel(HDC hdc, RECT clientRect) const;
     void PaintCanvas(HDC hdc, RECT clientRect);
     void PaintPage(HDC hdc, const PageView& pageView);
+    void PaintSelectionOverlay(HDC hdc, RECT canvasRect) const;
     void PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke) const;
     bool TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke& stroke);
     bool TryRefreshPageSurfaceCacheForStroke(std::size_t pageIndex, const Stroke& stroke);
@@ -439,14 +443,14 @@ private:
     POINT lastPanCursor_ {};
     ULONG_PTR gdiplusToken_ = 0;
     SelectionMode selectionMode_ = SelectionMode::Lasso;
-    std::optional<std::size_t> selectionPageIndex_ {};
     std::optional<std::size_t> moveSelectionPageIndex_ {};
     std::optional<std::size_t> transformingImagePageIndex_ {};
     std::optional<std::size_t> transformingImageIndex_ {};
     std::optional<std::size_t> transformingStrokePageIndex_ {};
-    Vec2 selectionAnchorPage_ {};
-    Vec2 selectionCurrentPage_ {};
-    Vec2 lastMovePagePoint_ {};
+    POINT selectionAnchorCursor_ {};
+    POINT selectionCurrentCursor_ {};
+    POINT lastMoveCursor_ {};
+    float moveSelectionScale_ = 1.0f;
     Vec2 imageTransformStartPagePoint_ {};
     Vec2 strokeTransformStartPagePoint_ {};
     PageImage imageTransformInitial_ {};
@@ -457,7 +461,7 @@ private:
     Vec2 strokeTransformBoundsMin_ {};
     Vec2 strokeTransformBoundsMax_ {};
     std::vector<std::pair<std::size_t, Stroke>> strokeTransformInitials_ {};
-    std::vector<Vec2> selectionLassoPoints_ {};
+    std::vector<POINT> selectionLassoCursorPoints_ {};
     std::vector<std::vector<std::size_t>> selectedImageIndices_ {};
     std::vector<std::vector<std::size_t>> selectedStrokeIndices_ {};
     bool selectionBoxOverride_ = false;
