@@ -7,7 +7,7 @@ namespace cnote {
 
 namespace {
 
-constexpr std::array<ShortcutDefinition, 25> kShortcutDefinitions {{
+constexpr std::array<ShortcutDefinition, 26> kShortcutDefinitions {{
     { App::ShortcutAction::ToolDraw, L"Draw Tool", { 'D', false, false, false } },
     { App::ShortcutAction::ToolSelect, L"Select Tool", { 'S', false, false, false } },
     { App::ShortcutAction::ToolMove, L"Move Tool", { 'M', false, false, false } },
@@ -20,6 +20,7 @@ constexpr std::array<ShortcutDefinition, 25> kShortcutDefinitions {{
     { App::ShortcutAction::Save, L"Save Cnote", { 'S', true, false, false } },
     { App::ShortcutAction::ExportPdf, L"Export PDF", { 0, false, false, false } },
     { App::ShortcutAction::Copy, L"Copy", { 'C', true, false, false } },
+    { App::ShortcutAction::Cut, L"Cut", { 'X', true, false, false } },
     { App::ShortcutAction::Paste, L"Paste", { 'V', true, false, false } },
     { App::ShortcutAction::ResetView, L"Reset View", { '0', false, false, false } },
     { App::ShortcutAction::ZoomPreset1, L"Zoom Preset 1", { 0, false, false, false } },
@@ -76,6 +77,8 @@ const char* ShortcutActionConfigName(App::ShortcutAction action) {
         return "ExportPdf";
     case App::ShortcutAction::Copy:
         return "Copy";
+    case App::ShortcutAction::Cut:
+        return "Cut";
     case App::ShortcutAction::Paste:
         return "Paste";
     case App::ShortcutAction::ResetView:

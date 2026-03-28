@@ -988,6 +988,13 @@ void App::ExecuteShortcutAction(ShortcutAction action) {
             static_cast<void>(CopySelectionToClipboard());
         }
         break;
+    case ShortcutAction::Cut:
+        if (SidebarOwnsKeyboardShortcuts()) {
+            static_cast<void>(CutCurrentPageToSidebarBuffer());
+        } else {
+            static_cast<void>(CutSelectionToClipboard());
+        }
+        break;
     case ShortcutAction::Paste:
         if (SidebarOwnsKeyboardShortcuts()) {
             static_cast<void>(PasteSidebarPageAfterCurrent());

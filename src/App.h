@@ -65,6 +65,7 @@ public:
         Save,
         ExportPdf,
         Copy,
+        Cut,
         Paste,
         ResetView,
         ZoomPreset1,
@@ -247,6 +248,7 @@ private:
     void FocusPage(std::size_t index);
     void AddBlankPageAfterCurrent();
     void CopyCurrentPageToSidebarBuffer();
+    bool CutCurrentPageToSidebarBuffer();
     bool PasteSidebarPageAfterCurrent();
     bool DeleteCurrentPage();
     void ToggleBrushSettings();
@@ -340,7 +342,8 @@ private:
     void ClearSelection();
     [[nodiscard]] bool HasSelection() const;
     [[nodiscard]] bool HasSelectedStrokes() const;
-    void DeleteSelection();
+    [[nodiscard]] std::optional<std::size_t> FirstSelectedPageIndex() const;
+    void DeleteSelection(std::optional<std::size_t> pageIndex = std::nullopt);
     void AdjustSelectionForRemoval(std::size_t pageIndex, std::size_t strokeIndex);
     void AdjustSelectionForInsertion(std::size_t pageIndex, std::size_t strokeIndex);
     [[nodiscard]] bool IsImageSelected(std::size_t pageIndex, std::size_t imageIndex) const;
@@ -351,6 +354,7 @@ private:
     [[nodiscard]] bool CursorHitsSelectedContent(POINT cursor) const;
     [[nodiscard]] bool CursorInteractsWithSelection(POINT cursor) const;
     bool CopySelectionToClipboard();
+    bool CutSelectionToClipboard();
     bool PasteSelectionFromClipboard();
     bool PasteImageFromClipboard();
     [[nodiscard]] std::optional<Vec2> DefaultPasteOrigin(std::size_t pageIndex) const;

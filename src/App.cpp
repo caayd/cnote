@@ -2522,6 +2522,15 @@ void App::CopyCurrentPageToSidebarBuffer() {
     copiedSidebarPage_ = document_.CurrentPage();
 }
 
+bool App::CutCurrentPageToSidebarBuffer() {
+    if (document_.PageCount() <= 1U) {
+        return false;
+    }
+
+    CopyCurrentPageToSidebarBuffer();
+    return DeleteCurrentPage();
+}
+
 bool App::PasteSidebarPageAfterCurrent() {
     if (!copiedSidebarPage_.has_value() || document_.PageCount() == 0U) {
         return false;
@@ -2580,35 +2589,64 @@ bool App::HasSelectedStrokes() const {
     return false;
 }
 
-void App::DeleteSelection() {
-    if (!HasSelection()) {
+std::optional<std::size_t> App::FirstSelectedPageIndex() const {
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        const bool hasStrokes = pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty();
+        const bool hasImages = pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty();
+        if (hasStrokes || hasImages) {
+            return pageIndex;
+        }
+    }
+
+    return std::nullopt;
+}
+
+void App::DeleteSelection(std::optional<std::size_t> pageIndex) {
+    if (!pageIndex.has_value() && !HasSelection()) {
         return;
     }
 
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        if (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty()) {
-            auto imageIndices = selectedImageIndices_[pageIndex];
+    bool hadSelection = false;
+    for (std::size_t index = 0; index < document_.PageCount(); ++index) {
+        if (pageIndex.has_value() && index != *pageIndex) {
+            continue;
+        }
+
+        const bool hasSelectedImages = index < selectedImageIndices_.size() && !selectedImageIndices_[index].empty();
+        const bool hasSelectedStrokes = index < selectedStrokeIndices_.size() && !selectedStrokeIndices_[index].empty();
+        if (!hasSelectedImages && !hasSelectedStrokes) {
+            continue;
+        }
+
+        hadSelection = true;
+
+        if (hasSelectedImages) {
+            auto imageIndices = selectedImageIndices_[index];
             std::sort(imageIndices.rbegin(), imageIndices.rend());
-            auto& images = document_.PageAt(pageIndex).images;
+            auto& images = document_.PageAt(index).images;
             for (std::size_t imageIndex : imageIndices) {
                 if (imageIndex < images.size()) {
                     images.erase(images.begin() + static_cast<std::ptrdiff_t>(imageIndex));
                 }
             }
-            InvalidatePageSurfaceCache(pageIndex);
+            InvalidatePageSurfaceCache(index);
         }
 
-        if (pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty()) {
-            auto strokeIndices = selectedStrokeIndices_[pageIndex];
+        if (hasSelectedStrokes) {
+            auto strokeIndices = selectedStrokeIndices_[index];
             std::sort(strokeIndices.rbegin(), strokeIndices.rend());
-            auto& strokes = document_.PageAt(pageIndex).strokes;
+            auto& strokes = document_.PageAt(index).strokes;
             for (std::size_t strokeIndex : strokeIndices) {
                 if (strokeIndex < strokes.size()) {
                     strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(strokeIndex));
                 }
             }
-            InvalidatePageSurfaceCache(pageIndex);
+            InvalidatePageSurfaceCache(index);
         }
+    }
+
+    if (!hadSelection) {
+        return;
     }
 
     ClearSelection();
@@ -2690,10 +2728,33 @@ std::optional<Vec2> App::DefaultPasteOrigin(std::size_t pageIndex) const {
     }
 
     const Page& page = document_.PageAt(pageIndex);
-    return Vec2 {
+    const Vec2 fallback {
         page.width * 0.5f,
         page.height * 0.5f,
     };
+
+    if (window_ == nullptr) {
+        return fallback;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const RECT canvasRect = CanvasRect(clientRect);
+    const PageView pageView = CalculatePageView(clientRect, pageIndex);
+    if (!pageView.valid || pageView.scale <= 0.0f) {
+        return fallback;
+    }
+
+    RECT visibleRect {};
+    if (IntersectRect(&visibleRect, &pageView.rect, &canvasRect) == 0) {
+        return fallback;
+    }
+
+    POINT visibleCenter {
+        (visibleRect.left + visibleRect.right) / 2,
+        (visibleRect.top + visibleRect.bottom) / 2,
+    };
+    return ScreenToPage(pageView, visibleCenter, true);
 }
 
 std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedImage() const {
@@ -4566,15 +4627,7 @@ void App::EndMoveSelection() {
 }
 
 bool App::CopySelectionToClipboard() {
-    std::optional<std::size_t> pageIndex;
-    for (std::size_t index = 0; index < document_.PageCount(); ++index) {
-        const bool hasStrokes = index < selectedStrokeIndices_.size() && !selectedStrokeIndices_[index].empty();
-        const bool hasImages = index < selectedImageIndices_.size() && !selectedImageIndices_[index].empty();
-        if (hasStrokes || hasImages) {
-            pageIndex = index;
-            break;
-        }
-    }
+    const std::optional<std::size_t> pageIndex = FirstSelectedPageIndex();
     if (!pageIndex.has_value()) {
         return false;
     }
@@ -4674,6 +4727,20 @@ bool App::CopySelectionToClipboard() {
     GlobalUnlock(memory);
     SetClipboardData(SelectionClipboardFormat(), memory);
     CloseClipboard();
+    return true;
+}
+
+bool App::CutSelectionToClipboard() {
+    const std::optional<std::size_t> pageIndex = FirstSelectedPageIndex();
+    if (!pageIndex.has_value()) {
+        return false;
+    }
+
+    if (!CopySelectionToClipboard()) {
+        return false;
+    }
+
+    DeleteSelection(pageIndex);
     return true;
 }
 
@@ -4798,9 +4865,18 @@ bool App::PasteSelectionFromClipboard() {
         return false;
     }
 
+    const Page& targetPage = document_.PageAt(targetPageIndex);
+    const float contentWidth = std::max(0.0f, maxX - minX);
+    const float contentHeight = std::max(0.0f, maxY - minY);
     const Vec2 pasteTopLeft {
-        pasteCenter->x - ((maxX - minX) * 0.5f),
-        pasteCenter->y - ((maxY - minY) * 0.5f),
+        std::clamp(
+            pasteCenter->x - (contentWidth * 0.5f),
+            0.0f,
+            std::max(0.0f, targetPage.width - contentWidth)),
+        std::clamp(
+            pasteCenter->y - (contentHeight * 0.5f),
+            0.0f,
+            std::max(0.0f, targetPage.height - contentHeight)),
     };
     const Vec2 delta {
         pasteTopLeft.x - minX,
