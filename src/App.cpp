@@ -1504,6 +1504,43 @@ std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float str
     return smoothed;
 }
 
+std::optional<RECT> StrokeRenderBoundsRect(
+    const Stroke& stroke,
+    float scale,
+    bool smoothLiveStroke,
+    float strokeSmoothing,
+    int extraPadding = 0) {
+    if (stroke.points.empty() || scale <= 0.0f) {
+        return std::nullopt;
+    }
+
+    const std::vector<Vec2> renderPoints = smoothLiveStroke
+        ? BuildSmoothedPoints(stroke.points, strokeSmoothing)
+        : stroke.points;
+    if (renderPoints.empty()) {
+        return std::nullopt;
+    }
+
+    float minX = renderPoints.front().x;
+    float minY = renderPoints.front().y;
+    float maxX = renderPoints.front().x;
+    float maxY = renderPoints.front().y;
+    for (const Vec2& point : renderPoints) {
+        minX = std::min(minX, point.x);
+        minY = std::min(minY, point.y);
+        maxX = std::max(maxX, point.x);
+        maxY = std::max(maxY, point.y);
+    }
+
+    const float penWidth = std::max(1.25f, stroke.style.width * scale / 2.15f);
+    const float padding = static_cast<float>(static_cast<int>(std::ceil(penWidth)) + extraPadding);
+    return MakeRectFromFloatBounds(
+        (minX * scale) - padding,
+        (minY * scale) - padding,
+        (maxX * scale) + padding + 1.0f,
+        (maxY * scale) + padding + 1.0f);
+}
+
 bool PointInRectF(Vec2 point, float left, float top, float right, float bottom) {
     return point.x >= left && point.x <= right && point.y >= top && point.y <= bottom;
 }
@@ -2214,31 +2251,18 @@ void App::InvalidateStrokeRegion(const Stroke& stroke, std::size_t pageIndex, bo
         return;
     }
 
-    const std::vector<Vec2> renderPoints = smoothLiveStroke
-        ? BuildSmoothedPoints(stroke.points, settings_.strokeSmoothing)
-        : stroke.points;
-    if (renderPoints.empty()) {
+    const std::optional<RECT> strokeBounds = StrokeRenderBoundsRect(
+        stroke,
+        pageView.scale,
+        smoothLiveStroke,
+        settings_.strokeSmoothing,
+        12);
+    if (!strokeBounds.has_value()) {
         return;
     }
 
-    float minX = renderPoints.front().x;
-    float minY = renderPoints.front().y;
-    float maxX = renderPoints.front().x;
-    float maxY = renderPoints.front().y;
-    for (const Vec2& point : renderPoints) {
-        minX = std::min(minX, point.x);
-        minY = std::min(minY, point.y);
-        maxX = std::max(maxX, point.x);
-        maxY = std::max(maxY, point.y);
-    }
-
-    const float penWidth = std::max(1.25f, stroke.style.width * pageView.scale / 2.15f);
-    const int padding = static_cast<int>(std::ceil(penWidth)) + 12;
-    RECT dirtyRect = MakeRect(
-        pageView.rect.left + static_cast<int>(std::floor(minX * pageView.scale)) - padding,
-        pageView.rect.top + static_cast<int>(std::floor(minY * pageView.scale)) - padding,
-        pageView.rect.left + static_cast<int>(std::ceil(maxX * pageView.scale)) + padding + 1,
-        pageView.rect.top + static_cast<int>(std::ceil(maxY * pageView.scale)) + padding + 1);
+    RECT dirtyRect = *strokeBounds;
+    OffsetRect(&dirtyRect, pageView.rect.left, pageView.rect.top);
     InvalidateRect(window_, &dirtyRect, FALSE);
 }
 
@@ -3536,6 +3560,13 @@ void App::ExtendStroke(POINT cursor) {
         return;
     }
 
+    const std::optional<RECT> previousDirtyRect = StrokeRenderBoundsRect(
+        *activeStroke_,
+        pageView.scale,
+        true,
+        settings_.strokeSmoothing,
+        12);
+
     const float pageX = (static_cast<float>(cursor.x - pageView.rect.left)) / pageView.scale;
     const float pageY = (static_cast<float>(cursor.y - pageView.rect.top)) / pageView.scale;
     const Vec2 rawPoint {
@@ -3552,13 +3583,45 @@ void App::ExtendStroke(POINT cursor) {
     }
 
     activeStroke_->points.push_back(filteredPoint);
-    InvalidateStrokeRegion(*activeStroke_, *activeStrokePageIndex_, true);
+    std::optional<RECT> currentDirtyRect = StrokeRenderBoundsRect(
+        *activeStroke_,
+        pageView.scale,
+        true,
+        settings_.strokeSmoothing,
+        12);
+    if (previousDirtyRect.has_value()) {
+        currentDirtyRect = currentDirtyRect.has_value()
+            ? UnionRectangles(*previousDirtyRect, *currentDirtyRect)
+            : previousDirtyRect;
+    }
+    if (currentDirtyRect.has_value()) {
+        RECT dirtyRect = *currentDirtyRect;
+        OffsetRect(&dirtyRect, pageView.rect.left, pageView.rect.top);
+        InvalidateRect(window_, &dirtyRect, FALSE);
+    }
 }
 
 void App::EndStroke() {
     std::optional<Stroke> committedStroke;
     std::optional<std::size_t> committedPageIndex;
+    std::optional<RECT> previewDirtyRect;
+    std::optional<PageView> committedPageView;
     if (isDrawing_ && activeStroke_.has_value() && activeStrokePageIndex_.has_value() && !activeStroke_->points.empty()) {
+        if (window_ != nullptr) {
+            RECT clientRect {};
+            GetClientRect(window_, &clientRect);
+            const PageView pageView = CalculatePageView(clientRect, *activeStrokePageIndex_);
+            if (pageView.valid && pageView.scale > 0.0f) {
+                previewDirtyRect = StrokeRenderBoundsRect(
+                    *activeStroke_,
+                    pageView.scale,
+                    true,
+                    settings_.strokeSmoothing,
+                    12);
+                committedPageView = pageView;
+            }
+        }
+
         Stroke finishedStroke = std::move(*activeStroke_);
         finishedStroke.points = BuildSmoothedPoints(finishedStroke.points, settings_.strokeSmoothing);
         auto& strokes = document_.PageAt(*activeStrokePageIndex_).strokes;
@@ -3587,7 +3650,28 @@ void App::EndStroke() {
     }
     if (committedStroke.has_value() && committedPageIndex.has_value()) {
         NotifyDocumentMutated();
-        InvalidateStrokeRegion(*committedStroke, *committedPageIndex, false);
+        if (window_ != nullptr && committedPageView.has_value()) {
+            std::optional<RECT> dirtyRect = StrokeRenderBoundsRect(
+                *committedStroke,
+                committedPageView->scale,
+                false,
+                settings_.strokeSmoothing,
+                12);
+            if (previewDirtyRect.has_value()) {
+                dirtyRect = dirtyRect.has_value()
+                    ? UnionRectangles(*previewDirtyRect, *dirtyRect)
+                    : previewDirtyRect;
+            }
+            if (dirtyRect.has_value()) {
+                RECT windowDirtyRect = *dirtyRect;
+                OffsetRect(&windowDirtyRect, committedPageView->rect.left, committedPageView->rect.top);
+                InvalidateRect(window_, &windowDirtyRect, FALSE);
+            } else {
+                InvalidateStrokeRegion(*committedStroke, *committedPageIndex, false);
+            }
+        } else {
+            InvalidateStrokeRegion(*committedStroke, *committedPageIndex, false);
+        }
     } else {
         InvalidateCanvas();
     }
@@ -7101,7 +7185,11 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
             bitmapInfo.bmiHeader.biBitCount = 32;
             bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
-            SetStretchBltMode(hdc, (isPanning_ || isDrawing_ || isErasing_ || zoomSessionActive_) ? COLORONCOLOR : HALFTONE);
+            const int stretchMode = (isPanning_ || zoomSessionActive_) ? COLORONCOLOR : HALFTONE;
+            SetStretchBltMode(hdc, stretchMode);
+            if (stretchMode == HALFTONE) {
+                SetBrushOrgEx(hdc, 0, 0, nullptr);
+            }
             StretchDIBits(
                 hdc,
                 pageView.rect.left,
