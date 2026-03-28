@@ -37,6 +37,8 @@ struct PageImage {
 struct PageText {
     float x = 0.0f;
     float y = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
     float fontSize = 24.0f;
     std::uint32_t color = 0xFF111827;
     std::wstring content {};
