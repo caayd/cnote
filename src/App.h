@@ -175,6 +175,16 @@ public:
         std::size_t sourcePageIndex = 0;
         std::size_t sourceIndex = 0;
         PageText text {};
+        float boundsWidth = 0.0f;
+        float boundsHeight = 0.0f;
+    };
+
+    struct MoveSelectionTextCacheEntry {
+        std::size_t textIndex = 0;
+        float centerX = 0.0f;
+        float centerY = 0.0f;
+        float boundsWidth = 0.0f;
+        float boundsHeight = 0.0f;
     };
 
     struct RenderRequest {
@@ -305,6 +315,9 @@ private:
     void CancelTextEdit();
     void EndTextEditControl();
     void RefreshTextEditControl();
+    void InvalidateEditingTextRegion();
+    void ReleaseTextEditBackgroundBrush();
+    void RefreshTextEditBackgroundBrush(const RECT& editRect);
     void BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, ImageTransformHandle handle, POINT cursor);
     void UpdateImageTransform(POINT cursor);
     void EndImageTransform();
@@ -369,6 +382,7 @@ private:
     [[nodiscard]] bool IsStrokeSelected(std::size_t pageIndex, std::size_t strokeIndex) const;
     [[nodiscard]] bool IsTextSelected(std::size_t pageIndex, std::size_t textIndex) const;
     [[nodiscard]] bool IsEditingText(std::size_t pageIndex, std::size_t textIndex) const;
+    [[nodiscard]] std::optional<PageText> CurrentEditingTextLayout() const;
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedImageHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* imageIndex = nullptr) const;
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedStrokeHandle(POINT cursor, std::size_t* pageIndex = nullptr) const;
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedTextHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* textIndex = nullptr) const;
@@ -468,6 +482,7 @@ private:
     [[nodiscard]] bool ShouldSkipStrokeInInteractionSnapshot(std::size_t pageIndex, std::size_t strokeIndex) const;
     [[nodiscard]] bool ShouldSkipImageInInteractionSnapshot(std::size_t pageIndex, std::size_t imageIndex) const;
     [[nodiscard]] bool ShouldSkipTextInInteractionSnapshot(std::size_t pageIndex, std::size_t textIndex) const;
+    void RebuildMoveSelectionTextCache();
     void RebuildMoveSelectionPreview(POINT cursor);
     void RebuildImageTransformPreview(POINT cursor);
     void RebuildStrokeTransformPreview(POINT cursor);
@@ -556,6 +571,7 @@ private:
     std::vector<std::vector<InteractionPreviewStroke>> interactionPreviewStrokes_ {};
     std::vector<std::vector<InteractionPreviewImage>> interactionPreviewImages_ {};
     std::vector<std::vector<InteractionPreviewText>> interactionPreviewTexts_ {};
+    std::vector<std::vector<MoveSelectionTextCacheEntry>> moveSelectionTextCache_ {};
     std::vector<SidebarThumbnailCache> sidebarThumbnailCaches_ {};
     std::vector<ZoomPageSnapshot> zoomPageSnapshots_ {};
     std::uint64_t renderGeneration_ = 0;
@@ -603,6 +619,10 @@ private:
     HWND textEditWindow_ = nullptr;
     HFONT textEditFont_ = nullptr;
     WNDPROC textEditOriginalProc_ = nullptr;
+    HBITMAP textEditBackgroundBitmap_ = nullptr;
+    HBRUSH textEditBackgroundBrush_ = nullptr;
+    RECT textEditBounds_ {};
+    int textEditFontPixelHeight_ = 0;
     std::optional<std::size_t> editingTextPageIndex_ {};
     std::optional<std::size_t> editingTextIndex_ {};
     std::optional<Page> editingTextBeforePage_ {};

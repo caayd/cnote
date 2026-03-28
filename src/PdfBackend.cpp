@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <numbers>
@@ -24,6 +25,14 @@ namespace {
 constexpr float kInitialRenderScale = 1.5f;
 constexpr float kMinimumStrokeRenderWidth = 1.25f;
 constexpr float kStrokeRenderWidthDivisor = 2.15f;
+constexpr float kTextLayoutScale = 8.0f;
+
+struct WrappedTextLayout {
+    std::vector<std::wstring> lines;
+    int wrapWidth = 0;
+    int lineHeight = 0;
+    int height = 0;
+};
 
 std::optional<std::vector<std::uint8_t>> ReadAllBytes(const std::wstring& filePath) {
     std::ifstream input(std::filesystem::path(filePath), std::ios::binary);
@@ -60,6 +69,20 @@ RasterImage CreateBlankRaster(float pageWidth, float pageHeight, float renderSca
     raster.stride = stride;
     raster.scale = renderScale;
     raster.pixels.assign(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight), 0xFF);
+    return raster;
+}
+
+RasterImage CreateTransparentRaster(float pageWidth, float pageHeight, float renderScale) {
+    const int bitmapWidth = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageWidth) * renderScale)));
+    const int bitmapHeight = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageHeight) * renderScale)));
+    const int stride = bitmapWidth * 4;
+
+    RasterImage raster {};
+    raster.width = bitmapWidth;
+    raster.height = bitmapHeight;
+    raster.stride = stride;
+    raster.scale = renderScale;
+    raster.pixels.assign(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight), 0);
     return raster;
 }
 
@@ -131,6 +154,179 @@ std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float str
     }
 
     return smoothed;
+}
+
+int PageTextFontPixelHeight(const PageText& text, float scale) {
+    return std::max(1, static_cast<int>(std::lround(std::max(1.0f, text.fontSize) * std::max(0.1f, scale))));
+}
+
+std::wstring TrimTrailingLayoutWhitespace(std::wstring value) {
+    while (!value.empty() && (value.back() == L' ' || value.back() == L'\t')) {
+        value.pop_back();
+    }
+    return value;
+}
+
+float ResolvedPageTextWidth(const PageText& text, float pageWidth) {
+    static_cast<void>(pageWidth);
+    if (text.width > 0.0f) {
+        return std::max(1.0f, text.width);
+    }
+
+    const std::wstring measureText = TrimTrailingLayoutWhitespace(text.content);
+    const int fontHeight = PageTextFontPixelHeight(text, 1.0f);
+    HDC dc = GetDC(nullptr);
+    if (dc == nullptr) {
+        const float estimatedWidth = static_cast<float>(std::max(
+            1,
+            static_cast<int>(std::lround(static_cast<float>(measureText.size()) * static_cast<float>(fontHeight) * 0.56f))));
+        return estimatedWidth;
+    }
+
+    HFONT font = CreateFontW(
+        -fontHeight,
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        VARIABLE_PITCH,
+        L"Segoe UI");
+    HGDIOBJ previousFont = font != nullptr ? SelectObject(dc, font) : nullptr;
+    RECT measureRect { 0, 0, 32767, 0 };
+    if (!measureText.empty()) {
+        DrawTextW(dc, measureText.c_str(), -1, &measureRect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX);
+    }
+    if (previousFont != nullptr) {
+        SelectObject(dc, previousFont);
+    }
+    if (font != nullptr) {
+        DeleteObject(font);
+    }
+    ReleaseDC(nullptr, dc);
+    return std::max(1.0f, static_cast<float>(measureRect.right - measureRect.left));
+}
+
+WrappedTextLayout LayoutPageText(const PageText& text, float pageWidth) {
+    WrappedTextLayout layout {};
+    layout.wrapWidth = std::max(1, static_cast<int>(std::ceil(ResolvedPageTextWidth(text, pageWidth) * kTextLayoutScale)));
+    layout.lineHeight = PageTextFontPixelHeight(text, kTextLayoutScale);
+
+    HDC dc = GetDC(nullptr);
+    if (dc == nullptr) {
+        layout.lines.push_back(TrimTrailingLayoutWhitespace(text.content));
+        if (layout.lines.back().empty()) {
+            layout.lines.back().clear();
+        }
+        layout.height = std::max(layout.lineHeight, static_cast<int>(layout.lines.size()) * layout.lineHeight);
+        return layout;
+    }
+
+    HFONT font = CreateFontW(
+        -layout.lineHeight,
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        VARIABLE_PITCH,
+        L"Segoe UI");
+    HGDIOBJ previousFont = font != nullptr ? SelectObject(dc, font) : nullptr;
+
+    TEXTMETRICW textMetrics {};
+    if (GetTextMetricsW(dc, &textMetrics) != 0) {
+        layout.lineHeight = std::max(layout.lineHeight, static_cast<int>(textMetrics.tmHeight));
+    }
+
+    auto appendParagraph = [&](const std::wstring& paragraph) {
+        if (paragraph.empty()) {
+            layout.lines.push_back(L"");
+            return;
+        }
+
+        std::size_t index = 0;
+        while (index < paragraph.size()) {
+            const int remaining = static_cast<int>(paragraph.size() - index);
+            int fit = 0;
+            SIZE fitSize {};
+            if (GetTextExtentExPointW(
+                    dc,
+                    paragraph.c_str() + index,
+                    remaining,
+                    layout.wrapWidth,
+                    &fit,
+                    nullptr,
+                    &fitSize) == 0) {
+                fit = 0;
+            }
+            fit = std::clamp(fit, 1, remaining);
+
+            int take = fit;
+            bool brokeAtWhitespace = false;
+            if (fit < remaining) {
+                int whitespaceTake = fit;
+                while (whitespaceTake > 0 && !std::iswspace(paragraph[index + whitespaceTake - 1])) {
+                    --whitespaceTake;
+                }
+                if (whitespaceTake > 0) {
+                    take = whitespaceTake;
+                    brokeAtWhitespace = true;
+                }
+            }
+
+            take = std::max(1, take);
+            std::wstring line = paragraph.substr(index, static_cast<std::size_t>(take));
+            layout.lines.push_back(TrimTrailingLayoutWhitespace(std::move(line)));
+            index += static_cast<std::size_t>(take);
+
+            if (brokeAtWhitespace) {
+                while (index < paragraph.size() && (paragraph[index] == L' ' || paragraph[index] == L'\t')) {
+                    ++index;
+                }
+            }
+        }
+    };
+
+    std::wstring paragraph;
+    for (std::size_t index = 0; index < text.content.size(); ++index) {
+        const wchar_t ch = text.content[index];
+        if (ch == L'\r' || ch == L'\n') {
+            appendParagraph(paragraph);
+            paragraph.clear();
+            if (ch == L'\r' && (index + 1U) < text.content.size() && text.content[index + 1U] == L'\n') {
+                ++index;
+            }
+        } else {
+            paragraph.push_back(ch);
+        }
+    }
+    appendParagraph(paragraph);
+
+    if (previousFont != nullptr) {
+        SelectObject(dc, previousFont);
+    }
+    if (font != nullptr) {
+        DeleteObject(font);
+    }
+    ReleaseDC(nullptr, dc);
+
+    if (layout.lines.empty()) {
+        layout.lines.push_back(L"");
+    }
+    layout.height = std::max(layout.lineHeight, static_cast<int>(layout.lines.size()) * layout.lineHeight);
+    return layout;
 }
 
 void DrawPageImage(Gdiplus::Graphics& graphics, const PageImage& image, float renderScale) {
@@ -206,6 +402,76 @@ void DrawStroke(Gdiplus::Graphics& graphics, const Stroke& stroke, float renderS
     Gdiplus::GraphicsPath path;
     path.AddCurve(screenPoints.data(), static_cast<INT>(screenPoints.size()), 0.1f + (strokeSmoothing * 0.8f));
     graphics.DrawPath(&pen, &path);
+}
+
+void DrawPageText(Gdiplus::Graphics& graphics, const PageText& text, float pageWidth, float renderScale) {
+    if (text.content.empty()) {
+        return;
+    }
+
+    const WrappedTextLayout layout = LayoutPageText(text, pageWidth);
+    const Gdiplus::REAL left = static_cast<Gdiplus::REAL>(text.x * renderScale);
+    const Gdiplus::REAL top = static_cast<Gdiplus::REAL>(text.y * renderScale);
+    const Gdiplus::REAL renderWidth = static_cast<Gdiplus::REAL>(
+        std::max(1.0f, ResolvedPageTextWidth(text, pageWidth) * std::max(0.1f, renderScale)));
+    const Gdiplus::REAL fontSize = static_cast<Gdiplus::REAL>(std::max(1.0f, text.fontSize * std::max(0.1f, renderScale)));
+    const Gdiplus::REAL lineHeight = static_cast<Gdiplus::REAL>(std::max(
+        fontSize,
+        (static_cast<float>(layout.lineHeight) / kTextLayoutScale) * std::max(0.1f, renderScale)));
+    const auto alpha = static_cast<BYTE>((text.color >> 24U) & 0xFFU);
+    const auto red = static_cast<BYTE>((text.color >> 16U) & 0xFFU);
+    const auto green = static_cast<BYTE>((text.color >> 8U) & 0xFFU);
+    const auto blue = static_cast<BYTE>(text.color & 0xFFU);
+
+    Gdiplus::FontFamily fontFamily(L"Segoe UI");
+    Gdiplus::Font font(&fontFamily, fontSize, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    Gdiplus::SolidBrush brush(Gdiplus::Color(alpha, red, green, blue));
+    Gdiplus::StringFormat format;
+    format.SetAlignment(Gdiplus::StringAlignmentNear);
+    format.SetLineAlignment(Gdiplus::StringAlignmentNear);
+    format.SetFormatFlags(Gdiplus::StringFormatFlagsNoClip | Gdiplus::StringFormatFlagsNoWrap);
+    format.SetTrimming(Gdiplus::StringTrimmingNone);
+
+    for (std::size_t lineIndex = 0; lineIndex < layout.lines.size(); ++lineIndex) {
+        const std::wstring& line = layout.lines[lineIndex];
+        const Gdiplus::REAL lineTop = top + (lineHeight * static_cast<Gdiplus::REAL>(lineIndex));
+        const Gdiplus::RectF lineRect(left, lineTop, renderWidth + (fontSize * 0.5f), lineHeight * 1.25f);
+        graphics.DrawString(line.c_str(), static_cast<INT>(line.size()), &font, lineRect, &format, &brush);
+    }
+}
+
+std::optional<RasterImage> ComposeTextOverlayRaster(const Page& page, float renderScale) {
+    bool hasText = false;
+    for (const PageText& text : page.texts) {
+        if (!text.content.empty()) {
+            hasText = true;
+            break;
+        }
+    }
+    if (!hasText) {
+        return std::nullopt;
+    }
+
+    RasterImage raster = CreateTransparentRaster(page.width, page.height, renderScale);
+    Gdiplus::Bitmap bitmap(
+        raster.width,
+        raster.height,
+        raster.stride,
+        PixelFormat32bppARGB,
+        reinterpret_cast<BYTE*>(raster.pixels.data()));
+
+    Gdiplus::Graphics graphics(&bitmap);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+    graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+    graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+
+    for (const PageText& text : page.texts) {
+        DrawPageText(graphics, text, page.width, renderScale);
+    }
+
+    return raster;
 }
 
 RasterImage ComposePageRaster(
@@ -647,6 +913,19 @@ bool PdfiumBackend::ExportPdf(
                     break;
                 }
             }
+            if (!ok) {
+                break;
+            }
+        }
+
+        if (const auto textOverlay = ComposeTextOverlayRaster(sourcePage, renderScale); textOverlay.has_value()) {
+            flattenedPages.push_back(std::move(*textOverlay));
+            ok = AppendFullPageRasterObject(
+                outputDocument,
+                pageHandle,
+                sourcePage,
+                flattenedPages.back(),
+                ownedBitmaps);
             if (!ok) {
                 break;
             }

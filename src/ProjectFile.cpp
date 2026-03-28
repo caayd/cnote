@@ -16,7 +16,7 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 5;
+constexpr std::uint32_t kProjectVersion = 7;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
 
@@ -218,6 +218,8 @@ bool ReadImage(ByteReader& reader, PageImage& image) {
 void AppendText(std::vector<std::uint8_t>& output, const PageText& text) {
     AppendValue(output, text.x);
     AppendValue(output, text.y);
+    AppendValue(output, text.width);
+    AppendValue(output, text.height);
     AppendValue(output, text.fontSize);
     AppendValue(output, text.color);
     AppendString(output, text.content);
@@ -226,6 +228,8 @@ void AppendText(std::vector<std::uint8_t>& output, const PageText& text) {
 bool ReadText(ByteReader& reader, PageText& text) {
     return reader.Read(text.x)
         && reader.Read(text.y)
+        && reader.Read(text.width)
+        && reader.Read(text.height)
         && reader.Read(text.fontSize)
         && reader.Read(text.color)
         && reader.ReadString(text.content);
@@ -396,8 +400,30 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
         page.texts.reserve(textCount);
         for (std::uint32_t textIndex = 0; textIndex < textCount; ++textIndex) {
             PageText text {};
-            if (!ReadText(reader, text)) {
-                return std::nullopt;
+            if (version >= 7U) {
+                if (!ReadText(reader, text)) {
+                    return std::nullopt;
+                }
+            } else if (version >= 6U) {
+                if (!reader.Read(text.x)
+                    || !reader.Read(text.y)
+                    || !reader.Read(text.width)
+                    || !reader.Read(text.fontSize)
+                    || !reader.Read(text.color)
+                    || !reader.ReadString(text.content)) {
+                    return std::nullopt;
+                }
+                text.height = 0.0f;
+            } else {
+                if (!reader.Read(text.x)
+                    || !reader.Read(text.y)
+                    || !reader.Read(text.fontSize)
+                    || !reader.Read(text.color)
+                    || !reader.ReadString(text.content)) {
+                    return std::nullopt;
+                }
+                text.width = 0.0f;
+                text.height = 0.0f;
             }
             page.texts.push_back(std::move(text));
         }
