@@ -34,6 +34,7 @@ public:
     enum class Tool {
         Select,
         Move,
+        Text,
         Draw,
         Pan,
         Erase,
@@ -56,6 +57,7 @@ public:
         ToolDraw,
         ToolSelect,
         ToolMove,
+        ToolText,
         ToolPan,
         ToolErase,
         New,
@@ -120,6 +122,7 @@ public:
         std::size_t pageIndex = 0;
         std::size_t strokeCount = 0;
         std::size_t imageCount = 0;
+        std::size_t textCount = 0;
         int rasterWidth = 0;
         int rasterHeight = 0;
         float rasterScale = 0.0f;
@@ -153,6 +156,7 @@ public:
         MoveSelection,
         ImageTransform,
         StrokeTransform,
+        TextTransform,
     };
 
     struct InteractionPreviewStroke {
@@ -165,6 +169,12 @@ public:
         std::size_t sourcePageIndex = 0;
         std::size_t sourceIndex = 0;
         PageImage image {};
+    };
+
+    struct InteractionPreviewText {
+        std::size_t sourcePageIndex = 0;
+        std::size_t sourceIndex = 0;
+        PageText text {};
     };
 
     struct RenderRequest {
@@ -286,6 +296,15 @@ private:
     void BeginMoveSelection(POINT cursor);
     void UpdateMoveSelection(POINT cursor);
     void EndMoveSelection();
+    void BeginTextTransform(std::size_t pageIndex, std::size_t textIndex, ImageTransformHandle handle, POINT cursor);
+    void UpdateTextTransform(POINT cursor);
+    void EndTextTransform();
+    void BeginTextToolInteraction(POINT cursor);
+    void BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, Page beforePage);
+    void CommitTextEdit();
+    void CancelTextEdit();
+    void EndTextEditControl();
+    void RefreshTextEditControl();
     void BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, ImageTransformHandle handle, POINT cursor);
     void UpdateImageTransform(POINT cursor);
     void EndImageTransform();
@@ -348,8 +367,12 @@ private:
     void AdjustSelectionForInsertion(std::size_t pageIndex, std::size_t strokeIndex);
     [[nodiscard]] bool IsImageSelected(std::size_t pageIndex, std::size_t imageIndex) const;
     [[nodiscard]] bool IsStrokeSelected(std::size_t pageIndex, std::size_t strokeIndex) const;
+    [[nodiscard]] bool IsTextSelected(std::size_t pageIndex, std::size_t textIndex) const;
+    [[nodiscard]] bool IsEditingText(std::size_t pageIndex, std::size_t textIndex) const;
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedImageHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* imageIndex = nullptr) const;
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedStrokeHandle(POINT cursor, std::size_t* pageIndex = nullptr) const;
+    [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedTextHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* textIndex = nullptr) const;
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> HitTestText(POINT cursor) const;
     [[nodiscard]] std::vector<Vec2> CurrentSelectionLassoPolygon() const;
     [[nodiscard]] bool CursorHitsSelectedContent(POINT cursor) const;
     [[nodiscard]] bool CursorInteractsWithSelection(POINT cursor) const;
@@ -359,6 +382,7 @@ private:
     bool PasteImageFromClipboard();
     [[nodiscard]] std::optional<Vec2> DefaultPasteOrigin(std::size_t pageIndex) const;
     [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> SingleSelectedImage() const;
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> SingleSelectedText() const;
     [[nodiscard]] std::optional<std::size_t> SingleSelectedStrokePage() const;
     void TranslateSelectedContent(std::size_t pageIndex, Vec2 delta, bool clampToPage = true, bool notify = true);
     bool RehomeSelectedContentAcrossPages(bool clampToPage);
@@ -433,6 +457,7 @@ private:
     void PaintSelectionOverlay(HDC hdc, RECT canvasRect) const;
     void PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSelectToolSelectionAffordances) const;
     void PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke, bool fastPreview = false) const;
+    void PaintText(HDC hdc, const PageText& text, const PageView& pageView) const;
     bool TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke& stroke);
     bool TryRefreshPageSurfaceCacheForStroke(std::size_t pageIndex, const Stroke& stroke);
     bool TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect);
@@ -442,6 +467,7 @@ private:
     void BuildInteractionPageSnapshot(const PageView& pageView);
     [[nodiscard]] bool ShouldSkipStrokeInInteractionSnapshot(std::size_t pageIndex, std::size_t strokeIndex) const;
     [[nodiscard]] bool ShouldSkipImageInInteractionSnapshot(std::size_t pageIndex, std::size_t imageIndex) const;
+    [[nodiscard]] bool ShouldSkipTextInInteractionSnapshot(std::size_t pageIndex, std::size_t textIndex) const;
     void RebuildMoveSelectionPreview(POINT cursor);
     void RebuildImageTransformPreview(POINT cursor);
     void RebuildStrokeTransformPreview(POINT cursor);
@@ -458,6 +484,7 @@ private:
 
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK TextEditProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
 
     HINSTANCE instance_ = nullptr;
     HWND window_ = nullptr;
@@ -479,6 +506,7 @@ private:
     bool isMovingSelection_ = false;
     bool isTransformingImage_ = false;
     bool isTransformingStroke_ = false;
+    bool isTransformingText_ = false;
     std::optional<Stroke> activeStroke_ {};
     std::optional<std::size_t> activeStrokePageIndex_ {};
     std::vector<HistoryAction> undoActions_ {};
@@ -490,22 +518,29 @@ private:
     std::optional<std::size_t> transformingImagePageIndex_ {};
     std::optional<std::size_t> transformingImageIndex_ {};
     std::optional<std::size_t> transformingStrokePageIndex_ {};
+    std::optional<std::size_t> transformingTextPageIndex_ {};
+    std::optional<std::size_t> transformingTextIndex_ {};
     POINT selectionAnchorCursor_ {};
     POINT selectionCurrentCursor_ {};
     POINT lastMoveCursor_ {};
     float moveSelectionScale_ = 1.0f;
     Vec2 imageTransformStartPagePoint_ {};
     Vec2 strokeTransformStartPagePoint_ {};
+    Vec2 textTransformStartPagePoint_ {};
     PageImage imageTransformInitial_ {};
+    PageText textTransformInitial_ {};
     ImageTransformHandle imageTransformHandle_ = ImageTransformHandle::None;
     ImageTransformHandle strokeTransformHandle_ = ImageTransformHandle::None;
+    ImageTransformHandle textTransformHandle_ = ImageTransformHandle::None;
     float imageTransformStartAngleDegrees_ = 0.0f;
     float strokeTransformStartAngleDegrees_ = 0.0f;
     Vec2 strokeTransformBoundsMin_ {};
     Vec2 strokeTransformBoundsMax_ {};
+    Page textTransformBeforePage_ {};
     std::vector<std::pair<std::size_t, Stroke>> strokeTransformInitials_ {};
     std::vector<POINT> selectionLassoCursorPoints_ {};
     std::vector<std::vector<std::size_t>> selectedImageIndices_ {};
+    std::vector<std::vector<std::size_t>> selectedTextIndices_ {};
     std::vector<std::vector<std::size_t>> selectedStrokeIndices_ {};
     bool selectionBoxOverride_ = false;
     bool rasterRefreshPending_ = false;
@@ -520,6 +555,7 @@ private:
     std::vector<PageSurfaceCache> interactionPageSnapshots_ {};
     std::vector<std::vector<InteractionPreviewStroke>> interactionPreviewStrokes_ {};
     std::vector<std::vector<InteractionPreviewImage>> interactionPreviewImages_ {};
+    std::vector<std::vector<InteractionPreviewText>> interactionPreviewTexts_ {};
     std::vector<SidebarThumbnailCache> sidebarThumbnailCaches_ {};
     std::vector<ZoomPageSnapshot> zoomPageSnapshots_ {};
     std::uint64_t renderGeneration_ = 0;
@@ -560,6 +596,16 @@ private:
     std::optional<Tool> toolbarBrushSizeEditTool_ {};
     std::wstring toolbarBrushSizeText_ {};
     bool toolbarBrushSliderDragging_ = false;
+    bool pendingTextEditClick_ = false;
+    POINT pendingTextEditCursor_ {};
+    std::optional<std::size_t> pendingTextEditPageIndex_ {};
+    std::optional<std::size_t> pendingTextEditIndex_ {};
+    HWND textEditWindow_ = nullptr;
+    HFONT textEditFont_ = nullptr;
+    WNDPROC textEditOriginalProc_ = nullptr;
+    std::optional<std::size_t> editingTextPageIndex_ {};
+    std::optional<std::size_t> editingTextIndex_ {};
+    std::optional<Page> editingTextBeforePage_ {};
     bool hoveredTitleMenu_ = false;
     bool titleMenuActive_ = false;
     int hoveredWindowButton_ = -1;

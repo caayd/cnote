@@ -52,6 +52,7 @@ struct ToolbarLayout {
     RECT undoRect {};
     RECT redoRect {};
     RECT selectToolRect {};
+    RECT textToolRect {};
     RECT moveToolRect {};
     RECT drawToolRect {};
     RECT panToolRect {};
@@ -105,6 +106,9 @@ struct PaletteWheelLayout {
     int innerRadius = 0;
     int outerRadius = 0;
 };
+
+bool SegmentsIntersect(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2);
+bool PointInPolygon(Vec2 point, const std::vector<Vec2>& polygon);
 
 RECT MakeRect(int left, int top, int right, int bottom) {
     RECT rect { left, top, right, bottom };
@@ -161,6 +165,14 @@ bool PageImageEqual(const PageImage& a, const PageImage& b) {
         && a.pixels == b.pixels;
 }
 
+bool PageTextEqual(const PageText& a, const PageText& b) {
+    return a.x == b.x
+        && a.y == b.y
+        && a.fontSize == b.fontSize
+        && a.color == b.color
+        && a.content == b.content;
+}
+
 bool RasterImageEqual(const RasterImage& a, const RasterImage& b) {
     return a.width == b.width
         && a.height == b.height
@@ -176,6 +188,7 @@ bool PageEqual(const Page& a, const Page& b) {
         || a.sourcePdfPageIndex != b.sourcePdfPageIndex
         || !RasterImageEqual(a.raster, b.raster)
         || a.images.size() != b.images.size()
+        || a.texts.size() != b.texts.size()
         || a.strokes.size() != b.strokes.size()) {
         return false;
     }
@@ -185,12 +198,170 @@ bool PageEqual(const Page& a, const Page& b) {
             return false;
         }
     }
+    for (std::size_t index = 0; index < a.texts.size(); ++index) {
+        if (!PageTextEqual(a.texts[index], b.texts[index])) {
+            return false;
+        }
+    }
     for (std::size_t index = 0; index < a.strokes.size(); ++index) {
         if (!StrokeEqual(a.strokes[index], b.strokes[index])) {
             return false;
         }
     }
     return true;
+}
+
+struct PageTextBounds {
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+};
+
+struct TextPixelMetrics {
+    int width = 0;
+    int height = 0;
+};
+
+int PageTextFontPixelHeight(const PageText& text, float scale) {
+    return std::max(1, static_cast<int>(std::lround(std::max(1.0f, text.fontSize) * std::max(0.1f, scale))));
+}
+
+int PageTextRenderPaddingPixels(const PageText& text, float scale) {
+    return std::max(2, static_cast<int>(std::ceil(std::max(1.0f, text.fontSize) * std::max(0.1f, scale) * 0.12f)));
+}
+
+TextPixelMetrics MeasurePageTextPixels(const PageText& text, float scale) {
+    std::wstring measureText = text.content;
+    while (!measureText.empty() && (measureText.back() == L' ' || measureText.back() == L'\t')) {
+        measureText.pop_back();
+    }
+
+    const int fontHeight = PageTextFontPixelHeight(text, scale);
+    TextPixelMetrics metrics { 0, fontHeight };
+
+    HDC dc = GetDC(nullptr);
+    if (dc == nullptr) {
+        metrics.width = static_cast<int>(std::lround(static_cast<float>(measureText.size()) * static_cast<float>(fontHeight) * 0.56f));
+        return metrics;
+    }
+
+    HFONT font = CreateFontW(
+        -fontHeight,
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        VARIABLE_PITCH,
+        L"Segoe UI");
+    HGDIOBJ previousFont = font != nullptr ? SelectObject(dc, font) : nullptr;
+    TEXTMETRICW textMetrics {};
+    if (GetTextMetricsW(dc, &textMetrics) != 0) {
+        metrics.height = std::max(metrics.height, static_cast<int>(textMetrics.tmHeight));
+    }
+    if (!measureText.empty()) {
+        SIZE size {};
+        if (GetTextExtentPoint32W(dc, measureText.c_str(), static_cast<int>(measureText.size()), &size) != 0) {
+            metrics.width = static_cast<int>(size.cx);
+            metrics.height = std::max(metrics.height, static_cast<int>(size.cy));
+        } else {
+            metrics.width = static_cast<int>(std::lround(static_cast<float>(measureText.size()) * static_cast<float>(fontHeight) * 0.56f));
+        }
+    } else {
+        metrics.width = 0;
+    }
+    if (previousFont != nullptr) {
+        SelectObject(dc, previousFont);
+    }
+    if (font != nullptr) {
+        DeleteObject(font);
+    }
+    ReleaseDC(nullptr, dc);
+    return metrics;
+}
+
+PageTextBounds MeasurePageTextBounds(const PageText& text) {
+    const TextPixelMetrics metrics = MeasurePageTextPixels(text, 1.0f);
+    return {
+        text.x,
+        text.y,
+        text.x + std::max(1.0f, static_cast<float>(metrics.width)),
+        text.y + std::max(1.0f, static_cast<float>(metrics.height)),
+    };
+}
+
+std::optional<RECT> PageTextBoundsRect(const PageText& text, float scale, int extraPadding = 0) {
+    if (scale <= 0.0f) {
+        return std::nullopt;
+    }
+
+    const PageTextBounds bounds = MeasurePageTextBounds(text);
+    const float intrinsicPadding = static_cast<float>(PageTextRenderPaddingPixels(text, scale) + extraPadding);
+    return MakeRectFromFloatBounds(
+        (bounds.left * scale) - intrinsicPadding,
+        (bounds.top * scale) - intrinsicPadding,
+        (bounds.right * scale) + intrinsicPadding + 1.0f,
+        (bounds.bottom * scale) + intrinsicPadding + 1.0f);
+}
+
+bool TextHitsPoint(const PageText& text, Vec2 point) {
+    const PageTextBounds bounds = MeasurePageTextBounds(text);
+    return point.x >= bounds.left && point.x <= bounds.right
+        && point.y >= bounds.top && point.y <= bounds.bottom;
+}
+
+bool TextIntersectsRectSelection(const PageText& text, Vec2 anchor, Vec2 current) {
+    const PageTextBounds bounds = MeasurePageTextBounds(text);
+    const float left = std::min(anchor.x, current.x);
+    const float right = std::max(anchor.x, current.x);
+    const float top = std::min(anchor.y, current.y);
+    const float bottom = std::max(anchor.y, current.y);
+    return !(bounds.right < left || bounds.left > right || bounds.bottom < top || bounds.top > bottom);
+}
+
+bool TextIntersectsPolygonSelection(const PageText& text, const std::vector<Vec2>& polygon) {
+    if (polygon.size() < 3U) {
+        return false;
+    }
+
+    const PageTextBounds bounds = MeasurePageTextBounds(text);
+    const std::array<Vec2, 4> corners {{
+        { bounds.left, bounds.top },
+        { bounds.right, bounds.top },
+        { bounds.right, bounds.bottom },
+        { bounds.left, bounds.bottom },
+    }};
+
+    for (const Vec2& corner : corners) {
+        if (PointInPolygon(corner, polygon)) {
+            return true;
+        }
+    }
+
+    for (const Vec2& point : polygon) {
+        if (TextHitsPoint(text, point)) {
+            return true;
+        }
+    }
+
+    for (std::size_t edgeIndex = 0; edgeIndex < polygon.size(); ++edgeIndex) {
+        const Vec2 polyA = polygon[edgeIndex];
+        const Vec2 polyB = polygon[(edgeIndex + 1U) % polygon.size()];
+        for (std::size_t rectEdgeIndex = 0; rectEdgeIndex < corners.size(); ++rectEdgeIndex) {
+            if (SegmentsIntersect(polyA, polyB, corners[rectEdgeIndex], corners[(rectEdgeIndex + 1U) % corners.size()])) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 std::optional<RECT> StrokeBoundsRect(const Stroke& stroke, float scale, int extraPadding = 0) {
@@ -534,6 +705,8 @@ const wchar_t* ToolSvgFileName(App::Tool tool) {
         return L"lasso.svg";
     case App::Tool::Move:
         return L"cursor.svg";
+    case App::Tool::Text:
+        return L"text.svg";
     case App::Tool::Draw:
         return L"draw.svg";
     case App::Tool::Pan:
@@ -1158,10 +1331,15 @@ ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool m
         toolbarTop,
         layout.drawToolRect.left - toolGap,
         toolbarTop + ScaleForDpi(kIconButtonSize, dpi));
-    layout.selectToolRect = MakeRect(
+    layout.textToolRect = MakeRect(
         layout.eraseToolRect.left - toolGap - ScaleForDpi(kIconButtonSize, dpi),
         toolbarTop,
         layout.eraseToolRect.left - toolGap,
+        toolbarTop + ScaleForDpi(kIconButtonSize, dpi));
+    layout.selectToolRect = MakeRect(
+        layout.textToolRect.left - toolGap - ScaleForDpi(kIconButtonSize, dpi),
+        toolbarTop,
+        layout.textToolRect.left - toolGap,
         toolbarTop + ScaleForDpi(kIconButtonSize, dpi));
     layout.moveToolRect = MakeRect(
         layout.selectToolRect.left - toolGap - ScaleForDpi(kIconButtonSize, dpi),
@@ -1311,7 +1489,7 @@ std::optional<std::size_t> PaletteWheelIndexAtPoint(const PaletteWheelLayout& la
 }
 
 bool IsToolbarControlRect(const ToolbarLayout& layout, const ToolbarTitleLayout& titleLayout, POINT cursor) {
-    const std::array<RECT, 11> controls {
+    const std::array<RECT, 12> controls {
         titleLayout.fileTitleRect,
         titleLayout.zoomRect,
         layout.minimizeRect,
@@ -1320,6 +1498,7 @@ bool IsToolbarControlRect(const ToolbarLayout& layout, const ToolbarTitleLayout&
         layout.undoRect,
         layout.redoRect,
         layout.selectToolRect,
+        layout.textToolRect,
         layout.moveToolRect,
         layout.drawToolRect,
         layout.panToolRect,
@@ -1473,6 +1652,35 @@ void PaintMoveToolIcon(HDC hdc, RECT rect, COLORREF color) {
         POINT { centerX + 7, centerY + 2 },
     };
     FillSolidPolygon(hdc, arrow, color);
+}
+
+void PaintTextToolIcon(HDC hdc, RECT rect, COLORREF color) {
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, color);
+    HFONT font = CreateFontW(
+        -14,
+        0,
+        0,
+        0,
+        FW_BOLD,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        VARIABLE_PITCH,
+        L"Segoe UI");
+    HGDIOBJ previousFont = font != nullptr ? SelectObject(hdc, font) : nullptr;
+    RECT textRect = rect;
+    DrawTextW(hdc, L"T", -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (previousFont != nullptr) {
+        SelectObject(hdc, previousFont);
+    }
+    if (font != nullptr) {
+        DeleteObject(font);
+    }
 }
 
 void PaintDrawToolIcon(HDC hdc, RECT rect, COLORREF color) {
@@ -1979,6 +2187,7 @@ App::~App() {
     settings_.window = nullptr;
     delete newPageSettings_.window;
     newPageSettings_.window = nullptr;
+    EndTextEditControl();
     SaveAppSettings();
     StopRenderWorker();
     ClearZoomSessionSnapshots();
@@ -2128,6 +2337,7 @@ void App::CreateBlankDocument() {
 }
 
 void App::PrepareForDocumentSwitch() {
+    CancelTextEdit();
     CancelDeferredRasterRefresh();
     KillTimer(window_, kZoomSessionTimerId);
     CancelQuickSizePopup();
@@ -2152,6 +2362,10 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
     copiedSidebarPage_.reset();
     CancelPageJumpInput();
     CancelToolbarZoomInput();
+    EndTextEditControl();
+    editingTextPageIndex_.reset();
+    editingTextIndex_.reset();
+    editingTextBeforePage_.reset();
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
     ClearInteractionPreview();
@@ -2348,6 +2562,7 @@ void App::InvalidatePageSurfaceCache(std::size_t pageIndex) {
     cache.height = 0;
     cache.stride = 0;
     cache.imageCount = 0;
+    cache.textCount = 0;
     cache.rasterWidth = 0;
     cache.rasterHeight = 0;
     cache.rasterScale = 0.0f;
@@ -2425,6 +2640,9 @@ void App::ResetView() {
 }
 
 void App::SetActiveTool(Tool tool) {
+    if (tool != Tool::Text) {
+        CommitTextEdit();
+    }
     if (tool == Tool::Select) {
         selectionMode_ = SelectionMode::Lasso;
     }
@@ -2436,12 +2654,19 @@ void App::SetActiveTool(Tool tool) {
     }
     if (tool != Tool::Move) {
         ClearInteractionPreview();
+        pendingTextEditClick_ = false;
+        pendingTextEditPageIndex_.reset();
+        pendingTextEditIndex_.reset();
         isMovingSelection_ = false;
         moveSelectionPageIndex_.reset();
         isTransformingImage_ = false;
         transformingImagePageIndex_.reset();
         transformingImageIndex_.reset();
         imageTransformHandle_ = ImageTransformHandle::None;
+        isTransformingText_ = false;
+        transformingTextPageIndex_.reset();
+        transformingTextIndex_.reset();
+        textTransformHandle_ = ImageTransformHandle::None;
         isTransformingStroke_ = false;
         transformingStrokePageIndex_.reset();
         strokeTransformHandle_ = ImageTransformHandle::None;
@@ -2565,12 +2790,14 @@ bool App::DeleteCurrentPage() {
 
 void App::ClearSelection() {
     selectedImageIndices_.assign(document_.PageCount(), {});
+    selectedTextIndices_.assign(document_.PageCount(), {});
     selectedStrokeIndices_.assign(document_.PageCount(), {});
 }
 
 bool App::HasSelection() const {
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         if ((pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
+            || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())
             || (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())) {
             return true;
         }
@@ -2592,8 +2819,9 @@ bool App::HasSelectedStrokes() const {
 std::optional<std::size_t> App::FirstSelectedPageIndex() const {
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         const bool hasStrokes = pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty();
+        const bool hasTexts = pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty();
         const bool hasImages = pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty();
-        if (hasStrokes || hasImages) {
+        if (hasStrokes || hasTexts || hasImages) {
             return pageIndex;
         }
     }
@@ -2612,13 +2840,26 @@ void App::DeleteSelection(std::optional<std::size_t> pageIndex) {
             continue;
         }
 
-        const bool hasSelectedImages = index < selectedImageIndices_.size() && !selectedImageIndices_[index].empty();
         const bool hasSelectedStrokes = index < selectedStrokeIndices_.size() && !selectedStrokeIndices_[index].empty();
-        if (!hasSelectedImages && !hasSelectedStrokes) {
+        const bool hasSelectedTexts = index < selectedTextIndices_.size() && !selectedTextIndices_[index].empty();
+        const bool hasSelectedImages = index < selectedImageIndices_.size() && !selectedImageIndices_[index].empty();
+        if (!hasSelectedImages && !hasSelectedTexts && !hasSelectedStrokes) {
             continue;
         }
 
         hadSelection = true;
+
+        if (hasSelectedTexts) {
+            auto textIndices = selectedTextIndices_[index];
+            std::sort(textIndices.rbegin(), textIndices.rend());
+            auto& texts = document_.PageAt(index).texts;
+            for (std::size_t textIndex : textIndices) {
+                if (textIndex < texts.size()) {
+                    texts.erase(texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
+                }
+            }
+            InvalidatePageSurfaceCache(index);
+        }
 
         if (hasSelectedImages) {
             auto imageIndices = selectedImageIndices_[index];
@@ -2722,6 +2963,23 @@ bool App::IsImageSelected(std::size_t pageIndex, std::size_t imageIndex) const {
     return std::find(selected.begin(), selected.end(), imageIndex) != selected.end();
 }
 
+bool App::IsTextSelected(std::size_t pageIndex, std::size_t textIndex) const {
+    if (pageIndex >= selectedTextIndices_.size()) {
+        return false;
+    }
+
+    const auto& selected = selectedTextIndices_[pageIndex];
+    return std::find(selected.begin(), selected.end(), textIndex) != selected.end();
+}
+
+bool App::IsEditingText(std::size_t pageIndex, std::size_t textIndex) const {
+    return textEditWindow_ != nullptr
+        && editingTextPageIndex_.has_value()
+        && editingTextIndex_.has_value()
+        && *editingTextPageIndex_ == pageIndex
+        && *editingTextIndex_ == textIndex;
+}
+
 std::optional<Vec2> App::DefaultPasteOrigin(std::size_t pageIndex) const {
     if (pageIndex >= document_.PageCount()) {
         return std::nullopt;
@@ -2760,7 +3018,8 @@ std::optional<Vec2> App::DefaultPasteOrigin(std::size_t pageIndex) const {
 std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedImage() const {
     std::optional<std::pair<std::size_t, std::size_t>> result;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        if (pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty()) {
+        if ((pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
+            || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())) {
             return std::nullopt;
         }
         if (pageIndex >= selectedImageIndices_.size()) {
@@ -2776,10 +3035,31 @@ std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedImage() co
     return result;
 }
 
+std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedText() const {
+    std::optional<std::pair<std::size_t, std::size_t>> result;
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        if ((pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
+            || (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())) {
+            return std::nullopt;
+        }
+        if (pageIndex >= selectedTextIndices_.size()) {
+            continue;
+        }
+        for (std::size_t textIndex : selectedTextIndices_[pageIndex]) {
+            if (result.has_value()) {
+                return std::nullopt;
+            }
+            result = std::make_pair(pageIndex, textIndex);
+        }
+    }
+    return result;
+}
+
 std::optional<std::size_t> App::SingleSelectedStrokePage() const {
     std::optional<std::size_t> result;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        if (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty()) {
+        if ((pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())
+            || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())) {
             return std::nullopt;
         }
         if (pageIndex >= selectedStrokeIndices_.size() || selectedStrokeIndices_[pageIndex].empty()) {
@@ -2855,6 +3135,82 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedImageHandle(POINT c
             }
             if (imageIndex != nullptr) {
                 *imageIndex = singleImage->second;
+            }
+            return handlePoint.handle;
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::pair<std::size_t, std::size_t>> App::HitTestText(POINT cursor) const {
+    const auto hitPage = HitTestPage(cursor);
+    if (!hitPage.has_value() || hitPage->pageIndex >= document_.PageCount()) {
+        return std::nullopt;
+    }
+
+    const Vec2 pagePoint = ScreenToPage(*hitPage, cursor, true);
+    const Page& page = document_.PageAt(hitPage->pageIndex);
+    for (std::size_t textIndex = page.texts.size(); textIndex > 0; --textIndex) {
+        const std::size_t actualIndex = textIndex - 1U;
+        if (TextHitsPoint(page.texts[actualIndex], pagePoint)) {
+            return std::make_pair(hitPage->pageIndex, actualIndex);
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::optional<App::ImageTransformHandle> App::HitTestSelectedTextHandle(POINT cursor, std::size_t* pageIndex, std::size_t* textIndex) const {
+    const auto singleText = SingleSelectedText();
+    if (!singleText.has_value() || window_ == nullptr) {
+        return std::nullopt;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, singleText->first);
+    if (!pageView.valid) {
+        return std::nullopt;
+    }
+
+    const Page& page = document_.PageAt(singleText->first);
+    if (singleText->second >= page.texts.size()) {
+        return std::nullopt;
+    }
+
+    const auto boundsRect = PageTextBoundsRect(page.texts[singleText->second], pageView.scale, 0);
+    if (!boundsRect.has_value()) {
+        return std::nullopt;
+    }
+    RECT screenBounds = *boundsRect;
+    OffsetRect(&screenBounds, pageView.rect.left, pageView.rect.top);
+    const Vec2 center {
+        static_cast<float>((screenBounds.left + screenBounds.right) / 2),
+        static_cast<float>((screenBounds.top + screenBounds.bottom) / 2),
+    };
+    const struct {
+        ImageTransformHandle handle;
+        Vec2 point;
+    } handlePoints[] {
+        { ImageTransformHandle::ResizeNorthWest, { static_cast<float>(screenBounds.left), static_cast<float>(screenBounds.top) } },
+        { ImageTransformHandle::ResizeNorth, { center.x, static_cast<float>(screenBounds.top) } },
+        { ImageTransformHandle::ResizeNorthEast, { static_cast<float>(screenBounds.right), static_cast<float>(screenBounds.top) } },
+        { ImageTransformHandle::ResizeEast, { static_cast<float>(screenBounds.right), center.y } },
+        { ImageTransformHandle::ResizeSouthEast, { static_cast<float>(screenBounds.right), static_cast<float>(screenBounds.bottom) } },
+        { ImageTransformHandle::ResizeSouth, { center.x, static_cast<float>(screenBounds.bottom) } },
+        { ImageTransformHandle::ResizeSouthWest, { static_cast<float>(screenBounds.left), static_cast<float>(screenBounds.bottom) } },
+        { ImageTransformHandle::ResizeWest, { static_cast<float>(screenBounds.left), center.y } },
+    };
+    constexpr float kHandleRadiusPixels = 11.0f;
+    const Vec2 cursorPoint { static_cast<float>(cursor.x), static_cast<float>(cursor.y) };
+    for (const auto& handlePoint : handlePoints) {
+        if (DistanceSquared(handlePoint.point, cursorPoint) <= (kHandleRadiusPixels * kHandleRadiusPixels)) {
+            if (pageIndex != nullptr) {
+                *pageIndex = singleText->first;
+            }
+            if (textIndex != nullptr) {
+                *textIndex = singleText->second;
             }
             return handlePoint.handle;
         }
@@ -2945,7 +3301,9 @@ bool App::CursorHitsSelectedContent(POINT cursor) const {
     }
 
     const std::size_t pageIndex = hitPage->pageIndex;
-    if (pageIndex >= selectedStrokeIndices_.size() && pageIndex >= selectedImageIndices_.size()) {
+    if (pageIndex >= selectedStrokeIndices_.size()
+        && pageIndex >= selectedTextIndices_.size()
+        && pageIndex >= selectedImageIndices_.size()) {
         return false;
     }
 
@@ -2966,6 +3324,14 @@ bool App::CursorHitsSelectedContent(POINT cursor) const {
         }
     }
 
+    if (pageIndex < selectedTextIndices_.size()) {
+        for (std::size_t textIndex : selectedTextIndices_[pageIndex]) {
+            if (textIndex < page.texts.size() && TextHitsPoint(page.texts[textIndex], pagePoint)) {
+                return true;
+            }
+        }
+    }
+
     if (pageIndex < selectedImageIndices_.size()) {
         for (std::size_t imageIndex : selectedImageIndices_[pageIndex]) {
             if (imageIndex < page.images.size() && ImageHitsPoint(page.images[imageIndex], pagePoint)) {
@@ -2979,6 +3345,7 @@ bool App::CursorHitsSelectedContent(POINT cursor) const {
 
 bool App::CursorInteractsWithSelection(POINT cursor) const {
     return HitTestSelectedStrokeHandle(cursor).has_value()
+        || HitTestSelectedTextHandle(cursor).has_value()
         || HitTestSelectedImageHandle(cursor).has_value()
         || CursorHitsSelectedContent(cursor);
 }
@@ -2989,7 +3356,9 @@ void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta, bool clamp
     }
 
     Page& page = document_.PageAt(pageIndex);
-    if (pageIndex >= selectedStrokeIndices_.size() || pageIndex >= selectedImageIndices_.size()) {
+    if (pageIndex >= selectedStrokeIndices_.size()
+        || pageIndex >= selectedTextIndices_.size()
+        || pageIndex >= selectedImageIndices_.size()) {
         return;
     }
 
@@ -3010,6 +3379,18 @@ void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta, bool clamp
             maxY = std::max(maxY, point.y);
             hasSelection = true;
         }
+    }
+
+    for (std::size_t textIndex : selectedTextIndices_[pageIndex]) {
+        if (textIndex >= page.texts.size()) {
+            continue;
+        }
+        const PageTextBounds bounds = MeasurePageTextBounds(page.texts[textIndex]);
+        minX = std::min(minX, bounds.left);
+        minY = std::min(minY, bounds.top);
+        maxX = std::max(maxX, bounds.right);
+        maxY = std::max(maxY, bounds.bottom);
+        hasSelection = true;
     }
 
     for (std::size_t imageIndex : selectedImageIndices_[pageIndex]) {
@@ -3047,6 +3428,14 @@ void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta, bool clamp
             point.x += delta.x;
             point.y += delta.y;
         }
+    }
+
+    for (std::size_t textIndex : selectedTextIndices_[pageIndex]) {
+        if (textIndex >= page.texts.size()) {
+            continue;
+        }
+        page.texts[textIndex].x += delta.x;
+        page.texts[textIndex].y += delta.y;
     }
 
     for (std::size_t imageIndex : selectedImageIndices_[pageIndex]) {
@@ -3469,7 +3858,7 @@ bool App::CanAutoSaveCurrentDocument() const {
 }
 
 bool App::IsDocumentInteractionActive() const {
-    return isDrawing_ || isErasing_ || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_;
+    return isDrawing_ || isErasing_ || pendingTextEditClick_ || isMovingSelection_ || isTransformingImage_ || isTransformingText_ || isTransformingStroke_;
 }
 
 void App::RestoreAfterPageHistoryChange(std::size_t focusPageIndex) {
@@ -4298,6 +4687,23 @@ void App::EndSelection() {
                 selectedImageIndices_[pageView.pageIndex].push_back(imageIndex);
             }
         }
+
+        for (std::size_t textIndex = 0; textIndex < page.texts.size(); ++textIndex) {
+            const PageText& text = page.texts[textIndex];
+            bool hit = false;
+            if (effectiveSelectionMode == SelectionMode::Box) {
+                hit = clickSelection
+                    ? TextHitsPoint(text, currentPage)
+                    : TextIntersectsRectSelection(text, anchorPage, currentPage);
+            } else {
+                hit = (pagePolygon.size() < 3U)
+                    ? TextHitsPoint(text, currentPage)
+                    : TextIntersectsPolygonSelection(text, pagePolygon);
+            }
+            if (hit && pageView.pageIndex < selectedTextIndices_.size()) {
+                selectedTextIndices_[pageView.pageIndex].push_back(textIndex);
+            }
+        }
     }
 
     isSelecting_ = false;
@@ -4331,6 +4737,411 @@ void App::BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, Ima
     BuildInteractionPageSnapshot(CalculatePageView(clientRect, pageIndex));
     RebuildImageTransformPreview(cursor);
     UpdateCaptureState();
+    InvalidateCanvas();
+}
+
+void App::EndTextEditControl() {
+    if (textEditWindow_ != nullptr) {
+        if (textEditOriginalProc_ != nullptr) {
+            SetWindowLongPtrW(textEditWindow_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(textEditOriginalProc_));
+        }
+        DestroyWindow(textEditWindow_);
+        textEditWindow_ = nullptr;
+    }
+    textEditOriginalProc_ = nullptr;
+    if (textEditFont_ != nullptr) {
+        DeleteObject(textEditFont_);
+        textEditFont_ = nullptr;
+    }
+}
+
+void App::RefreshTextEditControl() {
+    if (textEditWindow_ == nullptr || !editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || window_ == nullptr) {
+        return;
+    }
+    if (*editingTextPageIndex_ >= document_.PageCount()) {
+        ShowWindow(textEditWindow_, SW_HIDE);
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, *editingTextPageIndex_);
+    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    if (!pageView.valid || *editingTextIndex_ >= page.texts.size()) {
+        ShowWindow(textEditWindow_, SW_HIDE);
+        return;
+    }
+
+    const PageText& text = page.texts[*editingTextIndex_];
+    PageText layoutText = text;
+    const int editLength = GetWindowTextLengthW(textEditWindow_);
+    if (editLength > 0) {
+        std::vector<wchar_t> buffer(static_cast<std::size_t>(editLength) + 1U, L'\0');
+        GetWindowTextW(textEditWindow_, buffer.data(), editLength + 1);
+        layoutText.content.assign(buffer.data(), static_cast<std::size_t>(editLength));
+    } else {
+        layoutText.content.clear();
+    }
+    const TextPixelMetrics metrics = MeasurePageTextPixels(layoutText, pageView.scale);
+    const int fontHeight = PageTextFontPixelHeight(layoutText, pageView.scale);
+    const int horizontalSlack = std::max(24, fontHeight);
+    const int width = std::max(metrics.width + (horizontalSlack * 2), ScaleForDpi(140, WindowDpi(window_)));
+    const int height = std::max(metrics.height + 10, fontHeight + 10);
+    const int left = pageView.rect.left + static_cast<int>(std::lround(text.x * pageView.scale)) - 3;
+    const int top = pageView.rect.top + static_cast<int>(std::lround(text.y * pageView.scale)) - 3;
+
+    if (textEditFont_ != nullptr) {
+        DeleteObject(textEditFont_);
+        textEditFont_ = nullptr;
+    }
+    textEditFont_ = CreateFontW(
+        -fontHeight,
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        VARIABLE_PITCH,
+        L"Segoe UI");
+    if (textEditFont_ != nullptr) {
+        SendMessageW(textEditWindow_, WM_SETFONT, reinterpret_cast<WPARAM>(textEditFont_), TRUE);
+    }
+
+    SetWindowPos(textEditWindow_, HWND_TOP, left, top, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+void App::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, Page beforePage) {
+    CommitTextEdit();
+    if (pageIndex >= document_.PageCount() || textIndex >= document_.PageAt(pageIndex).texts.size()) {
+        return;
+    }
+
+    ClearSelection();
+    selectedTextIndices_[pageIndex].push_back(textIndex);
+    editingTextPageIndex_ = pageIndex;
+    editingTextIndex_ = textIndex;
+    editingTextBeforePage_ = std::move(beforePage);
+
+    if (textEditWindow_ == nullptr) {
+        textEditWindow_ = CreateWindowExW(
+            0,
+            L"EDIT",
+            L"",
+            WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+            0,
+            0,
+            0,
+            0,
+            window_,
+            reinterpret_cast<HMENU>(4001),
+            instance_,
+            nullptr);
+        if (textEditWindow_ == nullptr) {
+            editingTextPageIndex_.reset();
+            editingTextIndex_.reset();
+            editingTextBeforePage_.reset();
+            return;
+        }
+        SetWindowLongPtrW(textEditWindow_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+        textEditOriginalProc_ = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(textEditWindow_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&App::TextEditProc)));
+        SendMessageW(textEditWindow_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 6));
+    }
+
+    const PageText& text = document_.PageAt(pageIndex).texts[textIndex];
+    SetWindowTextW(textEditWindow_, text.content.c_str());
+    InvalidatePageSurfaceCache(pageIndex);
+    RefreshTextEditControl();
+    ShowWindow(textEditWindow_, SW_SHOW);
+    SetFocus(textEditWindow_);
+    SendMessageW(textEditWindow_, EM_SETSEL, 0, -1);
+    UpdateCaptureState();
+    InvalidateCanvas();
+}
+
+void App::CommitTextEdit() {
+    if (textEditWindow_ == nullptr || !editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || !editingTextBeforePage_.has_value()) {
+        return;
+    }
+
+    const std::size_t pageIndex = *editingTextPageIndex_;
+    const std::size_t textIndex = *editingTextIndex_;
+    Page beforePage = *editingTextBeforePage_;
+
+    if (pageIndex < document_.PageCount() && textIndex < document_.PageAt(pageIndex).texts.size()) {
+        const int textLength = GetWindowTextLengthW(textEditWindow_);
+        std::wstring content(static_cast<std::size_t>(textLength), L'\0');
+        if (textLength > 0) {
+            std::vector<wchar_t> buffer(static_cast<std::size_t>(textLength) + 1U, L'\0');
+            GetWindowTextW(textEditWindow_, buffer.data(), textLength + 1);
+            content.assign(buffer.data(), static_cast<std::size_t>(textLength));
+        }
+        Page& page = document_.PageAt(pageIndex);
+        page.texts[textIndex].content = std::move(content);
+        if (page.texts[textIndex].content.empty()) {
+            page.texts.erase(page.texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
+        }
+    }
+
+    EndTextEditControl();
+    editingTextPageIndex_.reset();
+    editingTextIndex_.reset();
+    editingTextBeforePage_.reset();
+    ClearSelection();
+    if (pageIndex < document_.PageCount() && textIndex < document_.PageAt(pageIndex).texts.size()) {
+        selectedTextIndices_[pageIndex].push_back(textIndex);
+    }
+    if (pageIndex < document_.PageCount()) {
+        const bool changed = !PageEqual(beforePage, document_.PageAt(pageIndex));
+        PushReplacePagesHistoryAction({ pageIndex }, { beforePage }, document_.CurrentPageIndex());
+        if (changed) {
+            NotifyDocumentMutated();
+        }
+        InvalidatePageSurfaceCache(pageIndex);
+    }
+    UpdateCaptureState();
+    InvalidateCanvas();
+}
+
+void App::CancelTextEdit() {
+    if (!editingTextPageIndex_.has_value() || !editingTextBeforePage_.has_value()) {
+        EndTextEditControl();
+        return;
+    }
+
+    const std::size_t pageIndex = *editingTextPageIndex_;
+    const std::size_t textIndex = editingTextIndex_.value_or(0);
+    if (pageIndex < document_.PageCount()) {
+        document_.PageAt(pageIndex) = *editingTextBeforePage_;
+        InvalidatePageSurfaceCache(pageIndex);
+    }
+
+    EndTextEditControl();
+    editingTextPageIndex_.reset();
+    editingTextIndex_.reset();
+    editingTextBeforePage_.reset();
+    ClearSelection();
+    if (pageIndex < document_.PageCount() && textIndex < document_.PageAt(pageIndex).texts.size()) {
+        selectedTextIndices_[pageIndex].push_back(textIndex);
+    }
+    UpdateCaptureState();
+    InvalidateCanvas();
+}
+
+void App::BeginTextToolInteraction(POINT cursor) {
+    const auto hitText = HitTestText(cursor);
+    if (hitText.has_value()) {
+        document_.SetCurrentPageIndex(hitText->first);
+        const auto selectedText = SingleSelectedText();
+        if (selectedText.has_value() && *selectedText == *hitText) {
+            BeginTextEdit(hitText->first, hitText->second, document_.PageAt(hitText->first));
+        } else {
+            ClearSelection();
+            selectedTextIndices_[hitText->first].push_back(hitText->second);
+            UpdateCaptureState();
+            InvalidateCanvas();
+        }
+        return;
+    }
+
+    const auto hitPage = HitTestPage(cursor);
+    if (!hitPage.has_value()) {
+        ClearSelection();
+        InvalidateCanvas();
+        return;
+    }
+
+    Page beforePage = document_.PageAt(hitPage->pageIndex);
+    Page& page = document_.PageAt(hitPage->pageIndex);
+    PageText text {};
+    const Vec2 pagePoint = ScreenToPage(*hitPage, cursor, true);
+    text.x = pagePoint.x;
+    text.y = pagePoint.y;
+    text.color = palette_[colorIndex_];
+    page.texts.push_back(text);
+    document_.SetCurrentPageIndex(hitPage->pageIndex);
+    BeginTextEdit(hitPage->pageIndex, page.texts.size() - 1U, std::move(beforePage));
+}
+
+void App::BeginTextTransform(std::size_t pageIndex, std::size_t textIndex, ImageTransformHandle handle, POINT cursor) {
+    if (pageIndex >= document_.PageCount() || textIndex >= document_.PageAt(pageIndex).texts.size()) {
+        return;
+    }
+
+    pendingTextEditClick_ = false;
+    pendingTextEditPageIndex_.reset();
+    pendingTextEditIndex_.reset();
+    CancelDeferredRasterRefresh(false);
+    isTransformingText_ = true;
+    transformingTextPageIndex_ = pageIndex;
+    transformingTextIndex_ = textIndex;
+    textTransformHandle_ = handle;
+    textTransformInitial_ = document_.PageAt(pageIndex).texts[textIndex];
+    textTransformBeforePage_ = document_.PageAt(pageIndex);
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, pageIndex);
+    textTransformStartPagePoint_ = pageView.valid ? ScreenToPage(pageView, cursor, false) : ScreenToPage(cursor, nullptr);
+    UpdateCaptureState();
+    InvalidateCanvas();
+}
+
+void App::UpdateTextTransform(POINT cursor) {
+    if (!isTransformingText_ || !transformingTextPageIndex_.has_value() || !transformingTextIndex_.has_value()) {
+        return;
+    }
+
+    const std::size_t pageIndex = *transformingTextPageIndex_;
+    const std::size_t textIndex = *transformingTextIndex_;
+    if (pageIndex >= document_.PageCount() || textIndex >= document_.PageAt(pageIndex).texts.size()) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, pageIndex);
+    if (!pageView.valid) {
+        return;
+    }
+
+    const Page& page = document_.PageAt(pageIndex);
+    const Vec2 currentPoint = ScreenToPage(pageView, cursor, false);
+    const PageTextBounds initialBounds = MeasurePageTextBounds(textTransformInitial_);
+    const float initialWidth = std::max(1.0f, initialBounds.right - initialBounds.left);
+    const float initialHeight = std::max(1.0f, initialBounds.bottom - initialBounds.top);
+    const float centerX = (initialBounds.left + initialBounds.right) * 0.5f;
+    const float centerY = (initialBounds.top + initialBounds.bottom) * 0.5f;
+    constexpr float kMinTextFontSize = 8.0f;
+    const float minScale = std::max(0.05f, kMinTextFontSize / std::max(1.0f, textTransformInitial_.fontSize));
+    const float maxScaleToFit = std::max(0.05f, std::min(page.width / initialWidth, page.height / initialHeight));
+
+    auto clampScale = [&](float value) {
+        return std::clamp(value, minScale, std::max(minScale, maxScaleToFit));
+    };
+
+    float scale = 1.0f;
+    float newLeft = initialBounds.left;
+    float newTop = initialBounds.top;
+    switch (textTransformHandle_) {
+    case ImageTransformHandle::ResizeNorthWest: {
+        scale = clampScale(std::max(
+            (initialBounds.right - currentPoint.x) / initialWidth,
+            (initialBounds.bottom - currentPoint.y) / initialHeight));
+        newLeft = initialBounds.right - (initialWidth * scale);
+        newTop = initialBounds.bottom - (initialHeight * scale);
+        break;
+    }
+    case ImageTransformHandle::ResizeNorth: {
+        scale = clampScale((initialBounds.bottom - currentPoint.y) / initialHeight);
+        newLeft = centerX - ((initialWidth * scale) * 0.5f);
+        newTop = initialBounds.bottom - (initialHeight * scale);
+        break;
+    }
+    case ImageTransformHandle::ResizeNorthEast: {
+        scale = clampScale(std::max(
+            (currentPoint.x - initialBounds.left) / initialWidth,
+            (initialBounds.bottom - currentPoint.y) / initialHeight));
+        newLeft = initialBounds.left;
+        newTop = initialBounds.bottom - (initialHeight * scale);
+        break;
+    }
+    case ImageTransformHandle::ResizeEast: {
+        scale = clampScale((currentPoint.x - initialBounds.left) / initialWidth);
+        newLeft = initialBounds.left;
+        newTop = centerY - ((initialHeight * scale) * 0.5f);
+        break;
+    }
+    case ImageTransformHandle::ResizeSouthEast: {
+        scale = clampScale(std::max(
+            (currentPoint.x - initialBounds.left) / initialWidth,
+            (currentPoint.y - initialBounds.top) / initialHeight));
+        newLeft = initialBounds.left;
+        newTop = initialBounds.top;
+        break;
+    }
+    case ImageTransformHandle::ResizeSouth: {
+        scale = clampScale((currentPoint.y - initialBounds.top) / initialHeight);
+        newLeft = centerX - ((initialWidth * scale) * 0.5f);
+        newTop = initialBounds.top;
+        break;
+    }
+    case ImageTransformHandle::ResizeSouthWest: {
+        scale = clampScale(std::max(
+            (initialBounds.right - currentPoint.x) / initialWidth,
+            (currentPoint.y - initialBounds.top) / initialHeight));
+        newLeft = initialBounds.right - (initialWidth * scale);
+        newTop = initialBounds.top;
+        break;
+    }
+    case ImageTransformHandle::ResizeWest: {
+        scale = clampScale((initialBounds.right - currentPoint.x) / initialWidth);
+        newLeft = initialBounds.right - (initialWidth * scale);
+        newTop = centerY - ((initialHeight * scale) * 0.5f);
+        break;
+    }
+    default:
+        return;
+    }
+
+    PageText updated = textTransformInitial_;
+    updated.fontSize = std::max(kMinTextFontSize, textTransformInitial_.fontSize * scale);
+    updated.x = newLeft;
+    updated.y = newTop;
+
+    const PageTextBounds updatedBounds = MeasurePageTextBounds(updated);
+    float deltaX = 0.0f;
+    float deltaY = 0.0f;
+    if (updatedBounds.left < 0.0f) {
+        deltaX = -updatedBounds.left;
+    } else if (updatedBounds.right > page.width) {
+        deltaX = page.width - updatedBounds.right;
+    }
+    if (updatedBounds.top < 0.0f) {
+        deltaY = -updatedBounds.top;
+    } else if (updatedBounds.bottom > page.height) {
+        deltaY = page.height - updatedBounds.bottom;
+    }
+    updated.x += deltaX;
+    updated.y += deltaY;
+
+    document_.PageAt(pageIndex).texts[textIndex] = std::move(updated);
+    InvalidatePageSurfaceCache(pageIndex);
+    InvalidateCanvas();
+}
+
+void App::EndTextTransform() {
+    if (!isTransformingText_ || !transformingTextPageIndex_.has_value()) {
+        return;
+    }
+
+    const std::size_t pageIndex = *transformingTextPageIndex_;
+    const bool changed = pageIndex < document_.PageCount() && !PageEqual(textTransformBeforePage_, document_.PageAt(pageIndex));
+
+    isTransformingText_ = false;
+    transformingTextPageIndex_.reset();
+    transformingTextIndex_.reset();
+    textTransformHandle_ = ImageTransformHandle::None;
+    UpdateCaptureState();
+
+    if (pageIndex < document_.PageCount()) {
+        PushReplacePagesHistoryAction({ pageIndex }, { textTransformBeforePage_ }, document_.CurrentPageIndex());
+        if (changed) {
+            NotifyDocumentMutated();
+        }
+        InvalidatePageSurfaceCache(pageIndex);
+    }
+
+    if (rasterRefreshPending_) {
+        ScheduleDeferredRasterRefresh();
+    }
     InvalidateCanvas();
 }
 
@@ -4413,9 +5224,19 @@ void App::BeginMoveSelection(POINT cursor) {
         return;
     }
 
+    std::size_t textHandlePageIndex = 0;
+    std::size_t textHandleTextIndex = 0;
+    const auto textHandle = HitTestSelectedTextHandle(cursor, &textHandlePageIndex, &textHandleTextIndex);
+    if (textHandle.has_value() && textHandlePageIndex == pageIndex) {
+        BeginTextTransform(pageIndex, textHandleTextIndex, *textHandle, cursor);
+        return;
+    }
+
     std::optional<std::size_t> clickedSelectedStroke {};
+    std::optional<std::size_t> clickedSelectedText {};
     std::optional<std::size_t> clickedSelectedImage {};
     std::optional<std::size_t> clickedStroke {};
+    std::optional<std::size_t> clickedText {};
     std::optional<std::size_t> clickedImage {};
 
     if (pageIndex < selectedStrokeIndices_.size()) {
@@ -4426,7 +5247,15 @@ void App::BeginMoveSelection(POINT cursor) {
             }
         }
     }
-    if (!clickedSelectedStroke.has_value() && pageIndex < selectedImageIndices_.size()) {
+    if (!clickedSelectedStroke.has_value() && pageIndex < selectedTextIndices_.size()) {
+        for (std::size_t textIndex : selectedTextIndices_[pageIndex]) {
+            if (textIndex < page.texts.size() && TextHitsPoint(page.texts[textIndex], pagePoint)) {
+                clickedSelectedText = textIndex;
+                break;
+            }
+        }
+    }
+    if (!clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && pageIndex < selectedImageIndices_.size()) {
         for (std::size_t imageIndex : selectedImageIndices_[pageIndex]) {
             if (imageIndex < page.images.size() && ImageHitsPoint(page.images[imageIndex], pagePoint)) {
                 clickedSelectedImage = imageIndex;
@@ -4435,7 +5264,7 @@ void App::BeginMoveSelection(POINT cursor) {
         }
     }
 
-    if (!clickedSelectedStroke.has_value() && !clickedSelectedImage.has_value()) {
+    if (!clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()) {
         for (std::size_t strokeIndex = page.strokes.size(); strokeIndex > 0; --strokeIndex) {
             const std::size_t actualIndex = strokeIndex - 1U;
             if (StrokeHitsPoint(page.strokes[actualIndex], pagePoint, hitRadius)) {
@@ -4444,7 +5273,17 @@ void App::BeginMoveSelection(POINT cursor) {
             }
         }
     }
-    if (!clickedSelectedStroke.has_value() && !clickedSelectedImage.has_value() && !clickedStroke.has_value()) {
+    if (!clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value() && !clickedStroke.has_value()) {
+        for (std::size_t textIndex = page.texts.size(); textIndex > 0; --textIndex) {
+            const std::size_t actualIndex = textIndex - 1U;
+            if (TextHitsPoint(page.texts[actualIndex], pagePoint)) {
+                clickedText = actualIndex;
+                break;
+            }
+        }
+    }
+    if (!clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()
+        && !clickedStroke.has_value() && !clickedText.has_value()) {
         for (std::size_t imageIndex = page.images.size(); imageIndex > 0; --imageIndex) {
             const std::size_t actualIndex = imageIndex - 1U;
             if (ImageHitsPoint(page.images[actualIndex], pagePoint)) {
@@ -4454,24 +5293,39 @@ void App::BeginMoveSelection(POINT cursor) {
         }
     }
 
-    if (!clickedSelectedStroke.has_value() && !clickedSelectedImage.has_value()
-        && !clickedStroke.has_value() && !clickedImage.has_value()) {
+    if (!clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()
+        && !clickedStroke.has_value() && !clickedText.has_value() && !clickedImage.has_value()) {
         ClearSelection();
         BeginSelection(cursor, true);
         return;
     }
 
-    if (!clickedSelectedStroke.has_value() && !clickedSelectedImage.has_value()) {
+    if (!clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()) {
         ClearSelection();
         if (clickedStroke.has_value() && pageIndex < selectedStrokeIndices_.size()) {
             selectedStrokeIndices_[pageIndex].push_back(*clickedStroke);
+        }
+        if (clickedText.has_value() && pageIndex < selectedTextIndices_.size()) {
+            selectedTextIndices_[pageIndex].push_back(*clickedText);
         }
         if (clickedImage.has_value() && pageIndex < selectedImageIndices_.size()) {
             selectedImageIndices_[pageIndex].push_back(*clickedImage);
         }
     }
 
+    if (activeTool_ == Tool::Move && clickedSelectedText.has_value() && !clickedSelectedStroke.has_value() && !clickedSelectedImage.has_value()) {
+        pendingTextEditClick_ = true;
+        pendingTextEditCursor_ = cursor;
+        pendingTextEditPageIndex_ = pageIndex;
+        pendingTextEditIndex_ = *clickedSelectedText;
+        UpdateCaptureState();
+        return;
+    }
+
     CancelDeferredRasterRefresh(false);
+    pendingTextEditClick_ = false;
+    pendingTextEditPageIndex_.reset();
+    pendingTextEditIndex_.reset();
     isMovingSelection_ = true;
     moveSelectionPageIndex_ = pageIndex;
     interactionPreviewMode_ = InteractionPreviewMode::MoveSelection;
@@ -4484,8 +5338,9 @@ void App::BeginMoveSelection(POINT cursor) {
     const std::vector<PageView> pageViews = CalculatePageViews(clientRect);
     for (const PageView& previewPageView : pageViews) {
         const bool hasSelectedStrokes = previewPageView.pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[previewPageView.pageIndex].empty();
+        const bool hasSelectedTexts = previewPageView.pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[previewPageView.pageIndex].empty();
         const bool hasSelectedImages = previewPageView.pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[previewPageView.pageIndex].empty();
-        if (hasSelectedStrokes || hasSelectedImages) {
+        if (hasSelectedStrokes || hasSelectedTexts || hasSelectedImages) {
             BuildInteractionPageSnapshot(previewPageView);
         }
     }
@@ -4538,6 +5393,49 @@ void App::EndStrokeTransform() {
 }
 
 void App::UpdateMoveSelection(POINT cursor) {
+    if (pendingTextEditClick_) {
+        if (DistanceSquared(PointToVec2(cursor), PointToVec2(pendingTextEditCursor_)) < (5.0f * 5.0f)
+            || !pendingTextEditPageIndex_.has_value()) {
+            return;
+        }
+
+        pendingTextEditClick_ = false;
+        const std::size_t pageIndex = *pendingTextEditPageIndex_;
+        pendingTextEditPageIndex_.reset();
+        pendingTextEditIndex_.reset();
+
+        const auto hitPage = HitTestPage(pendingTextEditCursor_);
+        if (!hitPage.has_value() || pageIndex >= document_.PageCount()) {
+            UpdateCaptureState();
+            return;
+        }
+
+        CancelDeferredRasterRefresh(false);
+        isMovingSelection_ = true;
+        moveSelectionPageIndex_ = pageIndex;
+        interactionPreviewMode_ = InteractionPreviewMode::MoveSelection;
+        interactionPreviewStartCursor_ = pendingTextEditCursor_;
+        lastMoveCursor_ = pendingTextEditCursor_;
+        moveSelectionScale_ = std::max(0.1f, hitPage->scale);
+        EnsureInteractionPreviewStorage();
+        RECT clientRect {};
+        GetClientRect(window_, &clientRect);
+        const std::vector<PageView> pageViews = CalculatePageViews(clientRect);
+        for (const PageView& previewPageView : pageViews) {
+            const bool hasSelectedStrokes = previewPageView.pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[previewPageView.pageIndex].empty();
+            const bool hasSelectedTexts = previewPageView.pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[previewPageView.pageIndex].empty();
+            const bool hasSelectedImages = previewPageView.pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[previewPageView.pageIndex].empty();
+            if (hasSelectedStrokes || hasSelectedTexts || hasSelectedImages) {
+                BuildInteractionPageSnapshot(previewPageView);
+            }
+        }
+        RebuildMoveSelectionPreview(cursor);
+        document_.SetCurrentPageIndex(pageIndex);
+        UpdateCaptureState();
+        InvalidateCanvas();
+        return;
+    }
+
     if (!isMovingSelection_) {
         return;
     }
@@ -4598,10 +5496,12 @@ void App::EndMoveSelection() {
     affectedPageIndices.reserve(document_.PageCount());
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         const bool hasSelectedStrokes = pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty();
+        const bool hasSelectedTexts = pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty();
         const bool hasSelectedImages = pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty();
         const bool hasPreviewStrokes = pageIndex < interactionPreviewStrokes_.size() && !interactionPreviewStrokes_[pageIndex].empty();
+        const bool hasPreviewTexts = pageIndex < interactionPreviewTexts_.size() && !interactionPreviewTexts_[pageIndex].empty();
         const bool hasPreviewImages = pageIndex < interactionPreviewImages_.size() && !interactionPreviewImages_[pageIndex].empty();
-        if (hasSelectedStrokes || hasSelectedImages || hasPreviewStrokes || hasPreviewImages) {
+        if (hasSelectedStrokes || hasSelectedTexts || hasSelectedImages || hasPreviewStrokes || hasPreviewTexts || hasPreviewImages) {
             affectedPageIndices.push_back(pageIndex);
         }
     }
@@ -4634,6 +5534,7 @@ bool App::CopySelectionToClipboard() {
 
     const Page& page = document_.PageAt(*pageIndex);
     std::vector<Stroke> strokes;
+    std::vector<PageText> texts;
     std::vector<PageImage> images;
     float minX = page.width;
     float minY = page.height;
@@ -4654,6 +5555,20 @@ bool App::CopySelectionToClipboard() {
             maxY = std::max(maxY, point.y);
             hasContent = true;
         }
+    }
+
+    for (std::size_t textIndex : selectedTextIndices_[*pageIndex]) {
+        if (textIndex >= page.texts.size()) {
+            continue;
+        }
+        const PageText& text = page.texts[textIndex];
+        const PageTextBounds bounds = MeasurePageTextBounds(text);
+        texts.push_back(text);
+        minX = std::min(minX, bounds.left);
+        minY = std::min(minY, bounds.top);
+        maxX = std::max(maxX, bounds.right);
+        maxY = std::max(maxY, bounds.bottom);
+        hasContent = true;
     }
 
     for (std::size_t imageIndex : selectedImageIndices_[*pageIndex]) {
@@ -4681,9 +5596,10 @@ bool App::CopySelectionToClipboard() {
     const auto appendUint32 = [&](std::uint32_t value) { appendBytes(&value, sizeof(value)); };
     const auto appendFloat = [&](float value) { appendBytes(&value, sizeof(value)); };
 
-    const char magic[] = { 'C', 'T', 'S', '1' };
+    const char magic[] = { 'C', 'T', 'S', '2' };
     appendBytes(magic, sizeof(magic));
     appendUint32(static_cast<std::uint32_t>(strokes.size()));
+    appendUint32(static_cast<std::uint32_t>(texts.size()));
     appendUint32(static_cast<std::uint32_t>(images.size()));
     appendFloat(minX);
     appendFloat(minY);
@@ -4698,6 +5614,15 @@ bool App::CopySelectionToClipboard() {
             appendFloat(point.x);
             appendFloat(point.y);
         }
+    }
+
+    for (const PageText& text : texts) {
+        appendFloat(text.x);
+        appendFloat(text.y);
+        appendFloat(text.fontSize);
+        appendUint32(text.color);
+        appendUint32(static_cast<std::uint32_t>(text.content.size()));
+        appendBytes(text.content.data(), text.content.size() * sizeof(wchar_t));
     }
 
     for (const PageImage& image : images) {
@@ -4772,7 +5697,7 @@ bool App::PasteSelectionFromClipboard() {
 
     std::size_t offset = 0;
     char magic[4] {};
-    if (!readExact(offset, magic, sizeof(magic)) || std::memcmp(magic, "CTS1", 4) != 0) {
+    if (!readExact(offset, magic, sizeof(magic)) || (std::memcmp(magic, "CTS1", 4) != 0 && std::memcmp(magic, "CTS2", 4) != 0)) {
         GlobalUnlock(clipboardData);
         CloseClipboard();
         return false;
@@ -4791,12 +5716,17 @@ bool App::PasteSelectionFromClipboard() {
     };
 
     std::uint32_t strokeCount = 0;
+    std::uint32_t textCount = 0;
     std::uint32_t imageCount = 0;
     float minX = 0.0f;
     float minY = 0.0f;
     float maxX = 0.0f;
     float maxY = 0.0f;
-    const bool headerOk = readUint32(strokeCount) && readUint32(imageCount)
+    bool headerOk = readUint32(strokeCount);
+    if (headerOk && std::memcmp(magic, "CTS2", 4) == 0) {
+        headerOk = readUint32(textCount);
+    }
+    headerOk = headerOk && readUint32(imageCount)
         && readFloat(minX) && readFloat(minY) && readFloat(maxX) && readFloat(maxY);
     if (!headerOk) {
         GlobalUnlock(clipboardData);
@@ -4805,8 +5735,10 @@ bool App::PasteSelectionFromClipboard() {
     }
 
     std::vector<Stroke> strokes;
+    std::vector<PageText> texts;
     std::vector<PageImage> images;
     strokes.reserve(strokeCount);
+    texts.reserve(textCount);
     images.reserve(imageCount);
 
     bool ok = true;
@@ -4824,6 +5756,21 @@ bool App::PasteSelectionFromClipboard() {
         }
         if (ok) {
             strokes.push_back(std::move(stroke));
+        }
+    }
+
+    for (std::uint32_t textIndex = 0; ok && textIndex < textCount; ++textIndex) {
+        PageText text {};
+        std::uint32_t charCount = 0;
+        ok = readFloat(text.x) && readFloat(text.y) && readFloat(text.fontSize) && readUint32(text.color) && readUint32(charCount);
+        if (ok) {
+            const std::size_t byteCount = static_cast<std::size_t>(charCount) * sizeof(wchar_t);
+            text.content.resize(charCount);
+            ok = readExact(offset, text.content.data(), byteCount);
+            offset += ok ? byteCount : 0U;
+        }
+        if (ok) {
+            texts.push_back(std::move(text));
         }
     }
 
@@ -4892,6 +5839,13 @@ bool App::PasteSelectionFromClipboard() {
         }
         page.strokes.push_back(stroke);
         selectedStrokeIndices_[targetPageIndex].push_back(page.strokes.size() - 1U);
+    }
+
+    for (PageText& text : texts) {
+        text.x += delta.x;
+        text.y += delta.y;
+        page.texts.push_back(text);
+        selectedTextIndices_[targetPageIndex].push_back(page.texts.size() - 1U);
     }
 
     for (PageImage& image : images) {
@@ -5115,7 +6069,8 @@ void App::EndPan() {
 }
 
 void App::UpdateCaptureState() {
-    if (toolbarBrushSliderDragging_ || isDrawing_ || isPanning_ || isSelecting_ || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_) {
+    if (toolbarBrushSliderDragging_ || isDrawing_ || isPanning_ || isSelecting_ || pendingTextEditClick_
+        || isMovingSelection_ || isTransformingImage_ || isTransformingText_ || isTransformingStroke_) {
         SetCapture(window_);
         return;
     }
@@ -5276,6 +6231,12 @@ bool App::HandleToolbarClick(POINT cursor) {
         ClosePaletteOverlays();
         selectionMode_ = SelectionMode::Lasso;
         SetActiveTool(Tool::Select);
+        return true;
+    }
+
+    if (PtInRect(&layout.textToolRect, cursor) != 0) {
+        ClosePaletteOverlays();
+        SetActiveTool(Tool::Text);
         return true;
     }
 
@@ -5441,6 +6402,7 @@ bool App::HandleToolbarRightClick(POINT cursor) {
     };
 
     return showMenuForTool(layout.selectToolRect, Tool::Select)
+        || showMenuForTool(layout.textToolRect, Tool::Text)
         || showMenuForTool(layout.moveToolRect, Tool::Move)
         || showMenuForTool(layout.drawToolRect, Tool::Draw)
         || showMenuForTool(layout.panToolRect, Tool::Pan)
@@ -6292,6 +7254,7 @@ void App::Paint() {
     PaintQuickSizePopup(memoryDc, clientRect);
     PaintPaletteMenu(memoryDc, clientRect);
     PaintPaletteWheel(memoryDc, clientRect);
+    RefreshTextEditControl();
 
     if (memoryDc != windowDc) {
         BitBlt(
@@ -6427,6 +7390,7 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
         paintSvgActionButton(layout.redoRect, L"redo.svg", L"Redo", CanRedo());
     }
     paintIconToolButton(layout.selectToolRect, PaintSelectToolIcon, L"lasso.svg", activeTool_ == Tool::Select);
+    paintIconToolButton(layout.textToolRect, PaintTextToolIcon, L"text.svg", activeTool_ == Tool::Text);
     paintIconToolButton(layout.moveToolRect, PaintMoveToolIcon, L"cursor.svg", activeTool_ == Tool::Move || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_);
     paintIconToolButton(layout.eraseToolRect, PaintEraseToolIcon, L"erase.svg", activeTool_ == Tool::Erase);
     paintIconToolButton(layout.drawToolRect, PaintDrawToolIcon, L"draw.svg", activeTool_ == Tool::Draw);
@@ -6436,6 +7400,9 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     }
     if (IsToolInWheel(Tool::Move)) {
         paintWheelBadge(layout.moveToolRect);
+    }
+    if (IsToolInWheel(Tool::Text)) {
+        paintWheelBadge(layout.textToolRect);
     }
     if (IsToolInWheel(Tool::Erase)) {
         paintWheelBadge(layout.eraseToolRect);
@@ -6912,6 +7879,17 @@ void App::PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSe
             DrawRectangleAA(hdc, MakeRect(left, top, right, bottom), RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
         }
     }
+
+    if (pageView.pageIndex < interactionPreviewTexts_.size()) {
+        for (const InteractionPreviewText& entry : interactionPreviewTexts_[pageView.pageIndex]) {
+            PaintText(hdc, entry.text, pageView);
+            if (const auto textRect = PageTextBoundsRect(entry.text, pageView.scale, 4); textRect.has_value()) {
+                RECT screenRect = *textRect;
+                OffsetRect(&screenRect, pageView.rect.left, pageView.rect.top);
+                DrawRectangleAA(hdc, screenRect, RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
+            }
+        }
+    }
 }
 
 void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
@@ -7063,6 +8041,7 @@ bool App::TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke&
     if (cache.pageIndex != pageIndex
         || cache.strokeCount + 1U != page.strokes.size()
         || cache.imageCount != page.images.size()
+        || cache.textCount != page.texts.size()
         || cache.rasterWidth != page.raster.width
         || cache.rasterHeight != page.raster.height
         || std::abs(cache.rasterScale - page.raster.scale) >= 0.001f) {
@@ -7144,6 +8123,7 @@ bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect
         || cache.height <= 0
         || cache.pageIndex != pageIndex
         || cache.imageCount != page.images.size()
+        || cache.textCount != page.texts.size()
         || cache.rasterWidth != page.raster.width
         || cache.rasterHeight != page.raster.height
         || std::abs(cache.rasterScale - page.raster.scale) >= 0.001f
@@ -7270,6 +8250,17 @@ bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect
         imageGraphics.DrawImage(&bitmap, -drawWidth * 0.5f, -drawHeight * 0.5f, drawWidth, drawHeight);
     }
     imageGraphics.ResetTransform();
+    for (std::size_t textIndex = 0; textIndex < page.texts.size(); ++textIndex) {
+        if (IsEditingText(pageIndex, textIndex)) {
+            continue;
+        }
+        const PageText& text = page.texts[textIndex];
+        const auto textBounds = PageTextBoundsRect(text, 1.0f, 0);
+        if (!textBounds.has_value() || !RectsOverlap(*textBounds, dirtyPageRect)) {
+            continue;
+        }
+        PaintText(cacheDc, text, cacheView);
+    }
     for (const Stroke& pageStroke : page.strokes) {
         const std::optional<RECT> strokeBounds = StrokeBoundsRect(pageStroke, 1.0f, 0);
         if (strokeBounds.has_value() && !RectsOverlap(*strokeBounds, dirtyPageRect)) {
@@ -7282,6 +8273,7 @@ bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect
     std::copy_n(static_cast<const std::uint8_t*>(bits), cache.pixels.size(), cache.pixels.data());
     cache.strokeCount = page.strokes.size();
     cache.imageCount = page.images.size();
+    cache.textCount = page.texts.size();
 
     SelectObject(cacheDc, previousBitmap);
     DeleteObject(cacheBitmap);
@@ -7311,6 +8303,7 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
         && cache.height == height
         && cache.strokeCount == page.strokes.size()
         && cache.imageCount == page.images.size()
+        && cache.textCount == page.texts.size()
         && cache.rasterWidth == page.raster.width
         && cache.rasterHeight == page.raster.height
         && std::abs(cache.rasterScale - page.raster.scale) < 0.001f
@@ -7408,6 +8401,13 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
         imageGraphics.DrawImage(&bitmap, -drawWidth * 0.5f, -drawHeight * 0.5f, drawWidth, drawHeight);
     }
     imageGraphics.ResetTransform();
+    for (std::size_t textIndex = 0; textIndex < page.texts.size(); ++textIndex) {
+        if (IsEditingText(pageView.pageIndex, textIndex)) {
+            continue;
+        }
+        const PageText& text = page.texts[textIndex];
+        PaintText(cacheDc, text, cacheView);
+    }
     for (const Stroke& stroke : page.strokes) {
         PaintStroke(cacheDc, stroke, cacheView, false);
     }
@@ -7422,6 +8422,7 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
     cache.pageIndex = pageView.pageIndex;
     cache.strokeCount = page.strokes.size();
     cache.imageCount = page.images.size();
+    cache.textCount = page.texts.size();
     cache.rasterWidth = page.raster.width;
     cache.rasterHeight = page.raster.height;
     cache.rasterScale = page.raster.scale;
@@ -7437,12 +8438,14 @@ void App::ClearInteractionPreview() {
     interactionPreviewMode_ = InteractionPreviewMode::None;
     interactionPageSnapshots_.clear();
     interactionPreviewStrokes_.clear();
+    interactionPreviewTexts_.clear();
     interactionPreviewImages_.clear();
 }
 
 void App::EnsureInteractionPreviewStorage() {
     interactionPageSnapshots_.assign(document_.PageCount(), {});
     interactionPreviewStrokes_.assign(document_.PageCount(), {});
+    interactionPreviewTexts_.assign(document_.PageCount(), {});
     interactionPreviewImages_.assign(document_.PageCount(), {});
 }
 
@@ -7474,6 +8477,19 @@ bool App::ShouldSkipImageInInteractionSnapshot(std::size_t pageIndex, std::size_
             && transformingImageIndex_.has_value()
             && *transformingImagePageIndex_ == pageIndex
             && *transformingImageIndex_ == imageIndex;
+    }
+
+    return false;
+}
+
+bool App::ShouldSkipTextInInteractionSnapshot(std::size_t pageIndex, std::size_t textIndex) const {
+    if (interactionPreviewMode_ == InteractionPreviewMode::None) {
+        return false;
+    }
+
+    if (interactionPreviewMode_ == InteractionPreviewMode::MoveSelection) {
+        return pageIndex < selectedTextIndices_.size()
+            && std::find(selectedTextIndices_[pageIndex].begin(), selectedTextIndices_[pageIndex].end(), textIndex) != selectedTextIndices_[pageIndex].end();
     }
 
     return false;
@@ -7591,6 +8607,12 @@ void App::BuildInteractionPageSnapshot(const PageView& pageView) {
         imageGraphics.DrawImage(&bitmap, -drawWidth * 0.5f, -drawHeight * 0.5f, drawWidth, drawHeight);
     }
     imageGraphics.ResetTransform();
+    for (std::size_t textIndex = 0; textIndex < page.texts.size(); ++textIndex) {
+        if (ShouldSkipTextInInteractionSnapshot(pageView.pageIndex, textIndex) || IsEditingText(pageView.pageIndex, textIndex)) {
+            continue;
+        }
+        PaintText(cacheDc, page.texts[textIndex], cacheView);
+    }
     for (std::size_t strokeIndex = 0; strokeIndex < page.strokes.size(); ++strokeIndex) {
         if (ShouldSkipStrokeInInteractionSnapshot(pageView.pageIndex, strokeIndex)) {
             continue;
@@ -7608,6 +8630,7 @@ void App::BuildInteractionPageSnapshot(const PageView& pageView) {
     cache.pageIndex = pageView.pageIndex;
     cache.strokeCount = page.strokes.size();
     cache.imageCount = page.images.size();
+    cache.textCount = page.texts.size();
     cache.rasterWidth = page.raster.width;
     cache.rasterHeight = page.raster.height;
     cache.rasterScale = page.raster.scale;
@@ -7672,6 +8695,18 @@ std::optional<RECT> App::InteractionPreviewBoundsForPage(std::size_t pageIndex) 
         }
     }
 
+    if (pageIndex < interactionPreviewTexts_.size()) {
+        for (const InteractionPreviewText& entry : interactionPreviewTexts_[pageIndex]) {
+            const auto rect = PageTextBoundsRect(entry.text, pageView.scale, 8);
+            if (!rect.has_value()) {
+                continue;
+            }
+            RECT windowRect = *rect;
+            OffsetRect(&windowRect, pageView.rect.left, pageView.rect.top);
+            includeRect(windowRect);
+        }
+    }
+
     return hasBounds ? std::optional<RECT>(bounds) : std::nullopt;
 }
 
@@ -7705,6 +8740,7 @@ void App::RebuildMoveSelectionPreview(POINT cursor) {
         previousBounds[pageIndex] = InteractionPreviewBoundsForPage(pageIndex);
     }
     interactionPreviewStrokes_.assign(document_.PageCount(), {});
+    interactionPreviewTexts_.assign(document_.PageCount(), {});
     interactionPreviewImages_.assign(document_.PageCount(), {});
 
     RECT clientRect {};
@@ -7780,6 +8816,32 @@ void App::RebuildMoveSelectionPreview(POINT cursor) {
             }
         }
 
+        if (pageIndex < selectedTextIndices_.size()) {
+            for (std::size_t textIndex : selectedTextIndices_[pageIndex]) {
+                if (textIndex >= page.texts.size()) {
+                    continue;
+                }
+                const PageText& originalText = page.texts[textIndex];
+                const PageTextBounds bounds = MeasurePageTextBounds(originalText);
+                const POINT centerPoint {
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.left) + (((bounds.left + bounds.right) * 0.5f) * sourceView.scale) + static_cast<float>(deltaX))),
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.top) + (((bounds.top + bounds.bottom) * 0.5f) * sourceView.scale) + static_cast<float>(deltaY))),
+                };
+                const std::size_t targetPageIndex = targetPageForScreenPoint(centerPoint, pageIndex);
+                const PageView& targetView = pageViews[targetPageIndex];
+
+                InteractionPreviewText preview {};
+                preview.sourcePageIndex = pageIndex;
+                preview.sourceIndex = textIndex;
+                preview.text = originalText;
+                const float screenX = static_cast<float>(sourceView.rect.left) + (originalText.x * sourceView.scale) + static_cast<float>(deltaX);
+                const float screenY = static_cast<float>(sourceView.rect.top) + (originalText.y * sourceView.scale) + static_cast<float>(deltaY);
+                preview.text.x = (screenX - static_cast<float>(targetView.rect.left)) / std::max(0.1f, targetView.scale);
+                preview.text.y = (screenY - static_cast<float>(targetView.rect.top)) / std::max(0.1f, targetView.scale);
+                interactionPreviewTexts_[targetPageIndex].push_back(std::move(preview));
+            }
+        }
+
         if (pageIndex < selectedImageIndices_.size()) {
             for (std::size_t imageIndex : selectedImageIndices_[pageIndex]) {
                 if (imageIndex >= page.images.size()) {
@@ -7839,6 +8901,17 @@ void App::CommitMoveSelectionPreview() {
                 }
             }
         }
+        if (pageIndex < selectedTextIndices_.size()) {
+            auto textIndices = selectedTextIndices_[pageIndex];
+            std::sort(textIndices.rbegin(), textIndices.rend());
+            auto& texts = document_.PageAt(pageIndex).texts;
+            for (std::size_t textIndex : textIndices) {
+                if (textIndex < texts.size()) {
+                    texts.erase(texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
+                    affectedPages[pageIndex] = true;
+                }
+            }
+        }
     }
 
     ClearSelection();
@@ -7852,6 +8925,11 @@ void App::CommitMoveSelectionPreview() {
         for (const InteractionPreviewImage& preview : interactionPreviewImages_[pageIndex]) {
             page.images.push_back(preview.image);
             selectedImageIndices_[pageIndex].push_back(page.images.size() - 1U);
+            affectedPages[pageIndex] = true;
+        }
+        for (const InteractionPreviewText& preview : interactionPreviewTexts_[pageIndex]) {
+            page.texts.push_back(preview.text);
+            selectedTextIndices_[pageIndex].push_back(page.texts.size() - 1U);
             affectedPages[pageIndex] = true;
         }
     }
@@ -8458,6 +9536,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     const Page& page = document_.PageAt(pageView.pageIndex);
     const bool pageHasInteractionPreview = interactionPreviewMode_ != InteractionPreviewMode::None
         && ((pageView.pageIndex < interactionPreviewStrokes_.size() && !interactionPreviewStrokes_[pageView.pageIndex].empty())
+            || (pageView.pageIndex < interactionPreviewTexts_.size() && !interactionPreviewTexts_[pageView.pageIndex].empty())
             || (pageView.pageIndex < interactionPreviewImages_.size() && !interactionPreviewImages_[pageView.pageIndex].empty())
             || interactionSnapshot != nullptr);
     bool showSelectToolSelectionAffordances = false;
@@ -8468,6 +9547,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         showSelectToolSelectionAffordances = CursorInteractsWithSelection(cursor);
     }
     const auto singleImage = SingleSelectedImage();
+    const auto singleText = SingleSelectedText();
     const auto singleStrokePage = SingleSelectedStrokePage();
     for (std::size_t imageIndex = 0; !pageHasInteractionPreview && imageIndex < page.images.size(); ++imageIndex) {
         if (!IsImageSelected(pageView.pageIndex, imageIndex)) {
@@ -8542,6 +9622,43 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
             SelectObject(hdc, oldStemPen);
             DeleteObject(stemPen);
             paintHandle(static_cast<int>(std::lround(rotateScreenPoint.x)), static_cast<int>(std::lround(rotateScreenPoint.y)));
+        }
+    }
+
+    for (std::size_t textIndex = 0; !pageHasInteractionPreview && textIndex < page.texts.size(); ++textIndex) {
+        if (!IsTextSelected(pageView.pageIndex, textIndex) || IsEditingText(pageView.pageIndex, textIndex)) {
+            continue;
+        }
+        if (const auto textRect = PageTextBoundsRect(page.texts[textIndex], pageView.scale, 4); textRect.has_value()) {
+            RECT screenRect = *textRect;
+            OffsetRect(&screenRect, pageView.rect.left, pageView.rect.top);
+            DrawRectangleAA(hdc, screenRect, RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
+
+            if (singleText.has_value() && singleText->first == pageView.pageIndex && singleText->second == textIndex
+                && (activeTool_ == Tool::Move || isTransformingText_
+                    || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances))) {
+                const int handleHalf = 4;
+                const auto paintHandle = [&](int centerX, int centerY) {
+                    RECT handleRect = MakeRect(centerX - handleHalf, centerY - handleHalf, centerX + handleHalf + 1, centerY + handleHalf + 1);
+                    FillRoundedRect(hdc, handleRect, RGB(242, 247, 252));
+                    StrokeRoundedRect(hdc, handleRect, RGB(83, 112, 145), 1);
+                };
+
+                const int left = screenRect.left;
+                const int top = screenRect.top;
+                const int right = screenRect.right;
+                const int bottom = screenRect.bottom;
+                const int centerX = (left + right) / 2;
+                const int centerY = (top + bottom) / 2;
+                paintHandle(left, top);
+                paintHandle(centerX, top);
+                paintHandle(right, top);
+                paintHandle(right, centerY);
+                paintHandle(right, bottom);
+                paintHandle(centerX, bottom);
+                paintHandle(left, bottom);
+                paintHandle(left, centerY);
+            }
         }
     }
 
@@ -8702,6 +9819,38 @@ void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, b
     DeleteObject(pen);
 }
 
+void App::PaintText(HDC hdc, const PageText& text, const PageView& pageView) const {
+    const int fontHeight = PageTextFontPixelHeight(text, pageView.scale);
+    HFONT font = CreateFontW(
+        -fontHeight,
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        VARIABLE_PITCH,
+        L"Segoe UI");
+    HGDIOBJ previousFont = font != nullptr ? SelectObject(hdc, font) : nullptr;
+    const int left = pageView.rect.left + static_cast<int>(std::lround(text.x * pageView.scale));
+    const int top = pageView.rect.top + static_cast<int>(std::lround(text.y * pageView.scale));
+    RECT textRect = MakeRect(left, top, left + 32767, top + fontHeight + 12);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, ToColorRef(text.color));
+    DrawTextW(hdc, text.content.c_str(), -1, &textRect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOCLIP);
+    if (previousFont != nullptr) {
+        SelectObject(hdc, previousFont);
+    }
+    if (font != nullptr) {
+        DeleteObject(font);
+    }
+}
+
 LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_NCACTIVATE:
@@ -8777,6 +9926,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_LBUTTONDOWN: {
         SetFocus(window_);
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        CommitTextEdit();
         if (HandlePaletteClick(cursor)) {
             return 0;
         }
@@ -8810,6 +9960,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 }
                 BeginSelection(cursor);
             }
+        } else if (activeTool_ == Tool::Text) {
+            BeginTextToolInteraction(cursor);
         } else if (activeTool_ == Tool::Erase) {
             BeginErase(cursor);
         } else {
@@ -8895,6 +10047,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             ExtendSelection(cursor);
         } else if (isTransformingStroke_) {
             UpdateStrokeTransform(cursor);
+        } else if (isTransformingText_) {
+            UpdateTextTransform(cursor);
         } else if (isTransformingImage_) {
             UpdateImageTransform(cursor);
         } else if (isPanning_ || (wParam & MK_MBUTTON) != 0) {
@@ -8928,10 +10082,23 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             EndStroke();
         } else if (isTransformingStroke_) {
             EndStrokeTransform();
+        } else if (isTransformingText_) {
+            EndTextTransform();
         } else if (isTransformingImage_) {
             EndImageTransform();
         } else if (isMovingSelection_) {
             EndMoveSelection();
+        } else if (pendingTextEditClick_) {
+            const std::optional<std::size_t> pageIndex = pendingTextEditPageIndex_;
+            const std::optional<std::size_t> textIndex = pendingTextEditIndex_;
+            pendingTextEditClick_ = false;
+            pendingTextEditPageIndex_.reset();
+            pendingTextEditIndex_.reset();
+            UpdateCaptureState();
+            if (pageIndex.has_value() && textIndex.has_value() && *pageIndex < document_.PageCount()
+                && *textIndex < document_.PageAt(*pageIndex).texts.size()) {
+                BeginTextEdit(*pageIndex, *textIndex, document_.PageAt(*pageIndex));
+            }
         } else if (isSelecting_) {
             EndSelection();
         } else if (isErasing_) {
@@ -9066,6 +10233,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
             } else if (isTransformingStroke_) {
                 SetCursor(LoadCursorW(nullptr, cursorForHandle(strokeTransformHandle_)));
+            } else if (isTransformingText_) {
+                SetCursor(LoadCursorW(nullptr, cursorForHandle(textTransformHandle_)));
             } else if (isTransformingImage_) {
                 SetCursor(LoadCursorW(nullptr, cursorForHandle(imageTransformHandle_)));
             } else if (isMovingSelection_) {
@@ -9073,6 +10242,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             } else if (activeTool_ == Tool::Move) {
                 if (const auto strokeHandle = HitTestSelectedStrokeHandle(cursor); strokeHandle.has_value()) {
                     SetCursor(LoadCursorW(nullptr, cursorForHandle(*strokeHandle)));
+                } else if (const auto textHandle = HitTestSelectedTextHandle(cursor); textHandle.has_value()) {
+                    SetCursor(LoadCursorW(nullptr, cursorForHandle(*textHandle)));
                 } else if (const auto imageHandle = HitTestSelectedImageHandle(cursor); imageHandle.has_value()) {
                     SetCursor(LoadCursorW(nullptr, cursorForHandle(*imageHandle)));
                 } else if (CursorHitsSelectedContent(cursor)) {
@@ -9083,6 +10254,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             } else if (activeTool_ == Tool::Select) {
                 if (const auto strokeHandle = HitTestSelectedStrokeHandle(cursor); strokeHandle.has_value()) {
                     SetCursor(LoadCursorW(nullptr, cursorForHandle(*strokeHandle)));
+                } else if (const auto textHandle = HitTestSelectedTextHandle(cursor); textHandle.has_value()) {
+                    SetCursor(LoadCursorW(nullptr, cursorForHandle(*textHandle)));
                 } else if (const auto imageHandle = HitTestSelectedImageHandle(cursor); imageHandle.has_value()) {
                     SetCursor(LoadCursorW(nullptr, cursorForHandle(*imageHandle)));
                 } else if (CursorHitsSelectedContent(cursor)) {
@@ -9090,6 +10263,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 } else {
                     SetCursor(LoadCursorW(nullptr, IDC_CROSS));
                 }
+            } else if (activeTool_ == Tool::Text) {
+                SetCursor(LoadCursorW(nullptr, HitTestText(cursor).has_value() ? IDC_IBEAM : IDC_CROSS));
             } else if (activeTool_ == Tool::Erase) {
                 SetCursor(eraserCursor_ != nullptr ? eraserCursor_ : LoadCursorW(nullptr, IDC_CROSS));
             } else {
@@ -9382,6 +10557,78 @@ LRESULT CALLBACK App::WindowProc(HWND window, UINT message, WPARAM wParam, LPARA
     }
 
     return DefWindowProcW(window, message, wParam, lParam);
+}
+
+LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    App* app = reinterpret_cast<App*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (app == nullptr || app->textEditOriginalProc_ == nullptr) {
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+
+    switch (message) {
+    case WM_GETDLGCODE:
+        return DLGC_WANTALLKEYS;
+    case WM_KEYDOWN: {
+        const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        if (wParam == VK_RETURN) {
+            app->CommitTextEdit();
+            SetFocus(app->window_);
+            return 0;
+        }
+        if (wParam == VK_ESCAPE) {
+            app->CancelTextEdit();
+            SetFocus(app->window_);
+            return 0;
+        }
+        if (ctrlPressed && wParam == 'A') {
+            SendMessageW(window, EM_SETSEL, 0, -1);
+            return 0;
+        }
+        if (ctrlPressed && wParam == VK_BACK) {
+            DWORD selection = static_cast<DWORD>(SendMessageW(window, EM_GETSEL, 0, 0));
+            const int selectionStart = static_cast<int>(LOWORD(selection));
+            const int selectionEnd = static_cast<int>(HIWORD(selection));
+            const int textLength = GetWindowTextLengthW(window);
+            std::vector<wchar_t> buffer(static_cast<std::size_t>(textLength) + 1U, L'\0');
+            GetWindowTextW(window, buffer.data(), textLength + 1);
+            std::wstring text(buffer.data(), static_cast<std::size_t>(textLength));
+
+            int eraseStart = selectionStart;
+            int eraseEnd = selectionEnd;
+            if (eraseStart == eraseEnd) {
+                eraseEnd = eraseStart;
+                while (eraseStart > 0 && std::iswspace(text[static_cast<std::size_t>(eraseStart - 1)])) {
+                    --eraseStart;
+                }
+                while (eraseStart > 0 && !std::iswspace(text[static_cast<std::size_t>(eraseStart - 1)])) {
+                    --eraseStart;
+                }
+            }
+
+            if (eraseStart < eraseEnd) {
+                text.erase(static_cast<std::size_t>(eraseStart), static_cast<std::size_t>(eraseEnd - eraseStart));
+                SetWindowTextW(window, text.c_str());
+                SendMessageW(window, EM_SETSEL, eraseStart, eraseStart);
+                app->RefreshTextEditControl();
+            }
+            return 0;
+        }
+        break;
+    }
+    case WM_CHAR:
+        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 && (wParam < 32 || wParam == 127)) {
+            return 0;
+        }
+        break;
+    default:
+        break;
+    }
+
+    const LRESULT result = CallWindowProcW(app->textEditOriginalProc_, window, message, wParam, lParam);
+    if (message == WM_CHAR || message == WM_PASTE || message == WM_CUT || message == WM_CLEAR) {
+        app->RefreshTextEditControl();
+    }
+    return result;
 }
 
 }  // namespace cnote

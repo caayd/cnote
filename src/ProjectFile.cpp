@@ -16,7 +16,7 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 4;
+constexpr std::uint32_t kProjectVersion = 5;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
 
@@ -215,6 +215,22 @@ bool ReadImage(ByteReader& reader, PageImage& image) {
     return reader.ReadBlob(image.pixels);
 }
 
+void AppendText(std::vector<std::uint8_t>& output, const PageText& text) {
+    AppendValue(output, text.x);
+    AppendValue(output, text.y);
+    AppendValue(output, text.fontSize);
+    AppendValue(output, text.color);
+    AppendString(output, text.content);
+}
+
+bool ReadText(ByteReader& reader, PageText& text) {
+    return reader.Read(text.x)
+        && reader.Read(text.y)
+        && reader.Read(text.fontSize)
+        && reader.Read(text.color)
+        && reader.ReadString(text.content);
+}
+
 void AppendRaster(std::vector<std::uint8_t>& output, const RasterImage& raster) {
     AppendValue(output, raster.width);
     AppendValue(output, raster.height);
@@ -330,6 +346,7 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
         Page page {};
         std::uint32_t pageFlags = 0;
         std::uint32_t strokeCount = 0;
+        std::uint32_t textCount = 0;
         std::uint32_t imageCount = 0;
         if (!reader.Read(page.width) || !reader.Read(page.height)) {
             return std::nullopt;
@@ -355,7 +372,15 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
                 return std::nullopt;
             }
         }
-        if (!reader.Read(strokeCount) || !reader.Read(imageCount)) {
+        if (!reader.Read(strokeCount)) {
+            return std::nullopt;
+        }
+        if (version >= 5U) {
+            if (!reader.Read(textCount)) {
+                return std::nullopt;
+            }
+        }
+        if (!reader.Read(imageCount)) {
             return std::nullopt;
         }
 
@@ -366,6 +391,15 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
                 return std::nullopt;
             }
             page.strokes.push_back(std::move(stroke));
+        }
+
+        page.texts.reserve(textCount);
+        for (std::uint32_t textIndex = 0; textIndex < textCount; ++textIndex) {
+            PageText text {};
+            if (!ReadText(reader, text)) {
+                return std::nullopt;
+            }
+            page.texts.push_back(std::move(text));
         }
 
         page.images.reserve(imageCount);
@@ -446,6 +480,7 @@ bool ProjectFile::Save(const Document& document, const std::wstring& filePath) {
         const Page& page = document.PageAt(pageIndex);
         const std::uint32_t pageFlags = (page.sourcePdfSourceIndex < 0 && !page.raster.pixels.empty()) ? kPageFlagHasRaster : 0U;
         const auto strokeCount = static_cast<std::uint32_t>(page.strokes.size());
+        const auto textCount = static_cast<std::uint32_t>(page.texts.size());
         const auto imageCount = static_cast<std::uint32_t>(page.images.size());
         AppendValue(bytes, page.width);
         AppendValue(bytes, page.height);
@@ -456,9 +491,13 @@ bool ProjectFile::Save(const Document& document, const std::wstring& filePath) {
             AppendRaster(bytes, page.raster);
         }
         AppendValue(bytes, strokeCount);
+        AppendValue(bytes, textCount);
         AppendValue(bytes, imageCount);
         for (const Stroke& stroke : page.strokes) {
             AppendStroke(bytes, stroke);
+        }
+        for (const PageText& text : page.texts) {
+            AppendText(bytes, text);
         }
         for (const PageImage& image : page.images) {
             AppendImage(bytes, image);

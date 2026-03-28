@@ -34,6 +34,14 @@ struct PageImage {
     std::vector<std::uint8_t> pixels;
 };
 
+struct PageText {
+    float x = 0.0f;
+    float y = 0.0f;
+    float fontSize = 24.0f;
+    std::uint32_t color = 0xFF111827;
+    std::wstring content {};
+};
+
 struct RasterImage {
     int width = 0;
     int height = 0;
@@ -49,6 +57,7 @@ struct Page {
     std::int32_t sourcePdfPageIndex = -1;
     RasterImage raster {};
     std::vector<PageImage> images;
+    std::vector<PageText> texts;
     std::vector<Stroke> strokes;
 };
 

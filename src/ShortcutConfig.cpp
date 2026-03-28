@@ -7,10 +7,11 @@ namespace cnote {
 
 namespace {
 
-constexpr std::array<ShortcutDefinition, 26> kShortcutDefinitions {{
+constexpr std::array<ShortcutDefinition, 27> kShortcutDefinitions {{
     { App::ShortcutAction::ToolDraw, L"Draw Tool", { 'D', false, false, false } },
     { App::ShortcutAction::ToolSelect, L"Select Tool", { 'S', false, false, false } },
     { App::ShortcutAction::ToolMove, L"Move Tool", { 'M', false, false, false } },
+    { App::ShortcutAction::ToolText, L"Text Tool", { 'T', false, false, false } },
     { App::ShortcutAction::ToolPan, L"Pan Tool", { 'H', false, false, false } },
     { App::ShortcutAction::ToolErase, L"Erase Tool", { 'E', false, false, false } },
     { App::ShortcutAction::New, L"New", { 'N', true, false, false } },
@@ -59,6 +60,8 @@ const char* ShortcutActionConfigName(App::ShortcutAction action) {
         return "ToolSelect";
     case App::ShortcutAction::ToolMove:
         return "ToolMove";
+    case App::ShortcutAction::ToolText:
+        return "ToolText";
     case App::ShortcutAction::ToolPan:
         return "ToolPan";
     case App::ShortcutAction::ToolErase:
