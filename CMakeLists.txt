@@ -21,6 +21,7 @@ add_executable(cnote WIN32
     src/ProjectFile.cpp
     src/SettingsWindow.cpp
     src/ShortcutConfig.cpp
+    src/UiUtil.cpp
     src/main.cpp
 )
 

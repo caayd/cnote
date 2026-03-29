@@ -24,10 +24,16 @@
 #include "NewPageSettingsWindow.h"
 #include "SettingsWindow.h"
 #include "ShortcutConfig.h"
+#include "UiUtil.h"
 
 namespace cnote {
 
+namespace ui = cnote::ui;
+
 namespace {
+
+using ui::FillRoundedRect;
+using ui::StrokeRoundedRect;
 
 constexpr wchar_t kWindowClassName[] = L"CnoteWindow";
 constexpr wchar_t kWindowTitle[] = L"cnote";
@@ -1843,43 +1849,62 @@ int ToolbarBrushThumbCenterX(const RECT& sliderRect, float brushSize) {
     return sliderRect.left + static_cast<int>(std::lround(normalized * static_cast<float>(width - 1)));
 }
 
-std::unique_ptr<Gdiplus::GraphicsPath> CreateRoundedRectPath(const RECT& rect, float radius) {
-    const float left = static_cast<float>(rect.left);
-    const float top = static_cast<float>(rect.top);
-    const float width = static_cast<float>(rect.right - rect.left);
-    const float height = static_cast<float>(rect.bottom - rect.top);
-    const float diameter = std::min(radius * 2.0f, std::min(width, height));
+void PaintRoundedPanel(HDC hdc, const RECT& rect, COLORREF fill, COLORREF border, int borderWidth = 1) {
+    ui::FillRoundedRect(hdc, rect, fill);
+    ui::StrokeRoundedRect(hdc, rect, border, borderWidth);
+}
 
-    auto path = std::make_unique<Gdiplus::GraphicsPath>();
-    if (diameter <= 0.0f) {
-        path->AddRectangle(Gdiplus::RectF(left, top, width, height));
-        return path;
+void PaintSvgOrFallbackLabel(HDC hdc, RECT rect, const wchar_t* svgFileName, const wchar_t* fallbackLabel, COLORREF color, HFONT fallbackFont) {
+    if (const SvgIconData* icon = ToolbarSvgIcon(svgFileName); icon != nullptr) {
+        PaintSvgIcon(hdc, rect, *icon, color);
+        return;
     }
 
-    path->AddArc(left, top, diameter, diameter, 180.0f, 90.0f);
-    path->AddArc(left + width - diameter, top, diameter, diameter, 270.0f, 90.0f);
-    path->AddArc(left + width - diameter, top + height - diameter, diameter, diameter, 0.0f, 90.0f);
-    path->AddArc(left, top + height - diameter, diameter, diameter, 90.0f, 90.0f);
-    path->CloseFigure();
-    return path;
+    SetTextColor(hdc, color);
+    HGDIOBJ previousFont = nullptr;
+    if (fallbackFont != nullptr) {
+        previousFont = SelectObject(hdc, fallbackFont);
+    }
+    DrawTextW(hdc, fallbackLabel, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    if (previousFont != nullptr) {
+        SelectObject(hdc, previousFont);
+    }
 }
 
-void FillRoundedRect(HDC hdc, RECT rect, COLORREF color) {
-    Gdiplus::Graphics graphics(hdc);
-    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-    Gdiplus::SolidBrush brush(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)));
-    const auto path = CreateRoundedRectPath(rect, 6.0f);
-    graphics.FillPath(&brush, path.get());
+void PaintRoundedSvgButton(
+    HDC hdc,
+    const RECT& rect,
+    COLORREF fill,
+    COLORREF border,
+    COLORREF contentColor,
+    const wchar_t* svgFileName,
+    const wchar_t* fallbackLabel,
+    HFONT fallbackFont,
+    UINT dpi,
+    int iconInsetDips = 0) {
+    PaintRoundedPanel(hdc, rect, fill, border);
+    RECT contentRect = rect;
+    if (iconInsetDips > 0) {
+        const int inset = ScaleForDpi(iconInsetDips, dpi);
+        InflateRect(&contentRect, -inset, -inset);
+    }
+    PaintSvgOrFallbackLabel(hdc, contentRect, svgFileName, fallbackLabel, contentColor, fallbackFont);
 }
 
-void StrokeRoundedRect(HDC hdc, RECT rect, COLORREF color, int width) {
-    Gdiplus::Graphics graphics(hdc);
-    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)), static_cast<Gdiplus::REAL>(width));
-    const auto path = CreateRoundedRectPath(rect, 6.0f);
-    graphics.DrawPath(&pen, path.get());
+void PaintVerticalCaret(HDC hdc, int x, int top, int bottom, COLORREF color) {
+    HPEN caretPen = CreatePen(PS_SOLID, 1, color);
+    HGDIOBJ oldCaretPen = SelectObject(hdc, caretPen);
+    MoveToEx(hdc, x, top, nullptr);
+    LineTo(hdc, x, bottom);
+    SelectObject(hdc, oldCaretPen);
+    DeleteObject(caretPen);
+}
+
+void PaintSelectionHandle(HDC hdc, int centerX, int centerY) {
+    constexpr int handleHalf = 4;
+    const RECT handleRect = MakeRect(centerX - handleHalf, centerY - handleHalf, centerX + handleHalf + 1, centerY + handleHalf + 1);
+    ui::FillRoundedRect(hdc, handleRect, RGB(242, 247, 252));
+    ui::StrokeRoundedRect(hdc, handleRect, RGB(83, 112, 145), 1);
 }
 
 void DrawPolylineAA(HDC hdc, const POINT* points, int count, COLORREF color, float width, Gdiplus::DashStyle dashStyle = Gdiplus::DashStyleSolid) {
@@ -8361,14 +8386,7 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
 
     const auto paintSvgActionButton = [&](RECT rect, const wchar_t* svgFileName, const wchar_t* label, bool enabled) {
         const COLORREF iconColor = enabled ? primaryText : RGB(102, 111, 124);
-        if (const SvgIconData* icon = ToolbarSvgIcon(svgFileName); icon != nullptr) {
-            PaintSvgIcon(hdc, rect, *icon, iconColor);
-        } else {
-            SetTextColor(hdc, iconColor);
-            SelectObject(hdc, bodyFont);
-            RECT labelRect = rect;
-            DrawTextW(hdc, label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
+        PaintSvgOrFallbackLabel(hdc, rect, svgFileName, label, iconColor, bodyFont);
     };
 
     const auto paintWindowButton = [&](RECT rect, int kind, bool hovered) {
@@ -8488,12 +8506,7 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
             SIZE textSize {};
             if (GetTextExtentPoint32W(hdc, zoomLabel.c_str(), static_cast<int>(zoomLabel.size()), &textSize) != 0) {
                 const int caretX = std::min(static_cast<int>(zoomEntryRect.right) - 1, static_cast<int>(zoomEntryRect.left) + static_cast<int>(textSize.cx) + 1);
-                HPEN caretPen = CreatePen(PS_SOLID, 1, RGB(244, 247, 252));
-                HGDIOBJ oldCaretPen = SelectObject(hdc, caretPen);
-                MoveToEx(hdc, caretX, zoomVisualRect.top + 4, nullptr);
-                LineTo(hdc, caretX, zoomVisualRect.bottom - 4);
-                SelectObject(hdc, oldCaretPen);
-                DeleteObject(caretPen);
+                PaintVerticalCaret(hdc, caretX, zoomVisualRect.top + 4, zoomVisualRect.bottom - 4, RGB(244, 247, 252));
             }
         } else {
             RECT zoomTextRect = titleLayout.zoomTextRect;
@@ -8517,16 +8530,12 @@ void App::PaintPaletteMenu(HDC hdc, RECT clientRect) const {
     const UINT dpi = WindowDpi(window_);
     const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_, dpi);
     const PaletteMenuLayout layout = BuildPaletteMenuLayout(toolbarLayout, palette_.size(), dpi);
-    const COLORREF panelFill = RGB(18, 24, 32);
-    const COLORREF panelBorder = RGB(46, 58, 74);
-
-    FillRoundedRect(hdc, layout.panelRect, panelFill);
-    StrokeRoundedRect(hdc, layout.panelRect, panelBorder, 1);
+    PaintRoundedPanel(hdc, layout.panelRect, ui::kPanelFill, ui::kPanelBorder);
 
     for (std::size_t index = 0; index < layout.swatchRects.size(); ++index) {
         const RECT swatchRect = layout.swatchRects[index];
         FillRoundedRect(hdc, swatchRect, ToColorRef(palette_[index]));
-        StrokeRoundedRect(hdc, swatchRect, index == colorIndex_ ? RGB(244, 247, 252) : panelBorder, index == colorIndex_ ? 2 : 1);
+        StrokeRoundedRect(hdc, swatchRect, index == colorIndex_ ? ui::kSelectionBorder : ui::kPanelBorder, index == colorIndex_ ? 2 : 1);
     }
 }
 
@@ -8648,21 +8657,18 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
     const SidebarMetrics metrics = BuildSidebarMetrics(dpi);
 
     const auto paintIconActionButton = [&](RECT rect, const wchar_t* svgFileName, const wchar_t* fallbackLabel, bool enabled, bool accentFill) {
-        FillRoundedRect(hdc, rect, accentFill ? RGB(32, 63, 102) : RGB(27, 34, 43));
-        StrokeRoundedRect(hdc, rect, enabled ? panelBorder : RGB(55, 63, 75), 1);
         const COLORREF iconColor = enabled ? primaryText : RGB(102, 111, 124);
-        if (const SvgIconData* icon = ToolbarSvgIcon(svgFileName); icon != nullptr) {
-            RECT iconRect = MakeRect(
-                rect.left + ScaleForDpi(2, dpi),
-                rect.top + ScaleForDpi(2, dpi),
-                rect.right - ScaleForDpi(2, dpi),
-                rect.bottom - ScaleForDpi(2, dpi));
-            PaintSvgIcon(hdc, iconRect, *icon, iconColor);
-        } else {
-            SetTextColor(hdc, iconColor);
-            RECT labelRect = rect;
-            DrawTextW(hdc, fallbackLabel, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
+        PaintRoundedSvgButton(
+            hdc,
+            rect,
+            accentFill ? RGB(32, 63, 102) : RGB(27, 34, 43),
+            enabled ? panelBorder : RGB(55, 63, 75),
+            iconColor,
+            svgFileName,
+            fallbackLabel,
+            labelFont,
+            dpi,
+            2);
     };
     paintIconActionButton(headerLayout.addPageRect, L"new-page.svg", L"+", true, true);
     paintIconActionButton(headerLayout.newPageSettingsRect, L"settings.svg", L"...", true, false);
@@ -8867,15 +8873,9 @@ void App::PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSe
             if ((interactionPreviewMode_ == InteractionPreviewMode::ImageTransform || interactionPreviewMode_ == InteractionPreviewMode::MoveSelection)
                 && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingImage_
                     || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances))) {
-                const int handleHalf = 4;
-                const auto paintHandle = [&](int centerXInt, int centerYInt) {
-                    RECT handleRect = MakeRect(centerXInt - handleHalf, centerYInt - handleHalf, centerXInt + handleHalf + 1, centerYInt + handleHalf + 1);
-                    FillRoundedRect(hdc, handleRect, RGB(242, 247, 252));
-                    StrokeRoundedRect(hdc, handleRect, RGB(83, 112, 145), 1);
-                };
                 for (std::size_t index = 0; index < corners.size(); ++index) {
                     const Vec2 screenPoint = ScreenPointFromPagePoint(corners[index], pageView.rect, pageView.scale);
-                    paintHandle(static_cast<int>(std::lround(screenPoint.x)), static_cast<int>(std::lround(screenPoint.y)));
+                    PaintSelectionHandle(hdc, static_cast<int>(std::lround(screenPoint.x)), static_cast<int>(std::lround(screenPoint.y)));
                 }
             }
         }
@@ -8933,13 +8933,10 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
     const UINT dpi = WindowDpi(window_);
     const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_, dpi);
     const Tool popupTool = *quickSizePopupTool_;
-    const COLORREF panelFill = RGB(18, 24, 32);
-    const COLORREF panelBorder = RGB(46, 58, 74);
     const COLORREF primaryText = RGB(236, 240, 245);
-    const COLORREF accent = RGB(92, 137, 187);
+    const COLORREF accent = ui::kAccent;
 
-    FillRoundedRect(hdc, popupLayout.panelRect, panelFill);
-    StrokeRoundedRect(hdc, popupLayout.panelRect, panelBorder, 1);
+    PaintRoundedPanel(hdc, popupLayout.panelRect, ui::kPanelFill, ui::kPanelBorder);
 
     HFONT labelFont = CreateFontW(FontHeightForDpi(13, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
@@ -8964,9 +8961,9 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
         Gdiplus::Pen pen(
             Gdiplus::Color(
                 255,
-                GetRValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : panelBorder),
-                GetGValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : panelBorder),
-                GetBValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : panelBorder)),
+                GetRValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : ui::kPanelBorder),
+                GetGValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : ui::kPanelBorder),
+                GetBValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : ui::kPanelBorder)),
             1.0f);
         graphics.FillEllipse(
             &brush,
@@ -9006,12 +9003,7 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
         SIZE textSize {};
         if (GetTextExtentPoint32W(hdc, brushValue.c_str(), static_cast<int>(brushValue.size()), &textSize) != 0) {
             const int caretX = std::min(brushValueTextRect.right - 1, brushValueTextRect.left + textSize.cx + 1);
-            HPEN caretPen = CreatePen(PS_SOLID, 1, RGB(244, 247, 252));
-            HGDIOBJ oldCaretPen = SelectObject(hdc, caretPen);
-            MoveToEx(hdc, caretX, popupLayout.valueRect.top + 6, nullptr);
-            LineTo(hdc, caretX, popupLayout.valueRect.bottom - 6);
-            SelectObject(hdc, oldCaretPen);
-            DeleteObject(caretPen);
+            PaintVerticalCaret(hdc, caretX, popupLayout.valueRect.top + 6, popupLayout.valueRect.bottom - 6, RGB(244, 247, 252));
         }
     } else {
         DrawTextW(hdc, brushValue.c_str(), -1, &brushValueTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -9038,14 +9030,12 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
     const UINT dpi = WindowDpi(window_);
     const RECT canvasRect = CanvasRect(clientRect);
     const TextFormatPopupLayout layout = BuildTextFormatPopupLayout(canvasRect, textEditBounds_, textFormatFontMenuOpen_, dpi);
-    const COLORREF panelFill = RGB(18, 24, 32);
-    const COLORREF panelBorder = RGB(46, 58, 74);
     const COLORREF buttonFill = RGB(29, 37, 48);
     const COLORREF buttonBorder = RGB(58, 71, 88);
     const COLORREF primaryText = RGB(236, 240, 245);
     const COLORREF mutedText = RGB(177, 188, 202);
     const COLORREF accentFill = RGB(44, 79, 119);
-    const COLORREF accentBorder = RGB(92, 137, 187);
+    const COLORREF accentBorder = ui::kAccent;
     const std::wstring fontSizeLabel = TextFormatFontSizeLabel();
 
     auto fontFamilyLabel = [](TextFontFamily family) -> const wchar_t* {
@@ -9084,8 +9074,7 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
         }
     };
 
-    FillRoundedRect(hdc, layout.panelRect, panelFill);
-    StrokeRoundedRect(hdc, layout.panelRect, panelBorder, 1);
+    PaintRoundedPanel(hdc, layout.panelRect, ui::kPanelFill, ui::kPanelBorder);
 
     HFONT bodyFont = CreateFontW(FontHeightForDpi(13, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
@@ -9093,17 +9082,8 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
     SetBkMode(hdc, TRANSPARENT);
 
     const auto drawButton = [&](const RECT& rect, const wchar_t* iconFileName, const wchar_t* fallbackLabel, bool active) {
-        FillRoundedRect(hdc, rect, active ? accentFill : buttonFill);
-        StrokeRoundedRect(hdc, rect, active ? accentBorder : buttonBorder, 1);
         const COLORREF iconColor = active ? primaryText : mutedText;
-        if (const SvgIconData* icon = ToolbarSvgIcon(iconFileName); icon != nullptr) {
-            PaintSvgIcon(hdc, rect, *icon, iconColor);
-            return;
-        }
-
-        SetTextColor(hdc, iconColor);
-        RECT textRect = rect;
-        DrawTextW(hdc, fallbackLabel, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        PaintRoundedSvgButton(hdc, rect, active ? accentFill : buttonFill, active ? accentBorder : buttonBorder, iconColor, iconFileName, fallbackLabel, bodyFont, dpi);
     };
 
     drawButton(layout.alignCycleRect, alignmentIconFileName(text.alignment), alignmentFallbackLabel(text.alignment), true);
@@ -9136,8 +9116,7 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
     DrawTextW(hdc, fontFamilyLabel(text.fontFamily), -1, &dropdownTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
     if (textFormatFontMenuOpen_ && HasRect(layout.fontMenuRect)) {
-        FillRoundedRect(hdc, layout.fontMenuRect, panelFill);
-        StrokeRoundedRect(hdc, layout.fontMenuRect, panelBorder, 1);
+        PaintRoundedPanel(hdc, layout.fontMenuRect, ui::kPanelFill, ui::kPanelBorder);
         for (std::size_t index = 0; index < layout.fontOptionRects.size(); ++index) {
             TextFontFamily optionFamily = TextFontFamily::Sans;
             switch (index) {
@@ -9153,7 +9132,7 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
             }
 
             const bool active = text.fontFamily == optionFamily;
-            FillRoundedRect(hdc, layout.fontOptionRects[index], active ? accentFill : panelFill);
+            FillRoundedRect(hdc, layout.fontOptionRects[index], active ? accentFill : ui::kPanelFill);
             SetTextColor(hdc, active ? primaryText : mutedText);
             RECT optionTextRect = layout.fontOptionRects[index];
             optionTextRect.left += ScaleForDpi(8, dpi);
@@ -10776,11 +10755,8 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         if (singleImage.has_value() && singleImage->first == pageView.pageIndex && singleImage->second == imageIndex
             && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingImage_
                 || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances))) {
-            const int handleHalf = 4;
             const auto paintHandle = [&](int centerX, int centerY) {
-                RECT handleRect = MakeRect(centerX - handleHalf, centerY - handleHalf, centerX + handleHalf + 1, centerY + handleHalf + 1);
-                FillRoundedRect(hdc, handleRect, RGB(242, 247, 252));
-                StrokeRoundedRect(hdc, handleRect, RGB(83, 112, 145), 1);
+                PaintSelectionHandle(hdc, centerX, centerY);
             };
 
             const Vec2 topMid {
@@ -10872,11 +10848,8 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
                 && !IsEditingText(pageView.pageIndex, textIndex)
                 && (activeTool_ == Tool::Move || isTransformingText_
                     || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances))) {
-                const int handleHalf = 4;
                 const auto paintHandle = [&](int centerX, int centerY) {
-                    RECT handleRect = MakeRect(centerX - handleHalf, centerY - handleHalf, centerX + handleHalf + 1, centerY + handleHalf + 1);
-                    FillRoundedRect(hdc, handleRect, RGB(242, 247, 252));
-                    StrokeRoundedRect(hdc, handleRect, RGB(83, 112, 145), 1);
+                    PaintSelectionHandle(hdc, centerX, centerY);
                 };
 
                 const int left = screenRect.left;
@@ -10934,11 +10907,8 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         const int bottom = pageView.rect.top + static_cast<int>(std::lround(maxY * pageView.scale));
         DrawRectangleAA(hdc, MakeRect(left, top, right, bottom), RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
 
-        const int handleHalf = 4;
         const auto paintHandle = [&](int centerX, int centerY) {
-            RECT handleRect = MakeRect(centerX - handleHalf, centerY - handleHalf, centerX + handleHalf + 1, centerY + handleHalf + 1);
-            FillRoundedRect(hdc, handleRect, RGB(242, 247, 252));
-            StrokeRoundedRect(hdc, handleRect, RGB(83, 112, 145), 1);
+            PaintSelectionHandle(hdc, centerX, centerY);
         };
 
         const int centerX = (left + right) / 2;
