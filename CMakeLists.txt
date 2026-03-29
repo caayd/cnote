@@ -13,6 +13,7 @@ set(PDFIUM_IMPLIB "${PDFIUM_ROOT}/lib/libpdfium.dll.a")
 add_executable(cnote WIN32
     src/App.cpp
     src/AppSettings.cpp
+    src/ui/Layout.cpp
     src/cnote.rc
     src/DpiUtil.cpp
     src/Document.cpp
@@ -21,7 +22,21 @@ add_executable(cnote WIN32
     src/ProjectFile.cpp
     src/SettingsWindow.cpp
     src/ShortcutConfig.cpp
-    src/UiUtil.cpp
+    src/document/Clipboard.cpp
+    src/document/FileIO.cpp
+    src/document/History.cpp
+    src/document/Pages.cpp
+    src/render/Paint.cpp
+    src/render/RenderCache.cpp
+    src/selection/Selection.cpp
+    src/selection/Transforms.cpp
+    src/shell/Startup.cpp
+    src/ui/UiUtil.cpp
+    src/shell/MessageLoop.cpp
+    src/shell/ToolbarState.cpp
+    src/text/TextEditing.cpp
+    src/text/TextGeometry.cpp
+    src/viewport/Viewport.cpp
     src/main.cpp
 )
 

@@ -17,7 +17,7 @@
 #include "DpiUtil.h"
 #include "resource.h"
 #include "ShortcutConfig.h"
-#include "UiUtil.h"
+#include "ui/UiUtil.h"
 
 namespace cnote {
 
