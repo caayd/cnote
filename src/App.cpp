@@ -98,12 +98,11 @@ struct QuickSizePopupLayout {
 
 struct TextFormatPopupLayout {
     RECT panelRect {};
-    RECT alignLeftRect {};
-    RECT alignCenterRect {};
-    RECT alignRightRect {};
+    RECT alignCycleRect {};
     RECT boldRect {};
     RECT italicRect {};
     RECT underlineRect {};
+    RECT textSizeInputRect {};
     RECT fontDropdownRect {};
     RECT fontMenuRect {};
     std::array<RECT, 3> fontOptionRects {};
@@ -808,6 +807,19 @@ float SnapBrushSize(float size) {
 std::wstring FormatBrushSizeValue(float size) {
     wchar_t buffer[32] = {};
     std::swprintf(buffer, std::size(buffer), L"%.2f", SnapBrushSize(size));
+    std::wstring value = buffer;
+    while (!value.empty() && value.back() == L'0') {
+        value.pop_back();
+    }
+    if (!value.empty() && value.back() == L'.') {
+        value.pop_back();
+    }
+    return value;
+}
+
+std::wstring FormatTextFontSizeValue(float size) {
+    wchar_t buffer[32] = {};
+    std::swprintf(buffer, std::size(buffer), L"%.2f", std::max(1.0f, size));
     std::wstring value = buffer;
     while (!value.empty() && value.back() == L'0') {
         value.pop_back();
@@ -1647,10 +1659,11 @@ TextFormatPopupLayout BuildTextFormatPopupLayout(RECT canvasRect, RECT editRect,
     TextFormatPopupLayout layout {};
     const int panelPadding = ScaleForDpi(8, dpi);
     const int buttonSize = ScaleForDpi(28, dpi);
+    const int textSizeInputWidth = ScaleForDpi(58, dpi);
     const int itemGap = ScaleForDpi(6, dpi);
     const int dropdownWidth = ScaleForDpi(118, dpi);
     const int panelHeight = ScaleForDpi(44, dpi);
-    const int panelWidth = (panelPadding * 2) + (buttonSize * 6) + (itemGap * 6) + dropdownWidth;
+    const int panelWidth = (panelPadding * 2) + (buttonSize * 4) + textSizeInputWidth + (itemGap * 5) + dropdownWidth;
     const int panelGap = ScaleForDpi(10, dpi);
     const int canvasPadding = ScaleForDpi(8, dpi);
     int left = editRect.left;
@@ -1674,12 +1687,12 @@ TextFormatPopupLayout BuildTextFormatPopupLayout(RECT canvasRect, RECT editRect,
         itemLeft = rect.right + itemGap;
     };
 
-    advanceButton(layout.alignLeftRect);
-    advanceButton(layout.alignCenterRect);
-    advanceButton(layout.alignRightRect);
+    advanceButton(layout.alignCycleRect);
     advanceButton(layout.boldRect);
     advanceButton(layout.italicRect);
     advanceButton(layout.underlineRect);
+    layout.textSizeInputRect = MakeRect(itemLeft, itemTop, itemLeft + textSizeInputWidth, itemTop + buttonSize);
+    itemLeft = layout.textSizeInputRect.right + itemGap;
     layout.fontDropdownRect = MakeRect(itemLeft, itemTop, itemLeft + dropdownWidth, itemTop + buttonSize);
 
     if (fontMenuOpen) {
@@ -4764,6 +4777,7 @@ void App::ToggleTextFormatPopup() {
     if (textFormatPopupOpen_) {
         CancelTextFormatPopup();
     } else {
+        CancelTextFormatSizeInput(false);
         textFormatPopupOpen_ = true;
         textFormatFontMenuOpen_ = false;
         RefreshTextEditControl();
@@ -4772,8 +4786,65 @@ void App::ToggleTextFormatPopup() {
 }
 
 void App::CancelTextFormatPopup() {
+    CancelTextFormatSizeInput(false);
     textFormatPopupOpen_ = false;
     textFormatFontMenuOpen_ = false;
+}
+
+std::wstring App::TextFormatFontSizeLabel() const {
+    if (textFormatSizeEditing_) {
+        return textFormatSizeText_.empty() ? L"" : textFormatSizeText_;
+    }
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+        return L"";
+    }
+    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    if (*editingTextIndex_ >= page.texts.size()) {
+        return L"";
+    }
+    return FormatTextFontSizeValue(page.texts[*editingTextIndex_].fontSize);
+}
+
+void App::CancelTextFormatSizeInput(bool restoreFocus) {
+    textFormatSizeEditing_ = false;
+    textFormatSizeReplaceOnType_ = false;
+    textFormatSizeText_.clear();
+    if (restoreFocus && textEditWindow_ != nullptr) {
+        SetFocus(textEditWindow_);
+    }
+}
+
+void App::BeginTextFormatSizeInput() {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+        return;
+    }
+    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    if (*editingTextIndex_ >= page.texts.size()) {
+        return;
+    }
+
+    textFormatFontMenuOpen_ = false;
+    textFormatSizeEditing_ = true;
+    textFormatSizeReplaceOnType_ = true;
+    textFormatSizeText_ = FormatTextFontSizeValue(page.texts[*editingTextIndex_].fontSize);
+    if (window_ != nullptr) {
+        SetFocus(window_);
+    }
+}
+
+void App::ApplyTextFormatSizeInput() {
+    if (textFormatSizeText_.empty()) {
+        return;
+    }
+
+    wchar_t* end = nullptr;
+    const float parsed = std::wcstof(textFormatSizeText_.c_str(), &end);
+    if (end == textFormatSizeText_.c_str() || *end != L'\0' || parsed <= 0.0f) {
+        return;
+    }
+
+    SetEditingTextFontSize(parsed);
+    textFormatSizeText_ = TextFormatFontSizeLabel();
 }
 
 void App::SetEditingTextAlignment(TextAlignment alignment) {
@@ -4820,6 +4891,25 @@ void App::CycleEditingTextAlignment() {
     default:
         SetEditingTextAlignment(TextAlignment::Left);
         break;
+    }
+}
+
+void App::SetEditingTextFontSize(float fontSize) {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+        return;
+    }
+
+    Page& page = document_.PageAt(*editingTextPageIndex_);
+    if (*editingTextIndex_ >= page.texts.size()) {
+        return;
+    }
+
+    page.texts[*editingTextIndex_].fontSize = std::max(1.0f, fontSize);
+    textFormatFontMenuOpen_ = false;
+    InvalidatePageSurfaceCache(*editingTextPageIndex_);
+    RefreshTextEditControl();
+    if (textFormatPopupOpen_ && window_ != nullptr) {
+        InvalidateRect(window_, nullptr, FALSE);
     }
 }
 
@@ -4933,8 +5023,15 @@ bool App::HandleTextFormatPopupClick(POINT cursor) {
     const TextFormatPopupLayout layout = BuildTextFormatPopupLayout(canvasRect, textEditBounds_, textFormatFontMenuOpen_, dpi);
     const RECT popupBounds = TextFormatPopupBounds(layout, dpi);
     if (PtInRect(&popupBounds, cursor) == 0) {
+        ApplyTextFormatSizeInput();
         CancelTextFormatPopup();
         return false;
+    }
+
+    const bool clickedSizeInput = PtInRect(&layout.textSizeInputRect, cursor) != 0;
+    if (textFormatSizeEditing_ && !clickedSizeInput) {
+        ApplyTextFormatSizeInput();
+        CancelTextFormatSizeInput(false);
     }
 
     if (textFormatFontMenuOpen_) {
@@ -4958,23 +5055,21 @@ bool App::HandleTextFormatPopupClick(POINT cursor) {
         }
     }
 
-    if (PtInRect(&layout.alignLeftRect, cursor) != 0) {
-        SetEditingTextAlignment(TextAlignment::Left);
-    } else if (PtInRect(&layout.alignCenterRect, cursor) != 0) {
-        SetEditingTextAlignment(TextAlignment::Center);
-    } else if (PtInRect(&layout.alignRightRect, cursor) != 0) {
-        SetEditingTextAlignment(TextAlignment::Right);
+    if (PtInRect(&layout.alignCycleRect, cursor) != 0) {
+        CycleEditingTextAlignment();
     } else if (PtInRect(&layout.boldRect, cursor) != 0) {
         ToggleEditingTextBold();
     } else if (PtInRect(&layout.italicRect, cursor) != 0) {
         ToggleEditingTextItalic();
     } else if (PtInRect(&layout.underlineRect, cursor) != 0) {
         ToggleEditingTextUnderline();
+    } else if (clickedSizeInput) {
+        BeginTextFormatSizeInput();
     } else if (PtInRect(&layout.fontDropdownRect, cursor) != 0) {
         textFormatFontMenuOpen_ = !textFormatFontMenuOpen_;
     }
 
-    if (textEditWindow_ != nullptr) {
+    if (textEditWindow_ != nullptr && !textFormatSizeEditing_) {
         SetFocus(textEditWindow_);
     }
     InvalidateRect(window_, nullptr, FALSE);
@@ -8951,6 +9046,7 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
     const COLORREF mutedText = RGB(177, 188, 202);
     const COLORREF accentFill = RGB(44, 79, 119);
     const COLORREF accentBorder = RGB(92, 137, 187);
+    const std::wstring fontSizeLabel = TextFormatFontSizeLabel();
 
     auto fontFamilyLabel = [](TextFontFamily family) -> const wchar_t* {
         switch (family) {
@@ -8961,6 +9057,30 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
         case TextFontFamily::Sans:
         default:
             return L"Sans";
+        }
+    };
+
+    auto alignmentIconFileName = [](TextAlignment alignment) -> const wchar_t* {
+        switch (alignment) {
+        case TextAlignment::Center:
+            return L"text/cent-or.svg";
+        case TextAlignment::Right:
+            return L"text/right-or.svg";
+        case TextAlignment::Left:
+        default:
+            return L"text/left-or.svg";
+        }
+    };
+
+    auto alignmentFallbackLabel = [](TextAlignment alignment) -> const wchar_t* {
+        switch (alignment) {
+        case TextAlignment::Center:
+            return L"C";
+        case TextAlignment::Right:
+            return L"R";
+        case TextAlignment::Left:
+        default:
+            return L"L";
         }
     };
 
@@ -8986,24 +9106,34 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
         DrawTextW(hdc, fallbackLabel, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     };
 
-    drawButton(layout.alignLeftRect, L"text/left-or.svg", L"L", text.alignment == TextAlignment::Left);
-    drawButton(layout.alignCenterRect, L"text/cent-or.svg", L"C", text.alignment == TextAlignment::Center);
-    drawButton(layout.alignRightRect, L"text/right-or.svg", L"R", text.alignment == TextAlignment::Right);
+    drawButton(layout.alignCycleRect, alignmentIconFileName(text.alignment), alignmentFallbackLabel(text.alignment), true);
     drawButton(layout.boldRect, L"text/bold.svg", L"B", text.bold);
     drawButton(layout.italicRect, L"text/italics.svg", L"I", text.italic);
     drawButton(layout.underlineRect, L"text/underline.svg", L"U", text.underline);
+
+    FillRoundedRect(hdc, layout.textSizeInputRect, buttonFill);
+    StrokeRoundedRect(hdc, layout.textSizeInputRect, textFormatSizeEditing_ ? accentBorder : buttonBorder, 1);
+    RECT sizeTextRect = layout.textSizeInputRect;
+    sizeTextRect.left += ScaleForDpi(8, dpi);
+    sizeTextRect.right -= ScaleForDpi(8, dpi);
+    SetTextColor(hdc, primaryText);
+    DrawTextW(hdc, fontSizeLabel.c_str(), -1, &sizeTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    if (textFormatSizeEditing_) {
+        SIZE textSize {};
+        if (GetTextExtentPoint32W(hdc, fontSizeLabel.c_str(), static_cast<int>(fontSizeLabel.size()), &textSize) != 0) {
+            const int caretX = std::min(sizeTextRect.right - 1, sizeTextRect.left + textSize.cx + 1);
+            RECT caretRect = MakeRect(caretX, layout.textSizeInputRect.top + ScaleForDpi(6, dpi), caretX + 1, layout.textSizeInputRect.bottom - ScaleForDpi(6, dpi));
+            FillSolidRect(hdc, caretRect, primaryText);
+        }
+    }
 
     FillRoundedRect(hdc, layout.fontDropdownRect, buttonFill);
     StrokeRoundedRect(hdc, layout.fontDropdownRect, textFormatFontMenuOpen_ ? accentBorder : buttonBorder, 1);
     SetTextColor(hdc, primaryText);
     RECT dropdownTextRect = layout.fontDropdownRect;
     dropdownTextRect.left += ScaleForDpi(10, dpi);
-    dropdownTextRect.right -= ScaleForDpi(22, dpi);
+    dropdownTextRect.right -= ScaleForDpi(10, dpi);
     DrawTextW(hdc, fontFamilyLabel(text.fontFamily), -1, &dropdownTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-    RECT dropdownArrowRect = layout.fontDropdownRect;
-    dropdownArrowRect.left = dropdownArrowRect.right - ScaleForDpi(18, dpi);
-    SetTextColor(hdc, mutedText);
-    DrawTextW(hdc, L"v", -1, &dropdownArrowRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     if (textFormatFontMenuOpen_ && HasRect(layout.fontMenuRect)) {
         FillRoundedRect(hdc, layout.fontMenuRect, panelFill);
@@ -11338,6 +11468,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             const UINT dpi = WindowDpi(window_);
             const QuickSizePopupLayout quickSizePopupLayout = BuildQuickSizePopupLayout(CanvasRect(clientRect), quickSizePopupAnchor_, dpi);
             const RECT quickSizePopupBounds = QuickSizePopupBounds(quickSizePopupLayout, dpi);
+            const RECT liveTextFrameRect = LiveTextEditFrameRect(textEditBounds_, dpi);
             if (IsPdfSidebarVisible() && PtInRect(&sidebarRect, cursor) != 0) {
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
             } else if (quickSizePopupTool_.has_value()
@@ -11345,6 +11476,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
             } else if (cursor.y < ToolbarHeight(IsZoomed(window_), dpi)) {
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+            } else if (textEditWindow_ != nullptr
+                && IsWindowVisible(textEditWindow_) != FALSE
+                && HasRect(textEditBounds_)
+                && PtInRect(&liveTextFrameRect, cursor) != 0) {
+                SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
             } else if (isPanning_ || activeTool_ == Tool::Pan) {
                 SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
             } else if (isTransformingStroke_) {
@@ -11390,6 +11526,46 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         break;
     case WM_CHAR:
+        if (textFormatSizeEditing_) {
+            if (wParam == VK_BACK) {
+                if (textFormatSizeReplaceOnType_) {
+                    textFormatSizeText_.clear();
+                    textFormatSizeReplaceOnType_ = false;
+                }
+                if (!textFormatSizeText_.empty()) {
+                    textFormatSizeText_.pop_back();
+                    ApplyTextFormatSizeInput();
+                }
+            } else if (wParam >= L'0' && wParam <= L'9') {
+                if (textFormatSizeReplaceOnType_) {
+                    textFormatSizeText_.clear();
+                    textFormatSizeReplaceOnType_ = false;
+                }
+                if (!(textFormatSizeText_.empty() && wParam == L'0') && textFormatSizeText_.size() < 6) {
+                    textFormatSizeText_.push_back(static_cast<wchar_t>(wParam));
+                    ApplyTextFormatSizeInput();
+                }
+            } else if (wParam == L'.') {
+                if (textFormatSizeReplaceOnType_) {
+                    textFormatSizeText_.clear();
+                    textFormatSizeReplaceOnType_ = false;
+                }
+                if (textFormatSizeText_.find(L'.') == std::wstring::npos) {
+                    if (textFormatSizeText_.empty()) {
+                        textFormatSizeText_ = L"0.";
+                    } else {
+                        textFormatSizeText_.push_back(L'.');
+                    }
+                }
+            } else if (wParam == VK_RETURN) {
+                ApplyTextFormatSizeInput();
+                CancelTextFormatSizeInput();
+            } else if (wParam == 27) {
+                CancelTextFormatSizeInput();
+            }
+            InvalidateRect(window_, nullptr, FALSE);
+            return 0;
+        }
         if (pageJumpEditing_) {
             if (wParam == VK_BACK) {
                 if (pageJumpReplaceOnType_) {
@@ -11503,6 +11679,20 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         const bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
 
+        if (textFormatSizeEditing_) {
+            if (wParam == VK_RETURN) {
+                ApplyTextFormatSizeInput();
+                CancelTextFormatSizeInput();
+                InvalidateRect(window_, nullptr, FALSE);
+                return 0;
+            }
+            if (wParam == VK_ESCAPE) {
+                CancelTextFormatSizeInput();
+                InvalidateRect(window_, nullptr, FALSE);
+                return 0;
+            }
+            return 0;
+        }
         if (pageJumpEditing_) {
             if (wParam == VK_RETURN) {
                 ApplyPageJumpInput();
@@ -11544,6 +11734,23 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
             return 0;
+        }
+
+        if (ctrlPressed && wParam == 'W') {
+            const auto selectedText = SingleSelectedText();
+            if (selectedText.has_value()
+                && selectedText->first < document_.PageCount()
+                && selectedText->second < document_.PageAt(selectedText->first).texts.size()) {
+                if (!IsEditingText(selectedText->first, selectedText->second)) {
+                    BeginTextEdit(selectedText->first, selectedText->second, document_.PageAt(selectedText->first));
+                }
+                if (!textFormatPopupOpen_) {
+                    ToggleTextFormatPopup();
+                } else {
+                    InvalidateRect(window_, nullptr, FALSE);
+                }
+                return 0;
+            }
         }
 
         if (HandleShortcutKey(static_cast<UINT>(wParam), ctrlPressed, shiftPressed, altPressed)) {
@@ -11707,6 +11914,18 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
         const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         if (ctrlPressed && wParam == 'W') {
             app->ToggleTextFormatPopup();
+            return 0;
+        }
+        if (ctrlPressed && wParam == 'B') {
+            app->ToggleEditingTextBold();
+            return 0;
+        }
+        if (ctrlPressed && wParam == 'I') {
+            app->ToggleEditingTextItalic();
+            return 0;
+        }
+        if (ctrlPressed && wParam == 'U') {
+            app->ToggleEditingTextUnderline();
             return 0;
         }
         if (wParam == VK_RETURN) {

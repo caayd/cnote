@@ -463,8 +463,13 @@ private:
     void ToggleTextFormatPopup();
     void CancelTextFormatPopup();
     [[nodiscard]] bool HandleTextFormatPopupClick(POINT cursor);
+    [[nodiscard]] std::wstring TextFormatFontSizeLabel() const;
+    void CancelTextFormatSizeInput(bool restoreFocus = true);
+    void BeginTextFormatSizeInput();
+    void ApplyTextFormatSizeInput();
     void SetEditingTextAlignment(TextAlignment alignment);
     void CycleEditingTextAlignment();
+    void SetEditingTextFontSize(float fontSize);
     void SetEditingTextFontFamily(TextFontFamily family);
     void ToggleEditingTextBold();
     void ToggleEditingTextItalic();
@@ -641,6 +646,9 @@ private:
     std::optional<Page> editingTextBeforePage_ {};
     bool textFormatPopupOpen_ = false;
     bool textFormatFontMenuOpen_ = false;
+    bool textFormatSizeEditing_ = false;
+    bool textFormatSizeReplaceOnType_ = false;
+    std::wstring textFormatSizeText_ {};
     TextAlignment textEditAlignment_ = TextAlignment::Left;
     TextFontFamily textEditFontFamily_ = TextFontFamily::Sans;
     bool textEditBold_ = false;
