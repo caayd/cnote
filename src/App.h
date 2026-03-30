@@ -424,6 +424,7 @@ private:
 
     [[nodiscard]] bool IsCursorInsidePage(POINT cursor) const;
     [[nodiscard]] std::optional<PageView> HitTestPage(POINT cursor) const;
+    [[nodiscard]] std::optional<PageView> ResolveZoomAnchorPage(RECT clientRect, POINT anchorPoint) const;
     [[nodiscard]] Vec2 ScreenToPage(POINT cursor, std::size_t* pageIndex = nullptr) const;
     [[nodiscard]] Vec2 ScreenToPage(const PageView& pageView, POINT cursor, bool clampToPage) const;
     [[nodiscard]] POINT PageToScreen(std::size_t pageIndex, Vec2 point) const;

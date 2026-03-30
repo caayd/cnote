@@ -458,9 +458,13 @@ bool IsToolbarControlRect(const ToolbarLayout& layout, const ToolbarTitleLayout&
     return PtInRect(&layout.currentColorRect, cursor) != 0;
 }
 
-RECT ToolbarBrushTrackRect(const RECT& sliderRect) {
+RECT ToolbarBrushTrackRect(const RECT& sliderRect, UINT dpi) {
     const int centerY = (sliderRect.top + sliderRect.bottom) / 2;
-    return MakeRect(sliderRect.left + 10, centerY - 3, sliderRect.right - 10, centerY + 3);
+    return MakeRect(
+        sliderRect.left + ScaleForDpi(10, dpi),
+        centerY - ScaleForDpi(3, dpi),
+        sliderRect.right - ScaleForDpi(10, dpi),
+        centerY + ScaleForDpi(3, dpi));
 }
 
 int ToolbarBrushThumbCenterX(const RECT& sliderRect, float brushSize) {

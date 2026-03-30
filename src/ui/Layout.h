@@ -100,7 +100,7 @@ PaletteMenuLayout BuildPaletteMenuLayout(const ToolbarLayout& toolbarLayout, std
 PaletteWheelLayout BuildPaletteWheelLayout(RECT clientRect, POINT requestedCenter, std::size_t colorCount, int toolbarHeight, UINT dpi);
 std::optional<std::size_t> PaletteWheelIndexAtPoint(const PaletteWheelLayout& layout, POINT cursor, std::size_t colorCount);
 bool IsToolbarControlRect(const ToolbarLayout& layout, const ToolbarTitleLayout& titleLayout, POINT cursor);
-RECT ToolbarBrushTrackRect(const RECT& sliderRect);
+RECT ToolbarBrushTrackRect(const RECT& sliderRect, UINT dpi);
 int ToolbarBrushThumbCenterX(const RECT& sliderRect, float brushSize);
 
 }  // namespace cnote::appui

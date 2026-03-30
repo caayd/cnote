@@ -41,6 +41,22 @@ constexpr int kToolbarPadding = 18;
 constexpr int kIconButtonSize = 30;
 constexpr int kColorSwatchSize = 22;
 constexpr int kColorSwatchGap = 10;
+constexpr int kSelectionHandleHalfDip = 4;
+constexpr float kSelectionHandleHitRadiusDip = 11.0f;
+constexpr float kSelectionRotateOffsetDip = 18.0f;
+constexpr int kPaletteWheelShadowInsetDip = 6;
+constexpr int kPaletteWheelIconHalfDip = 20;
+constexpr float kPaletteWheelSelectedStrokeDip = 3.0f;
+constexpr float kPaletteWheelStrokeDip = 1.2f;
+constexpr float kPaletteWheelBorderDip = 1.5f;
+constexpr int kQuickSizePreviewMinDip = 4;
+constexpr int kQuickSizePreviewMaxDip = 28;
+constexpr int kQuickSizeThumbHalfDip = 6;
+constexpr int kQuickSizeValuePaddingDip = 5;
+constexpr int kQuickSizeCaretInsetDip = 6;
+constexpr int kQuickWheelBadgeInsetRightDip = 3;
+constexpr int kQuickWheelBadgeTopDip = 4;
+constexpr int kQuickWheelBadgeSizeDip = 6;
 constexpr unsigned int kCommandFileNew = 1001;
 constexpr unsigned int kCommandFileOpen = 1002;
 constexpr unsigned int kCommandFileSaveCnote = 1003;
@@ -139,6 +155,43 @@ RECT MakeRectFromFloatBounds(float left, float top, float right, float bottom) {
         static_cast<int>(std::floor(top)),
         static_cast<int>(std::ceil(right)),
         static_cast<int>(std::ceil(bottom)));
+}
+
+int SelectionHandleHalfSize(UINT dpi) {
+    return std::max(1, ScaleForDpi(kSelectionHandleHalfDip, dpi));
+}
+
+float SelectionHandleHitRadiusPixels(UINT dpi) {
+    return std::max(
+        static_cast<float>(SelectionHandleHalfSize(dpi) + ScaleForDpi(2, dpi)),
+        ScaleForDpi(kSelectionHandleHitRadiusDip, dpi));
+}
+
+float SelectionRotateOffsetPageUnits(float pageScale, UINT dpi) {
+    return ScaleForDpi(kSelectionRotateOffsetDip, dpi) / std::max(0.1f, pageScale);
+}
+
+int PaletteWheelShadowInset(UINT dpi) {
+    return ScaleForDpi(kPaletteWheelShadowInsetDip, dpi);
+}
+
+int PaletteWheelIconHalfSize(UINT dpi) {
+    return std::max(1, ScaleForDpi(kPaletteWheelIconHalfDip, dpi));
+}
+
+float PaletteWheelStrokeWidth(float baseDip, UINT dpi) {
+    return std::max(1.0f, ScaleForDpi(baseDip, dpi));
+}
+
+int QuickSizePreviewDiameter(float brushSize, UINT dpi) {
+    return std::clamp(
+        static_cast<int>(std::lround(ScaleForDpi(brushSize * 1.5f, dpi))),
+        std::max(1, ScaleForDpi(kQuickSizePreviewMinDip, dpi)),
+        std::max(1, ScaleForDpi(kQuickSizePreviewMaxDip, dpi)));
+}
+
+int QuickSizeThumbHalfSize(UINT dpi) {
+    return std::max(1, ScaleForDpi(kQuickSizeThumbHalfDip, dpi));
 }
 
 bool HasRect(const RECT& rect) {
@@ -1716,9 +1769,13 @@ std::optional<std::size_t> PaletteWheelIndexAtPoint(const PaletteWheelLayout& la
     return index;
 }
 
-RECT ToolbarBrushTrackRect(const RECT& sliderRect) {
+RECT ToolbarBrushTrackRect(const RECT& sliderRect, UINT dpi) {
     const int centerY = (sliderRect.top + sliderRect.bottom) / 2;
-    return MakeRect(sliderRect.left + 10, centerY - 3, sliderRect.right - 10, centerY + 3);
+    return MakeRect(
+        sliderRect.left + ScaleForDpi(10, dpi),
+        centerY - ScaleForDpi(3, dpi),
+        sliderRect.right - ScaleForDpi(10, dpi),
+        centerY + ScaleForDpi(3, dpi));
 }
 
 int ToolbarBrushThumbCenterX(const RECT& sliderRect, float brushSize) {
@@ -1778,11 +1835,11 @@ void PaintVerticalCaret(HDC hdc, int x, int top, int bottom, COLORREF color) {
     DeleteObject(caretPen);
 }
 
-void PaintSelectionHandle(HDC hdc, int centerX, int centerY) {
-    constexpr int handleHalf = 4;
+void PaintSelectionHandle(HDC hdc, int centerX, int centerY, UINT dpi) {
+    const int handleHalf = SelectionHandleHalfSize(dpi);
     const RECT handleRect = MakeRect(centerX - handleHalf, centerY - handleHalf, centerX + handleHalf + 1, centerY + handleHalf + 1);
     ui::FillRoundedRect(hdc, handleRect, RGB(242, 247, 252));
-    ui::StrokeRoundedRect(hdc, handleRect, RGB(83, 112, 145), 1);
+    ui::StrokeRoundedRect(hdc, handleRect, RGB(83, 112, 145), std::max(1, ScaleForDpi(1, dpi)));
 }
 
 void DrawPolylineAA(HDC hdc, const POINT* points, int count, COLORREF color, float width, Gdiplus::DashStyle dashStyle = Gdiplus::DashStyleSolid) {
@@ -2632,6 +2689,7 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedImageHandle(POINT c
     }
 
     const PageImage& image = page.images[singleImage->second];
+    const UINT dpi = WindowDpi(window_);
     const auto corners = ImageCorners(image);
     const Vec2 topMid {
         (corners[0].x + corners[1].x) * 0.5f,
@@ -2650,7 +2708,7 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedImageHandle(POINT c
         (corners[1].y + corners[2].y) * 0.5f,
     };
     const Vec2 center = ImageCenter(image);
-    const Vec2 rotateHandle = RotatePointAround({ center.x, image.y - 18.0f / pageView.scale }, center, image.rotationDegrees);
+    const Vec2 rotateHandle = RotatePointAround({ center.x, image.y - SelectionRotateOffsetPageUnits(pageView.scale, dpi) }, center, image.rotationDegrees);
 
     const struct {
         ImageTransformHandle handle;
@@ -2666,10 +2724,10 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedImageHandle(POINT c
         { ImageTransformHandle::ResizeWest, ScreenPointFromPagePoint(leftMid, pageView.rect, pageView.scale) },
         { ImageTransformHandle::Rotate, ScreenPointFromPagePoint(rotateHandle, pageView.rect, pageView.scale) },
     };
-    constexpr float kHandleRadiusPixels = 11.0f;
+    const float handleRadiusPixels = SelectionHandleHitRadiusPixels(dpi);
     const Vec2 cursorPoint { static_cast<float>(cursor.x), static_cast<float>(cursor.y) };
     for (const auto& handlePoint : handlePoints) {
-        if (DistanceSquared(handlePoint.point, cursorPoint) <= (kHandleRadiusPixels * kHandleRadiusPixels)) {
+        if (DistanceSquared(handlePoint.point, cursorPoint) <= (handleRadiusPixels * handleRadiusPixels)) {
             if (pageIndex != nullptr) {
                 *pageIndex = singleImage->first;
             }
@@ -2742,10 +2800,10 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedTextHandle(POINT cu
         { ImageTransformHandle::ResizeSouthWest, { static_cast<float>(screenBounds.left), static_cast<float>(screenBounds.bottom) } },
         { ImageTransformHandle::ResizeWest, { static_cast<float>(screenBounds.left), center.y } },
     };
-    constexpr float kHandleRadiusPixels = 11.0f;
+    const float handleRadiusPixels = SelectionHandleHitRadiusPixels(WindowDpi(window_));
     const Vec2 cursorPoint { static_cast<float>(cursor.x), static_cast<float>(cursor.y) };
     for (const auto& handlePoint : handlePoints) {
-        if (DistanceSquared(handlePoint.point, cursorPoint) <= (kHandleRadiusPixels * kHandleRadiusPixels)) {
+        if (DistanceSquared(handlePoint.point, cursorPoint) <= (handleRadiusPixels * handleRadiusPixels)) {
             if (pageIndex != nullptr) {
                 *pageIndex = singleText->first;
             }
@@ -2773,6 +2831,7 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedStrokeHandle(POINT 
     }
 
     const Page& page = document_.PageAt(*strokePage);
+    const UINT dpi = WindowDpi(window_);
     float minX = page.width;
     float minY = page.height;
     float maxX = 0.0f;
@@ -2802,12 +2861,12 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedStrokeHandle(POINT 
         { ImageTransformHandle::ResizeSouth, ScreenPointFromPagePoint({ center.x, maxY }, pageView.rect, pageView.scale) },
         { ImageTransformHandle::ResizeSouthWest, ScreenPointFromPagePoint({ minX, maxY }, pageView.rect, pageView.scale) },
         { ImageTransformHandle::ResizeWest, ScreenPointFromPagePoint({ minX, center.y }, pageView.rect, pageView.scale) },
-        { ImageTransformHandle::Rotate, ScreenPointFromPagePoint({ center.x, minY - (18.0f / pageView.scale) }, pageView.rect, pageView.scale) },
+        { ImageTransformHandle::Rotate, ScreenPointFromPagePoint({ center.x, minY - SelectionRotateOffsetPageUnits(pageView.scale, dpi) }, pageView.rect, pageView.scale) },
     };
-    constexpr float kHandleRadiusPixels = 11.0f;
+    const float handleRadiusPixels = SelectionHandleHitRadiusPixels(dpi);
     const Vec2 cursorPoint { static_cast<float>(cursor.x), static_cast<float>(cursor.y) };
     for (const auto& handlePoint : handlePoints) {
-        if (DistanceSquared(handlePoint.point, cursorPoint) <= (kHandleRadiusPixels * kHandleRadiusPixels)) {
+        if (DistanceSquared(handlePoint.point, cursorPoint) <= (handleRadiusPixels * handleRadiusPixels)) {
             if (pageIndex != nullptr) {
                 *pageIndex = *strokePage;
             }
@@ -5236,7 +5295,14 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     };
 
     const auto paintWheelBadge = [&](RECT rect) {
-        RECT badgeRect = MakeRect(rect.right - 9, rect.top + 4, rect.right - 3, rect.top + 10);
+        const int badgeInsetRight = ScaleForDpi(kQuickWheelBadgeInsetRightDip, dpi);
+        const int badgeTop = rect.top + ScaleForDpi(kQuickWheelBadgeTopDip, dpi);
+        const int badgeSize = std::max(1, ScaleForDpi(kQuickWheelBadgeSizeDip, dpi));
+        RECT badgeRect = MakeRect(
+            rect.right - badgeInsetRight - badgeSize,
+            badgeTop,
+            rect.right - badgeInsetRight,
+            badgeTop + badgeSize);
         FillRoundedRect(hdc, badgeRect, RGB(244, 247, 252));
     };
 
@@ -5418,14 +5484,16 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
         layout.center.y - layout.outerRadius,
         outerDiameter,
         outerDiameter);
+    const int shadowInset = PaletteWheelShadowInset(dpi);
+    const int iconHalfSize = PaletteWheelIconHalfSize(dpi);
 
     Gdiplus::SolidBrush shadowBrush(Gdiplus::Color(210, 18, 24, 32));
     graphics.FillEllipse(
         &shadowBrush,
-        static_cast<Gdiplus::REAL>(layout.center.x - (layout.outerRadius + 6)),
-        static_cast<Gdiplus::REAL>(layout.center.y - (layout.outerRadius + 6)),
-        static_cast<Gdiplus::REAL>((layout.outerRadius + 6) * 2),
-        static_cast<Gdiplus::REAL>((layout.outerRadius + 6) * 2));
+        static_cast<Gdiplus::REAL>(layout.center.x - (layout.outerRadius + shadowInset)),
+        static_cast<Gdiplus::REAL>(layout.center.y - (layout.outerRadius + shadowInset)),
+        static_cast<Gdiplus::REAL>((layout.outerRadius + shadowInset) * 2),
+        static_cast<Gdiplus::REAL>((layout.outerRadius + shadowInset) * 2));
 
     const float sweep = 360.0f / static_cast<float>(wheelEntryCount);
     float start = -90.0f;
@@ -5438,7 +5506,9 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
         Gdiplus::SolidBrush brush(segmentColor);
         graphics.FillPie(&brush, outerRect, start, sweep);
 
-        Gdiplus::Pen separatorPen(Gdiplus::Color(selected ? 255 : 120, 244, 247, 252), selected ? 3.0f : 1.2f);
+        Gdiplus::Pen separatorPen(
+            Gdiplus::Color(selected ? 255 : 120, 244, 247, 252),
+            PaletteWheelStrokeWidth(selected ? kPaletteWheelSelectedStrokeDip : kPaletteWheelStrokeDip, dpi));
         graphics.DrawPie(&separatorPen, outerRect, start, sweep);
 
         if (!isColorEntry) {
@@ -5447,7 +5517,11 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
             const float iconRadius = static_cast<float>(layout.innerRadius + ((layout.outerRadius - layout.innerRadius) * 0.5f));
             const int iconCenterX = layout.center.x + static_cast<int>(std::lround(std::cos(centerAngleRadians) * iconRadius));
             const int iconCenterY = layout.center.y + static_cast<int>(std::lround(std::sin(centerAngleRadians) * iconRadius));
-            const RECT iconRect = MakeRect(iconCenterX - 20, iconCenterY - 20, iconCenterX + 20, iconCenterY + 20);
+            const RECT iconRect = MakeRect(
+                iconCenterX - iconHalfSize,
+                iconCenterY - iconHalfSize,
+                iconCenterX + iconHalfSize,
+                iconCenterY + iconHalfSize);
             const COLORREF iconColor = selected ? RGB(255, 255, 255) : RGB(232, 238, 245);
             if (const SvgIconData* icon = ToolbarSvgIcon(ToolSvgFileName(wheel_.tools[index - palette_.size()])); icon != nullptr) {
                 PaintSvgIcon(hdc, iconRect, *icon, iconColor);
@@ -5464,7 +5538,7 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
         static_cast<Gdiplus::REAL>(innerDiameter),
         static_cast<Gdiplus::REAL>(innerDiameter));
 
-    Gdiplus::Pen ringBorder(Gdiplus::Color(180, 244, 247, 252), 1.5f);
+    Gdiplus::Pen ringBorder(Gdiplus::Color(180, 244, 247, 252), PaletteWheelStrokeWidth(kPaletteWheelBorderDip, dpi));
     graphics.DrawEllipse(
         &ringBorder,
         static_cast<Gdiplus::REAL>(layout.center.x - layout.outerRadius),
@@ -5688,6 +5762,7 @@ void App::PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSe
     if (interactionPreviewMode_ == InteractionPreviewMode::None || pageView.pageIndex >= document_.PageCount()) {
         return;
     }
+    const UINT dpi = window_ != nullptr ? WindowDpi(window_) : SystemDpi();
 
     if (pageView.pageIndex < interactionPreviewImages_.size()) {
         Gdiplus::Graphics imageGraphics(hdc);
@@ -5731,7 +5806,7 @@ void App::PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSe
                     || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances))) {
                 for (std::size_t index = 0; index < corners.size(); ++index) {
                     const Vec2 screenPoint = ScreenPointFromPagePoint(corners[index], pageView.rect, pageView.scale);
-                    PaintSelectionHandle(hdc, static_cast<int>(std::lround(screenPoint.x)), static_cast<int>(std::lround(screenPoint.y)));
+                    PaintSelectionHandle(hdc, static_cast<int>(std::lround(screenPoint.x)), static_cast<int>(std::lround(screenPoint.y)), dpi);
                 }
             }
         }
@@ -5800,7 +5875,7 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
     SetBkMode(hdc, TRANSPARENT);
 
     const float brushSize = BrushSizeForTool(popupTool);
-    const int previewDiameter = std::clamp(static_cast<int>(std::lround(brushSize * 1.5f)), 4, 28);
+    const int previewDiameter = QuickSizePreviewDiameter(brushSize, dpi);
     const int previewCenterX = (popupLayout.previewRect.left + popupLayout.previewRect.right) / 2;
     const int previewCenterY = (popupLayout.previewRect.top + popupLayout.previewRect.bottom) / 2;
     const RECT previewDotRect = MakeRect(
@@ -5820,7 +5895,7 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
                 GetRValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : ui::kPanelBorder),
                 GetGValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : ui::kPanelBorder),
                 GetBValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : ui::kPanelBorder)),
-            1.0f);
+            PaletteWheelStrokeWidth(1.0f, dpi));
         graphics.FillEllipse(
             &brush,
             static_cast<Gdiplus::REAL>(previewDotRect.left),
@@ -5835,31 +5910,41 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
             static_cast<Gdiplus::REAL>(previewDotRect.bottom - previewDotRect.top));
     }
 
-    const RECT sliderTrackRect = ToolbarBrushTrackRect(popupLayout.sliderRect);
+    const RECT sliderTrackRect = ToolbarBrushTrackRect(popupLayout.sliderRect, dpi);
     const int sliderCenterY = (popupLayout.sliderRect.top + popupLayout.sliderRect.bottom) / 2;
     FillRoundedRect(hdc, sliderTrackRect, RGB(41, 51, 66));
     const int thumbCenterX = ToolbarBrushThumbCenterX(sliderTrackRect, brushSize);
     RECT sliderFillRect = sliderTrackRect;
     sliderFillRect.right = static_cast<LONG>(std::max<int>(sliderFillRect.left + 1, thumbCenterX + 1));
     FillRoundedRect(hdc, sliderFillRect, accent);
-    RECT thumbRect = MakeRect(thumbCenterX - 6, sliderCenterY - 6, thumbCenterX + 7, sliderCenterY + 7);
+    const int thumbHalfSize = QuickSizeThumbHalfSize(dpi);
+    RECT thumbRect = MakeRect(
+        thumbCenterX - thumbHalfSize,
+        sliderCenterY - thumbHalfSize,
+        thumbCenterX + thumbHalfSize + 1,
+        sliderCenterY + thumbHalfSize + 1);
     FillRoundedRect(hdc, thumbRect, RGB(244, 247, 252));
-    StrokeRoundedRect(hdc, thumbRect, toolbarBrushSliderDragging_ ? RGB(255, 255, 255) : RGB(120, 138, 162), 1);
+    StrokeRoundedRect(hdc, thumbRect, toolbarBrushSliderDragging_ ? RGB(255, 255, 255) : RGB(120, 138, 162), std::max(1, ScaleForDpi(1, dpi)));
 
     const std::wstring brushValue = ToolbarBrushValueLabel();
     RECT brushValueTextRect = popupLayout.valueRect;
     SetTextColor(hdc, primaryText);
     if (toolbarBrushSizeEditing_) {
-        StrokeRoundedRect(hdc, popupLayout.valueRect, accent, 1);
-        brushValueTextRect.left += 5;
-        brushValueTextRect.right -= 5;
+        StrokeRoundedRect(hdc, popupLayout.valueRect, accent, std::max(1, ScaleForDpi(1, dpi)));
+        brushValueTextRect.left += ScaleForDpi(kQuickSizeValuePaddingDip, dpi);
+        brushValueTextRect.right -= ScaleForDpi(kQuickSizeValuePaddingDip, dpi);
         SetTextColor(hdc, RGB(244, 247, 252));
         DrawTextW(hdc, brushValue.c_str(), -1, &brushValueTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         SIZE textSize {};
         if (GetTextExtentPoint32W(hdc, brushValue.c_str(), static_cast<int>(brushValue.size()), &textSize) != 0) {
             const int caretX = std::min(brushValueTextRect.right - 1, brushValueTextRect.left + textSize.cx + 1);
-            PaintVerticalCaret(hdc, caretX, popupLayout.valueRect.top + 6, popupLayout.valueRect.bottom - 6, RGB(244, 247, 252));
+            PaintVerticalCaret(
+                hdc,
+                caretX,
+                popupLayout.valueRect.top + ScaleForDpi(kQuickSizeCaretInsetDip, dpi),
+                popupLayout.valueRect.bottom - ScaleForDpi(kQuickSizeCaretInsetDip, dpi),
+                RGB(244, 247, 252));
         }
     } else {
         DrawTextW(hdc, brushValue.c_str(), -1, &brushValueTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -7567,6 +7652,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
             || (pageView.pageIndex < interactionPreviewTexts_.size() && !interactionPreviewTexts_[pageView.pageIndex].empty())
             || (pageView.pageIndex < interactionPreviewImages_.size() && !interactionPreviewImages_[pageView.pageIndex].empty())
             || interactionSnapshot != nullptr);
+    const UINT dpi = window_ != nullptr ? WindowDpi(window_) : SystemDpi();
     bool showSelectToolSelectionAffordances = false;
     if (activeTool_ == Tool::Select && window_ != nullptr) {
         POINT cursor {};
@@ -7597,7 +7683,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
             && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingImage_
                 || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances))) {
             const auto paintHandle = [&](int centerX, int centerY) {
-                PaintSelectionHandle(hdc, centerX, centerY);
+                PaintSelectionHandle(hdc, centerX, centerY, dpi);
             };
 
             const Vec2 topMid {
@@ -7617,7 +7703,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
                 (corners[1].y + corners[2].y) * 0.5f,
             };
             const Vec2 center = ImageCenter(image);
-            const Vec2 rotatePagePoint = RotatePointAround({ center.x, image.y - 18.0f / pageView.scale }, center, image.rotationDegrees);
+            const Vec2 rotatePagePoint = RotatePointAround({ center.x, image.y - SelectionRotateOffsetPageUnits(pageView.scale, dpi) }, center, image.rotationDegrees);
             const auto toScreenPoint = [&](Vec2 point) {
                 return ScreenPointFromPagePoint(point, pageView.rect, pageView.scale);
             };
@@ -7640,7 +7726,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
             paintHandle(static_cast<int>(std::lround(sw.x)), static_cast<int>(std::lround(sw.y)));
             paintHandle(static_cast<int>(std::lround(w.x)), static_cast<int>(std::lround(w.y)));
 
-            HPEN stemPen = CreatePen(PS_SOLID, 1, RGB(110, 204, 255));
+            HPEN stemPen = CreatePen(PS_SOLID, std::max(1, ScaleForDpi(1, dpi)), RGB(110, 204, 255));
             HGDIOBJ oldStemPen = SelectObject(hdc, stemPen);
             MoveToEx(hdc, static_cast<int>(std::lround(n.x)), static_cast<int>(std::lround(n.y)), nullptr);
             LineTo(hdc, static_cast<int>(std::lround(rotateScreenPoint.x)), static_cast<int>(std::lround(rotateScreenPoint.y)));
@@ -7690,7 +7776,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
                 && (activeTool_ == Tool::Move || isTransformingText_
                     || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances))) {
                 const auto paintHandle = [&](int centerX, int centerY) {
-                    PaintSelectionHandle(hdc, centerX, centerY);
+                    PaintSelectionHandle(hdc, centerX, centerY, dpi);
                 };
 
                 const int left = screenRect.left;
@@ -7748,9 +7834,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         const int bottom = pageView.rect.top + static_cast<int>(std::lround(maxY * pageView.scale));
         DrawRectangleAA(hdc, MakeRect(left, top, right, bottom), RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
 
-        const auto paintHandle = [&](int centerX, int centerY) {
-            PaintSelectionHandle(hdc, centerX, centerY);
-        };
+        const auto paintHandle = [&](int centerX, int centerY) { PaintSelectionHandle(hdc, centerX, centerY, dpi); };
 
         const int centerX = (left + right) / 2;
         const int centerY = (top + bottom) / 2;
@@ -7763,8 +7847,8 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         paintHandle(left, bottom);
         paintHandle(left, centerY);
 
-        const int rotateY = top - 18;
-        HPEN stemPen = CreatePen(PS_SOLID, 1, RGB(110, 204, 255));
+        const int rotateY = top - ScaleForDpi(static_cast<int>(kSelectionRotateOffsetDip), dpi);
+        HPEN stemPen = CreatePen(PS_SOLID, std::max(1, ScaleForDpi(1, dpi)), RGB(110, 204, 255));
         HGDIOBJ oldStemPen = SelectObject(hdc, stemPen);
         MoveToEx(hdc, centerX, top, nullptr);
         LineTo(hdc, centerX, rotateY);
@@ -7907,6 +7991,3 @@ void App::PaintText(HDC hdc, const PageText& text, const PageView& pageView) con
 
 
 }  // namespace cnote
-
-
-

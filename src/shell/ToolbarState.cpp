@@ -286,8 +286,9 @@ void App::UpdateToolbarBrushSliderDrag(POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const RECT canvasRect = CanvasRect(clientRect);
-    const appui::QuickSizePopupLayout popupLayout = appui::BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_, WindowDpi(window_));
-    const RECT trackRect = appui::ToolbarBrushTrackRect(popupLayout.sliderRect);
+    const UINT dpi = WindowDpi(window_);
+    const appui::QuickSizePopupLayout popupLayout = appui::BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_, dpi);
+    const RECT trackRect = appui::ToolbarBrushTrackRect(popupLayout.sliderRect, dpi);
     if (trackRect.right <= trackRect.left) {
         return;
     }

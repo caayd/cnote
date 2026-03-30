@@ -25,6 +25,14 @@ int ToolbarHeight(bool maximized, UINT dpi) {
     return ScaleForDpi(kBaseToolbarHeight + (maximized ? kMaximizedToolbarExtraHeight : 0), dpi);
 }
 
+float DistanceSquaredToRect(const RECT& rect, POINT point) {
+    const float clampedX = static_cast<float>(std::clamp(point.x, rect.left, rect.right - 1));
+    const float clampedY = static_cast<float>(std::clamp(point.y, rect.top, rect.bottom - 1));
+    const float dx = static_cast<float>(point.x) - clampedX;
+    const float dy = static_cast<float>(point.y) - clampedY;
+    return (dx * dx) + (dy * dy);
+}
+
 }  // namespace
 
 void App::ResetView() {
@@ -90,6 +98,21 @@ void App::SetZoom(float zoom, std::optional<POINT> anchor) {
         return;
     }
 
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    POINT focusPoint {
+        (clientRect.left + clientRect.right) / 2,
+        (clientRect.top + clientRect.bottom) / 2,
+    };
+    if (anchor.has_value()) {
+        focusPoint = *anchor;
+    }
+
+    const auto pageBefore = ResolveZoomAnchorPage(clientRect, focusPoint);
+    const Vec2 anchorPagePoint = pageBefore.has_value()
+        ? ScreenToPage(*pageBefore, focusPoint, false)
+        : Vec2 {};
+
     const float clampedZoom = std::clamp(zoom, kMinZoom, kMaxZoom);
     const float previousZoom = zoom_;
     targetZoom_ = clampedZoom;
@@ -99,24 +122,8 @@ void App::SetZoom(float zoom, std::optional<POINT> anchor) {
         return;
     }
 
-    RECT clientRect {};
-    GetClientRect(window_, &clientRect);
-    const RECT canvasRect = CanvasRect(clientRect);
-    POINT focusPoint {
-        (canvasRect.left + canvasRect.right) / 2,
-        (canvasRect.top + canvasRect.bottom) / 2,
-    };
-    if (anchor.has_value()) {
-        focusPoint = *anchor;
-    }
-
-    const auto pageBefore = HitTestPage(focusPoint);
     if (pageBefore.has_value() && previousZoom > 0.0f) {
-        const Vec2 pagePoint = ScreenToPage(*pageBefore, focusPoint, false);
-        const float zoomRatio = zoom_ / previousZoom;
-        panX_ += static_cast<float>(focusPoint.x - pageBefore->rect.left) * (1.0f - zoomRatio);
-        panY_ += static_cast<float>(focusPoint.y - pageBefore->rect.top) * (1.0f - zoomRatio);
-        const POINT newScreenPoint = PageToScreen(pageBefore->pageIndex, pagePoint);
+        const POINT newScreenPoint = PageToScreen(pageBefore->pageIndex, anchorPagePoint);
         panX_ += static_cast<float>(focusPoint.x - newScreenPoint.x);
         panY_ += static_cast<float>(focusPoint.y - newScreenPoint.y);
     }
@@ -143,6 +150,27 @@ std::optional<App::PageView> App::HitTestPage(POINT cursor) const {
         }
     }
     return std::nullopt;
+}
+
+std::optional<App::PageView> App::ResolveZoomAnchorPage(RECT clientRect, POINT anchorPoint) const {
+    std::optional<PageView> bestPage;
+    float bestDistanceSquared = 0.0f;
+    for (const PageView& pageView : CalculatePageViews(clientRect)) {
+        if (!pageView.valid) {
+            continue;
+        }
+
+        const float distanceSquared = DistanceSquaredToRect(pageView.rect, anchorPoint);
+        if (!bestPage.has_value() || distanceSquared < bestDistanceSquared) {
+            bestPage = pageView;
+            bestDistanceSquared = distanceSquared;
+            if (distanceSquared <= 0.0f) {
+                break;
+            }
+        }
+    }
+
+    return bestPage;
 }
 
 Vec2 App::ScreenToPage(POINT cursor, std::size_t* pageIndex) const {
@@ -281,8 +309,30 @@ bool App::ApplyZoomPreset(std::size_t presetIndex) {
     if (presetZoom <= 0.0f) {
         return false;
     }
-    SetZoom(presetZoom);
-    return false;
+
+    std::optional<POINT> anchor;
+    if (window_ != nullptr) {
+        RECT clientRect {};
+        GetClientRect(window_, &clientRect);
+
+        POINT cursor {};
+        if (GetCursorPos(&cursor) != FALSE) {
+            ScreenToClient(window_, &cursor);
+            if (PtInRect(&clientRect, cursor) != 0) {
+                anchor = cursor;
+            }
+        }
+
+        if (!anchor.has_value()) {
+            anchor = POINT {
+                (clientRect.left + clientRect.right) / 2,
+                (clientRect.top + clientRect.bottom) / 2,
+            };
+        }
+    }
+
+    SetZoom(presetZoom, anchor);
+    return true;
 }
 
 void App::BeginZoomSession(POINT cursor) {
@@ -290,10 +340,12 @@ void App::BeginZoomSession(POINT cursor) {
     zoomSessionActive_ = true;
     zoomAnchorValid_ = false;
 
-    if (const auto hitPage = HitTestPage(cursor); hitPage.has_value()) {
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    if (const auto hitPage = ResolveZoomAnchorPage(clientRect, cursor); hitPage.has_value()) {
         zoomAnchorValid_ = true;
         zoomAnchorPageIndex_ = hitPage->pageIndex;
-        zoomAnchorPage_ = ScreenToPage(cursor, nullptr);
+        zoomAnchorPage_ = ScreenToPage(*hitPage, cursor, false);
         zoomAnchorCursor_ = cursor;
     }
 
