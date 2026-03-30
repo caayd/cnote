@@ -681,7 +681,7 @@ private:
     static constexpr float kWheelScrollPixels = 72.0f;
     static constexpr float kMinZoom = 0.35f;
     static constexpr float kMaxZoom = 4.0f;
-    int sidebarWheelScrollRemainder_ = 0;
+    float sidebarWheelScrollRemainder_ = 0.0f;
 };
 
 }  // namespace cnote

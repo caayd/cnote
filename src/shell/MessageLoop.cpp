@@ -29,6 +29,35 @@ using appui::ToolbarHeight;
 using appui::ToolbarLayout;
 using appui::ToolbarTitleLayout;
 
+float WheelScrollPixels(int wheelDelta, UINT dpi, bool horizontal, int viewportSpan = 0) {
+    UINT scrollUnits = 0;
+    if (horizontal) {
+        SystemParametersInfoW(SPI_GETWHEELSCROLLCHARS, 0, &scrollUnits, 0);
+    } else {
+        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &scrollUnits, 0);
+    }
+
+    if (scrollUnits == WHEEL_PAGESCROLL) {
+        const int pagePixels = std::max(1, viewportSpan);
+        return (static_cast<float>(wheelDelta) / static_cast<float>(WHEEL_DELTA)) * static_cast<float>(pagePixels);
+    }
+
+    if (scrollUnits == 0U) {
+        scrollUnits = 3U;
+    }
+
+    const float unitPixels = static_cast<float>(ScaleForDpi(18, dpi));
+    return (static_cast<float>(wheelDelta) / static_cast<float>(WHEEL_DELTA))
+        * static_cast<float>(scrollUnits)
+        * unitPixels;
+}
+
+int ConsumeWholePixels(float& remainder) {
+    const int wholePixels = static_cast<int>(std::trunc(remainder));
+    remainder -= static_cast<float>(wholePixels);
+    return wholePixels;
+}
+
 bool HasRect(const RECT& rect) {
     return rect.right > rect.left && rect.bottom > rect.top;
 }
@@ -345,20 +374,23 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 }
                 const int viewportHeight = std::max(1, static_cast<int>(headerLayout.contentRect.bottom - headerLayout.contentRect.top));
                 const int maxScroll = std::max(0, contentHeight - viewportHeight);
-                sidebarWheelScrollRemainder_ += static_cast<int>(std::lround(static_cast<float>(wheelDelta) * ScaleForDpi(kWheelScrollPixels, dpi)));
-                const int scrollPixels = sidebarWheelScrollRemainder_ / WHEEL_DELTA;
-                sidebarWheelScrollRemainder_ -= scrollPixels * WHEEL_DELTA;
+                sidebarWheelScrollRemainder_ += WheelScrollPixels(wheelDelta, dpi, false, viewportHeight);
+                const int scrollPixels = ConsumeWholePixels(sidebarWheelScrollRemainder_);
                 pdfSidebarScrollY_ = std::clamp(pdfSidebarScrollY_ - scrollPixels, 0, maxScroll);
                 InvalidateRect(window_, &sidebarRect, FALSE);
                 return 0;
             }
         }
-        PanBy(0.0f, (static_cast<float>(wheelDelta) / static_cast<float>(WHEEL_DELTA)) * kWheelScrollPixels);
+        PanBy(0.0f, WheelScrollPixels(wheelDelta, WindowDpi(window_), false));
         return 0;
     }
     case WM_MOUSEHWHEEL: {
         const int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
-        PanBy(-(static_cast<float>(wheelDelta) / static_cast<float>(WHEEL_DELTA)) * kWheelScrollPixels, 0.0f);
+        RECT clientRect {};
+        GetClientRect(window_, &clientRect);
+        const RECT viewportRect = CanvasRect(clientRect);
+        const int viewportWidth = std::max(1, static_cast<int>(viewportRect.right - viewportRect.left));
+        PanBy(-WheelScrollPixels(wheelDelta, WindowDpi(window_), true, viewportWidth), 0.0f);
         return 0;
     }
     case kRenderResultsMessage:
