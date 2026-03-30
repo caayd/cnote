@@ -310,28 +310,54 @@ bool App::ApplyZoomPreset(std::size_t presetIndex) {
         return false;
     }
 
+    const float clampedZoom = std::clamp(presetZoom, kMinZoom, kMaxZoom);
+    if (window_ == nullptr) {
+        zoom_ = clampedZoom;
+        targetZoom_ = clampedZoom;
+        return true;
+    }
+
+    if (std::abs(clampedZoom - zoom_) < 0.001f) {
+        return true;
+    }
+
     std::optional<POINT> anchor;
-    if (window_ != nullptr) {
-        RECT clientRect {};
-        GetClientRect(window_, &clientRect);
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
 
-        POINT cursor {};
-        if (GetCursorPos(&cursor) != FALSE) {
-            ScreenToClient(window_, &cursor);
-            if (PtInRect(&clientRect, cursor) != 0) {
-                anchor = cursor;
-            }
-        }
-
-        if (!anchor.has_value()) {
-            anchor = POINT {
-                (clientRect.left + clientRect.right) / 2,
-                (clientRect.top + clientRect.bottom) / 2,
-            };
+    POINT cursor {};
+    if (GetCursorPos(&cursor) != FALSE) {
+        ScreenToClient(window_, &cursor);
+        if (PtInRect(&clientRect, cursor) != 0) {
+            anchor = cursor;
         }
     }
 
-    SetZoom(presetZoom, anchor);
+    if (!anchor.has_value()) {
+        anchor = POINT {
+            (clientRect.left + clientRect.right) / 2,
+            (clientRect.top + clientRect.bottom) / 2,
+        };
+    }
+
+    if (toolbarZoomEditing_) {
+        CancelToolbarZoomInput();
+    }
+    CancelDeferredRasterRefresh();
+    BeginZoomSession(*anchor);
+    zoom_ = clampedZoom;
+    targetZoom_ = clampedZoom;
+
+    if (zoomAnchorValid_) {
+        const POINT anchoredScreen = PageToScreen(zoomAnchorPageIndex_, zoomAnchorPage_);
+        panX_ += static_cast<float>(zoomAnchorCursor_.x - anchoredScreen.x);
+        panY_ += static_cast<float>(zoomAnchorCursor_.y - anchoredScreen.y);
+    }
+
+    InvalidateViewport();
+    RECT toolbarRect = clientRect;
+    toolbarRect.bottom = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
+    InvalidateRect(window_, &toolbarRect, FALSE);
     return true;
 }
 
@@ -395,7 +421,8 @@ void App::EndZoomSession() {
     zoomAnchorValid_ = false;
     KillTimer(window_, kZoomSessionTimerId);
     ClearZoomSessionSnapshots();
-    HandleDeferredRasterRefresh();
+    InvalidateCanvas();
+    ScheduleDeferredRasterRefresh();
 }
 
 }  // namespace cnote
