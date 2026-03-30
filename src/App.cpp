@@ -6387,9 +6387,7 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
 
     const Page& page = document_.PageAt(pageView.pageIndex);
     PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
-    const float cacheScale = std::max(
-        std::max(0.1f, pageView.scale),
-        (page.raster.width > 0 && page.raster.height > 0 && page.raster.scale > 0.0f) ? page.raster.scale : 0.0f);
+    const float cacheScale = std::max(0.1f, pageView.scale);
     const int width = std::max(1, static_cast<int>(std::lround(std::max(1.0f, page.width) * cacheScale)));
     const int height = std::max(1, static_cast<int>(std::lround(std::max(1.0f, page.height) * cacheScale)));
     if (width <= 0 || height <= 0) {
@@ -6618,9 +6616,7 @@ void App::BuildInteractionPageSnapshot(const PageView& pageView) {
 
     const Page& page = document_.PageAt(pageView.pageIndex);
     PageSurfaceCache& cache = interactionPageSnapshots_[pageView.pageIndex];
-    const float cacheScale = std::max(
-        std::max(0.1f, pageView.scale),
-        (page.raster.width > 0 && page.raster.height > 0 && page.raster.scale > 0.0f) ? page.raster.scale : 0.0f);
+    const float cacheScale = std::max(0.1f, pageView.scale);
     const int width = std::max(1, static_cast<int>(std::lround(std::max(1.0f, page.width) * cacheScale)));
     const int height = std::max(1, static_cast<int>(std::lround(std::max(1.0f, page.height) * cacheScale)));
     if (width <= 0 || height <= 0) {

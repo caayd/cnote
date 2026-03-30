@@ -88,6 +88,7 @@ RECT App::CanvasRect(RECT clientRect) const {
 void App::PanBy(float dx, float dy) {
     panX_ += dx;
     panY_ += dy;
+    ScheduleDeferredRasterRefresh();
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -365,6 +366,16 @@ void App::BeginZoomSession(POINT cursor) {
     const bool startingNewSession = !zoomSessionActive_;
     zoomSessionActive_ = true;
     zoomAnchorValid_ = false;
+
+    if (startingNewSession) {
+        ++renderGeneration_;
+        pendingRenderScales_.clear();
+        {
+            std::lock_guard lock(renderMutex_);
+            renderRequests_.clear();
+            renderResults_.clear();
+        }
+    }
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
