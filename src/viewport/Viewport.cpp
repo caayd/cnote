@@ -9,9 +9,6 @@ namespace cnote {
 
 namespace {
 
-constexpr int kBaseToolbarHeight = 34;
-constexpr int kMaximizedToolbarExtraHeight = 5;
-
 RECT MakeRect(int left, int top, int right, int bottom) {
     RECT rect { left, top, right, bottom };
     return rect;
@@ -19,10 +16,6 @@ RECT MakeRect(int left, int top, int right, int bottom) {
 
 int WindowFrameThicknessX(UINT dpi) {
     return ScaleForDpi(8, dpi);
-}
-
-int ToolbarHeight(bool maximized, UINT dpi) {
-    return ScaleForDpi(kBaseToolbarHeight + (maximized ? kMaximizedToolbarExtraHeight : 0), dpi);
 }
 
 float DistanceSquaredToRect(const RECT& rect, POINT point) {
@@ -62,7 +55,7 @@ void App::ResetView() {
         RECT clientRect {};
         GetClientRect(window_, &clientRect);
         RECT toolbarRect = clientRect;
-        toolbarRect.bottom = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
+        toolbarRect.bottom = FullToolbarHeight();
         InvalidateRect(window_, &toolbarRect, FALSE);
     }
 }
@@ -83,7 +76,7 @@ void App::FocusPage(std::size_t index) {
     }
 
     EnsureSidebarCurrentPageVisible();
-    const int toolbarHeight = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
+    const int toolbarHeight = ReservedToolbarHeight();
     const int canvasTop = toolbarHeight;
     const int canvasHeight = std::max(1, static_cast<int>(clientRect.bottom - clientRect.top) - toolbarHeight);
     const int pageCenterY = (pageView.rect.top + pageView.rect.bottom) / 2;
@@ -96,7 +89,7 @@ RECT App::CanvasRect(RECT clientRect) const {
     RECT rect = clientRect;
     const UINT dpi = WindowDpi(window_);
     const int horizontalInset = IsZoomed(window_) ? WindowFrameThicknessX(dpi) : 0;
-    rect.top = ToolbarHeight(IsZoomed(window_), dpi);
+    rect.top = ReservedToolbarHeight();
     rect.left += horizontalInset + PdfSidebarWidth();
     rect.right -= horizontalInset;
     return rect;
@@ -375,7 +368,7 @@ bool App::ApplyZoomPreset(std::size_t presetIndex) {
 
     InvalidateViewport();
     RECT toolbarRect = clientRect;
-    toolbarRect.bottom = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
+    toolbarRect.bottom = FullToolbarHeight();
     InvalidateRect(window_, &toolbarRect, FALSE);
     return true;
 }
@@ -437,7 +430,7 @@ void App::ZoomAt(int delta, POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     RECT toolbarRect = clientRect;
-    toolbarRect.bottom = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
+    toolbarRect.bottom = FullToolbarHeight();
     InvalidateRect(window_, &toolbarRect, FALSE);
 }
 

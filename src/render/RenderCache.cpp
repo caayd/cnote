@@ -9,16 +9,10 @@ namespace cnote {
 
 namespace {
 
-constexpr int kBaseToolbarHeight = 34;
-constexpr int kMaximizedToolbarExtraHeight = 5;
 constexpr int kVisibleRasterMargin = 240;
 constexpr int kRasterUnloadMargin = 32000;
 constexpr float kRasterUpgradeThreshold = 1.25f;
 constexpr float kRasterDowngradeThreshold = 1.35f;
-
-int ToolbarHeight(bool maximized, UINT dpi) {
-    return ScaleForDpi(kBaseToolbarHeight + (maximized ? kMaximizedToolbarExtraHeight : 0), dpi);
-}
 
 float QuantizeRenderScale(float renderScale) {
     constexpr std::array<float, 7> kRenderScaleBuckets { 1.0f, 1.25f, 1.5f, 2.0f, 2.5f, 3.0f, 4.0f };
@@ -161,7 +155,7 @@ void App::EnsureVisiblePageRasterQuality() {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const UINT dpi = WindowDpi(window_);
-    const int visibleTop = ToolbarHeight(IsZoomed(window_), dpi) - ScaleForDpi(kVisibleRasterMargin, dpi);
+    const int visibleTop = ReservedToolbarHeight() - ScaleForDpi(kVisibleRasterMargin, dpi);
     const int visibleBottom = static_cast<int>(clientRect.bottom) + ScaleForDpi(kVisibleRasterMargin, dpi);
     std::vector<bool> keepRaster(document_.PageCount(), false);
     for (const PageView& pageView : CalculatePageViews(clientRect)) {
@@ -175,7 +169,7 @@ void App::EnsureVisiblePageRasterQuality() {
         QueuePageRasterRequest(pageView);
     }
 
-    const int keepTop = ToolbarHeight(IsZoomed(window_), dpi) - ScaleForDpi(kRasterUnloadMargin, dpi);
+    const int keepTop = ReservedToolbarHeight() - ScaleForDpi(kRasterUnloadMargin, dpi);
     const int keepBottom = static_cast<int>(clientRect.bottom) + ScaleForDpi(kRasterUnloadMargin, dpi);
     for (const PageView& pageView : CalculatePageViews(clientRect)) {
         if (!pageView.valid) {

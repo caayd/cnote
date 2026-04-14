@@ -89,8 +89,8 @@ void App::Paint() {
     DeleteObject(backgroundBrush);
 
     RefreshTextEditControl();
-    PaintToolbar(memoryDc, clientRect);
     PaintCanvas(memoryDc, clientRect);
+    PaintToolbar(memoryDc, clientRect);
     PaintQuickSizePopup(memoryDc, clientRect);
     PaintTextFormatPopup(memoryDc, clientRect);
     PaintPaletteMenu(memoryDc, clientRect);

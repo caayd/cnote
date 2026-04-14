@@ -25,7 +25,6 @@ using appui::QuickSizePopupLayout;
 using appui::ResolveToolbarTitleLayout;
 using appui::SidebarHeaderLayout;
 using appui::SidebarMetrics;
-using appui::ToolbarHeight;
 using appui::ToolbarLayout;
 using appui::ToolbarTitleLayout;
 
@@ -125,8 +124,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 
         POINT clientCursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         ScreenToClient(window_, &clientCursor);
+        UpdateToolbarAutoHide(clientCursor);
         const UINT dpi = WindowDpi(window_);
-        if (clientCursor.y >= 0 && clientCursor.y < ToolbarHeight(IsZoomed(window_), dpi)) {
+        if (clientCursor.y >= 0 && clientCursor.y < VisibleToolbarHeight()) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
             const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_, dpi);
@@ -153,6 +153,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_LBUTTONDOWN: {
         SetFocus(window_);
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        UpdateToolbarAutoHide(cursor);
         if (HandleTextFormatPopupClick(cursor)) {
             return 0;
         }
@@ -208,6 +209,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_RBUTTONDOWN: {
         SetFocus(window_);
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        UpdateToolbarAutoHide(cursor);
         if (HandleToolbarRightClick(cursor)) {
             return 0;
         }
@@ -215,10 +217,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     }
     case WM_MOUSEMOVE: {
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        UpdateToolbarAutoHide(cursor);
         int hoveredWindowButton = -1;
         bool hoveredTitleMenu = false;
         const UINT dpi = WindowDpi(window_);
-        if (cursor.y >= 0 && cursor.y < ToolbarHeight(IsZoomed(window_), dpi)) {
+        if (cursor.y >= 0 && cursor.y < VisibleToolbarHeight()) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
             const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_, dpi);
@@ -251,14 +254,14 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             hoveredWindowButton_ = hoveredWindowButton;
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
-            clientRect.bottom = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
+            clientRect.bottom = FullToolbarHeight();
             InvalidateRect(window_, &clientRect, FALSE);
         }
         if (hoveredTitleMenu_ != hoveredTitleMenu) {
             hoveredTitleMenu_ = hoveredTitleMenu;
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
-            clientRect.bottom = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
+            clientRect.bottom = FullToolbarHeight();
             InvalidateRect(window_, &clientRect, FALSE);
         }
         if (!trackingMouseLeave_) {
@@ -296,15 +299,30 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     }
     case WM_MOUSELEAVE:
         trackingMouseLeave_ = false;
+    {
+        POINT cursor {};
+        GetCursorPos(&cursor);
+        ScreenToClient(window_, &cursor);
+        RECT clientRect {};
+        GetClientRect(window_, &clientRect);
+        const bool cursorInToolbarBand = cursor.x >= clientRect.left
+            && cursor.x < clientRect.right
+            && cursor.y >= 0
+            && cursor.y < FullToolbarHeight();
         if (hoveredWindowButton_ != -1 || hoveredTitleMenu_) {
             hoveredWindowButton_ = -1;
             hoveredTitleMenu_ = false;
-            RECT clientRect {};
-            GetClientRect(window_, &clientRect);
-            clientRect.bottom = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
-            InvalidateRect(window_, &clientRect, FALSE);
+            RECT toolbarRect = clientRect;
+            toolbarRect.bottom = FullToolbarHeight();
+            InvalidateRect(window_, &toolbarRect, FALSE);
+        }
+        if (cursorInToolbarBand) {
+            SetToolbarRevealed(true);
+        } else {
+            SetToolbarRevealed(false);
         }
         return 0;
+    }
     case WM_LBUTTONUP: {
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         if (toolbarBrushSliderDragging_) {
@@ -428,6 +446,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             EndZoomSession();
             return 0;
         }
+        if (wParam == kToolbarRevealTimerId) {
+            HandleToolbarRevealAnimationTimer();
+            return 0;
+        }
         break;
     case WM_SETCURSOR:
         if (LOWORD(lParam) == HTCLIENT) {
@@ -467,7 +489,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             } else if (quickSizePopupTool_.has_value()
                 && PtInRect(&quickSizePopupBounds, cursor) != 0) {
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
-            } else if (cursor.y < ToolbarHeight(IsZoomed(window_), dpi)) {
+            } else if (cursor.y < VisibleToolbarHeight()) {
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
             } else if (textEditWindow_ != nullptr
                 && IsWindowVisible(textEditWindow_) != FALSE
@@ -829,6 +851,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_SIZE:
         CancelDeferredRasterRefresh();
         KillTimer(window_, kZoomSessionTimerId);
+        KillTimer(window_, kToolbarRevealTimerId);
+        toolbarRevealProgress_ = toolbarRevealed_ ? 1.0f : 0.0f;
         zoomSessionActive_ = false;
         zoomAnchorValid_ = false;
         ClearZoomSessionSnapshots();
@@ -852,6 +876,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         CancelDeferredRasterRefresh();
         KillTimer(window_, kZoomSessionTimerId);
+        KillTimer(window_, kToolbarRevealTimerId);
+        toolbarRevealProgress_ = toolbarRevealed_ ? 1.0f : 0.0f;
         zoomSessionActive_ = false;
         zoomAnchorValid_ = false;
         ClearZoomSessionSnapshots();
@@ -865,6 +891,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_DESTROY:
         CancelDeferredRasterRefresh();
         KillTimer(window_, kZoomSessionTimerId);
+        KillTimer(window_, kToolbarRevealTimerId);
         ClearZoomSessionSnapshots();
         ReleasePaintBackbuffer();
         PostQuitMessage(0);

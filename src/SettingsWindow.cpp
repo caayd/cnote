@@ -86,6 +86,7 @@ constexpr int kIdStabilizationSlider = 205;
 constexpr int kIdSpacingSlider = 206;
 constexpr int kIdStrokeSmoothingSlider = 207;
 constexpr int kIdAutoSaveSlider = 208;
+constexpr int kIdAutoHideToolbarCheck = 209;
 constexpr int kIdZoomPresetBase = 300;
 
 struct SettingsWindowLayout {
@@ -125,6 +126,7 @@ struct SettingsWindowLayout {
     RECT strokeSmoothingSliderRect {};
     RECT autoSaveLabelRect {};
     RECT autoSaveSliderRect {};
+    RECT autoHideToolbarCheckRect {};
     std::array<RECT, App::kZoomPresetCount> zoomPresetLabelRects {};
     std::array<RECT, App::kZoomPresetCount> zoomPresetEditRects {};
     RECT zoomPresetHintRect {};
@@ -399,9 +401,10 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, UINT dpi) {
     const int metaRight = layout.drawingMetaSection.right - sectionPadding;
     layout.autoSaveLabelRect = MakeRect(metaLeft, layout.drawingMetaSection.top + sectionHeaderContentTop, metaRight, layout.drawingMetaSection.top + sectionHeaderContentTop + px(18));
     layout.autoSaveSliderRect = MakeRect(metaLeft, layout.autoSaveLabelRect.bottom + px(4), metaRight, layout.autoSaveLabelRect.bottom + px(32));
+    layout.autoHideToolbarCheckRect = MakeRect(metaLeft, layout.autoSaveSliderRect.bottom + px(16), metaRight, layout.autoSaveSliderRect.bottom + px(42));
     const int zoomLabelWidth = px(74);
     const int zoomEditWidth = px(90);
-    const int zoomRowTop = layout.autoSaveSliderRect.bottom + px(26);
+    const int zoomRowTop = layout.autoHideToolbarCheckRect.bottom + px(20);
     const int zoomRowHeight = px(26);
     const int zoomRowGap = px(10);
     for (std::size_t index = 0; index < layout.zoomPresetLabelRects.size(); ++index) {
@@ -687,6 +690,19 @@ void SettingsWindow::CreateControls() {
     strokeSmoothingSlider_ = createSlider(kIdStrokeSmoothingSlider, 0, 0, ScaleForDpi(320, dpi), ScaleForDpi(30, dpi));
     autoSaveLabel_ = createLabel(L"Auto Save", 0, 0, ScaleForDpi(260, dpi), ScaleForDpi(20, dpi));
     autoSaveSlider_ = createSlider(kIdAutoSaveSlider, 0, 0, ScaleForDpi(320, dpi), ScaleForDpi(30, dpi));
+    autoHideToolbarCheck_ = CreateWindowExW(
+        0,
+        L"BUTTON",
+        L"Auto-hide toolbar",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        0,
+        0,
+        ScaleForDpi(260, dpi),
+        ScaleForDpi(24, dpi),
+        window_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdAutoHideToolbarCheck)),
+        app_.instance_,
+        nullptr);
     for (std::size_t index = 0; index < zoomPresetLabels_.size(); ++index) {
         const std::wstring label = L"Preset " + std::to_wstring(index + 1U) + L" (%)";
         zoomPresetLabels_[index] = createLabel(label.c_str(), 0, 0, ScaleForDpi(80, dpi), ScaleForDpi(20, dpi));
@@ -759,7 +775,7 @@ void SettingsWindow::RebuildDpiResources(UINT dpi) {
     backgroundBrush_ = CreateSolidBrush(kWindowBackground);
     panelBrush_ = CreateSolidBrush(kPanelFill);
     std::vector<HWND> controls;
-    controls.reserve(36);
+    controls.reserve(37);
     controls.insert(controls.end(), categoryButtons_.begin(), categoryButtons_.end());
     controls.push_back(paletteList_);
     controls.push_back(addColorButton_);
@@ -785,6 +801,7 @@ void SettingsWindow::RebuildDpiResources(UINT dpi) {
     controls.push_back(strokeSmoothingSlider_);
     controls.push_back(autoSaveLabel_);
     controls.push_back(autoSaveSlider_);
+    controls.push_back(autoHideToolbarCheck_);
     controls.push_back(zoomPresetHintLabel_);
     controls.push_back(shortcutList_);
     controls.push_back(changeShortcutButton_);
@@ -822,7 +839,7 @@ void SettingsWindow::LayoutControls() {
     GetClientRect(window_, &clientRect);
     const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
 
-    HDWP deferred = BeginDeferWindowPos(40);
+    HDWP deferred = BeginDeferWindowPos(41);
     for (std::size_t index = 0; index < categoryButtons_.size(); ++index) {
         DeferMoveControl(deferred, categoryButtons_[index], layout.categoryButtons[index]);
     }
@@ -850,6 +867,7 @@ void SettingsWindow::LayoutControls() {
     DeferMoveControl(deferred, strokeSmoothingSlider_, layout.strokeSmoothingSliderRect);
     DeferMoveControl(deferred, autoSaveLabel_, layout.autoSaveLabelRect);
     DeferMoveControl(deferred, autoSaveSlider_, layout.autoSaveSliderRect);
+    DeferMoveControl(deferred, autoHideToolbarCheck_, layout.autoHideToolbarCheckRect);
     for (std::size_t index = 0; index < zoomPresetLabels_.size(); ++index) {
         DeferMoveControl(deferred, zoomPresetLabels_[index], layout.zoomPresetLabelRects[index]);
         DeferMoveControl(deferred, zoomPresetEdits_[index], layout.zoomPresetEditRects[index]);
@@ -943,6 +961,7 @@ void SettingsWindow::RefreshVisibleControls() {
     setVisible(strokeSmoothingSlider_, false);
     setVisible(autoSaveLabel_, showDrawing);
     setVisible(autoSaveSlider_, false);
+    setVisible(autoHideToolbarCheck_, showDrawing);
     for (HWND control : zoomPresetLabels_) {
         setVisible(control, showDrawing);
     }
@@ -1105,6 +1124,10 @@ void SettingsWindow::RefreshSavedPaletteList() {
 }
 
 void SettingsWindow::RefreshSliderValues() {
+    if (autoHideToolbarCheck_ != nullptr) {
+        SendMessageW(autoHideToolbarCheck_, BM_SETCHECK, app_.settings_.autoHideToolbar ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+
     if (app_.palette_.empty()) {
         return;
     }
@@ -1308,6 +1331,14 @@ void SettingsWindow::HandleCommand(WPARAM wParam, LPARAM lParam) {
     case kIdClearShortcut:
         if (notification == BN_CLICKED) {
             ClearSelectedShortcut();
+        }
+        break;
+    case kIdAutoHideToolbarCheck:
+        if (notification == BN_CLICKED) {
+            const bool enabled = SendMessageW(autoHideToolbarCheck_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            app_.SetToolbarAutoHideEnabled(enabled);
+            app_.SaveAppSettings();
+            RefreshSliderValues();
         }
         break;
     default:

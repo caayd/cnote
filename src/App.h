@@ -229,6 +229,7 @@ public:
         float inputSmoothing = 0.3f;
         float strokeSmoothing = 0.55f;
         unsigned int autoSaveIntervalSeconds = 60;
+        bool autoHideToolbar = false;
         std::array<float, kZoomPresetCount> zoomPresets {};
     };
 
@@ -443,6 +444,15 @@ private:
     [[nodiscard]] int PdfSidebarWidth() const;
     [[nodiscard]] RECT PdfSidebarRect(RECT clientRect) const;
     [[nodiscard]] RECT CanvasRect(RECT clientRect) const;
+    [[nodiscard]] int FullToolbarHeight() const;
+    [[nodiscard]] int ReservedToolbarHeight() const;
+    [[nodiscard]] int VisibleToolbarHeight() const;
+    [[nodiscard]] bool IsToolbarVisible() const;
+    void SetToolbarRevealed(bool revealed);
+    void SetToolbarAutoHideEnabled(bool enabled);
+    void UpdateToolbarAutoHide(POINT cursor);
+    void StartToolbarRevealAnimation(float targetProgress);
+    void HandleToolbarRevealAnimationTimer();
     [[nodiscard]] std::optional<std::size_t> HitTestSidebarPage(POINT cursor) const;
     void EnsureSidebarCurrentPageVisible();
     void SyncCurrentPageToViewport();
@@ -631,6 +641,11 @@ private:
     std::optional<Tool> toolbarBrushSizeEditTool_ {};
     std::wstring toolbarBrushSizeText_ {};
     bool toolbarBrushSliderDragging_ = false;
+    bool toolbarRevealed_ = true;
+    float toolbarRevealProgress_ = 1.0f;
+    float toolbarRevealAnimationStartProgress_ = 1.0f;
+    float toolbarRevealAnimationTargetProgress_ = 1.0f;
+    ULONGLONG toolbarRevealAnimationStartMs_ = 0;
     bool pendingTextEditClick_ = false;
     POINT pendingTextEditCursor_ {};
     std::optional<std::size_t> pendingTextEditPageIndex_ {};
@@ -674,8 +689,11 @@ private:
     static constexpr UINT_PTR kRasterRefreshTimerId = 1;
     static constexpr UINT_PTR kAutoSaveTimerId = 2;
     static constexpr UINT_PTR kZoomSessionTimerId = 3;
+    static constexpr UINT_PTR kToolbarRevealTimerId = 4;
     static constexpr UINT kRasterRefreshDelayMs = 120;
     static constexpr UINT kZoomSessionDelayMs = 100;
+    static constexpr UINT kToolbarRevealFrameMs = 5;
+    static constexpr UINT kToolbarRevealDurationMs = 120;
     static constexpr float kMinBrushSize = 0.5f;
     static constexpr float kMaxBrushSize = 20.0f;
     static constexpr float kBrushSizeStep = 0.25f;

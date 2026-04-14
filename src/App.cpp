@@ -2554,6 +2554,167 @@ void App::ResetPendingRasterWork() {
     }
 }
 
+int App::FullToolbarHeight() const {
+    return ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
+}
+
+bool App::IsToolbarVisible() const {
+    if (!settings_.autoHideToolbar) {
+        return true;
+    }
+
+    return toolbarRevealProgress_ > 0.001f
+        || toolbarRevealed_
+        || toolbarZoomEditing_
+        || toolbarBrushSizeEditing_
+        || toolbarBrushSliderDragging_
+        || titleMenuActive_
+        || wheel_.paletteMenuOpen;
+}
+
+int App::VisibleToolbarHeight() const {
+    return IsToolbarVisible() ? FullToolbarHeight() : 0;
+}
+
+int App::ReservedToolbarHeight() const {
+    return settings_.autoHideToolbar ? 0 : FullToolbarHeight();
+}
+
+void App::SetToolbarRevealed(bool revealed) {
+    if (!settings_.autoHideToolbar) {
+        revealed = true;
+    }
+    if (toolbarRevealed_ == revealed) {
+        return;
+    }
+
+    toolbarRevealed_ = revealed;
+    hoveredWindowButton_ = -1;
+    hoveredTitleMenu_ = false;
+
+    if (revealed) {
+        StartToolbarRevealAnimation(1.0f);
+    } else {
+        StartToolbarRevealAnimation(0.0f);
+    }
+}
+
+void App::SetToolbarAutoHideEnabled(bool enabled) {
+    if (settings_.autoHideToolbar == enabled) {
+        return;
+    }
+
+    settings_.autoHideToolbar = enabled;
+    toolbarRevealed_ = true;
+    toolbarRevealProgress_ = 1.0f;
+    toolbarRevealAnimationStartProgress_ = 1.0f;
+    toolbarRevealAnimationTargetProgress_ = 1.0f;
+    hoveredWindowButton_ = -1;
+    hoveredTitleMenu_ = false;
+
+    if (window_ != nullptr) {
+        KillTimer(window_, kToolbarRevealTimerId);
+        EnsureVisiblePageRasterQuality();
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+}
+
+void App::UpdateToolbarAutoHide(POINT cursor) {
+    if (!settings_.autoHideToolbar) {
+        SetToolbarRevealed(true);
+        return;
+    }
+    if (toolbarZoomEditing_
+        || toolbarBrushSizeEditing_
+        || toolbarBrushSliderDragging_
+        || titleMenuActive_
+        || wheel_.paletteMenuOpen
+        || isDrawing_
+        || isErasing_
+        || isPanning_
+        || isSelecting_
+        || pendingTextEditClick_
+        || isMovingSelection_
+        || isTransformingImage_
+        || isTransformingText_
+        || isTransformingStroke_) {
+        return;
+    }
+
+    const UINT dpi = WindowDpi(window_);
+    const int revealTop = IsZoomed(window_) ? -WindowFrameThicknessX(dpi) : 0;
+    const int revealHeight = ScaleForDpi(IsZoomed(window_) ? 22 : 12, dpi);
+    if (cursor.y >= revealTop && cursor.y < revealHeight) {
+        SetToolbarRevealed(true);
+        return;
+    }
+
+    const int toolbarHeight = FullToolbarHeight();
+    if (toolbarRevealed_ && cursor.y < toolbarHeight) {
+        return;
+    }
+
+    if (toolbarRevealed_) {
+        SetToolbarRevealed(false);
+    }
+}
+
+void App::StartToolbarRevealAnimation(float targetProgress) {
+    targetProgress = std::clamp(targetProgress, 0.0f, 1.0f);
+    if (!settings_.autoHideToolbar || window_ == nullptr) {
+        toolbarRevealProgress_ = targetProgress;
+        if (window_ != nullptr) {
+            KillTimer(window_, kToolbarRevealTimerId);
+        }
+        return;
+    }
+
+    if (std::abs(toolbarRevealProgress_ - targetProgress) <= 0.001f) {
+        toolbarRevealProgress_ = targetProgress;
+        toolbarRevealAnimationStartProgress_ = targetProgress;
+        toolbarRevealAnimationTargetProgress_ = targetProgress;
+        toolbarRevealAnimationStartMs_ = 0;
+        KillTimer(window_, kToolbarRevealTimerId);
+    } else {
+        toolbarRevealAnimationStartProgress_ = toolbarRevealProgress_;
+        toolbarRevealAnimationTargetProgress_ = targetProgress;
+        toolbarRevealAnimationStartMs_ = GetTickCount64();
+        SetTimer(window_, kToolbarRevealTimerId, kToolbarRevealFrameMs, nullptr);
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    RECT toolbarRect = clientRect;
+    toolbarRect.bottom = FullToolbarHeight();
+    RedrawWindow(window_, &toolbarRect, nullptr, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
+}
+
+void App::HandleToolbarRevealAnimationTimer() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    const ULONGLONG startMs = toolbarRevealAnimationStartMs_;
+    const ULONGLONG nowMs = GetTickCount64();
+    const double elapsed = startMs > 0 ? static_cast<double>(nowMs - startMs) : static_cast<double>(kToolbarRevealDurationMs);
+    const float linearT = static_cast<float>(std::clamp(elapsed / static_cast<double>(kToolbarRevealDurationMs), 0.0, 1.0));
+    const float easedT = linearT * linearT * (3.0f - (2.0f * linearT));
+    toolbarRevealProgress_ = toolbarRevealAnimationStartProgress_
+        + ((toolbarRevealAnimationTargetProgress_ - toolbarRevealAnimationStartProgress_) * easedT);
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    RECT toolbarRect = clientRect;
+    toolbarRect.bottom = FullToolbarHeight();
+    RedrawWindow(window_, &toolbarRect, nullptr, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
+
+    if (linearT >= 1.0f) {
+        toolbarRevealProgress_ = toolbarRevealAnimationTargetProgress_;
+        toolbarRevealAnimationStartProgress_ = toolbarRevealProgress_;
+        KillTimer(window_, kToolbarRevealTimerId);
+    }
+}
+
 void App::InvalidateCanvas() {
     if (window_ == nullptr) {
         return;
@@ -2561,7 +2722,7 @@ void App::InvalidateCanvas() {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    clientRect.top = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
+    clientRect.top = ReservedToolbarHeight();
     InvalidateRect(window_, &clientRect, FALSE);
 }
 
@@ -2610,7 +2771,7 @@ void App::InvalidateVisiblePageSurfaceCaches() {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const int visibleTop = ToolbarHeight(IsZoomed(window_), WindowDpi(window_));
+    const int visibleTop = ReservedToolbarHeight();
     const int visibleBottom = static_cast<int>(clientRect.bottom);
     for (const PageView& pageView : CalculatePageViews(clientRect)) {
         if (!pageView.valid) {
@@ -3449,7 +3610,7 @@ RECT App::PdfSidebarRect(RECT clientRect) const {
     RECT rect = clientRect;
     const UINT dpi = WindowDpi(window_);
     const int horizontalInset = IsZoomed(window_) ? WindowFrameThicknessX(dpi) : 0;
-    rect.top = ToolbarHeight(IsZoomed(window_), dpi);
+    rect.top = ReservedToolbarHeight();
     rect.left += horizontalInset;
     rect.right = rect.left + PdfSidebarWidth();
     return rect;
@@ -4966,7 +5127,7 @@ void App::ExecuteCommand(unsigned int commandId) {
 
 bool App::HandleToolbarClick(POINT cursor) {
     const UINT dpi = WindowDpi(window_);
-    if (cursor.y >= ToolbarHeight(IsZoomed(window_), dpi)) {
+    if (cursor.y >= VisibleToolbarHeight()) {
         return false;
     }
 
@@ -5015,7 +5176,7 @@ bool App::HandleToolbarClick(POINT cursor) {
         titleMenuActive_ = true;
         RECT clientRectForMenu {};
         GetClientRect(window_, &clientRectForMenu);
-        clientRectForMenu.bottom = ToolbarHeight(IsZoomed(window_), dpi);
+        clientRectForMenu.bottom = FullToolbarHeight();
         InvalidateRect(window_, &clientRectForMenu, FALSE);
         UpdateWindow(window_);
 
@@ -5212,7 +5373,7 @@ bool App::HandleQuickSizePopupClick(POINT cursor) {
 
 bool App::HandleToolbarRightClick(POINT cursor) {
     const UINT dpi = WindowDpi(window_);
-    if (cursor.y >= ToolbarHeight(IsZoomed(window_), dpi)) {
+    if (cursor.y >= VisibleToolbarHeight()) {
         return false;
     }
 
@@ -5260,6 +5421,10 @@ bool App::HandleToolbarRightClick(POINT cursor) {
 }
 
 bool App::HandlePaletteClick(POINT cursor) {
+    if (!IsToolbarVisible() && !wheel_.paletteWheelOpen) {
+        return false;
+    }
+
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const UINT dpi = WindowDpi(window_);
@@ -5312,7 +5477,7 @@ bool App::HandlePaletteClick(POINT cursor) {
 
     if (wheel_.paletteWheelOpen) {
         const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
-        const PaletteWheelLayout wheelLayout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, ToolbarHeight(IsZoomed(window_), dpi), dpi);
+        const PaletteWheelLayout wheelLayout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, VisibleToolbarHeight(), dpi);
         if (const auto index = PaletteWheelIndexAtPoint(wheelLayout, cursor, wheelEntryCount); index.has_value()) {
             if (*index < palette_.size()) {
                 if (toolbarZoomEditing_) {
@@ -5387,10 +5552,23 @@ void App::PaintLiveTextEditOverlay(HDC hdc) const {
 }
 
 void App::PaintToolbar(HDC hdc, RECT clientRect) const {
+    if (!IsToolbarVisible()) {
+        return;
+    }
+
     const UINT dpi = WindowDpi(window_);
     RECT toolbarRect = clientRect;
-    const int toolbarHeight = ToolbarHeight(IsZoomed(window_), dpi);
+    const int toolbarHeight = FullToolbarHeight();
     toolbarRect.bottom = toolbarHeight;
+    const float revealProgress = settings_.autoHideToolbar ? std::clamp(toolbarRevealProgress_, 0.0f, 1.0f) : 1.0f;
+    const int toolbarOffsetY = -static_cast<int>(std::lround(static_cast<float>(toolbarHeight) * (1.0f - revealProgress)));
+    const int savedDc = SaveDC(hdc);
+    if (savedDc != 0) {
+        IntersectClipRect(hdc, clientRect.left, 0, clientRect.right, toolbarHeight);
+        if (toolbarOffsetY != 0) {
+            SetViewportOrgEx(hdc, 0, toolbarOffsetY, nullptr);
+        }
+    }
 
     const COLORREF toolbarBackground = RGB(15, 18, 24);
     const COLORREF panelBorder = RGB(43, 52, 64);
@@ -5582,6 +5760,9 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     SelectObject(hdc, previousFont);
     DeleteObject(bodyFont);
     DeleteObject(labelFont);
+    if (savedDc != 0) {
+        RestoreDC(hdc, savedDc);
+    }
 }
 
 void App::PaintPaletteMenu(HDC hdc, RECT clientRect) const {
@@ -5608,7 +5789,7 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
 
     const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
     const UINT dpi = WindowDpi(window_);
-    const PaletteWheelLayout layout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, ToolbarHeight(IsZoomed(window_), dpi), dpi);
+    const PaletteWheelLayout layout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, VisibleToolbarHeight(), dpi);
     if (wheelEntryCount == 0U) {
         return;
     }
