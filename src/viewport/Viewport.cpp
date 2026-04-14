@@ -33,6 +33,23 @@ float DistanceSquaredToRect(const RECT& rect, POINT point) {
     return (dx * dx) + (dy * dy);
 }
 
+int MaximizedCanvasWidthForZoom(HWND window, int fallbackCanvasWidth, int sidebarWidth, UINT dpi) {
+    if (window == nullptr) {
+        return fallbackCanvasWidth;
+    }
+
+    HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitorInfo {};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (monitor == nullptr || GetMonitorInfoW(monitor, &monitorInfo) == FALSE) {
+        return fallbackCanvasWidth;
+    }
+
+    const int workAreaWidth = std::max(1, static_cast<int>(monitorInfo.rcWork.right - monitorInfo.rcWork.left));
+    const int maximizedHorizontalInset = WindowFrameThicknessX(dpi) * 2;
+    return std::max(1, workAreaWidth - maximizedHorizontalInset - std::max(0, sidebarWidth));
+}
+
 }  // namespace
 
 void App::ResetView() {
@@ -237,12 +254,13 @@ std::vector<App::PageView> App::CalculatePageViews(RECT clientRect) const {
     const UINT dpi = WindowDpi(window_);
     const RECT canvasRect = CanvasRect(clientRect);
     const int canvasWidth = std::max(1, static_cast<int>(canvasRect.right - canvasRect.left));
+    const int zoomReferenceCanvasWidth = MaximizedCanvasWidthForZoom(window_, canvasWidth, PdfSidebarWidth(), dpi);
     float widestPage = 1.0f;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         widestPage = std::max(widestPage, document_.PageAt(pageIndex).width);
     }
 
-    const float fitScale = static_cast<float>(canvasWidth - ScaleForDpi(120, dpi)) / widestPage;
+    const float fitScale = static_cast<float>(zoomReferenceCanvasWidth - ScaleForDpi(120, dpi)) / widestPage;
     const float scale = std::max(0.1f, fitScale * zoom_);
     const int canvasCenterX = canvasRect.left + (canvasWidth / 2);
     int top = canvasRect.top + ScaleForDpi(40, dpi) + static_cast<int>(std::lround(panY_));
