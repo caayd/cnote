@@ -2045,6 +2045,33 @@ Vec2 Lerp(Vec2 from, Vec2 to, float amount) {
     };
 }
 
+float Distance(Vec2 a, Vec2 b) {
+    return std::sqrt(DistanceSquared(a, b));
+}
+
+void AppendStrokePointWithResampling(Stroke& stroke, Vec2 point, float spacing) {
+    if (stroke.points.empty()) {
+        stroke.points.push_back(point);
+        return;
+    }
+
+    constexpr int kMaxInterpolatedPoints = 64;
+    const float minSpacing = std::max(0.05f, spacing);
+    const Vec2 from = stroke.points.back();
+    const float distance = Distance(from, point);
+    if (distance < minSpacing) {
+        return;
+    }
+
+    const int segmentCount = std::min(
+        kMaxInterpolatedPoints + 1,
+        std::max(1, static_cast<int>(std::ceil(distance / minSpacing))));
+    for (int segment = 1; segment <= segmentCount; ++segment) {
+        const float t = static_cast<float>(segment) / static_cast<float>(segmentCount);
+        stroke.points.push_back(Lerp(from, point, t));
+    }
+}
+
 std::array<Vec2, 4> ImageCorners(const PageImage& image);
 
 Vec2 PointToVec2(POINT point) {
@@ -2222,6 +2249,25 @@ bool OnSegment(Vec2 a, Vec2 b, Vec2 point) {
         && point.x <= std::max(a.x, b.x) + 0.001f
         && point.y >= std::min(a.y, b.y) - 0.001f
         && point.y <= std::max(a.y, b.y) + 0.001f;
+}
+
+bool RectContainsPointWithPadding(RECT rect, POINT point, int padding) {
+    if (!HasRect(rect)) {
+        return false;
+    }
+
+    padding = std::max(0, padding);
+    InflateRect(&rect, padding, padding);
+    return PtInRect(&rect, point) != 0;
+}
+
+bool PolygonContainsPoint(const std::vector<Vec2>& polygon, POINT point) {
+    if (polygon.size() < 3U) {
+        return false;
+    }
+
+    const Vec2 cursorPoint { static_cast<float>(point.x), static_cast<float>(point.y) };
+    return PointInPolygon(cursorPoint, polygon);
 }
 
 bool SegmentsIntersect(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2) {
@@ -2942,10 +2988,103 @@ bool App::CursorHitsSelectedContent(POINT cursor) const {
     return false;
 }
 
+bool App::CursorHitsSelectionMoveGrip(POINT cursor) const {
+    const auto hitPage = HitTestPage(cursor);
+    if (!hitPage.has_value()) {
+        return false;
+    }
+
+    const std::size_t pageIndex = hitPage->pageIndex;
+    if (pageIndex >= document_.PageCount()) {
+        return false;
+    }
+
+    const bool hasSelectedStrokes = pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty();
+    const bool hasSelectedTexts = pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty();
+    const bool hasSelectedImages = pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty();
+    if (!hasSelectedStrokes && !hasSelectedTexts && !hasSelectedImages) {
+        return false;
+    }
+
+    const Page& page = document_.PageAt(pageIndex);
+    const UINT dpi = window_ != nullptr ? WindowDpi(window_) : SystemDpi();
+    const int gripPadding = std::max(2, ScaleForDpi(2, dpi));
+
+    if (hasSelectedImages) {
+        for (std::size_t imageIndex : selectedImageIndices_[pageIndex]) {
+            if (imageIndex >= page.images.size()) {
+                continue;
+            }
+
+            std::vector<Vec2> screenCorners;
+            screenCorners.reserve(4U);
+            for (const Vec2& corner : ImageCorners(page.images[imageIndex])) {
+                screenCorners.push_back(ScreenPointFromPagePoint(corner, hitPage->rect, hitPage->scale));
+            }
+            if (PolygonContainsPoint(screenCorners, cursor)) {
+                return true;
+            }
+        }
+    }
+
+    if (hasSelectedTexts) {
+        for (std::size_t textIndex : selectedTextIndices_[pageIndex]) {
+            if (textIndex >= page.texts.size()) {
+                continue;
+            }
+
+            const auto textRect = PageTextBoundsRect(page.texts[textIndex], page.width, hitPage->scale, 4);
+            if (!textRect.has_value()) {
+                continue;
+            }
+
+            RECT screenRect = *textRect;
+            OffsetRect(&screenRect, hitPage->rect.left, hitPage->rect.top);
+            if (RectContainsPointWithPadding(screenRect, cursor, gripPadding)) {
+                return true;
+            }
+        }
+    }
+
+    if (hasSelectedStrokes) {
+        float minX = page.width;
+        float minY = page.height;
+        float maxX = 0.0f;
+        float maxY = 0.0f;
+        bool hasStrokeBounds = false;
+        for (std::size_t strokeIndex : selectedStrokeIndices_[pageIndex]) {
+            if (strokeIndex >= page.strokes.size()) {
+                continue;
+            }
+            for (const Vec2& point : page.strokes[strokeIndex].points) {
+                minX = std::min(minX, point.x);
+                minY = std::min(minY, point.y);
+                maxX = std::max(maxX, point.x);
+                maxY = std::max(maxY, point.y);
+                hasStrokeBounds = true;
+            }
+        }
+
+        if (hasStrokeBounds) {
+            const RECT screenRect = MakeRect(
+                hitPage->rect.left + static_cast<int>(std::lround(minX * hitPage->scale)),
+                hitPage->rect.top + static_cast<int>(std::lround(minY * hitPage->scale)),
+                hitPage->rect.left + static_cast<int>(std::lround(maxX * hitPage->scale)),
+                hitPage->rect.top + static_cast<int>(std::lround(maxY * hitPage->scale)));
+            if (RectContainsPointWithPadding(screenRect, cursor, gripPadding)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 bool App::CursorInteractsWithSelection(POINT cursor) const {
     return HitTestSelectedStrokeHandle(cursor).has_value()
         || HitTestSelectedTextHandle(cursor).has_value()
         || HitTestSelectedImageHandle(cursor).has_value()
+        || CursorHitsSelectionMoveGrip(cursor)
         || CursorHitsSelectedContent(cursor);
 }
 
@@ -3600,12 +3739,12 @@ void App::ExtendStroke(POINT cursor) {
 
     if (!activeStroke_->points.empty()) {
         filteredPoint = Lerp(activeStroke_->points.back(), rawPoint, settings_.inputSmoothing);
-        if (DistanceSquared(filteredPoint, activeStroke_->points.back()) < settings_.inputSpacing) {
+        if (Distance(filteredPoint, activeStroke_->points.back()) < settings_.inputSpacing) {
             return;
         }
     }
 
-    activeStroke_->points.push_back(filteredPoint);
+    AppendStrokePointWithResampling(*activeStroke_, filteredPoint, settings_.inputSpacing);
     std::optional<RECT> currentDirtyRect = StrokeRenderBoundsRect(
         *activeStroke_,
         pageView.scale,
@@ -4351,6 +4490,7 @@ void App::BeginMoveSelection(POINT cursor) {
         return;
     }
 
+    const bool clickedSelectionMoveGrip = CursorHitsSelectionMoveGrip(cursor);
     std::optional<std::size_t> clickedSelectedStroke {};
     std::optional<std::size_t> clickedSelectedText {};
     std::optional<std::size_t> clickedSelectedImage {};
@@ -4358,7 +4498,7 @@ void App::BeginMoveSelection(POINT cursor) {
     std::optional<std::size_t> clickedText {};
     std::optional<std::size_t> clickedImage {};
 
-    if (pageIndex < selectedStrokeIndices_.size()) {
+    if (!clickedSelectionMoveGrip && pageIndex < selectedStrokeIndices_.size()) {
         for (std::size_t strokeIndex : selectedStrokeIndices_[pageIndex]) {
             if (strokeIndex < page.strokes.size() && StrokeHitsPoint(page.strokes[strokeIndex], pagePoint, hitRadius)) {
                 clickedSelectedStroke = strokeIndex;
@@ -4366,7 +4506,7 @@ void App::BeginMoveSelection(POINT cursor) {
             }
         }
     }
-    if (!clickedSelectedStroke.has_value() && pageIndex < selectedTextIndices_.size()) {
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && pageIndex < selectedTextIndices_.size()) {
         for (std::size_t textIndex : selectedTextIndices_[pageIndex]) {
             if (textIndex < page.texts.size() && TextHitsPoint(page.texts[textIndex], page.width, pagePoint)) {
                 clickedSelectedText = textIndex;
@@ -4374,7 +4514,7 @@ void App::BeginMoveSelection(POINT cursor) {
             }
         }
     }
-    if (!clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && pageIndex < selectedImageIndices_.size()) {
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && pageIndex < selectedImageIndices_.size()) {
         for (std::size_t imageIndex : selectedImageIndices_[pageIndex]) {
             if (imageIndex < page.images.size() && ImageHitsPoint(page.images[imageIndex], pagePoint)) {
                 clickedSelectedImage = imageIndex;
@@ -4383,7 +4523,7 @@ void App::BeginMoveSelection(POINT cursor) {
         }
     }
 
-    if (!clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()) {
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()) {
         for (std::size_t strokeIndex = page.strokes.size(); strokeIndex > 0; --strokeIndex) {
             const std::size_t actualIndex = strokeIndex - 1U;
             if (StrokeHitsPoint(page.strokes[actualIndex], pagePoint, hitRadius)) {
@@ -4392,7 +4532,7 @@ void App::BeginMoveSelection(POINT cursor) {
             }
         }
     }
-    if (!clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value() && !clickedStroke.has_value()) {
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value() && !clickedStroke.has_value()) {
         for (std::size_t textIndex = page.texts.size(); textIndex > 0; --textIndex) {
             const std::size_t actualIndex = textIndex - 1U;
             if (TextHitsPoint(page.texts[actualIndex], page.width, pagePoint)) {
@@ -4401,7 +4541,7 @@ void App::BeginMoveSelection(POINT cursor) {
             }
         }
     }
-    if (!clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()
         && !clickedStroke.has_value() && !clickedText.has_value()) {
         for (std::size_t imageIndex = page.images.size(); imageIndex > 0; --imageIndex) {
             const std::size_t actualIndex = imageIndex - 1U;
@@ -4412,14 +4552,14 @@ void App::BeginMoveSelection(POINT cursor) {
         }
     }
 
-    if (!clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()
         && !clickedStroke.has_value() && !clickedText.has_value() && !clickedImage.has_value()) {
         ClearSelection();
         BeginSelection(cursor, true);
         return;
     }
 
-    if (!clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()) {
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()) {
         ClearSelection();
         if (clickedStroke.has_value() && pageIndex < selectedStrokeIndices_.size()) {
             selectedStrokeIndices_[pageIndex].push_back(*clickedStroke);
@@ -4432,7 +4572,7 @@ void App::BeginMoveSelection(POINT cursor) {
         }
     }
 
-    if (activeTool_ == Tool::Move && clickedSelectedText.has_value() && !clickedSelectedStroke.has_value() && !clickedSelectedImage.has_value()) {
+    if (!clickedSelectionMoveGrip && activeTool_ == Tool::Move && clickedSelectedText.has_value() && !clickedSelectedStroke.has_value() && !clickedSelectedImage.has_value()) {
         pendingTextEditClick_ = true;
         pendingTextEditCursor_ = cursor;
         pendingTextEditPageIndex_ = pageIndex;
@@ -7650,11 +7790,8 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
             || interactionSnapshot != nullptr);
     const UINT dpi = window_ != nullptr ? WindowDpi(window_) : SystemDpi();
     bool showSelectToolSelectionAffordances = false;
-    if (activeTool_ == Tool::Select && window_ != nullptr) {
-        POINT cursor {};
-        GetCursorPos(&cursor);
-        ScreenToClient(window_, &cursor);
-        showSelectToolSelectionAffordances = CursorInteractsWithSelection(cursor);
+    if (activeTool_ == Tool::Select) {
+        showSelectToolSelectionAffordances = HasSelection();
     }
     const auto singleImage = SingleSelectedImage();
     const auto singleText = SingleSelectedText();
@@ -7806,8 +7943,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
 
     if (!pageHasInteractionPreview && singleStrokePage.has_value() && *singleStrokePage == pageView.pageIndex
         && pageView.pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageView.pageIndex].empty()
-        && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingStroke_
-            || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances))) {
+        && (activeTool_ == Tool::Select || activeTool_ == Tool::Move || isMovingSelection_ || isTransformingStroke_)) {
         float minX = page.width;
         float minY = page.height;
         float maxX = 0.0f;
@@ -7830,27 +7966,31 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         const int bottom = pageView.rect.top + static_cast<int>(std::lround(maxY * pageView.scale));
         DrawRectangleAA(hdc, MakeRect(left, top, right, bottom), RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
 
-        const auto paintHandle = [&](int centerX, int centerY) { PaintSelectionHandle(hdc, centerX, centerY, dpi); };
+        const bool shouldDrawHandles = activeTool_ == Tool::Move || isMovingSelection_ || isTransformingStroke_
+            || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances);
+        if (shouldDrawHandles) {
+            const auto paintHandle = [&](int centerX, int centerY) { PaintSelectionHandle(hdc, centerX, centerY, dpi); };
 
-        const int centerX = (left + right) / 2;
-        const int centerY = (top + bottom) / 2;
-        paintHandle(left, top);
-        paintHandle(centerX, top);
-        paintHandle(right, top);
-        paintHandle(right, centerY);
-        paintHandle(right, bottom);
-        paintHandle(centerX, bottom);
-        paintHandle(left, bottom);
-        paintHandle(left, centerY);
+            const int centerX = (left + right) / 2;
+            const int centerY = (top + bottom) / 2;
+            paintHandle(left, top);
+            paintHandle(centerX, top);
+            paintHandle(right, top);
+            paintHandle(right, centerY);
+            paintHandle(right, bottom);
+            paintHandle(centerX, bottom);
+            paintHandle(left, bottom);
+            paintHandle(left, centerY);
 
-        const int rotateY = top - ScaleForDpi(static_cast<int>(kSelectionRotateOffsetDip), dpi);
-        HPEN stemPen = CreatePen(PS_SOLID, std::max(1, ScaleForDpi(1, dpi)), RGB(110, 204, 255));
-        HGDIOBJ oldStemPen = SelectObject(hdc, stemPen);
-        MoveToEx(hdc, centerX, top, nullptr);
-        LineTo(hdc, centerX, rotateY);
-        SelectObject(hdc, oldStemPen);
-        DeleteObject(stemPen);
-        paintHandle(centerX, rotateY);
+            const int rotateY = top - ScaleForDpi(static_cast<int>(kSelectionRotateOffsetDip), dpi);
+            HPEN stemPen = CreatePen(PS_SOLID, std::max(1, ScaleForDpi(1, dpi)), RGB(110, 204, 255));
+            HGDIOBJ oldStemPen = SelectObject(hdc, stemPen);
+            MoveToEx(hdc, centerX, top, nullptr);
+            LineTo(hdc, centerX, rotateY);
+            SelectObject(hdc, oldStemPen);
+            DeleteObject(stemPen);
+            paintHandle(centerX, rotateY);
+        }
     }
 
     if (activeStroke_.has_value() && activeStrokePageIndex_.has_value() && *activeStrokePageIndex_ == pageView.pageIndex) {

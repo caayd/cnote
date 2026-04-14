@@ -305,10 +305,15 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             InvalidateRect(window_, &clientRect, FALSE);
         }
         return 0;
-    case WM_LBUTTONUP:
+    case WM_LBUTTONUP: {
+        POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         if (toolbarBrushSliderDragging_) {
             EndToolbarBrushSliderDrag();
         } else if (isDrawing_) {
+            const auto hitPage = HitTestPage(cursor);
+            if (!hitPage.has_value() || (activeStrokePageIndex_.has_value() && hitPage->pageIndex == *activeStrokePageIndex_)) {
+                ExtendStroke(cursor);
+            }
             EndStroke();
         } else if (isTransformingStroke_) {
             EndStrokeTransform();
@@ -342,6 +347,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             EndPan();
         }
         return 0;
+    }
     case WM_MBUTTONUP:
         if (isPanning_ && panFromMiddleButton_) {
             EndPan();
@@ -485,7 +491,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                     SetCursor(LoadCursorW(nullptr, cursorForHandle(*textHandle)));
                 } else if (const auto imageHandle = HitTestSelectedImageHandle(cursor); imageHandle.has_value()) {
                     SetCursor(LoadCursorW(nullptr, cursorForHandle(*imageHandle)));
-                } else if (CursorHitsSelectedContent(cursor)) {
+                } else if (CursorHitsSelectionMoveGrip(cursor) || CursorHitsSelectedContent(cursor)) {
                     SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
                 } else {
                     SetCursor(LoadCursorW(nullptr, IDC_ARROW));
@@ -497,7 +503,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                     SetCursor(LoadCursorW(nullptr, cursorForHandle(*textHandle)));
                 } else if (const auto imageHandle = HitTestSelectedImageHandle(cursor); imageHandle.has_value()) {
                     SetCursor(LoadCursorW(nullptr, cursorForHandle(*imageHandle)));
-                } else if (CursorHitsSelectedContent(cursor)) {
+                } else if (CursorHitsSelectionMoveGrip(cursor) || CursorHitsSelectedContent(cursor)) {
                     SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
                 } else {
                     SetCursor(LoadCursorW(nullptr, IDC_CROSS));

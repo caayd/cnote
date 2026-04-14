@@ -389,6 +389,7 @@ private:
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedTextHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* textIndex = nullptr) const;
     [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> HitTestText(POINT cursor) const;
     [[nodiscard]] std::vector<Vec2> CurrentSelectionLassoPolygon() const;
+    [[nodiscard]] bool CursorHitsSelectionMoveGrip(POINT cursor) const;
     [[nodiscard]] bool CursorHitsSelectedContent(POINT cursor) const;
     [[nodiscard]] bool CursorInteractsWithSelection(POINT cursor) const;
     bool CopySelectionToClipboard();
