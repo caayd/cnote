@@ -443,6 +443,10 @@ private:
     [[nodiscard]] bool IsPdfSidebarVisible() const;
     [[nodiscard]] int PdfSidebarWidth() const;
     [[nodiscard]] RECT PdfSidebarRect(RECT clientRect) const;
+    void StartPdfSidebarSlideAnimation(float targetProgress);
+    void StopPdfSidebarSlideAnimationTimer();
+    void HandlePdfSidebarSlideAnimationTimer();
+    void InvalidatePdfSidebarAnimationRegion();
     [[nodiscard]] RECT CanvasRect(RECT clientRect) const;
     [[nodiscard]] int FullToolbarHeight() const;
     [[nodiscard]] int ReservedToolbarHeight() const;
@@ -452,6 +456,7 @@ private:
     void SetToolbarAutoHideEnabled(bool enabled);
     void UpdateToolbarAutoHide(POINT cursor);
     void StartToolbarRevealAnimation(float targetProgress);
+    void StopToolbarRevealAnimationTimer();
     void HandleToolbarRevealAnimationTimer();
     [[nodiscard]] std::optional<std::size_t> HitTestSidebarPage(POINT cursor) const;
     void EnsureSidebarCurrentPageVisible();
@@ -626,6 +631,11 @@ private:
     NewPageSettingsState newPageSettings_ {};
     HCURSOR eraserCursor_ = nullptr;
     bool pdfSidebarOpen_ = false;
+    float pdfSidebarSlideProgress_ = 0.0f;
+    float pdfSidebarSlideAnimationStartProgress_ = 0.0f;
+    float pdfSidebarSlideAnimationTargetProgress_ = 0.0f;
+    ULONGLONG pdfSidebarSlideAnimationStartMs_ = 0;
+    bool pdfSidebarSlideTimerResolutionActive_ = false;
     int pdfSidebarScrollY_ = 0;
     std::optional<Page> copiedSidebarPage_ {};
     bool pageJumpEditing_ = false;
@@ -646,6 +656,7 @@ private:
     float toolbarRevealAnimationStartProgress_ = 1.0f;
     float toolbarRevealAnimationTargetProgress_ = 1.0f;
     ULONGLONG toolbarRevealAnimationStartMs_ = 0;
+    bool toolbarRevealTimerResolutionActive_ = false;
     bool pendingTextEditClick_ = false;
     POINT pendingTextEditCursor_ {};
     std::optional<std::size_t> pendingTextEditPageIndex_ {};
@@ -690,10 +701,13 @@ private:
     static constexpr UINT_PTR kAutoSaveTimerId = 2;
     static constexpr UINT_PTR kZoomSessionTimerId = 3;
     static constexpr UINT_PTR kToolbarRevealTimerId = 4;
+    static constexpr UINT_PTR kPdfSidebarSlideTimerId = 5;
     static constexpr UINT kRasterRefreshDelayMs = 120;
     static constexpr UINT kZoomSessionDelayMs = 100;
-    static constexpr UINT kToolbarRevealFrameMs = 5;
+    static constexpr UINT kToolbarRevealFrameMs = 1;
     static constexpr UINT kToolbarRevealDurationMs = 120;
+    static constexpr UINT kPdfSidebarSlideFrameMs = 1;
+    static constexpr UINT kPdfSidebarSlideDurationMs = 150;
     static constexpr float kMinBrushSize = 0.5f;
     static constexpr float kMaxBrushSize = 20.0f;
     static constexpr float kBrushSizeStep = 0.25f;

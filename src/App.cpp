@@ -17,6 +17,7 @@
 #include <dwmapi.h>
 #include <objidl.h>
 #include <gdiplus.h>
+#include <mmsystem.h>
 #include <windowsx.h>
 
 #include "DpiUtil.h"
@@ -2541,6 +2542,14 @@ App::~App() {
     if (gdiplusToken_ != 0) {
         Gdiplus::GdiplusShutdown(gdiplusToken_);
     }
+    if (toolbarRevealTimerResolutionActive_) {
+        timeEndPeriod(1);
+        toolbarRevealTimerResolutionActive_ = false;
+    }
+    if (pdfSidebarSlideTimerResolutionActive_) {
+        timeEndPeriod(1);
+        pdfSidebarSlideTimerResolutionActive_ = false;
+    }
 }
 
 void App::ResetPendingRasterWork() {
@@ -2613,7 +2622,7 @@ void App::SetToolbarAutoHideEnabled(bool enabled) {
     hoveredTitleMenu_ = false;
 
     if (window_ != nullptr) {
-        KillTimer(window_, kToolbarRevealTimerId);
+        StopToolbarRevealAnimationTimer();
         EnsureVisiblePageRasterQuality();
         InvalidateRect(window_, nullptr, FALSE);
     }
@@ -2663,9 +2672,7 @@ void App::StartToolbarRevealAnimation(float targetProgress) {
     targetProgress = std::clamp(targetProgress, 0.0f, 1.0f);
     if (!settings_.autoHideToolbar || window_ == nullptr) {
         toolbarRevealProgress_ = targetProgress;
-        if (window_ != nullptr) {
-            KillTimer(window_, kToolbarRevealTimerId);
-        }
+        StopToolbarRevealAnimationTimer();
         return;
     }
 
@@ -2674,11 +2681,16 @@ void App::StartToolbarRevealAnimation(float targetProgress) {
         toolbarRevealAnimationStartProgress_ = targetProgress;
         toolbarRevealAnimationTargetProgress_ = targetProgress;
         toolbarRevealAnimationStartMs_ = 0;
-        KillTimer(window_, kToolbarRevealTimerId);
+        StopToolbarRevealAnimationTimer();
     } else {
         toolbarRevealAnimationStartProgress_ = toolbarRevealProgress_;
         toolbarRevealAnimationTargetProgress_ = targetProgress;
         toolbarRevealAnimationStartMs_ = GetTickCount64();
+        if (!toolbarRevealTimerResolutionActive_) {
+            if (timeBeginPeriod(1) == TIMERR_NOERROR) {
+                toolbarRevealTimerResolutionActive_ = true;
+            }
+        }
         SetTimer(window_, kToolbarRevealTimerId, kToolbarRevealFrameMs, nullptr);
     }
 
@@ -2687,6 +2699,16 @@ void App::StartToolbarRevealAnimation(float targetProgress) {
     RECT toolbarRect = clientRect;
     toolbarRect.bottom = FullToolbarHeight();
     RedrawWindow(window_, &toolbarRect, nullptr, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
+}
+
+void App::StopToolbarRevealAnimationTimer() {
+    if (window_ != nullptr) {
+        KillTimer(window_, kToolbarRevealTimerId);
+    }
+    if (toolbarRevealTimerResolutionActive_) {
+        timeEndPeriod(1);
+        toolbarRevealTimerResolutionActive_ = false;
+    }
 }
 
 void App::HandleToolbarRevealAnimationTimer() {
@@ -2707,11 +2729,12 @@ void App::HandleToolbarRevealAnimationTimer() {
     RECT toolbarRect = clientRect;
     toolbarRect.bottom = FullToolbarHeight();
     RedrawWindow(window_, &toolbarRect, nullptr, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
+    DwmFlush();
 
     if (linearT >= 1.0f) {
         toolbarRevealProgress_ = toolbarRevealAnimationTargetProgress_;
         toolbarRevealAnimationStartProgress_ = toolbarRevealProgress_;
-        KillTimer(window_, kToolbarRevealTimerId);
+        StopToolbarRevealAnimationTimer();
     }
 }
 
@@ -3585,11 +3608,11 @@ std::wstring App::PageIndicatorLabel() const {
 }
 
 bool App::IsPdfSidebarVisible() const {
-    return pdfSidebarOpen_ && document_.PageCount() > 0U;
+    return document_.PageCount() > 0U && (pdfSidebarOpen_ || pdfSidebarSlideProgress_ > 0.001f);
 }
 
 bool App::SidebarOwnsKeyboardShortcuts() const {
-    if (!IsPdfSidebarVisible() || window_ == nullptr) {
+    if (!pdfSidebarOpen_ || !IsPdfSidebarVisible() || window_ == nullptr) {
         return false;
     }
 
@@ -3610,15 +3633,99 @@ RECT App::PdfSidebarRect(RECT clientRect) const {
     RECT rect = clientRect;
     const UINT dpi = WindowDpi(window_);
     const int horizontalInset = IsZoomed(window_) ? WindowFrameThicknessX(dpi) : 0;
+    const int sidebarWidth = PdfSidebarWidth();
+    const float slideProgress = std::clamp(pdfSidebarSlideProgress_, 0.0f, 1.0f);
     rect.top = ReservedToolbarHeight();
-    rect.left += horizontalInset;
-    rect.right = rect.left + PdfSidebarWidth();
+    rect.left += horizontalInset - static_cast<int>(std::lround(static_cast<float>(sidebarWidth) * (1.0f - slideProgress)));
+    rect.right = rect.left + sidebarWidth;
     return rect;
+}
+
+void App::InvalidatePdfSidebarAnimationRegion() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const UINT dpi = WindowDpi(window_);
+    const int horizontalInset = IsZoomed(window_) ? WindowFrameThicknessX(dpi) : 0;
+    const int sidebarWidth = BuildSidebarMetrics(dpi).width;
+    RECT dirtyRect = clientRect;
+    dirtyRect.left = 0;
+    dirtyRect.top = ReservedToolbarHeight();
+    dirtyRect.right = std::min<LONG>(clientRect.right, horizontalInset + sidebarWidth);
+    if (dirtyRect.right > dirtyRect.left && dirtyRect.bottom > dirtyRect.top) {
+        RedrawWindow(window_, &dirtyRect, nullptr, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
+    }
+}
+
+void App::StartPdfSidebarSlideAnimation(float targetProgress) {
+    targetProgress = std::clamp(targetProgress, 0.0f, 1.0f);
+    if (window_ == nullptr) {
+        pdfSidebarSlideProgress_ = targetProgress;
+        StopPdfSidebarSlideAnimationTimer();
+        return;
+    }
+
+    if (std::abs(pdfSidebarSlideProgress_ - targetProgress) <= 0.001f) {
+        pdfSidebarSlideProgress_ = targetProgress;
+        pdfSidebarSlideAnimationStartProgress_ = targetProgress;
+        pdfSidebarSlideAnimationTargetProgress_ = targetProgress;
+        pdfSidebarSlideAnimationStartMs_ = 0;
+        StopPdfSidebarSlideAnimationTimer();
+    } else {
+        pdfSidebarSlideAnimationStartProgress_ = pdfSidebarSlideProgress_;
+        pdfSidebarSlideAnimationTargetProgress_ = targetProgress;
+        pdfSidebarSlideAnimationStartMs_ = GetTickCount64();
+        if (!pdfSidebarSlideTimerResolutionActive_) {
+            if (timeBeginPeriod(1) == TIMERR_NOERROR) {
+                pdfSidebarSlideTimerResolutionActive_ = true;
+            }
+        }
+        SetTimer(window_, kPdfSidebarSlideTimerId, kPdfSidebarSlideFrameMs, nullptr);
+    }
+
+    InvalidatePdfSidebarAnimationRegion();
+}
+
+void App::StopPdfSidebarSlideAnimationTimer() {
+    if (window_ != nullptr) {
+        KillTimer(window_, kPdfSidebarSlideTimerId);
+    }
+    if (pdfSidebarSlideTimerResolutionActive_) {
+        timeEndPeriod(1);
+        pdfSidebarSlideTimerResolutionActive_ = false;
+    }
+}
+
+void App::HandlePdfSidebarSlideAnimationTimer() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    const ULONGLONG startMs = pdfSidebarSlideAnimationStartMs_;
+    const ULONGLONG nowMs = GetTickCount64();
+    const double elapsed = startMs > 0 ? static_cast<double>(nowMs - startMs) : static_cast<double>(kPdfSidebarSlideDurationMs);
+    const float linearT = static_cast<float>(std::clamp(elapsed / static_cast<double>(kPdfSidebarSlideDurationMs), 0.0, 1.0));
+    const float easedT = linearT * linearT * (3.0f - (2.0f * linearT));
+    pdfSidebarSlideProgress_ = pdfSidebarSlideAnimationStartProgress_
+        + ((pdfSidebarSlideAnimationTargetProgress_ - pdfSidebarSlideAnimationStartProgress_) * easedT);
+
+    InvalidatePdfSidebarAnimationRegion();
+    DwmFlush();
+
+    if (linearT >= 1.0f) {
+        pdfSidebarSlideProgress_ = pdfSidebarSlideAnimationTargetProgress_;
+        pdfSidebarSlideAnimationStartProgress_ = pdfSidebarSlideProgress_;
+        StopPdfSidebarSlideAnimationTimer();
+        InvalidatePdfSidebarAnimationRegion();
+    }
 }
 
 
 std::optional<std::size_t> App::HitTestSidebarPage(POINT cursor) const {
-    if (!IsPdfSidebarVisible()) {
+    if (!pdfSidebarOpen_ || !IsPdfSidebarVisible()) {
         return std::nullopt;
     }
 
@@ -5285,7 +5392,7 @@ bool App::HandleToolbarClick(POINT cursor) {
 }
 
 bool App::HandleSidebarClick(POINT cursor) {
-    if (!IsPdfSidebarVisible()) {
+    if (!pdfSidebarOpen_ || !IsPdfSidebarVisible()) {
         return false;
     }
 
@@ -6417,14 +6524,6 @@ void App::PaintCanvas(HDC hdc, RECT clientRect) {
     HBRUSH canvasBrush = CreateSolidBrush(RGB(22, 26, 33));
     FillRect(hdc, &canvasRect, canvasBrush);
     DeleteObject(canvasBrush);
-
-    if (IsPdfSidebarVisible()) {
-        const RECT sidebarRect = PdfSidebarRect(clientRect);
-        RECT sidebarVisibleRect {};
-        if (IntersectRect(&sidebarVisibleRect, &sidebarRect, &clipRect) != 0) {
-            PaintPdfSidebar(hdc, clientRect);
-        }
-    }
 
     SaveDC(hdc);
     IntersectClipRect(hdc, canvasRect.left, canvasRect.top, canvasRect.right, canvasRect.bottom);

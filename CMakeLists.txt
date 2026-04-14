@@ -80,6 +80,7 @@ target_link_libraries(cnote PRIVATE
     pdfium
     uxtheme
     user32
+    winmm
 )
 
 add_custom_command(TARGET cnote POST_BUILD

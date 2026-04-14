@@ -90,6 +90,7 @@ void App::Paint() {
 
     RefreshTextEditControl();
     PaintCanvas(memoryDc, clientRect);
+    PaintPdfSidebar(memoryDc, clientRect);
     PaintToolbar(memoryDc, clientRect);
     PaintQuickSizePopup(memoryDc, clientRect);
     PaintTextFormatPopup(memoryDc, clientRect);

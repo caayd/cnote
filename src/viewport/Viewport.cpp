@@ -90,7 +90,7 @@ RECT App::CanvasRect(RECT clientRect) const {
     const UINT dpi = WindowDpi(window_);
     const int horizontalInset = IsZoomed(window_) ? WindowFrameThicknessX(dpi) : 0;
     rect.top = ReservedToolbarHeight();
-    rect.left += horizontalInset + PdfSidebarWidth();
+    rect.left += horizontalInset;
     rect.right -= horizontalInset;
     return rect;
 }
@@ -247,7 +247,7 @@ std::vector<App::PageView> App::CalculatePageViews(RECT clientRect) const {
     const UINT dpi = WindowDpi(window_);
     const RECT canvasRect = CanvasRect(clientRect);
     const int canvasWidth = std::max(1, static_cast<int>(canvasRect.right - canvasRect.left));
-    const int zoomReferenceCanvasWidth = MaximizedCanvasWidthForZoom(window_, canvasWidth, PdfSidebarWidth(), dpi);
+    const int zoomReferenceCanvasWidth = MaximizedCanvasWidthForZoom(window_, canvasWidth, 0, dpi);
     float widestPage = 1.0f;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         widestPage = std::max(widestPage, document_.PageAt(pageIndex).width);

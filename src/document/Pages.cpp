@@ -12,6 +12,7 @@ void App::PrepareForDocumentSwitch() {
     CancelTextEdit();
     CancelDeferredRasterRefresh();
     KillTimer(window_, kZoomSessionTimerId);
+    StopPdfSidebarSlideAnimationTimer();
     CancelQuickSizePopup();
     ClearInteractionPreview();
     zoomSessionActive_ = false;
@@ -30,6 +31,9 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
     document_ = std::move(document);
     documentDirty_ = false;
     pdfSidebarOpen_ = pdfSidebarOpen_ && document_.PageCount() > 0U;
+    pdfSidebarSlideProgress_ = pdfSidebarOpen_ ? 1.0f : 0.0f;
+    pdfSidebarSlideAnimationStartProgress_ = pdfSidebarSlideProgress_;
+    pdfSidebarSlideAnimationTargetProgress_ = pdfSidebarSlideProgress_;
     pdfSidebarScrollY_ = 0;
     copiedSidebarPage_.reset();
     CancelPageJumpInput();

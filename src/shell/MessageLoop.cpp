@@ -380,7 +380,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             ZoomAt(wheelDelta, cursor);
             return 0;
         }
-        if (IsPdfSidebarVisible()) {
+        if (pdfSidebarOpen_ && IsPdfSidebarVisible()) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
             const RECT sidebarRect = PdfSidebarRect(clientRect);
@@ -450,6 +450,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             HandleToolbarRevealAnimationTimer();
             return 0;
         }
+        if (wParam == kPdfSidebarSlideTimerId) {
+            HandlePdfSidebarSlideAnimationTimer();
+            return 0;
+        }
         break;
     case WM_SETCURSOR:
         if (LOWORD(lParam) == HTCLIENT) {
@@ -484,7 +488,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             const QuickSizePopupLayout quickSizePopupLayout = BuildQuickSizePopupLayout(CanvasRect(clientRect), quickSizePopupAnchor_, dpi);
             const RECT quickSizePopupBounds = QuickSizePopupBounds(quickSizePopupLayout, dpi);
             const RECT liveTextFrameRect = LiveTextEditFrameRect(textEditBounds_, dpi);
-            if (IsPdfSidebarVisible() && PtInRect(&sidebarRect, cursor) != 0) {
+            if (pdfSidebarOpen_ && IsPdfSidebarVisible() && PtInRect(&sidebarRect, cursor) != 0) {
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
             } else if (quickSizePopupTool_.has_value()
                 && PtInRect(&quickSizePopupBounds, cursor) != 0) {
@@ -851,8 +855,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_SIZE:
         CancelDeferredRasterRefresh();
         KillTimer(window_, kZoomSessionTimerId);
-        KillTimer(window_, kToolbarRevealTimerId);
+        StopToolbarRevealAnimationTimer();
+        StopPdfSidebarSlideAnimationTimer();
         toolbarRevealProgress_ = toolbarRevealed_ ? 1.0f : 0.0f;
+        pdfSidebarSlideProgress_ = pdfSidebarOpen_ ? 1.0f : 0.0f;
         zoomSessionActive_ = false;
         zoomAnchorValid_ = false;
         ClearZoomSessionSnapshots();
@@ -876,8 +882,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         CancelDeferredRasterRefresh();
         KillTimer(window_, kZoomSessionTimerId);
-        KillTimer(window_, kToolbarRevealTimerId);
+        StopToolbarRevealAnimationTimer();
+        StopPdfSidebarSlideAnimationTimer();
         toolbarRevealProgress_ = toolbarRevealed_ ? 1.0f : 0.0f;
+        pdfSidebarSlideProgress_ = pdfSidebarOpen_ ? 1.0f : 0.0f;
         zoomSessionActive_ = false;
         zoomAnchorValid_ = false;
         ClearZoomSessionSnapshots();
@@ -891,7 +899,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_DESTROY:
         CancelDeferredRasterRefresh();
         KillTimer(window_, kZoomSessionTimerId);
-        KillTimer(window_, kToolbarRevealTimerId);
+        StopToolbarRevealAnimationTimer();
+        StopPdfSidebarSlideAnimationTimer();
         ClearZoomSessionSnapshots();
         ReleasePaintBackbuffer();
         PostQuitMessage(0);

@@ -331,8 +331,12 @@ void App::ToggleNewPageSettings() {
 void App::TogglePdfSidebar() {
     if (document_.PageCount() == 0U) {
         pdfSidebarOpen_ = false;
+        pdfSidebarSlideProgress_ = 0.0f;
+        pdfSidebarSlideAnimationStartProgress_ = 0.0f;
+        pdfSidebarSlideAnimationTargetProgress_ = 0.0f;
         pdfSidebarScrollY_ = 0;
         CancelPageJumpInput();
+        StopPdfSidebarSlideAnimationTimer();
         InvalidateRect(window_, nullptr, FALSE);
         return;
     }
@@ -340,9 +344,11 @@ void App::TogglePdfSidebar() {
     pdfSidebarOpen_ = !pdfSidebarOpen_;
     if (pdfSidebarOpen_) {
         EnsureSidebarCurrentPageVisible();
+        StartPdfSidebarSlideAnimation(1.0f);
     } else {
         pdfSidebarScrollY_ = 0;
         CancelPageJumpInput();
+        StartPdfSidebarSlideAnimation(0.0f);
     }
     InvalidateRect(window_, nullptr, FALSE);
 }
