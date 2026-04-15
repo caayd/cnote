@@ -52,6 +52,14 @@ RECT UnionRectangles(RECT a, RECT b) {
         std::max(a.bottom, b.bottom));
 }
 
+float DefaultNewTextZoomScale(float zoom) {
+    return std::max(0.1f, zoom);
+}
+
+float DefaultNewTextSizeScale() {
+    return 0.5f;
+}
+
 DWORD TextEditAlignmentStyle(TextAlignment alignment) {
     switch (alignment) {
     case TextAlignment::Center:
@@ -554,30 +562,35 @@ void App::RefreshTextEditControl() {
         return;
     }
 
+    const UINT dpi = WindowDpi(window_);
     const PageText& text = page.texts[*editingTextIndex_];
     const PageText layoutText = CurrentEditingTextLayout().value_or(text);
     if (!EnsureTextEditWindow(layoutText.alignment)) {
         return;
     }
-    const textgeom::TextPixelMetrics metrics = textgeom::MeasurePageTextPixels(layoutText, page.width, pageView.scale);
-    const int fontHeight = textgeom::PageTextFontPixelHeight(layoutText, pageView.scale);
-    const int minimumAutoWidth = std::max(ScaleForDpi(80, WindowDpi(window_)), fontHeight * 3);
+    const int minimumEditFontHeight = ScaleForDpi(9, dpi);
+    const float editScale = std::max(
+        pageView.scale,
+        static_cast<float>(minimumEditFontHeight) / std::max(1.0f, layoutText.fontSize));
+    const textgeom::TextPixelMetrics metrics = textgeom::MeasurePageTextPixels(layoutText, page.width, editScale);
+    const int fontHeight = textgeom::PageTextFontPixelHeight(layoutText, editScale);
+    const int minimumAutoWidth = std::max(ScaleForDpi(80, dpi), fontHeight * 3);
     const int contentWidth = (text.width > 0.0f) ? metrics.width : std::max(metrics.width, minimumAutoWidth);
-    const int width = std::max(contentWidth + 10, ScaleForDpi(24, WindowDpi(window_)));
-    const int explicitHeight = std::max(0, static_cast<int>(std::ceil(text.height * pageView.scale)));
+    const int width = std::max(contentWidth + 10, ScaleForDpi(24, dpi));
+    const int explicitHeight = std::max(0, static_cast<int>(std::ceil(text.height * editScale)));
     const int height = std::max(std::max(metrics.height, explicitHeight) + 10, fontHeight + 10);
     const int left = pageView.rect.left + static_cast<int>(std::lround(text.x * pageView.scale)) - 3;
     const int top = pageView.rect.top + static_cast<int>(std::lround(text.y * pageView.scale)) - 3;
     const RECT editRect = MakeRect(left, top, left + width, top + height);
 
-    const float rawEditFontHeight = std::max(1.0f, layoutText.fontSize) * std::max(0.1f, pageView.scale);
-    const int editFontHeight = std::max(1, static_cast<int>(std::floor(rawEditFontHeight + 0.35f)));
-    if (textEditFont_ == nullptr
+    const int editFontHeight = std::max(1, fontHeight);
+    const bool fontChanged = textEditFont_ == nullptr
         || textEditFontPixelHeight_ != editFontHeight
         || textEditFontFamily_ != layoutText.fontFamily
         || textEditBold_ != layoutText.bold
         || textEditItalic_ != layoutText.italic
-        || textEditUnderline_ != layoutText.underline) {
+        || textEditUnderline_ != layoutText.underline;
+    if (fontChanged) {
         if (textEditFont_ != nullptr) {
             DeleteObject(textEditFont_);
             textEditFont_ = nullptr;
@@ -599,9 +612,9 @@ void App::RefreshTextEditControl() {
     RECT dirtyRect {};
     bool needsParentRedraw = false;
     if (boundsChanged || needsLayout) {
-        dirtyRect = LiveTextEditFrameRect(editRect, WindowDpi(window_));
+        dirtyRect = LiveTextEditFrameRect(editRect, dpi);
         if (HasRect(textEditBounds_)) {
-            const RECT previousFrameRect = LiveTextEditFrameRect(textEditBounds_, WindowDpi(window_));
+            const RECT previousFrameRect = LiveTextEditFrameRect(textEditBounds_, dpi);
             dirtyRect = UnionRectangles(previousFrameRect, dirtyRect);
         }
         RefreshTextEditBackgroundBrush(editRect);
@@ -619,10 +632,11 @@ void App::RefreshTextEditControl() {
         ShowWindow(textEditWindow_, SW_SHOW);
     }
     if (needsParentRedraw) {
-        RedrawWindow(window_, &dirtyRect, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOCHILDREN);
+        RedrawWindow(window_, &dirtyRect, nullptr, RDW_INVALIDATE | RDW_NOCHILDREN);
     }
-    InvalidateRect(textEditWindow_, nullptr, TRUE);
-    UpdateWindow(textEditWindow_);
+    if (boundsChanged || needsLayout || fontChanged) {
+        InvalidateRect(textEditWindow_, nullptr, TRUE);
+    }
 }
 
 void App::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, Page beforePage) {
@@ -706,10 +720,26 @@ void App::BeginTextToolInteraction(POINT cursor) {
     Page beforePage = document_.PageAt(hitPage->pageIndex);
     Page& page = document_.PageAt(hitPage->pageIndex);
     PageText text {};
+    const PageText defaultText {};
+    const float creationZoomScale = DefaultNewTextZoomScale(zoom_);
+    const float newTextSizeScale = DefaultNewTextSizeScale();
     const Vec2 pagePoint = ScreenToPage(*hitPage, cursor, true);
+    text.fontSize = std::max(1.0f, (defaultText.fontSize * newTextSizeScale) / creationZoomScale);
     text.x = pagePoint.x;
     text.y = pagePoint.y;
-    text.width = textgeom::DefaultPageTextBoxWidth(page, text);
+    text.width = std::max(1.0f, (textgeom::DefaultPageTextBoxWidth(page, defaultText) * newTextSizeScale) / creationZoomScale);
+    if (page.width > 0.0f) {
+        text.width = std::min(text.width, page.width);
+        if (text.x + text.width > page.width) {
+            text.x = std::max(0.0f, page.width - text.width);
+        }
+    }
+    if (page.height > 0.0f) {
+        const float estimatedInitialHeight = std::max(1.0f, text.fontSize * 1.35f);
+        if (text.y + estimatedInitialHeight > page.height) {
+            text.y = std::max(0.0f, page.height - estimatedInitialHeight);
+        }
+    }
     text.color = palette_[colorIndex_];
     page.texts.push_back(text);
     document_.SetCurrentPageIndex(hitPage->pageIndex);

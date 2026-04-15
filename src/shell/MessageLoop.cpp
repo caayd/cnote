@@ -1039,8 +1039,6 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
     const LRESULT result = CallWindowProcW(app->textEditOriginalProc_, window, message, wParam, lParam);
     if (message == WM_CHAR || message == WM_PASTE || message == WM_CUT || message == WM_CLEAR) {
         app->RefreshTextEditControl();
-        InvalidateRect(window, nullptr, TRUE);
-        UpdateWindow(window);
         if (app->textFormatPopupOpen_ && app->window_ != nullptr) {
             InvalidateRect(app->window_, nullptr, FALSE);
         }

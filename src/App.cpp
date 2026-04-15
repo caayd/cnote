@@ -5073,6 +5073,11 @@ void App::BeginTextTransform(std::size_t pageIndex, std::size_t textIndex, Image
     GetClientRect(window_, &clientRect);
     const PageView pageView = CalculatePageView(clientRect, pageIndex);
     textTransformStartPagePoint_ = pageView.valid ? ScreenToPage(pageView, cursor, false) : ScreenToPage(cursor, nullptr);
+    interactionPreviewMode_ = InteractionPreviewMode::TextTransform;
+    interactionPreviewStartCursor_ = cursor;
+    EnsureInteractionPreviewStorage();
+    BuildInteractionPageSnapshot(pageView);
+    UpdateTextTransform(cursor);
     UpdateCaptureState();
     InvalidateCanvas();
 }
@@ -5093,6 +5098,11 @@ void App::UpdateTextTransform(POINT cursor) {
     const PageView pageView = CalculatePageView(clientRect, pageIndex);
     if (!pageView.valid) {
         return;
+    }
+
+    std::vector<std::optional<RECT>> previousBounds(document_.PageCount());
+    for (std::size_t index = 0; index < document_.PageCount(); ++index) {
+        previousBounds[index] = InteractionPreviewBoundsForPage(index);
     }
 
     const Page& page = document_.PageAt(pageIndex);
@@ -5293,9 +5303,19 @@ void App::UpdateTextTransform(POINT cursor) {
         updated.height = std::max(1.0f, updated.height);
     }
 
-    document_.PageAt(pageIndex).texts[textIndex] = std::move(updated);
-    InvalidatePageSurfaceCache(pageIndex);
-    InvalidateCanvas();
+    const PageTextBounds finalBounds = MeasurePageTextBounds(updated, page.width);
+    if (interactionPreviewTexts_.size() != document_.PageCount()) {
+        EnsureInteractionPreviewStorage();
+    }
+    interactionPreviewTexts_.assign(document_.PageCount(), {});
+    interactionPreviewTexts_[pageIndex].push_back({
+        pageIndex,
+        textIndex,
+        std::move(updated),
+        std::max(1.0f, finalBounds.right - finalBounds.left),
+        std::max(1.0f, finalBounds.bottom - finalBounds.top),
+    });
+    InvalidateInteractionPreviewDelta(previousBounds);
 }
 
 void App::EndTextTransform() {
@@ -5304,12 +5324,24 @@ void App::EndTextTransform() {
     }
 
     const std::size_t pageIndex = *transformingTextPageIndex_;
+    if (pageIndex < document_.PageCount()
+        && transformingTextIndex_.has_value()
+        && *transformingTextIndex_ < document_.PageAt(pageIndex).texts.size()
+        && pageIndex < interactionPreviewTexts_.size()) {
+        for (const InteractionPreviewText& preview : interactionPreviewTexts_[pageIndex]) {
+            if (preview.sourcePageIndex == pageIndex && preview.sourceIndex == *transformingTextIndex_) {
+                document_.PageAt(pageIndex).texts[*transformingTextIndex_] = preview.text;
+                break;
+            }
+        }
+    }
     const bool changed = pageIndex < document_.PageCount() && !PageEqual(textTransformBeforePage_, document_.PageAt(pageIndex));
 
     isTransformingText_ = false;
     transformingTextPageIndex_.reset();
     transformingTextIndex_.reset();
     textTransformHandle_ = ImageTransformHandle::None;
+    ClearInteractionPreview();
     UpdateCaptureState();
 
     if (pageIndex < document_.PageCount()) {
@@ -6940,6 +6972,25 @@ void App::PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSe
                 RECT screenRect = *textRect;
                 OffsetRect(&screenRect, pageView.rect.left, pageView.rect.top);
                 DrawRectangleAA(hdc, screenRect, RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
+                const bool shouldDrawHandles = (interactionPreviewMode_ == InteractionPreviewMode::TextTransform || interactionPreviewMode_ == InteractionPreviewMode::MoveSelection)
+                    && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingText_
+                        || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances));
+                if (shouldDrawHandles) {
+                    const int left = screenRect.left;
+                    const int top = screenRect.top;
+                    const int right = screenRect.right;
+                    const int bottom = screenRect.bottom;
+                    const int centerX = (left + right) / 2;
+                    const int centerY = (top + bottom) / 2;
+                    PaintSelectionHandle(hdc, left, top, dpi);
+                    PaintSelectionHandle(hdc, centerX, top, dpi);
+                    PaintSelectionHandle(hdc, right, top, dpi);
+                    PaintSelectionHandle(hdc, right, centerY, dpi);
+                    PaintSelectionHandle(hdc, right, bottom, dpi);
+                    PaintSelectionHandle(hdc, centerX, bottom, dpi);
+                    PaintSelectionHandle(hdc, left, bottom, dpi);
+                    PaintSelectionHandle(hdc, left, centerY, dpi);
+                }
             }
         }
     }
@@ -7682,6 +7733,13 @@ bool App::ShouldSkipTextInInteractionSnapshot(std::size_t pageIndex, std::size_t
     if (interactionPreviewMode_ == InteractionPreviewMode::MoveSelection) {
         return pageIndex < selectedTextIndices_.size()
             && std::find(selectedTextIndices_[pageIndex].begin(), selectedTextIndices_[pageIndex].end(), textIndex) != selectedTextIndices_[pageIndex].end();
+    }
+
+    if (interactionPreviewMode_ == InteractionPreviewMode::TextTransform) {
+        return transformingTextPageIndex_.has_value()
+            && transformingTextIndex_.has_value()
+            && *transformingTextPageIndex_ == pageIndex
+            && *transformingTextIndex_ == textIndex;
     }
 
     return false;
