@@ -344,7 +344,14 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
         return std::nullopt;
     }
 
-    ByteReader reader { *bytes };
+    return LoadFromBytes(*bytes, filePath, pdfBackend);
+}
+
+std::optional<Document> ProjectFile::LoadFromBytes(
+    const std::vector<std::uint8_t>& bytes,
+    const std::wstring& filePath,
+    PdfiumBackend& pdfBackend) {
+    ByteReader reader { bytes };
     char magic[sizeof(kCnoteMagic)] {};
     std::uint32_t version = 0;
     std::uint32_t flags = 0;
@@ -550,7 +557,7 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
     return Document::CreateProjectDocument(filePath, std::move(pdfSources), std::move(savedPages), currentPageIndex, pageDefaults);
 }
 
-bool ProjectFile::Save(const Document& document, const std::wstring& filePath) {
+std::vector<std::uint8_t> ProjectFile::Serialize(const Document& document) {
     std::vector<std::uint8_t> bytes;
     const std::uint32_t flags = document.HasPdfData() ? kProjectFlagHasPdf : 0U;
     const std::uint32_t currentPageIndex = static_cast<std::uint32_t>(document.CurrentPageIndex());
@@ -600,6 +607,11 @@ bool ProjectFile::Save(const Document& document, const std::wstring& filePath) {
         }
     }
 
+    return bytes;
+}
+
+bool ProjectFile::Save(const Document& document, const std::wstring& filePath) {
+    const std::vector<std::uint8_t> bytes = Serialize(document);
     return WriteAllBytes(filePath, bytes);
 }
 
