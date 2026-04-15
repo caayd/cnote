@@ -48,6 +48,28 @@ void ReleaseCom(T*& instance) {
     }
 }
 
+void HashToolbarBytes(std::uint64_t& hash, const void* data, std::size_t size) {
+    constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (std::size_t index = 0; index < size; ++index) {
+        hash ^= static_cast<std::uint64_t>(bytes[index]);
+        hash *= kFnvPrime;
+    }
+}
+
+template <typename T>
+void HashToolbarValue(std::uint64_t& hash, const T& value) {
+    HashToolbarBytes(hash, &value, sizeof(value));
+}
+
+void HashToolbarString(std::uint64_t& hash, const std::wstring& value) {
+    const std::size_t size = value.size();
+    HashToolbarValue(hash, size);
+    if (!value.empty()) {
+        HashToolbarBytes(hash, value.data(), value.size() * sizeof(wchar_t));
+    }
+}
+
 constexpr wchar_t kWindowClassName[] = L"CnoteWindow";
 constexpr wchar_t kWindowTitle[] = L"cnote";
 constexpr int kToolbarPadding = 18;
@@ -2621,10 +2643,84 @@ void App::SetToolbarRevealed(bool revealed) {
     }
 }
 
+int App::ToolbarHiddenOvershoot() const {
+    return ScaleForDpi(2, WindowDpi(window_));
+}
+
+int App::ToolbarHideAnimationOvershoot(int toolbarHeight) const {
+    if (IsZoomed(window_)) {
+        return ToolbarHiddenOvershoot();
+    }
+    return std::max(toolbarHeight * 4, ScaleForDpi(48, WindowDpi(window_)));
+}
+
+int App::ToolbarVisibleClipHeight(int toolbarHeight) const {
+    const int edgeGuard = ScaleForDpi(2, WindowDpi(window_));
+    return std::max(1, toolbarHeight - edgeGuard);
+}
+
 float App::ToolbarOffsetYForProgress(int toolbarHeight, float progress) const {
     progress = std::clamp(progress, 0.0f, 1.0f);
-    constexpr float kHiddenToolbarOvershootPx = 2.0f;
-    return -(static_cast<float>(toolbarHeight) + kHiddenToolbarOvershootPx) * (1.0f - progress);
+    return -static_cast<float>(toolbarHeight + ToolbarHiddenOvershoot()) * (1.0f - progress);
+}
+
+float App::ToolbarHideAnimationTargetOffsetY(int toolbarHeight) const {
+    return -static_cast<float>(toolbarHeight + ToolbarHideAnimationOvershoot(toolbarHeight));
+}
+
+std::uint64_t App::ToolbarRenderSignature(RECT clientRect) const {
+    constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
+    std::uint64_t hash = kFnvOffset;
+    const UINT dpi = WindowDpi(window_);
+    const bool maximized = IsZoomed(window_) != FALSE;
+    const int clientWidth = static_cast<int>(clientRect.right - clientRect.left);
+    const int toolbarHeight = FullToolbarHeight();
+    const int activeTool = static_cast<int>(activeTool_);
+    const int hoveredWindowButton = hoveredWindowButton_;
+    const bool canUndo = CanUndo();
+    const bool canRedo = CanRedo();
+    const bool movingToolSelected = activeTool_ == Tool::Move || isMovingSelection_ || isTransformingImage_ || isTransformingStroke_;
+    const bool paletteMenuOpen = wheel_.paletteMenuOpen;
+    const bool titleMenuOpen = titleMenuActive_;
+    const bool titleHovered = hoveredTitleMenu_;
+    const bool zoomEditing = toolbarZoomEditing_;
+    const bool brushEditing = toolbarBrushSizeEditing_;
+    const bool brushDragging = toolbarBrushSliderDragging_;
+
+    HashToolbarValue(hash, dpi);
+    HashToolbarValue(hash, maximized);
+    HashToolbarValue(hash, clientWidth);
+    HashToolbarValue(hash, toolbarHeight);
+    HashToolbarValue(hash, activeTool);
+    HashToolbarValue(hash, colorIndex_);
+    HashToolbarValue(hash, hoveredWindowButton);
+    HashToolbarValue(hash, canUndo);
+    HashToolbarValue(hash, canRedo);
+    HashToolbarValue(hash, movingToolSelected);
+    HashToolbarValue(hash, paletteMenuOpen);
+    HashToolbarValue(hash, titleMenuOpen);
+    HashToolbarValue(hash, titleHovered);
+    HashToolbarValue(hash, zoomEditing);
+    HashToolbarValue(hash, brushEditing);
+    HashToolbarValue(hash, brushDragging);
+    HashToolbarString(hash, CurrentWindowTitle());
+    HashToolbarString(hash, ZoomIndicatorLabel());
+    HashToolbarString(hash, ToolbarBrushValueLabel());
+
+    const std::size_t paletteSize = palette_.size();
+    HashToolbarValue(hash, paletteSize);
+    for (std::uint32_t color : palette_) {
+        HashToolbarValue(hash, color);
+    }
+
+    const std::size_t wheelToolCount = wheel_.tools.size();
+    HashToolbarValue(hash, wheelToolCount);
+    for (Tool tool : wheel_.tools) {
+        const int toolValue = static_cast<int>(tool);
+        HashToolbarValue(hash, toolValue);
+    }
+
+    return hash;
 }
 
 void App::SetToolbarAutoHideEnabled(bool enabled) {
@@ -2723,7 +2819,13 @@ void App::StartToolbarRevealAnimation(float targetProgress) {
         toolbarRevealAnimationStartMs_ = GetTickCount64();
 
         if (StartToolbarCompositionAnimation(toolbarRevealAnimationStartProgress_, targetProgress)) {
-            SetTimer(window_, kToolbarRevealTimerId, kToolbarRevealDurationMs + 32, nullptr);
+            const UINT completionDelayMs = targetProgress <= 0.001f && !IsZoomed(window_)
+                ? kToolbarHideDetachDelayMs
+                : kToolbarRevealDurationMs + 32;
+            if (completionDelayMs == kToolbarHideDetachDelayMs && timeBeginPeriod(1) == TIMERR_NOERROR) {
+                toolbarRevealTimerResolutionActive_ = true;
+            }
+            SetTimer(window_, kToolbarRevealTimerId, completionDelayMs, nullptr);
             return;
         }
 
@@ -2768,8 +2870,11 @@ void App::HandleToolbarRevealAnimationTimer() {
         static_cast<void>(UpdatePdfSidebarComposition(clientRect));
         if (toolbarRevealProgress_ <= 0.001f) {
             RECT toolbarRect = clientRect;
-            toolbarRect.bottom = FullToolbarHeight();
+            toolbarRect.bottom = std::min<LONG>(
+                clientRect.bottom,
+                static_cast<LONG>(FullToolbarHeight() + ToolbarHideAnimationOvershoot(FullToolbarHeight())));
             RedrawWindow(window_, &toolbarRect, nullptr, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
+            DwmFlush();
         }
         return;
     }
@@ -3685,6 +3790,7 @@ bool App::EnsureCompositionDevice() {
     if (compositionDevice_ != nullptr
         && compositionTarget_ != nullptr
         && compositionRootVisual_ != nullptr
+        && toolbarViewportCompositionVisual_ != nullptr
         && toolbarCompositionVisual_ != nullptr
         && pdfSidebarCompositionVisual_ != nullptr) {
         return true;
@@ -3747,6 +3853,12 @@ bool App::EnsureCompositionDevice() {
         return false;
     }
 
+    hr = compositionDevice_->CreateVisual(&toolbarViewportCompositionVisual_);
+    if (FAILED(hr) || toolbarViewportCompositionVisual_ == nullptr) {
+        ReleaseCompositionResources();
+        return false;
+    }
+
     hr = compositionDevice_->CreateVisual(&toolbarCompositionVisual_);
     if (FAILED(hr) || toolbarCompositionVisual_ == nullptr) {
         ReleaseCompositionResources();
@@ -3754,9 +3866,11 @@ bool App::EnsureCompositionDevice() {
     }
 
     pdfSidebarCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
+    toolbarViewportCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
     toolbarCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
+    toolbarViewportCompositionVisual_->AddVisual(toolbarCompositionVisual_, TRUE, nullptr);
     compositionRootVisual_->AddVisual(pdfSidebarCompositionVisual_, TRUE, nullptr);
-    compositionRootVisual_->AddVisual(toolbarCompositionVisual_, TRUE, pdfSidebarCompositionVisual_);
+    compositionRootVisual_->AddVisual(toolbarViewportCompositionVisual_, TRUE, pdfSidebarCompositionVisual_);
     compositionTarget_->SetRoot(compositionRootVisual_);
     compositionDevice_->Commit();
     pdfSidebarCompositionDirty_ = true;
@@ -3774,6 +3888,7 @@ void App::ReleaseCompositionResources() {
     ReleaseCom(toolbarCompositionSurface_);
     ReleaseCom(pdfSidebarCompositionSurface_);
     ReleaseCom(toolbarCompositionVisual_);
+    ReleaseCom(toolbarViewportCompositionVisual_);
     ReleaseCom(pdfSidebarCompositionVisual_);
     ReleaseCom(compositionRootVisual_);
     ReleaseCom(compositionTarget_);
@@ -3785,7 +3900,10 @@ void App::ReleaseCompositionResources() {
     pdfSidebarCompositionWidth_ = 0;
     pdfSidebarCompositionHeight_ = 0;
     pdfSidebarCompositionDpi_ = 0;
+    toolbarCompositionDirty_ = true;
     toolbarCompositionAnimationActive_ = false;
+    toolbarCompositionContentAttached_ = false;
+    toolbarCompositionSignature_ = 0;
     toolbarCompositionWidth_ = 0;
     toolbarCompositionHeight_ = 0;
     toolbarCompositionDpi_ = 0;
@@ -3794,10 +3912,12 @@ void App::ReleaseCompositionResources() {
 
 bool App::UpdateToolbarComposition(RECT clientRect) {
     if (!IsToolbarVisible()) {
-        if (compositionDevice_ != nullptr && toolbarCompositionVisual_ != nullptr) {
+        if (compositionDevice_ != nullptr && toolbarCompositionVisual_ != nullptr && toolbarCompositionContentAttached_) {
             toolbarCompositionVisual_->SetOffsetY(ToolbarOffsetYForProgress(std::max(1, FullToolbarHeight()), 0.0f));
             toolbarCompositionVisual_->SetContent(nullptr);
             compositionDevice_->Commit();
+            compositionDevice_->WaitForCommitCompletion();
+            toolbarCompositionContentAttached_ = false;
         }
         return true;
     }
@@ -3809,16 +3929,23 @@ bool App::UpdateToolbarComposition(RECT clientRect) {
     const UINT dpi = WindowDpi(window_);
     const int toolbarWidth = std::max(1, static_cast<int>(clientRect.right - clientRect.left));
     const int toolbarHeight = std::max(1, FullToolbarHeight());
+    const int toolbarSurfaceHeight = ToolbarVisibleClipHeight(toolbarHeight);
+    toolbarViewportCompositionVisual_->SetOffsetX(0.0f);
+    toolbarViewportCompositionVisual_->SetOffsetY(0.0f);
+
     const bool maximized = IsZoomed(window_) != FALSE;
     if (toolbarCompositionSurface_ == nullptr
         || toolbarCompositionWidth_ != toolbarWidth
-        || toolbarCompositionHeight_ != toolbarHeight
+        || toolbarCompositionHeight_ != toolbarSurfaceHeight
         || toolbarCompositionDpi_ != dpi
         || toolbarCompositionMaximized_ != maximized) {
         ReleaseCom(toolbarCompositionSurface_);
+        toolbarCompositionContentAttached_ = false;
+        toolbarCompositionDirty_ = true;
+        toolbarCompositionSignature_ = 0;
         const HRESULT hr = compositionDevice_->CreateSurface(
             static_cast<UINT>(toolbarWidth),
-            static_cast<UINT>(toolbarHeight),
+            static_cast<UINT>(toolbarSurfaceHeight),
             DXGI_FORMAT_B8G8R8A8_UNORM,
             DXGI_ALPHA_MODE_IGNORE,
             &toolbarCompositionSurface_);
@@ -3827,53 +3954,62 @@ bool App::UpdateToolbarComposition(RECT clientRect) {
             return false;
         }
         toolbarCompositionWidth_ = toolbarWidth;
-        toolbarCompositionHeight_ = toolbarHeight;
+        toolbarCompositionHeight_ = toolbarSurfaceHeight;
         toolbarCompositionDpi_ = dpi;
         toolbarCompositionMaximized_ = maximized;
     }
 
-    RECT updateRect { 0, 0, toolbarWidth, toolbarHeight };
-    IDXGISurface* dxgiSurface = nullptr;
-    POINT updateOffset {};
-    HRESULT hr = toolbarCompositionSurface_->BeginDraw(
-        &updateRect,
-        __uuidof(IDXGISurface),
-        reinterpret_cast<void**>(&dxgiSurface),
-        &updateOffset);
-    if (FAILED(hr) || dxgiSurface == nullptr) {
+    const std::uint64_t nextSignature = ToolbarRenderSignature(clientRect);
+    const bool shouldRepaintToolbar = toolbarCompositionDirty_ || toolbarCompositionSignature_ != nextSignature;
+    if (shouldRepaintToolbar) {
+        RECT updateRect { 0, 0, toolbarWidth, toolbarSurfaceHeight };
+        IDXGISurface* dxgiSurface = nullptr;
+        POINT updateOffset {};
+        HRESULT hr = toolbarCompositionSurface_->BeginDraw(
+            &updateRect,
+            __uuidof(IDXGISurface),
+            reinterpret_cast<void**>(&dxgiSurface),
+            &updateOffset);
+        if (FAILED(hr) || dxgiSurface == nullptr) {
+            ReleaseCom(dxgiSurface);
+            return false;
+        }
+
+        IDXGISurface1* gdiSurface = nullptr;
+        hr = dxgiSurface->QueryInterface(__uuidof(IDXGISurface1), reinterpret_cast<void**>(&gdiSurface));
         ReleaseCom(dxgiSurface);
-        return false;
-    }
+        if (FAILED(hr) || gdiSurface == nullptr) {
+            toolbarCompositionSurface_->EndDraw();
+            ReleaseCom(gdiSurface);
+            return false;
+        }
 
-    IDXGISurface1* gdiSurface = nullptr;
-    hr = dxgiSurface->QueryInterface(__uuidof(IDXGISurface1), reinterpret_cast<void**>(&gdiSurface));
-    ReleaseCom(dxgiSurface);
-    if (FAILED(hr) || gdiSurface == nullptr) {
-        toolbarCompositionSurface_->EndDraw();
+        HDC toolbarDc = nullptr;
+        hr = gdiSurface->GetDC(FALSE, &toolbarDc);
+        if (FAILED(hr) || toolbarDc == nullptr) {
+            toolbarCompositionSurface_->EndDraw();
+            ReleaseCom(gdiSurface);
+            return false;
+        }
+
+        const int savedDc = SaveDC(toolbarDc);
+        SetViewportOrgEx(toolbarDc, updateOffset.x, updateOffset.y, nullptr);
+        PaintToolbarContents(toolbarDc, updateRect);
+        if (savedDc != 0) {
+            RestoreDC(toolbarDc, savedDc);
+        }
+
+        gdiSurface->ReleaseDC(nullptr);
         ReleaseCom(gdiSurface);
-        return false;
-    }
-
-    HDC toolbarDc = nullptr;
-    hr = gdiSurface->GetDC(FALSE, &toolbarDc);
-    if (FAILED(hr) || toolbarDc == nullptr) {
         toolbarCompositionSurface_->EndDraw();
-        ReleaseCom(gdiSurface);
-        return false;
+        toolbarCompositionDirty_ = false;
+        toolbarCompositionSignature_ = nextSignature;
     }
 
-    const int savedDc = SaveDC(toolbarDc);
-    SetViewportOrgEx(toolbarDc, updateOffset.x, updateOffset.y, nullptr);
-    PaintToolbarContents(toolbarDc, updateRect);
-    if (savedDc != 0) {
-        RestoreDC(toolbarDc, savedDc);
+    if (!toolbarCompositionContentAttached_) {
+        toolbarCompositionVisual_->SetContent(toolbarCompositionSurface_);
+        toolbarCompositionContentAttached_ = true;
     }
-
-    gdiSurface->ReleaseDC(nullptr);
-    ReleaseCom(gdiSurface);
-    toolbarCompositionSurface_->EndDraw();
-
-    toolbarCompositionVisual_->SetContent(toolbarCompositionSurface_);
     if (!toolbarCompositionAnimationActive_) {
         const float revealProgress = settings_.autoHideToolbar ? std::clamp(toolbarRevealProgress_, 0.0f, 1.0f) : 1.0f;
         toolbarCompositionVisual_->SetOffsetY(ToolbarOffsetYForProgress(toolbarHeight, revealProgress));
@@ -3896,7 +4032,9 @@ bool App::StartToolbarCompositionAnimation(float startProgress, float targetProg
 
     const int toolbarHeight = std::max(1, FullToolbarHeight());
     const float startOffset = ToolbarOffsetYForProgress(toolbarHeight, startProgress);
-    const float targetOffset = ToolbarOffsetYForProgress(toolbarHeight, targetProgress);
+    const float targetOffset = targetProgress <= 0.001f
+        ? ToolbarHideAnimationTargetOffsetY(toolbarHeight)
+        : ToolbarOffsetYForProgress(toolbarHeight, targetProgress);
     if (std::abs(startOffset - targetOffset) <= 0.001f) {
         toolbarCompositionVisual_->SetOffsetY(targetOffset);
         compositionDevice_->Commit();
@@ -3912,8 +4050,16 @@ bool App::StartToolbarCompositionAnimation(float startProgress, float targetProg
 
     const double durationSeconds = static_cast<double>(kToolbarRevealDurationMs) / 1000.0;
     const float delta = targetOffset - startOffset;
+    const bool hiding = targetProgress <= 0.001f;
     hr = animation->Reset();
-    if (SUCCEEDED(hr)) {
+    if (SUCCEEDED(hr) && hiding) {
+        hr = animation->AddCubic(
+            0.0,
+            startOffset,
+            0.0f,
+            0.0f,
+            delta * static_cast<float>(1.0 / (durationSeconds * durationSeconds * durationSeconds)));
+    } else if (SUCCEEDED(hr)) {
         hr = animation->AddCubic(
             0.0,
             startOffset,
@@ -6180,7 +6326,7 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     const int toolbarOffsetY = static_cast<int>(std::lround(ToolbarOffsetYForProgress(toolbarHeight, revealProgress)));
     const int savedDc = SaveDC(hdc);
     if (savedDc != 0) {
-        IntersectClipRect(hdc, clientRect.left, 0, clientRect.right, toolbarHeight);
+        IntersectClipRect(hdc, clientRect.left, 0, clientRect.right, ToolbarVisibleClipHeight(toolbarHeight));
         if (toolbarOffsetY != 0) {
             SetViewportOrgEx(hdc, 0, toolbarOffsetY, nullptr);
         }

@@ -473,7 +473,12 @@ private:
     void HandleToolbarRevealAnimationTimer();
     [[nodiscard]] bool UpdateToolbarComposition(RECT clientRect);
     [[nodiscard]] bool StartToolbarCompositionAnimation(float startProgress, float targetProgress);
+    [[nodiscard]] int ToolbarHiddenOvershoot() const;
+    [[nodiscard]] int ToolbarHideAnimationOvershoot(int toolbarHeight) const;
+    [[nodiscard]] int ToolbarVisibleClipHeight(int toolbarHeight) const;
     [[nodiscard]] float ToolbarOffsetYForProgress(int toolbarHeight, float progress) const;
+    [[nodiscard]] float ToolbarHideAnimationTargetOffsetY(int toolbarHeight) const;
+    [[nodiscard]] std::uint64_t ToolbarRenderSignature(RECT clientRect) const;
     [[nodiscard]] std::optional<std::size_t> HitTestSidebarPage(POINT cursor) const;
     void EnsureSidebarCurrentPageVisible();
     void SyncCurrentPageToViewport();
@@ -680,7 +685,10 @@ private:
     float toolbarRevealAnimationTargetProgress_ = 1.0f;
     ULONGLONG toolbarRevealAnimationStartMs_ = 0;
     bool toolbarRevealTimerResolutionActive_ = false;
+    bool toolbarCompositionDirty_ = true;
     bool toolbarCompositionAnimationActive_ = false;
+    bool toolbarCompositionContentAttached_ = false;
+    std::uint64_t toolbarCompositionSignature_ = 0;
     int toolbarCompositionWidth_ = 0;
     int toolbarCompositionHeight_ = 0;
     UINT toolbarCompositionDpi_ = 0;
@@ -725,6 +733,7 @@ private:
     IDCompositionDevice* compositionDevice_ = nullptr;
     IDCompositionTarget* compositionTarget_ = nullptr;
     IDCompositionVisual* compositionRootVisual_ = nullptr;
+    IDCompositionVisual* toolbarViewportCompositionVisual_ = nullptr;
     IDCompositionVisual* toolbarCompositionVisual_ = nullptr;
     IDCompositionSurface* toolbarCompositionSurface_ = nullptr;
     IDCompositionVisual* pdfSidebarCompositionVisual_ = nullptr;
@@ -743,6 +752,7 @@ private:
     static constexpr UINT kZoomSessionDelayMs = 100;
     static constexpr UINT kToolbarRevealFrameMs = 1;
     static constexpr UINT kToolbarRevealDurationMs = 120;
+    static constexpr UINT kToolbarHideDetachDelayMs = 72;
     static constexpr UINT kPdfSidebarSlideFrameMs = 1;
     static constexpr UINT kPdfSidebarSlideDurationMs = 150;
     static constexpr float kMinBrushSize = 0.5f;
