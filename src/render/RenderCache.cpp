@@ -2,10 +2,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 
 #include "DpiUtil.h"
+#include "ui/Layout.h"
 
 namespace cnote {
+
+namespace appui = cnote::appui;
 
 namespace {
 
@@ -177,6 +181,43 @@ void App::EnsureVisiblePageRasterQuality() {
         }
         if (pageView.rect.bottom >= keepTop && pageView.rect.top <= keepBottom) {
             keepRaster[pageView.pageIndex] = true;
+        }
+    }
+
+    if (IsPdfSidebarVisible()) {
+        const RECT sidebarRect = PdfSidebarRect(clientRect);
+        const appui::SidebarHeaderLayout headerLayout = appui::BuildSidebarHeaderLayout(sidebarRect, dpi);
+        const appui::SidebarMetrics metrics = appui::BuildSidebarMetrics(dpi);
+        const int itemWidth = std::max(1, static_cast<int>(headerLayout.headerRect.right - headerLayout.headerRect.left) - (metrics.itemInset * 2));
+        int top = headerLayout.contentRect.top + metrics.contentPadding - pdfSidebarScrollY_;
+        for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+            const Page& page = document_.PageAt(pageIndex);
+            const float aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
+            const int thumbHeight = std::max(metrics.minThumbHeight, static_cast<int>(std::lround(static_cast<float>(itemWidth) * aspect)));
+            RECT itemRect {
+                headerLayout.contentRect.left,
+                top,
+                headerLayout.contentRect.right,
+                top + thumbHeight + metrics.labelHeight,
+            };
+            top = itemRect.bottom + metrics.itemGap;
+
+            if (itemRect.bottom < headerLayout.contentRect.top || itemRect.top > headerLayout.contentRect.bottom) {
+                continue;
+            }
+
+            keepRaster[pageIndex] = true;
+            if (page.raster.pixels.empty() || page.raster.width <= 0 || page.raster.height <= 0) {
+                const float thumbnailScale = std::min(
+                    static_cast<float>(itemWidth) / std::max(1.0f, page.width),
+                    static_cast<float>(thumbHeight) / std::max(1.0f, page.height));
+                QueuePageRasterRequest({
+                    RECT { 0, 0, itemWidth, thumbHeight },
+                    pageIndex,
+                    std::max(0.1f, thumbnailScale),
+                    true,
+                });
+            }
         }
     }
 

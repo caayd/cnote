@@ -4484,6 +4484,18 @@ void App::EnsureSidebarThumbnailCache(std::size_t pageIndex, int width, int heig
     }
 
     const Page& page = document_.PageAt(pageIndex);
+    if (document_.IsPdfDocument() && (page.raster.pixels.empty() || page.raster.width <= 0 || page.raster.height <= 0)) {
+        const float thumbnailScale = std::min(
+            static_cast<float>(width) / std::max(1.0f, page.width),
+            static_cast<float>(height) / std::max(1.0f, page.height));
+        QueuePageRasterRequest({
+            MakeRect(0, 0, width, height),
+            pageIndex,
+            std::max(0.1f, thumbnailScale),
+            true,
+        });
+    }
+
     SidebarThumbnailCache& cache = sidebarThumbnailCaches_[pageIndex];
     if (cache.valid
         && cache.width == width
@@ -8638,7 +8650,8 @@ void App::CaptureZoomSessionSnapshots() {
     GetClientRect(window_, &clientRect);
     const RECT canvasRect = CanvasRect(clientRect);
     const UINT dpi = WindowDpi(window_);
-    const int snapshotPadding = ScaleForDpi(120, dpi);
+    const int viewportHeight = std::max(1, static_cast<int>(canvasRect.bottom - canvasRect.top));
+    const int snapshotPadding = std::max(ScaleForDpi(120, dpi), viewportHeight);
 
     zoomPageSnapshots_.resize(document_.PageCount());
     for (const PageView& pageView : CalculatePageViews(clientRect)) {
@@ -8697,7 +8710,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         const PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
         canReuseFrozenCache = canReuseFrozenCache || (cache.valid && !cache.pixels.empty());
     }
-    if (!zoomSessionActive_ || !canReuseFrozenCache) {
+    if (!zoomSessionActive_) {
         EnsurePageSurfaceCache(pageView);
     }
 

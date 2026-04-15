@@ -83,6 +83,7 @@ void App::FocusPage(std::size_t index) {
     const int pageCenterY = (pageView.rect.top + pageView.rect.bottom) / 2;
     const int desiredCenterY = canvasTop + (canvasHeight / 2);
     panY_ += static_cast<float>(desiredCenterY - pageCenterY);
+    EnsureVisiblePageRasterQuality();
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -110,6 +111,12 @@ void App::SetZoom(float zoom, std::optional<POINT> anchor) {
         return;
     }
 
+    const float clampedZoom = std::clamp(zoom, kMinZoom, kMaxZoom);
+    if (std::abs(clampedZoom - zoom_) < 0.001f) {
+        InvalidateRect(window_, nullptr, FALSE);
+        return;
+    }
+
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     POINT focusPoint {
@@ -120,33 +127,21 @@ void App::SetZoom(float zoom, std::optional<POINT> anchor) {
         focusPoint = *anchor;
     }
 
-    const auto pageBefore = ResolveZoomAnchorPage(clientRect, focusPoint);
-    const Vec2 anchorPagePoint = pageBefore.has_value()
-        ? ScreenToPage(*pageBefore, focusPoint, false)
-        : Vec2 {};
-
-    const float clampedZoom = std::clamp(zoom, kMinZoom, kMaxZoom);
-    const float previousZoom = zoom_;
+    CancelDeferredRasterRefresh();
+    BeginZoomSession(focusPoint);
     targetZoom_ = clampedZoom;
     zoom_ = clampedZoom;
-    if (std::abs(previousZoom - zoom_) < 0.001f) {
-        InvalidateRect(window_, nullptr, FALSE);
-        return;
+
+    if (zoomAnchorValid_) {
+        const POINT anchoredScreen = PageToScreen(zoomAnchorPageIndex_, zoomAnchorPage_);
+        panX_ += static_cast<float>(zoomAnchorCursor_.x - anchoredScreen.x);
+        panY_ += static_cast<float>(zoomAnchorCursor_.y - anchoredScreen.y);
     }
 
-    if (pageBefore.has_value() && previousZoom > 0.0f) {
-        const POINT newScreenPoint = PageToScreen(pageBefore->pageIndex, anchorPagePoint);
-        panX_ += static_cast<float>(focusPoint.x - newScreenPoint.x);
-        panY_ += static_cast<float>(focusPoint.y - newScreenPoint.y);
-    }
-
-    zoomSessionActive_ = true;
-    zoomAnchorValid_ = false;
-    KillTimer(window_, kZoomSessionTimerId);
-    SetTimer(window_, kZoomSessionTimerId, kZoomSessionDelayMs, nullptr);
-    InvalidateAllPageSurfaceCaches();
-    EnsureVisiblePageRasterQuality();
-    InvalidateRect(window_, nullptr, FALSE);
+    InvalidateViewport();
+    RECT toolbarRect = clientRect;
+    toolbarRect.bottom = FullToolbarHeight();
+    InvalidateRect(window_, &toolbarRect, FALSE);
 }
 
 bool App::IsCursorInsidePage(POINT cursor) const {
