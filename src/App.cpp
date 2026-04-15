@@ -14,7 +14,11 @@
 #include <utility>
 
 #include <commdlg.h>
+#include <d3d11.h>
+#include <dcomp.h>
+#include <dcompanimation.h>
 #include <dwmapi.h>
+#include <dxgi1_2.h>
 #include <objidl.h>
 #include <gdiplus.h>
 #include <mmsystem.h>
@@ -35,6 +39,14 @@ namespace {
 
 using ui::FillRoundedRect;
 using ui::StrokeRoundedRect;
+
+template <typename T>
+void ReleaseCom(T*& instance) {
+    if (instance != nullptr) {
+        instance->Release();
+        instance = nullptr;
+    }
+}
 
 constexpr wchar_t kWindowClassName[] = L"CnoteWindow";
 constexpr wchar_t kWindowTitle[] = L"cnote";
@@ -2535,6 +2547,7 @@ App::~App() {
     StopRenderWorker();
     ClearZoomSessionSnapshots();
     ReleasePaintBackbuffer();
+    ReleaseCompositionResources();
     if (eraserCursor_ != nullptr) {
         DestroyCursor(eraserCursor_);
         eraserCursor_ = nullptr;
@@ -2608,6 +2621,12 @@ void App::SetToolbarRevealed(bool revealed) {
     }
 }
 
+float App::ToolbarOffsetYForProgress(int toolbarHeight, float progress) const {
+    progress = std::clamp(progress, 0.0f, 1.0f);
+    constexpr float kHiddenToolbarOvershootPx = 2.0f;
+    return -(static_cast<float>(toolbarHeight) + kHiddenToolbarOvershootPx) * (1.0f - progress);
+}
+
 void App::SetToolbarAutoHideEnabled(bool enabled) {
     if (settings_.autoHideToolbar == enabled) {
         return;
@@ -2624,6 +2643,7 @@ void App::SetToolbarAutoHideEnabled(bool enabled) {
     if (window_ != nullptr) {
         StopToolbarRevealAnimationTimer();
         EnsureVisiblePageRasterQuality();
+        InvalidatePdfSidebarAnimationRegion();
         InvalidateRect(window_, nullptr, FALSE);
     }
 }
@@ -2673,23 +2693,42 @@ void App::StartToolbarRevealAnimation(float targetProgress) {
     if (!settings_.autoHideToolbar || window_ == nullptr) {
         toolbarRevealProgress_ = targetProgress;
         StopToolbarRevealAnimationTimer();
+        if (window_ != nullptr) {
+            RECT clientRect {};
+            GetClientRect(window_, &clientRect);
+            static_cast<void>(UpdateToolbarComposition(clientRect));
+            static_cast<void>(UpdatePdfSidebarComposition(clientRect));
+        }
         return;
     }
+
+    if (toolbarRevealAnimationStartMs_ > 0) {
+        const ULONGLONG nowMs = GetTickCount64();
+        const double elapsed = static_cast<double>(nowMs - toolbarRevealAnimationStartMs_);
+        const float linearT = static_cast<float>(std::clamp(elapsed / static_cast<double>(kToolbarRevealDurationMs), 0.0, 1.0));
+        const float easedT = linearT * linearT * (3.0f - (2.0f * linearT));
+        toolbarRevealProgress_ = toolbarRevealAnimationStartProgress_
+            + ((toolbarRevealAnimationTargetProgress_ - toolbarRevealAnimationStartProgress_) * easedT);
+    }
+    StopToolbarRevealAnimationTimer();
 
     if (std::abs(toolbarRevealProgress_ - targetProgress) <= 0.001f) {
         toolbarRevealProgress_ = targetProgress;
         toolbarRevealAnimationStartProgress_ = targetProgress;
         toolbarRevealAnimationTargetProgress_ = targetProgress;
         toolbarRevealAnimationStartMs_ = 0;
-        StopToolbarRevealAnimationTimer();
     } else {
         toolbarRevealAnimationStartProgress_ = toolbarRevealProgress_;
         toolbarRevealAnimationTargetProgress_ = targetProgress;
         toolbarRevealAnimationStartMs_ = GetTickCount64();
-        if (!toolbarRevealTimerResolutionActive_) {
-            if (timeBeginPeriod(1) == TIMERR_NOERROR) {
-                toolbarRevealTimerResolutionActive_ = true;
-            }
+
+        if (StartToolbarCompositionAnimation(toolbarRevealAnimationStartProgress_, targetProgress)) {
+            SetTimer(window_, kToolbarRevealTimerId, kToolbarRevealDurationMs + 32, nullptr);
+            return;
+        }
+
+        if (timeBeginPeriod(1) == TIMERR_NOERROR) {
+            toolbarRevealTimerResolutionActive_ = true;
         }
         SetTimer(window_, kToolbarRevealTimerId, kToolbarRevealFrameMs, nullptr);
     }
@@ -2699,12 +2738,14 @@ void App::StartToolbarRevealAnimation(float targetProgress) {
     RECT toolbarRect = clientRect;
     toolbarRect.bottom = FullToolbarHeight();
     RedrawWindow(window_, &toolbarRect, nullptr, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
+    static_cast<void>(UpdatePdfSidebarComposition(clientRect));
 }
 
 void App::StopToolbarRevealAnimationTimer() {
     if (window_ != nullptr) {
         KillTimer(window_, kToolbarRevealTimerId);
     }
+    toolbarCompositionAnimationActive_ = false;
     if (toolbarRevealTimerResolutionActive_) {
         timeEndPeriod(1);
         toolbarRevealTimerResolutionActive_ = false;
@@ -2713,6 +2754,23 @@ void App::StopToolbarRevealAnimationTimer() {
 
 void App::HandleToolbarRevealAnimationTimer() {
     if (window_ == nullptr) {
+        return;
+    }
+
+    if (toolbarCompositionAnimationActive_) {
+        toolbarRevealProgress_ = toolbarRevealAnimationTargetProgress_;
+        toolbarRevealAnimationStartProgress_ = toolbarRevealProgress_;
+        toolbarRevealAnimationStartMs_ = 0;
+        StopToolbarRevealAnimationTimer();
+        RECT clientRect {};
+        GetClientRect(window_, &clientRect);
+        static_cast<void>(UpdateToolbarComposition(clientRect));
+        static_cast<void>(UpdatePdfSidebarComposition(clientRect));
+        if (toolbarRevealProgress_ <= 0.001f) {
+            RECT toolbarRect = clientRect;
+            toolbarRect.bottom = FullToolbarHeight();
+            RedrawWindow(window_, &toolbarRect, nullptr, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
+        }
         return;
     }
 
@@ -2729,6 +2787,7 @@ void App::HandleToolbarRevealAnimationTimer() {
     RECT toolbarRect = clientRect;
     toolbarRect.bottom = FullToolbarHeight();
     RedrawWindow(window_, &toolbarRect, nullptr, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
+    static_cast<void>(UpdatePdfSidebarComposition(clientRect));
     DwmFlush();
 
     if (linearT >= 1.0f) {
@@ -2894,6 +2953,7 @@ void App::SetCurrentPageIndex(std::size_t index) {
     if (document_.SetCurrentPageIndex(index)) {
         CancelDeferredRasterRefresh();
         targetZoom_ = zoom_;
+        MarkPdfSidebarCompositionDirty();
         EnsureSidebarCurrentPageVisible();
         InvalidateRect(window_, nullptr, FALSE);
     }
@@ -3611,6 +3671,420 @@ bool App::IsPdfSidebarVisible() const {
     return document_.PageCount() > 0U && (pdfSidebarOpen_ || pdfSidebarSlideProgress_ > 0.001f);
 }
 
+void App::MarkPdfSidebarCompositionDirty() {
+    pdfSidebarCompositionDirty_ = true;
+}
+
+float App::PdfSidebarOffsetXForProgress(int sidebarWidth, UINT dpi, float progress) const {
+    const int horizontalInset = IsZoomed(window_) ? WindowFrameThicknessX(dpi) : 0;
+    progress = std::clamp(progress, 0.0f, 1.0f);
+    return static_cast<float>(horizontalInset) - (static_cast<float>(sidebarWidth) * (1.0f - progress));
+}
+
+bool App::EnsureCompositionDevice() {
+    if (compositionDevice_ != nullptr
+        && compositionTarget_ != nullptr
+        && compositionRootVisual_ != nullptr
+        && toolbarCompositionVisual_ != nullptr
+        && pdfSidebarCompositionVisual_ != nullptr) {
+        return true;
+    }
+    if (window_ == nullptr) {
+        return false;
+    }
+
+    ReleaseCompositionResources();
+
+    ID3D11DeviceContext* d3dContext = nullptr;
+    D3D_FEATURE_LEVEL featureLevel {};
+    HRESULT hr = D3D11CreateDevice(
+        nullptr,
+        D3D_DRIVER_TYPE_HARDWARE,
+        nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        nullptr,
+        0,
+        D3D11_SDK_VERSION,
+        &compositionD3dDevice_,
+        &featureLevel,
+        &d3dContext);
+    ReleaseCom(d3dContext);
+    if (FAILED(hr) || compositionD3dDevice_ == nullptr) {
+        ReleaseCompositionResources();
+        return false;
+    }
+
+    hr = compositionD3dDevice_->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&compositionDxgiDevice_));
+    if (FAILED(hr) || compositionDxgiDevice_ == nullptr) {
+        ReleaseCompositionResources();
+        return false;
+    }
+
+    hr = DCompositionCreateDevice(
+        compositionDxgiDevice_,
+        __uuidof(IDCompositionDevice),
+        reinterpret_cast<void**>(&compositionDevice_));
+    if (FAILED(hr) || compositionDevice_ == nullptr) {
+        ReleaseCompositionResources();
+        return false;
+    }
+
+    hr = compositionDevice_->CreateTargetForHwnd(window_, TRUE, &compositionTarget_);
+    if (FAILED(hr) || compositionTarget_ == nullptr) {
+        ReleaseCompositionResources();
+        return false;
+    }
+
+    hr = compositionDevice_->CreateVisual(&compositionRootVisual_);
+    if (FAILED(hr) || compositionRootVisual_ == nullptr) {
+        ReleaseCompositionResources();
+        return false;
+    }
+
+    hr = compositionDevice_->CreateVisual(&pdfSidebarCompositionVisual_);
+    if (FAILED(hr) || pdfSidebarCompositionVisual_ == nullptr) {
+        ReleaseCompositionResources();
+        return false;
+    }
+
+    hr = compositionDevice_->CreateVisual(&toolbarCompositionVisual_);
+    if (FAILED(hr) || toolbarCompositionVisual_ == nullptr) {
+        ReleaseCompositionResources();
+        return false;
+    }
+
+    pdfSidebarCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
+    toolbarCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
+    compositionRootVisual_->AddVisual(pdfSidebarCompositionVisual_, TRUE, nullptr);
+    compositionRootVisual_->AddVisual(toolbarCompositionVisual_, TRUE, pdfSidebarCompositionVisual_);
+    compositionTarget_->SetRoot(compositionRootVisual_);
+    compositionDevice_->Commit();
+    pdfSidebarCompositionDirty_ = true;
+    return true;
+}
+
+void App::ReleaseCompositionResources() {
+    if (compositionDevice_ != nullptr && pdfSidebarCompositionVisual_ != nullptr) {
+        pdfSidebarCompositionVisual_->SetContent(nullptr);
+        if (toolbarCompositionVisual_ != nullptr) {
+            toolbarCompositionVisual_->SetContent(nullptr);
+        }
+        compositionDevice_->Commit();
+    }
+    ReleaseCom(toolbarCompositionSurface_);
+    ReleaseCom(pdfSidebarCompositionSurface_);
+    ReleaseCom(toolbarCompositionVisual_);
+    ReleaseCom(pdfSidebarCompositionVisual_);
+    ReleaseCom(compositionRootVisual_);
+    ReleaseCom(compositionTarget_);
+    ReleaseCom(compositionDevice_);
+    ReleaseCom(compositionDxgiDevice_);
+    ReleaseCom(compositionD3dDevice_);
+    pdfSidebarCompositionDirty_ = true;
+    pdfSidebarCompositionAnimationActive_ = false;
+    pdfSidebarCompositionWidth_ = 0;
+    pdfSidebarCompositionHeight_ = 0;
+    pdfSidebarCompositionDpi_ = 0;
+    toolbarCompositionAnimationActive_ = false;
+    toolbarCompositionWidth_ = 0;
+    toolbarCompositionHeight_ = 0;
+    toolbarCompositionDpi_ = 0;
+    toolbarCompositionMaximized_ = false;
+}
+
+bool App::UpdateToolbarComposition(RECT clientRect) {
+    if (!IsToolbarVisible()) {
+        if (compositionDevice_ != nullptr && toolbarCompositionVisual_ != nullptr) {
+            toolbarCompositionVisual_->SetOffsetY(ToolbarOffsetYForProgress(std::max(1, FullToolbarHeight()), 0.0f));
+            toolbarCompositionVisual_->SetContent(nullptr);
+            compositionDevice_->Commit();
+        }
+        return true;
+    }
+
+    if (!EnsureCompositionDevice()) {
+        return false;
+    }
+
+    const UINT dpi = WindowDpi(window_);
+    const int toolbarWidth = std::max(1, static_cast<int>(clientRect.right - clientRect.left));
+    const int toolbarHeight = std::max(1, FullToolbarHeight());
+    const bool maximized = IsZoomed(window_) != FALSE;
+    if (toolbarCompositionSurface_ == nullptr
+        || toolbarCompositionWidth_ != toolbarWidth
+        || toolbarCompositionHeight_ != toolbarHeight
+        || toolbarCompositionDpi_ != dpi
+        || toolbarCompositionMaximized_ != maximized) {
+        ReleaseCom(toolbarCompositionSurface_);
+        const HRESULT hr = compositionDevice_->CreateSurface(
+            static_cast<UINT>(toolbarWidth),
+            static_cast<UINT>(toolbarHeight),
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_IGNORE,
+            &toolbarCompositionSurface_);
+        if (FAILED(hr) || toolbarCompositionSurface_ == nullptr) {
+            ReleaseCom(toolbarCompositionSurface_);
+            return false;
+        }
+        toolbarCompositionWidth_ = toolbarWidth;
+        toolbarCompositionHeight_ = toolbarHeight;
+        toolbarCompositionDpi_ = dpi;
+        toolbarCompositionMaximized_ = maximized;
+    }
+
+    RECT updateRect { 0, 0, toolbarWidth, toolbarHeight };
+    IDXGISurface* dxgiSurface = nullptr;
+    POINT updateOffset {};
+    HRESULT hr = toolbarCompositionSurface_->BeginDraw(
+        &updateRect,
+        __uuidof(IDXGISurface),
+        reinterpret_cast<void**>(&dxgiSurface),
+        &updateOffset);
+    if (FAILED(hr) || dxgiSurface == nullptr) {
+        ReleaseCom(dxgiSurface);
+        return false;
+    }
+
+    IDXGISurface1* gdiSurface = nullptr;
+    hr = dxgiSurface->QueryInterface(__uuidof(IDXGISurface1), reinterpret_cast<void**>(&gdiSurface));
+    ReleaseCom(dxgiSurface);
+    if (FAILED(hr) || gdiSurface == nullptr) {
+        toolbarCompositionSurface_->EndDraw();
+        ReleaseCom(gdiSurface);
+        return false;
+    }
+
+    HDC toolbarDc = nullptr;
+    hr = gdiSurface->GetDC(FALSE, &toolbarDc);
+    if (FAILED(hr) || toolbarDc == nullptr) {
+        toolbarCompositionSurface_->EndDraw();
+        ReleaseCom(gdiSurface);
+        return false;
+    }
+
+    const int savedDc = SaveDC(toolbarDc);
+    SetViewportOrgEx(toolbarDc, updateOffset.x, updateOffset.y, nullptr);
+    PaintToolbarContents(toolbarDc, updateRect);
+    if (savedDc != 0) {
+        RestoreDC(toolbarDc, savedDc);
+    }
+
+    gdiSurface->ReleaseDC(nullptr);
+    ReleaseCom(gdiSurface);
+    toolbarCompositionSurface_->EndDraw();
+
+    toolbarCompositionVisual_->SetContent(toolbarCompositionSurface_);
+    if (!toolbarCompositionAnimationActive_) {
+        const float revealProgress = settings_.autoHideToolbar ? std::clamp(toolbarRevealProgress_, 0.0f, 1.0f) : 1.0f;
+        toolbarCompositionVisual_->SetOffsetY(ToolbarOffsetYForProgress(toolbarHeight, revealProgress));
+    }
+    toolbarCompositionVisual_->SetOffsetX(0.0f);
+    compositionDevice_->Commit();
+    return true;
+}
+
+bool App::StartToolbarCompositionAnimation(float startProgress, float targetProgress) {
+    if (window_ == nullptr) {
+        return false;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    if (!UpdateToolbarComposition(clientRect) || compositionDevice_ == nullptr || toolbarCompositionVisual_ == nullptr) {
+        return false;
+    }
+
+    const int toolbarHeight = std::max(1, FullToolbarHeight());
+    const float startOffset = ToolbarOffsetYForProgress(toolbarHeight, startProgress);
+    const float targetOffset = ToolbarOffsetYForProgress(toolbarHeight, targetProgress);
+    if (std::abs(startOffset - targetOffset) <= 0.001f) {
+        toolbarCompositionVisual_->SetOffsetY(targetOffset);
+        compositionDevice_->Commit();
+        return true;
+    }
+
+    IDCompositionAnimation* animation = nullptr;
+    HRESULT hr = compositionDevice_->CreateAnimation(&animation);
+    if (FAILED(hr) || animation == nullptr) {
+        ReleaseCom(animation);
+        return false;
+    }
+
+    const double durationSeconds = static_cast<double>(kToolbarRevealDurationMs) / 1000.0;
+    const float delta = targetOffset - startOffset;
+    hr = animation->Reset();
+    if (SUCCEEDED(hr)) {
+        hr = animation->AddCubic(
+            0.0,
+            startOffset,
+            0.0f,
+            delta * static_cast<float>(3.0 / (durationSeconds * durationSeconds)),
+            delta * static_cast<float>(-2.0 / (durationSeconds * durationSeconds * durationSeconds)));
+    }
+    if (SUCCEEDED(hr)) {
+        hr = animation->End(durationSeconds, targetOffset);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = toolbarCompositionVisual_->SetOffsetY(animation);
+    }
+    ReleaseCom(animation);
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    toolbarCompositionVisual_->SetOffsetX(0.0f);
+    compositionDevice_->Commit();
+    toolbarCompositionAnimationActive_ = true;
+    return true;
+}
+
+bool App::UpdatePdfSidebarComposition(RECT clientRect) {
+    if (!IsPdfSidebarVisible()) {
+        if (compositionDevice_ != nullptr && pdfSidebarCompositionVisual_ != nullptr) {
+            pdfSidebarCompositionVisual_->SetContent(nullptr);
+            compositionDevice_->Commit();
+        }
+        return true;
+    }
+
+    if (!EnsureCompositionDevice()) {
+        return false;
+    }
+
+    const UINT dpi = WindowDpi(window_);
+    const int sidebarWidth = std::max(1, BuildSidebarMetrics(dpi).width);
+    const int sidebarTop = ReservedToolbarHeight();
+    const int sidebarHeight = std::max(1, static_cast<int>(clientRect.bottom) - sidebarTop);
+    if (pdfSidebarCompositionSurface_ == nullptr
+        || pdfSidebarCompositionWidth_ != sidebarWidth
+        || pdfSidebarCompositionHeight_ != sidebarHeight
+        || pdfSidebarCompositionDpi_ != dpi) {
+        ReleaseCom(pdfSidebarCompositionSurface_);
+        const HRESULT hr = compositionDevice_->CreateSurface(
+            static_cast<UINT>(sidebarWidth),
+            static_cast<UINT>(sidebarHeight),
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_IGNORE,
+            &pdfSidebarCompositionSurface_);
+        if (FAILED(hr) || pdfSidebarCompositionSurface_ == nullptr) {
+            ReleaseCom(pdfSidebarCompositionSurface_);
+            return false;
+        }
+        pdfSidebarCompositionWidth_ = sidebarWidth;
+        pdfSidebarCompositionHeight_ = sidebarHeight;
+        pdfSidebarCompositionDpi_ = dpi;
+        pdfSidebarCompositionDirty_ = true;
+    }
+
+    if (pdfSidebarCompositionDirty_) {
+        RECT updateRect { 0, 0, sidebarWidth, sidebarHeight };
+        IDXGISurface* dxgiSurface = nullptr;
+        POINT updateOffset {};
+        HRESULT hr = pdfSidebarCompositionSurface_->BeginDraw(
+            &updateRect,
+            __uuidof(IDXGISurface),
+            reinterpret_cast<void**>(&dxgiSurface),
+            &updateOffset);
+        if (FAILED(hr) || dxgiSurface == nullptr) {
+            ReleaseCom(dxgiSurface);
+            return false;
+        }
+
+        IDXGISurface1* gdiSurface = nullptr;
+        hr = dxgiSurface->QueryInterface(__uuidof(IDXGISurface1), reinterpret_cast<void**>(&gdiSurface));
+        ReleaseCom(dxgiSurface);
+        if (FAILED(hr) || gdiSurface == nullptr) {
+            pdfSidebarCompositionSurface_->EndDraw();
+            ReleaseCom(gdiSurface);
+            return false;
+        }
+
+        HDC sidebarDc = nullptr;
+        hr = gdiSurface->GetDC(FALSE, &sidebarDc);
+        if (FAILED(hr) || sidebarDc == nullptr) {
+            pdfSidebarCompositionSurface_->EndDraw();
+            ReleaseCom(gdiSurface);
+            return false;
+        }
+
+        const int savedDc = SaveDC(sidebarDc);
+        SetViewportOrgEx(sidebarDc, updateOffset.x, updateOffset.y, nullptr);
+        PaintPdfSidebarContents(sidebarDc, updateRect);
+        if (savedDc != 0) {
+            RestoreDC(sidebarDc, savedDc);
+        }
+
+        gdiSurface->ReleaseDC(nullptr);
+        ReleaseCom(gdiSurface);
+        pdfSidebarCompositionSurface_->EndDraw();
+        pdfSidebarCompositionDirty_ = false;
+    }
+
+    pdfSidebarCompositionVisual_->SetContent(pdfSidebarCompositionSurface_);
+    if (!pdfSidebarCompositionAnimationActive_) {
+        pdfSidebarCompositionVisual_->SetOffsetX(PdfSidebarOffsetXForProgress(sidebarWidth, dpi, pdfSidebarSlideProgress_));
+    }
+    pdfSidebarCompositionVisual_->SetOffsetY(static_cast<float>(sidebarTop));
+    compositionDevice_->Commit();
+    return true;
+}
+
+bool App::StartPdfSidebarCompositionAnimation(float startProgress, float targetProgress) {
+    if (window_ == nullptr) {
+        return false;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    if (!UpdatePdfSidebarComposition(clientRect) || compositionDevice_ == nullptr || pdfSidebarCompositionVisual_ == nullptr) {
+        return false;
+    }
+
+    const UINT dpi = WindowDpi(window_);
+    const int sidebarWidth = std::max(1, BuildSidebarMetrics(dpi).width);
+    const float startOffset = PdfSidebarOffsetXForProgress(sidebarWidth, dpi, startProgress);
+    const float targetOffset = PdfSidebarOffsetXForProgress(sidebarWidth, dpi, targetProgress);
+    if (std::abs(startOffset - targetOffset) <= 0.001f) {
+        pdfSidebarCompositionVisual_->SetOffsetX(targetOffset);
+        compositionDevice_->Commit();
+        return true;
+    }
+
+    IDCompositionAnimation* animation = nullptr;
+    HRESULT hr = compositionDevice_->CreateAnimation(&animation);
+    if (FAILED(hr) || animation == nullptr) {
+        ReleaseCom(animation);
+        return false;
+    }
+
+    const double durationSeconds = static_cast<double>(kPdfSidebarSlideDurationMs) / 1000.0;
+    const float delta = targetOffset - startOffset;
+    hr = animation->Reset();
+    if (SUCCEEDED(hr)) {
+        hr = animation->AddCubic(
+            0.0,
+            startOffset,
+            0.0f,
+            delta * static_cast<float>(3.0 / (durationSeconds * durationSeconds)),
+            delta * static_cast<float>(-2.0 / (durationSeconds * durationSeconds * durationSeconds)));
+    }
+    if (SUCCEEDED(hr)) {
+        hr = animation->End(durationSeconds, targetOffset);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = pdfSidebarCompositionVisual_->SetOffsetX(animation);
+    }
+    ReleaseCom(animation);
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    pdfSidebarCompositionVisual_->SetOffsetY(static_cast<float>(ReservedToolbarHeight()));
+    compositionDevice_->Commit();
+    pdfSidebarCompositionAnimationActive_ = true;
+    return true;
+}
+
 bool App::SidebarOwnsKeyboardShortcuts() const {
     if (!pdfSidebarOpen_ || !IsPdfSidebarVisible() || window_ == nullptr) {
         return false;
@@ -3648,6 +4122,10 @@ void App::InvalidatePdfSidebarAnimationRegion() {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
+    if (UpdatePdfSidebarComposition(clientRect)) {
+        return;
+    }
+
     const UINT dpi = WindowDpi(window_);
     const int horizontalInset = IsZoomed(window_) ? WindowFrameThicknessX(dpi) : 0;
     const int sidebarWidth = BuildSidebarMetrics(dpi).width;
@@ -3668,31 +4146,44 @@ void App::StartPdfSidebarSlideAnimation(float targetProgress) {
         return;
     }
 
+    if (pdfSidebarSlideAnimationStartMs_ > 0) {
+        const ULONGLONG nowMs = GetTickCount64();
+        const double elapsed = static_cast<double>(nowMs - pdfSidebarSlideAnimationStartMs_);
+        const float linearT = static_cast<float>(std::clamp(elapsed / static_cast<double>(kPdfSidebarSlideDurationMs), 0.0, 1.0));
+        const float easedT = linearT * linearT * (3.0f - (2.0f * linearT));
+        pdfSidebarSlideProgress_ = pdfSidebarSlideAnimationStartProgress_
+            + ((pdfSidebarSlideAnimationTargetProgress_ - pdfSidebarSlideAnimationStartProgress_) * easedT);
+    }
+    StopPdfSidebarSlideAnimationTimer();
+
     if (std::abs(pdfSidebarSlideProgress_ - targetProgress) <= 0.001f) {
         pdfSidebarSlideProgress_ = targetProgress;
         pdfSidebarSlideAnimationStartProgress_ = targetProgress;
         pdfSidebarSlideAnimationTargetProgress_ = targetProgress;
         pdfSidebarSlideAnimationStartMs_ = 0;
-        StopPdfSidebarSlideAnimationTimer();
+        InvalidatePdfSidebarAnimationRegion();
     } else {
         pdfSidebarSlideAnimationStartProgress_ = pdfSidebarSlideProgress_;
         pdfSidebarSlideAnimationTargetProgress_ = targetProgress;
         pdfSidebarSlideAnimationStartMs_ = GetTickCount64();
-        if (!pdfSidebarSlideTimerResolutionActive_) {
-            if (timeBeginPeriod(1) == TIMERR_NOERROR) {
-                pdfSidebarSlideTimerResolutionActive_ = true;
-            }
+        if (StartPdfSidebarCompositionAnimation(pdfSidebarSlideAnimationStartProgress_, targetProgress)) {
+            SetTimer(window_, kPdfSidebarSlideTimerId, kPdfSidebarSlideDurationMs + 32, nullptr);
+            return;
+        }
+
+        if (timeBeginPeriod(1) == TIMERR_NOERROR) {
+            pdfSidebarSlideTimerResolutionActive_ = true;
         }
         SetTimer(window_, kPdfSidebarSlideTimerId, kPdfSidebarSlideFrameMs, nullptr);
+        InvalidatePdfSidebarAnimationRegion();
     }
-
-    InvalidatePdfSidebarAnimationRegion();
 }
 
 void App::StopPdfSidebarSlideAnimationTimer() {
     if (window_ != nullptr) {
         KillTimer(window_, kPdfSidebarSlideTimerId);
     }
+    pdfSidebarCompositionAnimationActive_ = false;
     if (pdfSidebarSlideTimerResolutionActive_) {
         timeEndPeriod(1);
         pdfSidebarSlideTimerResolutionActive_ = false;
@@ -3701,6 +4192,15 @@ void App::StopPdfSidebarSlideAnimationTimer() {
 
 void App::HandlePdfSidebarSlideAnimationTimer() {
     if (window_ == nullptr) {
+        return;
+    }
+
+    if (pdfSidebarCompositionAnimationActive_) {
+        pdfSidebarSlideProgress_ = pdfSidebarSlideAnimationTargetProgress_;
+        pdfSidebarSlideAnimationStartProgress_ = pdfSidebarSlideProgress_;
+        pdfSidebarSlideAnimationStartMs_ = 0;
+        StopPdfSidebarSlideAnimationTimer();
+        InvalidatePdfSidebarAnimationRegion();
         return;
     }
 
@@ -3761,6 +4261,7 @@ void App::EnsureSidebarCurrentPageVisible() {
         return;
     }
 
+    const int previousScrollY = pdfSidebarScrollY_;
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const RECT sidebarRect = PdfSidebarRect(clientRect);
@@ -3783,6 +4284,9 @@ void App::EnsureSidebarCurrentPageVisible() {
             } else if (itemRect.bottom > visibleBottom) {
                 pdfSidebarScrollY_ = std::max(0, static_cast<int>(itemRect.bottom - (headerLayout.contentRect.bottom - metrics.contentPadding)));
             }
+            if (pdfSidebarScrollY_ != previousScrollY) {
+                MarkPdfSidebarCompositionDirty();
+            }
             return;
         }
         top = itemRect.bottom + metrics.itemGap;
@@ -3802,6 +4306,7 @@ void App::SyncCurrentPageToViewport() {
     }
 
     document_.SetCurrentPageIndex(*viewedPageIndex);
+    MarkPdfSidebarCompositionDirty();
     EnsureSidebarCurrentPageVisible();
     InvalidateRect(window_, nullptr, FALSE);
 }
@@ -3820,6 +4325,7 @@ void App::InvalidateSidebarThumbnailCache(std::size_t pageIndex) {
     cache.sourceWidth = 0;
     cache.sourceHeight = 0;
     cache.sourceScale = 0.0f;
+    MarkPdfSidebarCompositionDirty();
 }
 
 void App::EnsureSidebarThumbnailCache(std::size_t pageIndex, int width, int height) {
@@ -3969,6 +4475,7 @@ void App::BeginStroke(POINT cursor) {
     }
 
     document_.SetCurrentPageIndex(hitPage->pageIndex);
+    MarkPdfSidebarCompositionDirty();
     StartStrokeSegment(hitPage->pageIndex, ScreenToPage(*hitPage, cursor, true));
 }
 
@@ -3998,6 +4505,7 @@ void App::ExtendStroke(POINT cursor) {
     if (const auto hitPage = HitTestPage(cursor); hitPage.has_value() && hitPage->pageIndex != *activeStrokePageIndex_) {
         EndStroke();
         document_.SetCurrentPageIndex(hitPage->pageIndex);
+        MarkPdfSidebarCompositionDirty();
         StartStrokeSegment(hitPage->pageIndex, ScreenToPage(*hitPage, cursor, true));
         return;
     }
@@ -4145,6 +4653,7 @@ void App::BeginSelection(POINT cursor, bool boxOverride) {
     isSelecting_ = true;
     if (const auto hitPage = HitTestPage(cursor); hitPage.has_value()) {
         document_.SetCurrentPageIndex(hitPage->pageIndex);
+        MarkPdfSidebarCompositionDirty();
     }
     UpdateCaptureState();
     InvalidateCanvas();
@@ -4874,6 +5383,7 @@ void App::BeginMoveSelection(POINT cursor) {
     RebuildMoveSelectionTextCache();
     RebuildMoveSelectionPreview(cursor);
     document_.SetCurrentPageIndex(pageIndex);
+    MarkPdfSidebarCompositionDirty();
     UpdateCaptureState();
     InvalidateCanvas();
 }
@@ -4960,6 +5470,7 @@ void App::UpdateMoveSelection(POINT cursor) {
         RebuildMoveSelectionTextCache();
         RebuildMoveSelectionPreview(cursor);
         document_.SetCurrentPageIndex(pageIndex);
+        MarkPdfSidebarCompositionDirty();
         UpdateCaptureState();
         InvalidateCanvas();
         return;
@@ -5098,6 +5609,7 @@ bool App::EraseAt(POINT cursor) {
     const float eraseRadiusSquared = eraseRadiusPage * eraseRadiusPage;
     auto& strokes = document_.PageAt(pageView.pageIndex).strokes;
     document_.SetCurrentPageIndex(pageView.pageIndex);
+    MarkPdfSidebarCompositionDirty();
 
     for (std::size_t strokeIndex = 0; strokeIndex < strokes.size(); ++strokeIndex) {
         const Stroke& stroke = strokes[strokeIndex];
@@ -5663,12 +6175,9 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
         return;
     }
 
-    const UINT dpi = WindowDpi(window_);
-    RECT toolbarRect = clientRect;
     const int toolbarHeight = FullToolbarHeight();
-    toolbarRect.bottom = toolbarHeight;
     const float revealProgress = settings_.autoHideToolbar ? std::clamp(toolbarRevealProgress_, 0.0f, 1.0f) : 1.0f;
-    const int toolbarOffsetY = -static_cast<int>(std::lround(static_cast<float>(toolbarHeight) * (1.0f - revealProgress)));
+    const int toolbarOffsetY = static_cast<int>(std::lround(ToolbarOffsetYForProgress(toolbarHeight, revealProgress)));
     const int savedDc = SaveDC(hdc);
     if (savedDc != 0) {
         IntersectClipRect(hdc, clientRect.left, 0, clientRect.right, toolbarHeight);
@@ -5676,6 +6185,20 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
             SetViewportOrgEx(hdc, 0, toolbarOffsetY, nullptr);
         }
     }
+
+    PaintToolbarContents(hdc, clientRect);
+
+    if (savedDc != 0) {
+        RestoreDC(hdc, savedDc);
+    }
+}
+
+void App::PaintToolbarContents(HDC hdc, RECT clientRect) const {
+    const UINT dpi = WindowDpi(window_);
+    RECT toolbarRect = clientRect;
+    const int toolbarHeight = FullToolbarHeight();
+    toolbarRect.top = 0;
+    toolbarRect.bottom = toolbarHeight;
 
     const COLORREF toolbarBackground = RGB(15, 18, 24);
     const COLORREF panelBorder = RGB(43, 52, 64);
@@ -5686,13 +6209,6 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     HBRUSH toolbarBrush = CreateSolidBrush(toolbarBackground);
     FillRect(hdc, &toolbarRect, toolbarBrush);
     DeleteObject(toolbarBrush);
-
-    HPEN dividerPen = CreatePen(PS_SOLID, 1, panelBorder);
-    HGDIOBJ oldPen = SelectObject(hdc, dividerPen);
-    MoveToEx(hdc, 0, toolbarHeight - 1, nullptr);
-    LineTo(hdc, clientRect.right, toolbarHeight - 1);
-    SelectObject(hdc, oldPen);
-    DeleteObject(dividerPen);
 
     SetBkMode(hdc, TRANSPARENT);
 
@@ -5867,9 +6383,6 @@ void App::PaintToolbar(HDC hdc, RECT clientRect) const {
     SelectObject(hdc, previousFont);
     DeleteObject(bodyFont);
     DeleteObject(labelFont);
-    if (savedDc != 0) {
-        RestoreDC(hdc, savedDc);
-    }
 }
 
 void App::PaintPaletteMenu(HDC hdc, RECT clientRect) const {
@@ -5989,7 +6502,11 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
     const RECT sidebarRect = PdfSidebarRect(clientRect);
     SaveDC(hdc);
     IntersectClipRect(hdc, sidebarRect.left, sidebarRect.top, sidebarRect.right, sidebarRect.bottom);
+    PaintPdfSidebarContents(hdc, sidebarRect);
+    RestoreDC(hdc, -1);
+}
 
+void App::PaintPdfSidebarContents(HDC hdc, RECT sidebarRect) {
     HBRUSH sidebarBrush = CreateSolidBrush(RGB(18, 22, 29));
     FillRect(hdc, &sidebarRect, sidebarBrush);
     DeleteObject(sidebarBrush);
@@ -6148,7 +6665,6 @@ void App::PaintPdfSidebar(HDC hdc, RECT clientRect) {
     RestoreDC(hdc, -1);
     SelectObject(hdc, previousFont);
     DeleteObject(labelFont);
-    RestoreDC(hdc, -1);
 }
 
 void App::PaintSelectionOverlay(HDC hdc, RECT canvasRect) const {

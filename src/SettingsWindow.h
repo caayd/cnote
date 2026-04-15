@@ -111,7 +111,7 @@ private:
     HWND strokeSmoothingLabel_ = nullptr;
     HWND autoSaveSlider_ = nullptr;
     HWND autoSaveLabel_ = nullptr;
-    HWND autoHideToolbarCheck_ = nullptr;
+    HWND autoHideToolbarSwitch_ = nullptr;
     std::array<HWND, App::kZoomPresetCount> zoomPresetLabels_ {};
     std::array<HWND, App::kZoomPresetCount> zoomPresetEdits_ {};
     HWND zoomPresetHintLabel_ = nullptr;

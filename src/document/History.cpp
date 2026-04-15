@@ -111,6 +111,7 @@ void App::Undo() {
     case HistoryActionType::RemoveStroke: {
         auto& strokes = document_.PageAt(action.pageIndex).strokes;
         document_.SetCurrentPageIndex(action.pageIndex);
+        MarkPdfSidebarCompositionDirty();
         if (action.type == HistoryActionType::AddStroke) {
             if (action.index < strokes.size()) {
                 strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(action.index));
@@ -187,6 +188,7 @@ void App::Redo() {
     case HistoryActionType::RemoveStroke: {
         auto& strokes = document_.PageAt(action.pageIndex).strokes;
         document_.SetCurrentPageIndex(action.pageIndex);
+        MarkPdfSidebarCompositionDirty();
         if (action.type == HistoryActionType::AddStroke) {
             if (action.index <= strokes.size()) {
                 AdjustSelectionForInsertion(action.pageIndex, action.index);
@@ -312,6 +314,7 @@ void App::RestoreAfterPageHistoryChange(std::size_t focusPageIndex) {
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
     document_.SetCurrentPageIndex(std::min(focusPageIndex, document_.PageCount() - 1U));
+    MarkPdfSidebarCompositionDirty();
     EnsureSidebarCurrentPageVisible();
     EnsureVisiblePageRasterQuality();
     FocusPage(std::min(focusPageIndex, document_.PageCount() - 1U));
@@ -329,6 +332,7 @@ void App::RestoreAfterContentHistoryChange(const std::vector<std::size_t>& pageI
     }
 
     document_.SetCurrentPageIndex(std::min(focusPageIndex, document_.PageCount() - 1U));
+    MarkPdfSidebarCompositionDirty();
     EnsureSidebarCurrentPageVisible();
     EnsureVisiblePageRasterQuality();
 }

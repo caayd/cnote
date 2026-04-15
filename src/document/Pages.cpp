@@ -35,6 +35,7 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
     pdfSidebarSlideAnimationStartProgress_ = pdfSidebarSlideProgress_;
     pdfSidebarSlideAnimationTargetProgress_ = pdfSidebarSlideProgress_;
     pdfSidebarScrollY_ = 0;
+    MarkPdfSidebarCompositionDirty();
     copiedSidebarPage_.reset();
     CancelPageJumpInput();
     CancelToolbarZoomInput();

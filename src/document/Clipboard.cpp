@@ -425,6 +425,7 @@ bool App::PasteSelectionFromClipboard() {
     }
 
     document_.SetCurrentPageIndex(targetPageIndex);
+    MarkPdfSidebarCompositionDirty();
     NotifyDocumentMutated();
     InvalidatePageSurfaceCache(targetPageIndex);
     InvalidateCanvas();
@@ -500,6 +501,7 @@ bool App::PasteImageFromClipboard() {
     ClearSelection();
     selectedImageIndices_[targetPageIndex].push_back(mutablePage.images.size() - 1U);
     document_.SetCurrentPageIndex(targetPageIndex);
+    MarkPdfSidebarCompositionDirty();
     NotifyDocumentMutated();
     InvalidatePageSurfaceCache(targetPageIndex);
     InvalidateCanvas();

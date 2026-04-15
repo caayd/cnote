@@ -74,7 +74,10 @@ target_compile_options(cnote PRIVATE
 target_link_libraries(cnote PRIVATE
     comdlg32
     comctl32
+    d3d11
+    dcomp
     dwmapi
+    dxgi
     gdi32
     gdiplus
     pdfium

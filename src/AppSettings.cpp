@@ -335,6 +335,7 @@ void App::TogglePdfSidebar() {
         pdfSidebarSlideAnimationStartProgress_ = 0.0f;
         pdfSidebarSlideAnimationTargetProgress_ = 0.0f;
         pdfSidebarScrollY_ = 0;
+        MarkPdfSidebarCompositionDirty();
         CancelPageJumpInput();
         StopPdfSidebarSlideAnimationTimer();
         InvalidateRect(window_, nullptr, FALSE);
@@ -342,6 +343,7 @@ void App::TogglePdfSidebar() {
     }
 
     pdfSidebarOpen_ = !pdfSidebarOpen_;
+    MarkPdfSidebarCompositionDirty();
     if (pdfSidebarOpen_) {
         EnsureSidebarCurrentPageVisible();
         StartPdfSidebarSlideAnimation(1.0f);

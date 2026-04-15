@@ -400,7 +400,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 const int maxScroll = std::max(0, contentHeight - viewportHeight);
                 sidebarWheelScrollRemainder_ += WheelScrollPixels(wheelDelta, dpi, false, viewportHeight);
                 const int scrollPixels = ConsumeWholePixels(sidebarWheelScrollRemainder_);
+                const int previousScrollY = pdfSidebarScrollY_;
                 pdfSidebarScrollY_ = std::clamp(pdfSidebarScrollY_ - scrollPixels, 0, maxScroll);
+                if (pdfSidebarScrollY_ != previousScrollY) {
+                    MarkPdfSidebarCompositionDirty();
+                }
                 InvalidateRect(window_, &sidebarRect, FALSE);
                 return 0;
             }
@@ -610,6 +614,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             } else if (wParam == 27) {
                 CancelPageJumpInput();
             }
+            MarkPdfSidebarCompositionDirty();
             InvalidateRect(window_, nullptr, FALSE);
             return 0;
         }
@@ -903,6 +908,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         StopPdfSidebarSlideAnimationTimer();
         ClearZoomSessionSnapshots();
         ReleasePaintBackbuffer();
+        ReleaseCompositionResources();
         PostQuitMessage(0);
         return 0;
     default:

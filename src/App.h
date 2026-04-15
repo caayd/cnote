@@ -18,6 +18,13 @@
 #include "PdfBackend.h"
 #include "ProjectFile.h"
 
+struct ID3D11Device;
+struct IDXGIDevice;
+struct IDCompositionDevice;
+struct IDCompositionSurface;
+struct IDCompositionTarget;
+struct IDCompositionVisual;
+
 namespace cnote {
 
 class SettingsWindow;
@@ -447,6 +454,12 @@ private:
     void StopPdfSidebarSlideAnimationTimer();
     void HandlePdfSidebarSlideAnimationTimer();
     void InvalidatePdfSidebarAnimationRegion();
+    [[nodiscard]] bool UpdatePdfSidebarComposition(RECT clientRect);
+    [[nodiscard]] bool EnsureCompositionDevice();
+    [[nodiscard]] bool StartPdfSidebarCompositionAnimation(float startProgress, float targetProgress);
+    void ReleaseCompositionResources();
+    void MarkPdfSidebarCompositionDirty();
+    [[nodiscard]] float PdfSidebarOffsetXForProgress(int sidebarWidth, UINT dpi, float progress) const;
     [[nodiscard]] RECT CanvasRect(RECT clientRect) const;
     [[nodiscard]] int FullToolbarHeight() const;
     [[nodiscard]] int ReservedToolbarHeight() const;
@@ -458,6 +471,9 @@ private:
     void StartToolbarRevealAnimation(float targetProgress);
     void StopToolbarRevealAnimationTimer();
     void HandleToolbarRevealAnimationTimer();
+    [[nodiscard]] bool UpdateToolbarComposition(RECT clientRect);
+    [[nodiscard]] bool StartToolbarCompositionAnimation(float startProgress, float targetProgress);
+    [[nodiscard]] float ToolbarOffsetYForProgress(int toolbarHeight, float progress) const;
     [[nodiscard]] std::optional<std::size_t> HitTestSidebarPage(POINT cursor) const;
     void EnsureSidebarCurrentPageVisible();
     void SyncCurrentPageToViewport();
@@ -494,7 +510,9 @@ private:
 
     void Paint();
     void PaintToolbar(HDC hdc, RECT clientRect) const;
+    void PaintToolbarContents(HDC hdc, RECT clientRect) const;
     void PaintPdfSidebar(HDC hdc, RECT clientRect);
+    void PaintPdfSidebarContents(HDC hdc, RECT sidebarRect);
     void PaintQuickSizePopup(HDC hdc, RECT clientRect) const;
     void PaintTextFormatPopup(HDC hdc, RECT clientRect) const;
     void PaintLiveTextEditOverlay(HDC hdc) const;
@@ -636,6 +654,11 @@ private:
     float pdfSidebarSlideAnimationTargetProgress_ = 0.0f;
     ULONGLONG pdfSidebarSlideAnimationStartMs_ = 0;
     bool pdfSidebarSlideTimerResolutionActive_ = false;
+    bool pdfSidebarCompositionDirty_ = true;
+    bool pdfSidebarCompositionAnimationActive_ = false;
+    int pdfSidebarCompositionWidth_ = 0;
+    int pdfSidebarCompositionHeight_ = 0;
+    UINT pdfSidebarCompositionDpi_ = 0;
     int pdfSidebarScrollY_ = 0;
     std::optional<Page> copiedSidebarPage_ {};
     bool pageJumpEditing_ = false;
@@ -657,6 +680,11 @@ private:
     float toolbarRevealAnimationTargetProgress_ = 1.0f;
     ULONGLONG toolbarRevealAnimationStartMs_ = 0;
     bool toolbarRevealTimerResolutionActive_ = false;
+    bool toolbarCompositionAnimationActive_ = false;
+    int toolbarCompositionWidth_ = 0;
+    int toolbarCompositionHeight_ = 0;
+    UINT toolbarCompositionDpi_ = 0;
+    bool toolbarCompositionMaximized_ = false;
     bool pendingTextEditClick_ = false;
     POINT pendingTextEditCursor_ {};
     std::optional<std::size_t> pendingTextEditPageIndex_ {};
@@ -692,6 +720,15 @@ private:
     HGDIOBJ paintBackbufferPreviousBitmap_ = nullptr;
     int paintBackbufferWidth_ = 0;
     int paintBackbufferHeight_ = 0;
+    ID3D11Device* compositionD3dDevice_ = nullptr;
+    IDXGIDevice* compositionDxgiDevice_ = nullptr;
+    IDCompositionDevice* compositionDevice_ = nullptr;
+    IDCompositionTarget* compositionTarget_ = nullptr;
+    IDCompositionVisual* compositionRootVisual_ = nullptr;
+    IDCompositionVisual* toolbarCompositionVisual_ = nullptr;
+    IDCompositionSurface* toolbarCompositionSurface_ = nullptr;
+    IDCompositionVisual* pdfSidebarCompositionVisual_ = nullptr;
+    IDCompositionSurface* pdfSidebarCompositionSurface_ = nullptr;
 
     static constexpr int kToolbarHeight = 45;
     static constexpr int kSettingsPanelWidth = 320;

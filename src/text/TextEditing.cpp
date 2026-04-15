@@ -683,6 +683,7 @@ void App::BeginTextToolInteraction(POINT cursor) {
     const auto hitText = HitTestText(cursor);
     if (hitText.has_value()) {
         document_.SetCurrentPageIndex(hitText->first);
+        MarkPdfSidebarCompositionDirty();
         const auto selectedText = SingleSelectedText();
         if (selectedText.has_value() && *selectedText == *hitText) {
             BeginTextEdit(hitText->first, hitText->second, document_.PageAt(hitText->first));
@@ -712,6 +713,7 @@ void App::BeginTextToolInteraction(POINT cursor) {
     text.color = palette_[colorIndex_];
     page.texts.push_back(text);
     document_.SetCurrentPageIndex(hitPage->pageIndex);
+    MarkPdfSidebarCompositionDirty();
     BeginTextEdit(hitPage->pageIndex, page.texts.size() - 1U, std::move(beforePage));
 }
 

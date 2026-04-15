@@ -86,7 +86,7 @@ constexpr int kIdStabilizationSlider = 205;
 constexpr int kIdSpacingSlider = 206;
 constexpr int kIdStrokeSmoothingSlider = 207;
 constexpr int kIdAutoSaveSlider = 208;
-constexpr int kIdAutoHideToolbarCheck = 209;
+constexpr int kIdAutoHideToolbarSwitch = 209;
 constexpr int kIdZoomPresetBase = 300;
 
 struct SettingsWindowLayout {
@@ -126,7 +126,7 @@ struct SettingsWindowLayout {
     RECT strokeSmoothingSliderRect {};
     RECT autoSaveLabelRect {};
     RECT autoSaveSliderRect {};
-    RECT autoHideToolbarCheckRect {};
+    RECT autoHideToolbarSwitchRect {};
     std::array<RECT, App::kZoomPresetCount> zoomPresetLabelRects {};
     std::array<RECT, App::kZoomPresetCount> zoomPresetEditRects {};
     RECT zoomPresetHintRect {};
@@ -222,11 +222,13 @@ std::wstring FormatZoomPresetValue(float zoom) {
         std::swprintf(buffer, std::size(buffer), L"%.1f", percent);
     }
     std::wstring value = buffer;
-    while (!value.empty() && value.back() == L'0') {
-        value.pop_back();
-    }
-    if (!value.empty() && value.back() == L'.') {
-        value.pop_back();
+    if (value.find(L'.') != std::wstring::npos) {
+        while (!value.empty() && value.back() == L'0') {
+            value.pop_back();
+        }
+        if (!value.empty() && value.back() == L'.') {
+            value.pop_back();
+        }
     }
     return value;
 }
@@ -401,10 +403,10 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, UINT dpi) {
     const int metaRight = layout.drawingMetaSection.right - sectionPadding;
     layout.autoSaveLabelRect = MakeRect(metaLeft, layout.drawingMetaSection.top + sectionHeaderContentTop, metaRight, layout.drawingMetaSection.top + sectionHeaderContentTop + px(18));
     layout.autoSaveSliderRect = MakeRect(metaLeft, layout.autoSaveLabelRect.bottom + px(4), metaRight, layout.autoSaveLabelRect.bottom + px(32));
-    layout.autoHideToolbarCheckRect = MakeRect(metaLeft, layout.autoSaveSliderRect.bottom + px(16), metaRight, layout.autoSaveSliderRect.bottom + px(42));
+    layout.autoHideToolbarSwitchRect = MakeRect(metaLeft, layout.autoSaveSliderRect.bottom + px(16), metaRight, layout.autoSaveSliderRect.bottom + px(42));
     const int zoomLabelWidth = px(74);
     const int zoomEditWidth = px(90);
-    const int zoomRowTop = layout.autoHideToolbarCheckRect.bottom + px(20);
+    const int zoomRowTop = layout.autoHideToolbarSwitchRect.bottom + px(20);
     const int zoomRowHeight = px(26);
     const int zoomRowGap = px(10);
     for (std::size_t index = 0; index < layout.zoomPresetLabelRects.size(); ++index) {
@@ -690,17 +692,17 @@ void SettingsWindow::CreateControls() {
     strokeSmoothingSlider_ = createSlider(kIdStrokeSmoothingSlider, 0, 0, ScaleForDpi(320, dpi), ScaleForDpi(30, dpi));
     autoSaveLabel_ = createLabel(L"Auto Save", 0, 0, ScaleForDpi(260, dpi), ScaleForDpi(20, dpi));
     autoSaveSlider_ = createSlider(kIdAutoSaveSlider, 0, 0, ScaleForDpi(320, dpi), ScaleForDpi(30, dpi));
-    autoHideToolbarCheck_ = CreateWindowExW(
+    autoHideToolbarSwitch_ = CreateWindowExW(
         0,
         L"BUTTON",
         L"Auto-hide toolbar",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0,
         0,
         ScaleForDpi(260, dpi),
         ScaleForDpi(24, dpi),
         window_,
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdAutoHideToolbarCheck)),
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdAutoHideToolbarSwitch)),
         app_.instance_,
         nullptr);
     for (std::size_t index = 0; index < zoomPresetLabels_.size(); ++index) {
@@ -801,7 +803,7 @@ void SettingsWindow::RebuildDpiResources(UINT dpi) {
     controls.push_back(strokeSmoothingSlider_);
     controls.push_back(autoSaveLabel_);
     controls.push_back(autoSaveSlider_);
-    controls.push_back(autoHideToolbarCheck_);
+    controls.push_back(autoHideToolbarSwitch_);
     controls.push_back(zoomPresetHintLabel_);
     controls.push_back(shortcutList_);
     controls.push_back(changeShortcutButton_);
@@ -867,7 +869,7 @@ void SettingsWindow::LayoutControls() {
     DeferMoveControl(deferred, strokeSmoothingSlider_, layout.strokeSmoothingSliderRect);
     DeferMoveControl(deferred, autoSaveLabel_, layout.autoSaveLabelRect);
     DeferMoveControl(deferred, autoSaveSlider_, layout.autoSaveSliderRect);
-    DeferMoveControl(deferred, autoHideToolbarCheck_, layout.autoHideToolbarCheckRect);
+    DeferMoveControl(deferred, autoHideToolbarSwitch_, layout.autoHideToolbarSwitchRect);
     for (std::size_t index = 0; index < zoomPresetLabels_.size(); ++index) {
         DeferMoveControl(deferred, zoomPresetLabels_[index], layout.zoomPresetLabelRects[index]);
         DeferMoveControl(deferred, zoomPresetEdits_[index], layout.zoomPresetEditRects[index]);
@@ -961,7 +963,7 @@ void SettingsWindow::RefreshVisibleControls() {
     setVisible(strokeSmoothingSlider_, false);
     setVisible(autoSaveLabel_, showDrawing);
     setVisible(autoSaveSlider_, false);
-    setVisible(autoHideToolbarCheck_, showDrawing);
+    setVisible(autoHideToolbarSwitch_, showDrawing);
     for (HWND control : zoomPresetLabels_) {
         setVisible(control, showDrawing);
     }
@@ -1124,8 +1126,8 @@ void SettingsWindow::RefreshSavedPaletteList() {
 }
 
 void SettingsWindow::RefreshSliderValues() {
-    if (autoHideToolbarCheck_ != nullptr) {
-        SendMessageW(autoHideToolbarCheck_, BM_SETCHECK, app_.settings_.autoHideToolbar ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (autoHideToolbarSwitch_ != nullptr) {
+        InvalidateRect(autoHideToolbarSwitch_, nullptr, FALSE);
     }
 
     if (app_.palette_.empty()) {
@@ -1333,9 +1335,9 @@ void SettingsWindow::HandleCommand(WPARAM wParam, LPARAM lParam) {
             ClearSelectedShortcut();
         }
         break;
-    case kIdAutoHideToolbarCheck:
+    case kIdAutoHideToolbarSwitch:
         if (notification == BN_CLICKED) {
-            const bool enabled = SendMessageW(autoHideToolbarCheck_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            const bool enabled = !app_.settings_.autoHideToolbar;
             app_.SetToolbarAutoHideEnabled(enabled);
             app_.SaveAppSettings();
             RefreshSliderValues();
@@ -1575,6 +1577,50 @@ void SettingsWindow::DrawButton(const DRAWITEMSTRUCT& drawItem) {
     const bool selected = (drawItem.itemState & ODS_SELECTED) != 0;
     const bool focused = (drawItem.itemState & ODS_FOCUS) != 0;
     const bool disabled = (drawItem.itemState & ODS_DISABLED) != 0;
+    if (drawItem.CtlID == kIdAutoHideToolbarSwitch) {
+        HBRUSH backgroundBrush = CreateSolidBrush(kPanelFill);
+        FillRect(drawItem.hDC, &drawItem.rcItem, backgroundBrush);
+        DeleteObject(backgroundBrush);
+
+        const bool checked = app_.settings_.autoHideToolbar;
+        RECT labelRect = drawItem.rcItem;
+        labelRect.left += Scale(2);
+        labelRect.right -= Scale(66);
+        SetBkMode(drawItem.hDC, TRANSPARENT);
+        SetTextColor(drawItem.hDC, disabled ? RGB(102, 111, 124) : kTextPrimary);
+        SelectObject(drawItem.hDC, font_);
+
+        wchar_t label[128] = {};
+        GetWindowTextW(drawItem.hwndItem, label, static_cast<int>(std::size(label)));
+        DrawTextW(drawItem.hDC, label, -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        const int switchWidth = Scale(30);
+        const int switchHeight = Scale(16);
+        RECT switchRect = MakeRect(
+            drawItem.rcItem.right - switchWidth - Scale(2),
+            drawItem.rcItem.top + ((drawItem.rcItem.bottom - drawItem.rcItem.top - switchHeight) / 2),
+            drawItem.rcItem.right - Scale(2),
+            drawItem.rcItem.top + ((drawItem.rcItem.bottom - drawItem.rcItem.top - switchHeight) / 2) + switchHeight);
+        const COLORREF trackFill = checked ? RGB(52, 96, 143) : RGB(35, 44, 57);
+        const COLORREF trackBorder = checked ? RGB(92, 137, 187) : RGB(65, 78, 96);
+        FillRoundedRect(drawItem.hDC, switchRect, selected ? RGB(58, 74, 94) : trackFill);
+        StrokeRoundedRect(drawItem.hDC, switchRect, focused ? kSelectionBorder : trackBorder, focused ? 2 : 1);
+
+        const int knobInset = Scale(2);
+        const int knobSize = std::max(1, switchHeight - (knobInset * 2));
+        const int knobLeft = checked
+            ? switchRect.right - knobInset - knobSize
+            : switchRect.left + knobInset;
+        RECT knobRect = MakeRect(
+            knobLeft,
+            switchRect.top + knobInset,
+            knobLeft + knobSize,
+            switchRect.top + knobInset + knobSize);
+        FillRoundedRect(drawItem.hDC, knobRect, disabled ? RGB(150, 158, 169) : RGB(244, 247, 252));
+        StrokeRoundedRect(drawItem.hDC, knobRect, checked ? RGB(205, 221, 239) : RGB(118, 132, 150), 1);
+        return;
+    }
+
     const bool isCategoryButton = drawItem.CtlID >= kIdCategoryPalette && drawItem.CtlID <= kIdCategoryShortcuts;
     bool isActiveCategory = false;
     if (isCategoryButton) {

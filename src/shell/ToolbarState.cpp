@@ -150,6 +150,7 @@ void App::CancelPageJumpInput() {
     pageJumpEditing_ = false;
     pageJumpReplaceOnType_ = false;
     pageJumpText_.clear();
+    MarkPdfSidebarCompositionDirty();
 }
 
 void App::BeginPageJumpInput() {
@@ -158,6 +159,7 @@ void App::BeginPageJumpInput() {
     pageJumpEditing_ = true;
     pageJumpText_ = std::to_wstring(document_.CurrentPageIndex() + 1U);
     pageJumpReplaceOnType_ = true;
+    MarkPdfSidebarCompositionDirty();
 }
 
 void App::ApplyPageJumpInput() {

@@ -66,6 +66,7 @@ void App::FocusPage(std::size_t index) {
     }
 
     document_.SetCurrentPageIndex(index);
+    MarkPdfSidebarCompositionDirty();
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
