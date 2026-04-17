@@ -233,25 +233,26 @@ ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool m
     return layout;
 }
 
-SidebarHeaderLayout BuildSidebarHeaderLayout(RECT sidebarRect, UINT dpi) {
+SidebarHeaderLayout BuildSidebarHeaderLayout(RECT sidebarRect, UINT dpi, bool maximized) {
     SidebarHeaderLayout layout {};
-    const int padding = ScaleForDpi(8, dpi);
-    const int gap = ScaleForDpi(8, dpi);
-    const int actionSize = ScaleForDpi(26, dpi);
-    const int headerHeight = ScaleForDpi(42, dpi);
-    layout.headerRect = MakeRect(sidebarRect.left + padding, sidebarRect.top + padding, sidebarRect.right - padding, sidebarRect.top + padding + headerHeight);
-    const int rowTop = layout.headerRect.top + ((headerHeight - actionSize) / 2);
+    const int padding = ScaleForDpi(6, dpi);
+    const int gap = ScaleForDpi(4, dpi);
+    const int actionHeight = ScaleForDpi(30, dpi);
+    const int headerHeight = ToolbarHeight(maximized, dpi);
+    layout.headerRect = MakeRect(sidebarRect.left + padding, sidebarRect.bottom - headerHeight, sidebarRect.right - padding, sidebarRect.bottom);
+    const int rowTop = layout.headerRect.top + ((headerHeight - actionHeight) / 2);
     const int headerWidth = static_cast<int>(layout.headerRect.right - layout.headerRect.left);
     const int pageLabelWidth = std::clamp(
-        headerWidth - (actionSize * 2) - (gap * 2),
-        ScaleForDpi(74, dpi),
-        ScaleForDpi(88, dpi));
-    const int rowWidth = pageLabelWidth + (actionSize * 2) + (gap * 2);
+        headerWidth - (ScaleForDpi(52, dpi) * 2) - (gap * 2),
+        ScaleForDpi(52, dpi),
+        ScaleForDpi(64, dpi));
+    const int actionWidth = std::max(ScaleForDpi(1, dpi), (headerWidth - pageLabelWidth - (gap * 2)) / 2);
+    const int rowWidth = pageLabelWidth + (actionWidth * 2) + (gap * 2);
     const int rowLeft = layout.headerRect.left + std::max(0, (headerWidth - rowWidth) / 2);
-    layout.pageLabelRect = MakeRect(rowLeft, rowTop, rowLeft + pageLabelWidth, rowTop + actionSize);
-    layout.addPageRect = MakeRect(layout.pageLabelRect.right + gap, rowTop, layout.pageLabelRect.right + gap + actionSize, rowTop + actionSize);
-    layout.newPageSettingsRect = MakeRect(layout.addPageRect.right + gap, rowTop, layout.addPageRect.right + gap + actionSize, rowTop + actionSize);
-    layout.contentRect = MakeRect(sidebarRect.left, layout.headerRect.bottom + ScaleForDpi(6, dpi), sidebarRect.right, sidebarRect.bottom);
+    layout.pageLabelRect = MakeRect(rowLeft, rowTop, rowLeft + pageLabelWidth, rowTop + actionHeight);
+    layout.addPageRect = MakeRect(layout.pageLabelRect.right + gap, rowTop, layout.pageLabelRect.right + gap + actionWidth, rowTop + actionHeight);
+    layout.newPageSettingsRect = MakeRect(layout.addPageRect.right + gap, rowTop, layout.addPageRect.right + gap + actionWidth, rowTop + actionHeight);
+    layout.contentRect = MakeRect(sidebarRect.left, sidebarRect.top, sidebarRect.right, layout.headerRect.top);
     return layout;
 }
 

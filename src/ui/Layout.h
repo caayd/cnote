@@ -91,7 +91,7 @@ int ToolbarTopInset(bool maximized, UINT dpi);
 SidebarMetrics BuildSidebarMetrics(UINT dpi);
 ToolbarTitleLayout ResolveToolbarTitleLayout(const ToolbarLayout& layout, HDC hdc, const std::wstring& title, const std::wstring& zoomLabel, UINT dpi);
 ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool maximized, App::Tool activeTool, UINT dpi);
-SidebarHeaderLayout BuildSidebarHeaderLayout(RECT sidebarRect, UINT dpi);
+SidebarHeaderLayout BuildSidebarHeaderLayout(RECT sidebarRect, UINT dpi, bool maximized);
 QuickSizePopupLayout BuildQuickSizePopupLayout(RECT clientRect, POINT anchor, UINT dpi, int previewExtent);
 RECT QuickSizePopupBounds(const QuickSizePopupLayout& layout, UINT dpi);
 TextFormatPopupLayout BuildTextFormatPopupLayout(RECT canvasRect, RECT editRect, bool fontMenuOpen, UINT dpi);

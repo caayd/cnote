@@ -387,7 +387,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             const RECT sidebarRect = PdfSidebarRect(clientRect);
             if (PtInRect(&sidebarRect, cursor) != 0) {
                 const UINT dpi = WindowDpi(window_);
-                const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect, dpi);
+                const SidebarHeaderLayout headerLayout = BuildSidebarHeaderLayout(sidebarRect, dpi, IsZoomed(window_) != FALSE);
                 const SidebarMetrics metrics = BuildSidebarMetrics(dpi);
                 const int itemWidth = std::max(1, static_cast<int>(headerLayout.headerRect.right - headerLayout.headerRect.left) - (metrics.itemInset * 2));
                 int contentHeight = metrics.contentPadding;

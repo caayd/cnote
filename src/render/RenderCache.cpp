@@ -186,7 +186,7 @@ void App::EnsureVisiblePageRasterQuality() {
 
     if (IsPdfSidebarVisible()) {
         const RECT sidebarRect = PdfSidebarRect(clientRect);
-        const appui::SidebarHeaderLayout headerLayout = appui::BuildSidebarHeaderLayout(sidebarRect, dpi);
+        const appui::SidebarHeaderLayout headerLayout = appui::BuildSidebarHeaderLayout(sidebarRect, dpi, IsZoomed(window_) != FALSE);
         const appui::SidebarMetrics metrics = appui::BuildSidebarMetrics(dpi);
         const int itemWidth = std::max(1, static_cast<int>(headerLayout.headerRect.right - headerLayout.headerRect.left) - (metrics.itemInset * 2));
         int top = headerLayout.contentRect.top + metrics.contentPadding - pdfSidebarScrollY_;
