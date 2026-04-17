@@ -590,6 +590,7 @@ void App::LoadAppSettings() {
     std::optional<std::size_t> loadedColorIndex;
     std::optional<std::size_t> loadedSettingsPaletteIndex;
     std::map<unsigned int, PendingNamedPalette> pendingNamedPalettes;
+    std::map<unsigned int, std::wstring> pendingRecentDocumentPaths;
     std::string line;
     while (std::getline(input, line)) {
         const std::string trimmed = TrimAscii(line);
@@ -648,6 +649,30 @@ void App::LoadAppSettings() {
         if (key == "settings_palette_index") {
             if (const auto parsed = ParseUnsignedInt(value); parsed.has_value()) {
                 loadedSettingsPaletteIndex = static_cast<std::size_t>(*parsed);
+            }
+            continue;
+        }
+
+        if (key.starts_with("recent_document_")) {
+            if (const auto index = ParseUnsignedInt(std::string_view(key).substr(16)); index.has_value()
+                && *index >= 1U
+                && *index <= kMaxRecentDocuments) {
+                std::wstring recentPath = TrimWide(Utf8ToWide(value));
+                if (!recentPath.empty()) {
+                    pendingRecentDocumentPaths[*index] = std::move(recentPath);
+                }
+            }
+            continue;
+        }
+
+        if (key.starts_with("recent_cnote_")) {
+            if (const auto index = ParseUnsignedInt(std::string_view(key).substr(13)); index.has_value()
+                && *index >= 1U
+                && *index <= kMaxRecentDocuments) {
+                std::wstring recentPath = TrimWide(Utf8ToWide(value));
+                if (!recentPath.empty() && pendingRecentDocumentPaths.find(*index) == pendingRecentDocumentPaths.end()) {
+                    pendingRecentDocumentPaths[*index] = std::move(recentPath);
+                }
             }
             continue;
         }
@@ -783,6 +808,11 @@ void App::LoadAppSettings() {
         }
     }
 
+    recentDocumentPaths_.clear();
+    for (auto it = pendingRecentDocumentPaths.rbegin(); it != pendingRecentDocumentPaths.rend(); ++it) {
+        RecordRecentDocumentPath(it->second, false);
+    }
+
     if (palette_ == LegacyDefaultPalette()) {
         palette_ = DefaultPalette();
     }
@@ -823,6 +853,9 @@ void App::SaveAppSettings() const {
     }
     output << "active_color=" << colorIndex_ << '\n';
     output << "settings_palette_index=" << settings_.paletteIndex << '\n';
+    for (std::size_t index = 0; index < recentDocumentPaths_.size(); ++index) {
+        output << "recent_document_" << (index + 1U) << '=' << WideToUtf8(recentDocumentPaths_[index]) << '\n';
+    }
     output << "draw_brush_size=" << settings_.drawBrushSize << '\n';
     output << "erase_brush_size=" << settings_.eraseBrushSize << '\n';
     output << "input_smoothing=" << settings_.inputSmoothing << '\n';

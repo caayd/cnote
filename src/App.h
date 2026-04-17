@@ -293,6 +293,7 @@ private:
     [[nodiscard]] bool HasSavedCnotePath() const;
     [[nodiscard]] bool CanAutoSaveCurrentDocument() const;
     [[nodiscard]] bool IsDocumentInteractionActive() const;
+    [[nodiscard]] bool ConfirmCloseWithUnsavedChanges();
     void RestoreAfterPageHistoryChange(std::size_t focusPageIndex);
     void RestoreAfterContentHistoryChange(const std::vector<std::size_t>& pageIndices, std::size_t focusPageIndex);
     void PushPageHistoryAction(HistoryActionType type, std::size_t index, std::vector<Page> pages, std::size_t focusPageIndex, std::size_t previousPageIndex);
@@ -428,6 +429,8 @@ private:
     void ApplyDocument(Document document, bool resetBrushWidth = false);
     [[nodiscard]] std::wstring SuggestedCnotePath() const;
     [[nodiscard]] std::wstring SuggestedPdfExportPath() const;
+    void RecordRecentDocumentPath(const std::wstring& filePath, bool saveSettings = true);
+    [[nodiscard]] bool OpenRecentDocument(std::size_t index);
     void EnsureVisiblePageRasterQuality();
     void EnsurePageRasterQuality(const PageView& pageView);
 
@@ -723,6 +726,7 @@ private:
     int hoveredWindowButton_ = -1;
     bool trackingMouseLeave_ = false;
     bool documentDirty_ = false;
+    std::vector<std::wstring> recentDocumentPaths_ {};
     HDC paintBackbufferDc_ = nullptr;
     HBITMAP paintBackbufferBitmap_ = nullptr;
     HGDIOBJ paintBackbufferPreviousBitmap_ = nullptr;
@@ -761,6 +765,7 @@ private:
     static constexpr float kWheelScrollPixels = 72.0f;
     static constexpr float kMinZoom = 0.35f;
     static constexpr float kMaxZoom = 4.0f;
+    static constexpr std::size_t kMaxRecentDocuments = 10;
     float sidebarWheelScrollRemainder_ = 0.0f;
 };
 

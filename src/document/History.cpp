@@ -1,8 +1,62 @@
 #include "App.h"
 
+#include <algorithm>
+
+#include <commctrl.h>
+
 namespace cnote {
 
 namespace {
+
+int ShowUnsavedCloseDialog(HWND owner, HINSTANCE instance) {
+    using TaskDialogIndirectFn = HRESULT(WINAPI*)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
+    static const auto taskDialogIndirect = []() -> TaskDialogIndirectFn {
+        HMODULE commonControls = GetModuleHandleW(L"comctl32.dll");
+        if (commonControls == nullptr) {
+            commonControls = LoadLibraryW(L"comctl32.dll");
+        }
+        if (commonControls == nullptr) {
+            return nullptr;
+        }
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+#endif
+        return reinterpret_cast<TaskDialogIndirectFn>(GetProcAddress(commonControls, "TaskDialogIndirect"));
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+    }();
+
+    const TASKDIALOG_BUTTON buttons[] {
+        { IDYES, L"Save" },
+        { IDNO, L"Don't Save" },
+        { IDCANCEL, L"Cancel" },
+    };
+
+    TASKDIALOGCONFIG config {};
+    config.cbSize = sizeof(config);
+    config.hwndParent = owner;
+    config.hInstance = instance;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+    config.pszWindowTitle = L"Unsaved Cnote";
+    config.pszMainInstruction = L"Save this cnote?";
+    config.pszContent = L"This cnote has unsaved edits. Save it before closing?";
+    config.cButtons = static_cast<UINT>(std::size(buttons));
+    config.pButtons = buttons;
+    config.nDefaultButton = IDYES;
+
+    int result = IDCANCEL;
+    if (taskDialogIndirect != nullptr && SUCCEEDED(taskDialogIndirect(&config, &result, nullptr, nullptr))) {
+        return result;
+    }
+
+    return MessageBoxW(
+        owner,
+        L"This cnote has unsaved changes. Save it before closing?",
+        L"Unsaved Cnote",
+        MB_YESNOCANCEL | MB_ICONWARNING);
+}
 
 bool Vec2Equal(const Vec2& a, const Vec2& b) {
     return a.x == b.x && a.y == b.y;
@@ -306,6 +360,20 @@ bool App::CanAutoSaveCurrentDocument() const {
 
 bool App::IsDocumentInteractionActive() const {
     return isDrawing_ || isErasing_ || pendingTextEditClick_ || isMovingSelection_ || isTransformingImage_ || isTransformingText_ || isTransformingStroke_;
+}
+
+bool App::ConfirmCloseWithUnsavedChanges() {
+    CommitTextEdit();
+    if (!documentDirty_ || HasSavedCnotePath()) {
+        return true;
+    }
+
+    const int result = ShowUnsavedCloseDialog(window_, instance_);
+
+    if (result == IDYES) {
+        return SaveCurrentCnote();
+    }
+    return result == IDNO;
 }
 
 void App::RestoreAfterPageHistoryChange(std::size_t focusPageIndex) {

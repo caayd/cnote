@@ -901,6 +901,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
     }
+    case WM_CLOSE:
+        if (!ConfirmCloseWithUnsavedChanges()) {
+            return 0;
+        }
+        DestroyWindow(window_);
+        return 0;
     case WM_DESTROY:
         CancelDeferredRasterRefresh();
         KillTimer(window_, kZoomSessionTimerId);

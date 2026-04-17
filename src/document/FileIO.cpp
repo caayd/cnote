@@ -30,6 +30,27 @@ bool HasExtension(const std::wstring& path, const wchar_t* extension) {
     return normalizedPath.ends_with(normalizedExtension);
 }
 
+bool PathsEqualIgnoreCase(const std::wstring& a, const std::wstring& b) {
+    return Lowercase(a) == Lowercase(b);
+}
+
+std::wstring NormalizeFilePathForHistory(const std::wstring& filePath) {
+    if (filePath.empty()) {
+        return {};
+    }
+
+    std::filesystem::path path(filePath);
+    if (path.is_relative()) {
+        std::error_code error;
+        const std::filesystem::path absolutePath = std::filesystem::absolute(path, error);
+        if (!error) {
+            path = absolutePath;
+        }
+    }
+
+    return path.lexically_normal().native();
+}
+
 }  // namespace
 
 std::wstring App::SuggestedCnotePath() const {
@@ -114,6 +135,7 @@ bool App::OpenProject(const std::wstring& filePath) {
     newPageSettings_.height = document_.NewPageDefaults().height;
     newPageSettings_.backgroundColor = document_.NewPageDefaults().backgroundColor;
     RefreshNewPageSettingsWindow();
+    RecordRecentDocumentPath(filePath);
     return true;
 }
 
@@ -127,6 +149,7 @@ bool App::OpenPdf(const std::wstring& filePath) {
     PrepareForDocumentSwitch();
     ApplyDocument(*opened);
     document_.SetNewPageDefaults({ newPageSettings_.width, newPageSettings_.height, newPageSettings_.backgroundColor });
+    RecordRecentDocumentPath(filePath);
     return true;
 }
 
@@ -147,8 +170,62 @@ bool App::SaveCnoteToPath(const std::wstring& filePath, bool showError) {
 
     document_.SetFilePath(filePath);
     MarkDocumentSaved();
+    RecordRecentDocumentPath(filePath);
     InvalidateRect(window_, nullptr, FALSE);
     return true;
+}
+
+void App::RecordRecentDocumentPath(const std::wstring& filePath, bool saveSettings) {
+    const std::wstring normalizedPath = NormalizeFilePathForHistory(filePath);
+    if (normalizedPath.empty()
+        || (!HasExtension(normalizedPath, kCnoteFileExtension) && !HasExtension(normalizedPath, L".pdf"))) {
+        return;
+    }
+
+    const auto existing = std::find_if(recentDocumentPaths_.begin(), recentDocumentPaths_.end(), [&](const std::wstring& recentPath) {
+        return PathsEqualIgnoreCase(recentPath, normalizedPath);
+    });
+
+    if (existing != recentDocumentPaths_.end() && existing == recentDocumentPaths_.begin()) {
+        if (*existing != normalizedPath) {
+            *existing = normalizedPath;
+            if (saveSettings) {
+                SaveAppSettings();
+            }
+        }
+        return;
+    }
+
+    if (existing != recentDocumentPaths_.end()) {
+        recentDocumentPaths_.erase(existing);
+    }
+
+    recentDocumentPaths_.insert(recentDocumentPaths_.begin(), normalizedPath);
+    if (recentDocumentPaths_.size() > kMaxRecentDocuments) {
+        recentDocumentPaths_.resize(kMaxRecentDocuments);
+    }
+
+    if (saveSettings) {
+        SaveAppSettings();
+    }
+}
+
+bool App::OpenRecentDocument(std::size_t index) {
+    if (index >= recentDocumentPaths_.size()) {
+        return false;
+    }
+
+    const std::wstring filePath = recentDocumentPaths_[index];
+    std::error_code error;
+    if (!std::filesystem::exists(std::filesystem::path(filePath), error)) {
+        MessageBoxW(window_, L"That recent file was not found.", L"Open", MB_OK | MB_ICONERROR);
+        recentDocumentPaths_.erase(recentDocumentPaths_.begin() + static_cast<std::ptrdiff_t>(index));
+        SaveAppSettings();
+        InvalidateRect(window_, nullptr, FALSE);
+        return false;
+    }
+
+    return OpenDocumentPath(filePath);
 }
 
 bool App::SaveAsCnote() {

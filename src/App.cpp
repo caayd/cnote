@@ -100,6 +100,7 @@ constexpr unsigned int kCommandFileExit = 1005;
 constexpr unsigned int kCommandEditBrushSettings = 1103;
 constexpr unsigned int kCommandSelectLasso = 1111;
 constexpr unsigned int kCommandToolToggleQuickWheel = 1301;
+constexpr unsigned int kCommandRecentDocumentBase = 1400;
 
 struct ToolbarLayout {
     RECT titleAreaRect {};
@@ -832,6 +833,34 @@ std::wstring BaseName(const std::wstring& path) {
     }
 
     return path.substr(slash + 1);
+}
+
+std::wstring EscapeMenuText(std::wstring_view value) {
+    std::wstring escaped;
+    escaped.reserve(value.size());
+    for (wchar_t ch : value) {
+        if (ch == L'&') {
+            escaped.push_back(L'&');
+        }
+        escaped.push_back(ch);
+    }
+    return escaped;
+}
+
+std::wstring RecentDocumentMenuLabel(const std::wstring& path) {
+    std::wstring label;
+    std::wstring fileName = BaseName(path);
+    if (fileName.empty()) {
+        fileName = path;
+    }
+    label += EscapeMenuText(fileName);
+
+    const std::filesystem::path parent = std::filesystem::path(path).parent_path();
+    if (!parent.empty()) {
+        label += L"\t";
+        label += EscapeMenuText(parent.native());
+    }
+    return label;
 }
 
 float SnapBrushSize(float size) {
@@ -5915,6 +5944,14 @@ void App::UpdateCaptureState() {
 }
 
 void App::ExecuteCommand(unsigned int commandId) {
+    if (commandId >= kCommandRecentDocumentBase) {
+        const std::size_t recentIndex = static_cast<std::size_t>(commandId - kCommandRecentDocumentBase);
+        if (recentIndex < recentDocumentPaths_.size()) {
+            static_cast<void>(OpenRecentDocument(recentIndex));
+            return;
+        }
+    }
+
     switch (commandId) {
     case kCommandFileNew:
         CreateBlankDocument();
@@ -5982,8 +6019,19 @@ bool App::HandleToolbarClick(POINT cursor) {
             return;
         }
 
+        HMENU openMenu = CreatePopupMenu();
+        if (openMenu != nullptr) {
+            AppendMenuW(openMenu, MF_STRING, kCommandFileOpen, L"Choose...");
+            if (!recentDocumentPaths_.empty()) {
+                AppendMenuW(openMenu, MF_SEPARATOR, 0, nullptr);
+                for (std::size_t index = 0; index < recentDocumentPaths_.size(); ++index) {
+                    const std::wstring label = RecentDocumentMenuLabel(recentDocumentPaths_[index]);
+                    AppendMenuW(openMenu, MF_STRING, kCommandRecentDocumentBase + static_cast<unsigned int>(index), label.c_str());
+                }
+            }
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(openMenu), L"Open");
+        }
         AppendMenuW(menu, MF_STRING, kCommandFileNew, L"New");
-        AppendMenuW(menu, MF_STRING, kCommandFileOpen, L"Open...");
         AppendMenuW(menu, MF_STRING, kCommandFileSaveCnote, HasSavedCnotePath() ? L"Save Cnote" : L"Save as Cnote...");
         AppendMenuW(menu, MF_STRING, kCommandFileExportPdf, L"Export as PDF...");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
