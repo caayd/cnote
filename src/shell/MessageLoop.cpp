@@ -264,6 +264,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             clientRect.bottom = FullToolbarHeight();
             InvalidateRect(window_, &clientRect, FALSE);
         }
+        if (wheel_.paletteWheelOpen) {
+            InvalidateRect(window_, nullptr, FALSE);
+        }
         if (!trackingMouseLeave_) {
             TRACKMOUSEEVENT event {};
             event.cbSize = sizeof(event);
@@ -315,6 +318,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             RECT toolbarRect = clientRect;
             toolbarRect.bottom = FullToolbarHeight();
             InvalidateRect(window_, &toolbarRect, FALSE);
+        }
+        if (wheel_.paletteWheelOpen) {
+            InvalidateRect(window_, nullptr, FALSE);
         }
         if (cursorInToolbarBand) {
             SetToolbarRevealed(true);
