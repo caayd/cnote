@@ -83,7 +83,6 @@ void App::FocusPage(std::size_t index) {
     const int pageCenterY = (pageView.rect.top + pageView.rect.bottom) / 2;
     const int desiredCenterY = canvasTop + (canvasHeight / 2);
     panY_ += static_cast<float>(desiredCenterY - pageCenterY);
-    EnsureVisiblePageRasterQuality();
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -100,7 +99,6 @@ RECT App::CanvasRect(RECT clientRect) const {
 void App::PanBy(float dx, float dy) {
     panX_ += dx;
     panY_ += dy;
-    ScheduleDeferredRasterRefresh();
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -127,7 +125,6 @@ void App::SetZoom(float zoom, std::optional<POINT> anchor) {
         focusPoint = *anchor;
     }
 
-    CancelDeferredRasterRefresh();
     BeginZoomSession(focusPoint);
     targetZoom_ = clampedZoom;
     zoom_ = clampedZoom;
@@ -351,7 +348,6 @@ bool App::ApplyZoomPreset(std::size_t presetIndex) {
     if (toolbarZoomEditing_) {
         CancelToolbarZoomInput();
     }
-    CancelDeferredRasterRefresh();
     BeginZoomSession(*anchor);
     zoom_ = clampedZoom;
     targetZoom_ = clampedZoom;
@@ -373,16 +369,6 @@ void App::BeginZoomSession(POINT cursor) {
     const bool startingNewSession = !zoomSessionActive_;
     zoomSessionActive_ = true;
     zoomAnchorValid_ = false;
-
-    if (startingNewSession) {
-        ++renderGeneration_;
-        pendingRenderScales_.clear();
-        {
-            std::lock_guard lock(renderMutex_);
-            renderRequests_.clear();
-            renderResults_.clear();
-        }
-    }
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
@@ -411,7 +397,6 @@ void App::ZoomAt(int delta, POINT cursor) {
     if (toolbarZoomEditing_) {
         CancelToolbarZoomInput();
     }
-    CancelDeferredRasterRefresh();
     BeginZoomSession(cursor);
     zoom_ = newZoom;
     targetZoom_ = newZoom;
@@ -440,7 +425,6 @@ void App::EndZoomSession() {
     KillTimer(window_, kZoomSessionTimerId);
     ClearZoomSessionSnapshots();
     InvalidateCanvas();
-    ScheduleDeferredRasterRefresh();
 }
 
 }  // namespace cnote

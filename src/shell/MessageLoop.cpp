@@ -422,9 +422,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         PanBy(-WheelScrollPixels(wheelDelta, WindowDpi(window_), true, viewportWidth), 0.0f);
         return 0;
     }
-    case kRenderResultsMessage:
-        HandleCompletedRenderResults();
-        return 0;
     case WM_ACTIVATEAPP:
         if (wParam == FALSE) {
             if (CanAutoSaveCurrentDocument() && !IsDocumentInteractionActive()) {
@@ -435,10 +432,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         break;
     case WM_TIMER:
-        if (wParam == kRasterRefreshTimerId) {
-            HandleDeferredRasterRefresh();
-            return 0;
-        }
         if (wParam == kAutoSaveTimerId) {
             if (CanAutoSaveCurrentDocument() && !IsDocumentInteractionActive()) {
                 static_cast<void>(SaveCnoteToPath(document_.FilePath(), false));
@@ -896,7 +889,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_ERASEBKGND:
         return 1;
     case WM_SIZE:
-        CancelDeferredRasterRefresh();
         KillTimer(window_, kZoomSessionTimerId);
         StopToolbarRevealAnimationTimer();
         StopPdfSidebarSlideAnimationTimer();
@@ -908,7 +900,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         ReleasePaintBackbuffer();
         targetZoom_ = zoom_;
         InvalidateAllPageSurfaceCaches();
-        EnsureVisiblePageRasterQuality();
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
     case WM_DPICHANGED: {
@@ -923,7 +914,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 suggestedRect->bottom - suggestedRect->top,
                 SWP_NOZORDER | SWP_NOACTIVATE);
         }
-        CancelDeferredRasterRefresh();
         KillTimer(window_, kZoomSessionTimerId);
         StopToolbarRevealAnimationTimer();
         StopPdfSidebarSlideAnimationTimer();
@@ -935,7 +925,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         ReleasePaintBackbuffer();
         targetZoom_ = zoom_;
         InvalidateAllPageSurfaceCaches();
-        EnsureVisiblePageRasterQuality();
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
     }
@@ -946,7 +935,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         DestroyWindow(window_);
         return 0;
     case WM_DESTROY:
-        CancelDeferredRasterRefresh();
         KillTimer(window_, kZoomSessionTimerId);
         StopToolbarRevealAnimationTimer();
         StopPdfSidebarSlideAnimationTimer();

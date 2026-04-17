@@ -27,7 +27,6 @@ add_executable(cnote WIN32
     src/document/History.cpp
     src/document/Pages.cpp
     src/render/Paint.cpp
-    src/render/RenderCache.cpp
     src/selection/Selection.cpp
     src/selection/Transforms.cpp
     src/shell/Startup.cpp

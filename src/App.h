@@ -1,14 +1,9 @@
 #pragma once
 
-#include <condition_variable>
-#include <deque>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <array>
 #include <string>
-#include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -133,6 +128,8 @@ public:
         int rasterWidth = 0;
         int rasterHeight = 0;
         float rasterScale = 0.0f;
+        std::int32_t sourcePdfSourceIndex = -1;
+        std::int32_t sourcePdfPageIndex = -1;
         float pageScale = 0.0f;
         bool valid = false;
         std::vector<std::uint8_t> pixels {};
@@ -145,6 +142,8 @@ public:
         int sourceWidth = 0;
         int sourceHeight = 0;
         float sourceScale = 0.0f;
+        std::int32_t sourcePdfSourceIndex = -1;
+        std::int32_t sourcePdfPageIndex = -1;
         bool valid = false;
         std::vector<std::uint8_t> pixels {};
     };
@@ -192,21 +191,6 @@ public:
         float centerY = 0.0f;
         float boundsWidth = 0.0f;
         float boundsHeight = 0.0f;
-    };
-
-    struct RenderRequest {
-        std::shared_ptr<std::vector<std::uint8_t>> pdfData {};
-        std::size_t pageIndex = 0;
-        std::int32_t sourcePdfPageIndex = -1;
-        float renderScale = 0.0f;
-        std::uint64_t generation = 0;
-    };
-
-    struct RenderResult {
-        std::size_t pageIndex = 0;
-        float renderScale = 0.0f;
-        std::uint64_t generation = 0;
-        std::optional<RasterImage> raster {};
     };
 
     struct KeyBinding {
@@ -260,8 +244,6 @@ private:
     friend class NewPageSettingsWindow;
 
     bool CreateMainWindow(int showCommand);
-    void StartRenderWorker();
-    void StopRenderWorker();
     void CreateBlankDocument();
     void ClearHistory();
     void InvalidateCanvas();
@@ -384,12 +366,6 @@ private:
     [[nodiscard]] bool ApplyZoomPreset(std::size_t presetIndex);
     void BeginZoomSession(POINT cursor);
     void EndZoomSession();
-    void ScheduleDeferredRasterRefresh();
-    void CancelDeferredRasterRefresh(bool clearPending = true);
-    void HandleDeferredRasterRefresh();
-    void HandleCompletedRenderResults();
-    void QueuePageRasterRequest(const PageView& pageView);
-    void ResetPendingRasterWork();
     [[nodiscard]] bool SidebarOwnsKeyboardShortcuts() const;
     void ClearSelection();
     [[nodiscard]] bool HasSelection() const;
@@ -441,9 +417,6 @@ private:
     [[nodiscard]] std::wstring SuggestedPdfExportPath() const;
     void RecordRecentDocumentPath(const std::wstring& filePath, bool saveSettings = true);
     [[nodiscard]] bool OpenRecentDocument(std::size_t index);
-    void EnsureVisiblePageRasterQuality();
-    void EnsurePageRasterQuality(const PageView& pageView);
-
     [[nodiscard]] bool IsCursorInsidePage(POINT cursor) const;
     [[nodiscard]] std::optional<PageView> HitTestPage(POINT cursor) const;
     [[nodiscard]] std::optional<PageView> ResolveZoomAnchorPage(RECT clientRect, POINT anchorPoint) const;
@@ -453,7 +426,6 @@ private:
     [[nodiscard]] PageView CalculatePageView(RECT clientRect, std::size_t pageIndex) const;
     [[nodiscard]] std::vector<PageView> CalculatePageViews(RECT clientRect) const;
     [[nodiscard]] std::optional<std::size_t> ViewedPageIndex(RECT clientRect) const;
-    [[nodiscard]] float DesiredRenderScale(const PageView& pageView) const;
     [[nodiscard]] COLORREF ToColorRef(std::uint32_t argb) const;
     [[nodiscard]] std::uint32_t ComposeColor(unsigned char red, unsigned char green, unsigned char blue) const;
     [[nodiscard]] unsigned char GetColorChannel(std::uint32_t color, int shift) const;
@@ -544,6 +516,7 @@ private:
     void PaintPaletteWheel(HDC hdc, RECT clientRect) const;
     void PaintCanvas(HDC hdc, RECT clientRect);
     void PaintPage(HDC hdc, const PageView& pageView);
+    [[nodiscard]] bool PaintNativePdfBackground(HDC hdc, const Page& page, const RECT& destinationRect) const;
     void PaintSelectionOverlay(HDC hdc, RECT canvasRect) const;
     void PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSelectToolSelectionAffordances) const;
     void PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke, bool fastPreview = false, float opacity = 1.0f) const;
@@ -638,7 +611,6 @@ private:
     std::vector<std::vector<std::size_t>> pendingEraseImageIndices_ {};
     std::vector<std::vector<std::size_t>> pendingEraseTextIndices_ {};
     bool selectionBoxOverride_ = false;
-    bool rasterRefreshPending_ = false;
     bool zoomSessionActive_ = false;
     bool zoomAnchorValid_ = false;
     std::size_t zoomAnchorPageIndex_ = 0;
@@ -654,15 +626,6 @@ private:
     std::vector<std::vector<MoveSelectionTextCacheEntry>> moveSelectionTextCache_ {};
     std::vector<SidebarThumbnailCache> sidebarThumbnailCaches_ {};
     std::vector<ZoomPageSnapshot> zoomPageSnapshots_ {};
-    std::uint64_t renderGeneration_ = 0;
-    std::unordered_map<std::size_t, float> pendingRenderScales_ {};
-    std::mutex renderMutex_ {};
-    std::condition_variable renderCv_ {};
-    std::deque<RenderRequest> renderRequests_ {};
-    std::deque<RenderResult> renderResults_ {};
-    std::thread renderThread_ {};
-    bool renderWorkerRunning_ = false;
-
     std::vector<std::uint32_t> palette_ {
         0xFF000000,
         0xFF2563EB,
@@ -767,13 +730,10 @@ private:
     static constexpr int kToolbarHeight = 45;
     static constexpr int kSettingsPanelWidth = 320;
     static constexpr int kPageGap = 26;
-    static constexpr UINT kRenderResultsMessage = WM_APP + 1;
-    static constexpr UINT_PTR kRasterRefreshTimerId = 1;
     static constexpr UINT_PTR kAutoSaveTimerId = 2;
     static constexpr UINT_PTR kZoomSessionTimerId = 3;
     static constexpr UINT_PTR kToolbarRevealTimerId = 4;
     static constexpr UINT_PTR kPdfSidebarSlideTimerId = 5;
-    static constexpr UINT kRasterRefreshDelayMs = 120;
     static constexpr UINT kZoomSessionDelayMs = 100;
     static constexpr UINT kToolbarRevealFrameMs = 1;
     static constexpr UINT kToolbarRevealDurationMs = 120;

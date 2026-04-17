@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include <windows.h>
+
 #include "Document.h"
 
 namespace cnote {
@@ -29,6 +31,14 @@ public:
         const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
         std::size_t pageIndex,
         float renderScale) const;
+    [[nodiscard]] bool RenderPageToHdc(
+        const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
+        std::size_t pageIndex,
+        HDC hdc,
+        int x,
+        int y,
+        int width,
+        int height) const;
     [[nodiscard]] bool ExportPdf(
         const Document& document,
         const std::wstring& filePath,

@@ -378,19 +378,16 @@ bool App::ConfirmCloseWithUnsavedChanges() {
 
 void App::RestoreAfterPageHistoryChange(std::size_t focusPageIndex) {
     ClearSelection();
-    CancelDeferredRasterRefresh();
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
     document_.SetCurrentPageIndex(std::min(focusPageIndex, document_.PageCount() - 1U));
     MarkPdfSidebarCompositionDirty();
     EnsureSidebarCurrentPageVisible();
-    EnsureVisiblePageRasterQuality();
     FocusPage(std::min(focusPageIndex, document_.PageCount() - 1U));
 }
 
 void App::RestoreAfterContentHistoryChange(const std::vector<std::size_t>& pageIndices, std::size_t focusPageIndex) {
     ClearSelection();
-    CancelDeferredRasterRefresh();
     for (std::size_t pageIndex : pageIndices) {
         if (pageIndex >= document_.PageCount()) {
             continue;
@@ -402,7 +399,6 @@ void App::RestoreAfterContentHistoryChange(const std::vector<std::size_t>& pageI
     document_.SetCurrentPageIndex(std::min(focusPageIndex, document_.PageCount() - 1U));
     MarkPdfSidebarCompositionDirty();
     EnsureSidebarCurrentPageVisible();
-    EnsureVisiblePageRasterQuality();
 }
 
 void App::PushPageHistoryAction(

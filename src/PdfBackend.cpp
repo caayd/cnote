@@ -26,7 +26,6 @@ namespace cnote {
 
 namespace {
 
-constexpr float kInitialRenderScale = 1.5f;
 constexpr float kMinimumStrokeRenderWidth = 1.25f;
 constexpr float kStrokeRenderWidthDivisor = 2.15f;
 constexpr float kTextLayoutScale = 8.0f;
@@ -909,10 +908,6 @@ std::optional<Document> PdfiumBackend::OpenFromMemory(
         page.sourcePdfSourceIndex = 0;
         page.sourcePdfPageIndex = pageIndex;
 
-        if (const auto raster = RenderPageBitmap(pageHandle, kInitialRenderScale); raster.has_value()) {
-            page.raster = std::move(*raster);
-        }
-
         pages.push_back(std::move(page));
         FPDF_ClosePage(pageHandle);
     }
@@ -956,6 +951,63 @@ std::optional<RasterImage> PdfiumBackend::RenderPage(
     FPDF_ClosePage(pageHandle);
     FPDF_CloseDocument(documentHandle);
     return raster;
+}
+
+bool PdfiumBackend::RenderPageToHdc(
+    const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
+    std::size_t pageIndex,
+    HDC hdc,
+    int x,
+    int y,
+    int width,
+    int height) const {
+#ifdef _WIN32
+    if (!initialized_ || !pdfBytes || pdfBytes->empty() || hdc == nullptr || width <= 0 || height <= 0) {
+        return false;
+    }
+
+    FPDF_DOCUMENT documentHandle = FPDF_LoadMemDocument64(pdfBytes->data(), pdfBytes->size(), nullptr);
+    if (documentHandle == nullptr) {
+        return false;
+    }
+
+    const int pageCount = FPDF_GetPageCount(documentHandle);
+    if (pageCount <= 0 || pageIndex >= static_cast<std::size_t>(pageCount)) {
+        FPDF_CloseDocument(documentHandle);
+        return false;
+    }
+
+    FPDF_PAGE pageHandle = FPDF_LoadPage(documentHandle, static_cast<int>(pageIndex));
+    if (pageHandle == nullptr) {
+        FPDF_CloseDocument(documentHandle);
+        return false;
+    }
+
+    SaveDC(hdc);
+    const bool ok = FPDF_RenderPage(
+        hdc,
+        pageHandle,
+        x,
+        y,
+        width,
+        height,
+        0,
+        FPDF_ANNOT | FPDF_LCD_TEXT) != 0;
+    RestoreDC(hdc, -1);
+
+    FPDF_ClosePage(pageHandle);
+    FPDF_CloseDocument(documentHandle);
+    return ok;
+#else
+    static_cast<void>(pdfBytes);
+    static_cast<void>(pageIndex);
+    static_cast<void>(hdc);
+    static_cast<void>(x);
+    static_cast<void>(y);
+    static_cast<void>(width);
+    static_cast<void>(height);
+    return false;
+#endif
 }
 
 bool PdfiumBackend::ExportPdf(

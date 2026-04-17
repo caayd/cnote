@@ -391,8 +391,6 @@ void App::ApplyConfiguredSettingsToCurrentPage(float width, float height, std::u
         return;
     }
 
-    ResetPendingRasterWork();
-
     Page& page = document_.CurrentPage();
     page.width = std::max(72.0f, width);
     page.height = std::max(72.0f, height);
@@ -404,7 +402,6 @@ void App::ApplyConfiguredSettingsToCurrentPage(float width, float height, std::u
     NotifyDocumentMutated();
     InvalidatePageSurfaceCache(pageIndex);
     InvalidateSidebarThumbnailCache(pageIndex);
-    EnsureVisiblePageRasterQuality();
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -412,8 +409,6 @@ void App::ApplyConfiguredSettingsToAllPages(float width, float height, std::uint
     if (document_.PageCount() == 0U) {
         return;
     }
-
-    ResetPendingRasterWork();
 
     const float clampedWidth = std::max(72.0f, width);
     const float clampedHeight = std::max(72.0f, height);
@@ -429,7 +424,6 @@ void App::ApplyConfiguredSettingsToAllPages(float width, float height, std::uint
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
     NotifyDocumentMutated();
-    EnsureVisiblePageRasterQuality();
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -480,7 +474,6 @@ bool App::AppendPagesFromDocumentPath(const std::wstring& filePath) {
         return false;
     }
 
-    ResetPendingRasterWork();
     ClearSelection();
 
     const std::size_t insertIndex = document_.PageCount();
@@ -1076,9 +1069,7 @@ void App::ExecuteShortcutAction(ShortcutAction action) {
         }
         break;
     case ShortcutAction::ResetView:
-        CancelDeferredRasterRefresh();
         ResetView();
-        EnsureVisiblePageRasterQuality();
         InvalidateRect(window_, nullptr, FALSE);
         break;
     case ShortcutAction::ZoomPreset1:

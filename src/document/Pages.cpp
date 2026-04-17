@@ -10,7 +10,6 @@ void App::CreateBlankDocument() {
 
 void App::PrepareForDocumentSwitch() {
     CancelTextEdit();
-    CancelDeferredRasterRefresh();
     KillTimer(window_, kZoomSessionTimerId);
     StopPdfSidebarSlideAnimationTimer();
     CancelQuickSizePopup();
@@ -18,13 +17,6 @@ void App::PrepareForDocumentSwitch() {
     zoomSessionActive_ = false;
     zoomAnchorValid_ = false;
     ClearZoomSessionSnapshots();
-    ++renderGeneration_;
-    pendingRenderScales_.clear();
-    {
-        std::lock_guard lock(renderMutex_);
-        renderRequests_.clear();
-        renderResults_.clear();
-    }
 }
 
 void App::ApplyDocument(Document document, bool resetBrushWidth) {
@@ -57,7 +49,6 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
     ResetView();
     UpdateAutoSaveTimer();
     EnsureSidebarCurrentPageVisible();
-    EnsureVisiblePageRasterQuality();
     UpdateWindowTitle();
     InvalidateRect(window_, nullptr, FALSE);
 }
@@ -67,7 +58,6 @@ void App::AddBlankPageAfterCurrent() {
         return;
     }
 
-    ResetPendingRasterWork();
     ClearSelection();
     const std::size_t previousPageIndex = document_.CurrentPageIndex();
     Page newPage = BuildConfiguredNewPage();
@@ -100,7 +90,6 @@ bool App::PasteSidebarPageAfterCurrent() {
         return false;
     }
 
-    ResetPendingRasterWork();
     ClearSelection();
     const std::size_t previousPageIndex = document_.CurrentPageIndex();
     const Page insertedPage = *copiedSidebarPage_;
@@ -116,7 +105,6 @@ bool App::DeleteCurrentPage() {
         return false;
     }
 
-    ResetPendingRasterWork();
     ClearSelection();
     const std::size_t currentIndex = document_.CurrentPageIndex();
     Page removedPage = document_.PageAt(currentIndex);

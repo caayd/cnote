@@ -15,57 +15,6 @@ constexpr DWORD kDwmWindowCornerRound = 2;
 
 }  // namespace
 
-void App::StartRenderWorker() {
-    renderWorkerRunning_ = true;
-    renderThread_ = std::thread([this]() {
-        PdfiumBackend workerBackend {};
-        for (;;) {
-            RenderRequest request {};
-            {
-                std::unique_lock lock(renderMutex_);
-                renderCv_.wait(lock, [this]() { return !renderWorkerRunning_ || !renderRequests_.empty(); });
-                if (!renderWorkerRunning_ && renderRequests_.empty()) {
-                    break;
-                }
-                request = std::move(renderRequests_.front());
-                renderRequests_.pop_front();
-            }
-
-            RenderResult result {};
-            result.pageIndex = request.pageIndex;
-            result.renderScale = request.renderScale;
-            result.generation = request.generation;
-            if (request.sourcePdfPageIndex >= 0) {
-                result.raster = workerBackend.RenderPage(
-                    request.pdfData,
-                    static_cast<std::size_t>(request.sourcePdfPageIndex),
-                    request.renderScale);
-            }
-
-            {
-                std::lock_guard lock(renderMutex_);
-                renderResults_.push_back(std::move(result));
-            }
-
-            if (window_ != nullptr) {
-                PostMessageW(window_, kRenderResultsMessage, 0, 0);
-            }
-        }
-    });
-}
-
-void App::StopRenderWorker() {
-    {
-        std::lock_guard lock(renderMutex_);
-        renderWorkerRunning_ = false;
-        renderRequests_.clear();
-    }
-    renderCv_.notify_all();
-    if (renderThread_.joinable()) {
-        renderThread_.join();
-    }
-}
-
 int App::Run(int showCommand, std::optional<std::wstring> startupPath) {
     if (!CreateMainWindow(showCommand)) {
         return 1;

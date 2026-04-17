@@ -2713,7 +2713,6 @@ App::App(HINSTANCE instance) : instance_(instance) {
     }
     LoadAppSettings();
     ClearSelection();
-    StartRenderWorker();
 }
 
 App::~App() {
@@ -2723,7 +2722,6 @@ App::~App() {
     newPageSettings_.window = nullptr;
     EndTextEditControl();
     SaveAppSettings();
-    StopRenderWorker();
     ClearZoomSessionSnapshots();
     ReleasePaintBackbuffer();
     ReleaseCompositionResources();
@@ -2738,17 +2736,6 @@ App::~App() {
     if (pdfSidebarSlideTimerResolutionActive_) {
         timeEndPeriod(1);
         pdfSidebarSlideTimerResolutionActive_ = false;
-    }
-}
-
-void App::ResetPendingRasterWork() {
-    CancelDeferredRasterRefresh();
-    ++renderGeneration_;
-    pendingRenderScales_.clear();
-    {
-        std::lock_guard lock(renderMutex_);
-        renderRequests_.clear();
-        renderResults_.clear();
     }
 }
 
@@ -2892,7 +2879,6 @@ void App::SetToolbarAutoHideEnabled(bool enabled) {
 
     if (window_ != nullptr) {
         StopToolbarRevealAnimationTimer();
-        EnsureVisiblePageRasterQuality();
         InvalidatePdfSidebarAnimationRegion();
         InvalidateRect(window_, nullptr, FALSE);
     }
@@ -3094,6 +3080,8 @@ void App::InvalidatePageSurfaceCache(std::size_t pageIndex) {
     cache.rasterWidth = 0;
     cache.rasterHeight = 0;
     cache.rasterScale = 0.0f;
+    cache.sourcePdfSourceIndex = -1;
+    cache.sourcePdfPageIndex = -1;
     cache.pageScale = 0.0f;
     cache.strokeCount = 0;
     InvalidateSidebarThumbnailCache(pageIndex);
@@ -3231,7 +3219,6 @@ void App::NextPage() {
 
 void App::SetCurrentPageIndex(std::size_t index) {
     if (document_.SetCurrentPageIndex(index)) {
-        CancelDeferredRasterRefresh();
         targetZoom_ = zoom_;
         MarkPdfSidebarCompositionDirty();
         EnsureSidebarCurrentPageVisible();
@@ -4646,6 +4633,8 @@ void App::InvalidateSidebarThumbnailCache(std::size_t pageIndex) {
     cache.sourceWidth = 0;
     cache.sourceHeight = 0;
     cache.sourceScale = 0.0f;
+    cache.sourcePdfSourceIndex = -1;
+    cache.sourcePdfPageIndex = -1;
     MarkPdfSidebarCompositionDirty();
 }
 
@@ -4659,25 +4648,15 @@ void App::EnsureSidebarThumbnailCache(std::size_t pageIndex, int width, int heig
     }
 
     const Page& page = document_.PageAt(pageIndex);
-    if (document_.IsPdfDocument() && (page.raster.pixels.empty() || page.raster.width <= 0 || page.raster.height <= 0)) {
-        const float thumbnailScale = std::min(
-            static_cast<float>(width) / std::max(1.0f, page.width),
-            static_cast<float>(height) / std::max(1.0f, page.height));
-        QueuePageRasterRequest({
-            MakeRect(0, 0, width, height),
-            pageIndex,
-            std::max(0.1f, thumbnailScale),
-            true,
-        });
-    }
-
     SidebarThumbnailCache& cache = sidebarThumbnailCaches_[pageIndex];
     if (cache.valid
         && cache.width == width
         && cache.height == height
         && cache.sourceWidth == page.raster.width
         && cache.sourceHeight == page.raster.height
-        && std::abs(cache.sourceScale - page.raster.scale) < 0.001f) {
+        && std::abs(cache.sourceScale - page.raster.scale) < 0.001f
+        && cache.sourcePdfSourceIndex == page.sourcePdfSourceIndex
+        && cache.sourcePdfPageIndex == page.sourcePdfPageIndex) {
         return;
     }
 
@@ -4687,6 +4666,8 @@ void App::EnsureSidebarThumbnailCache(std::size_t pageIndex, int width, int heig
     cache.sourceWidth = page.raster.width;
     cache.sourceHeight = page.raster.height;
     cache.sourceScale = page.raster.scale;
+    cache.sourcePdfSourceIndex = page.sourcePdfSourceIndex;
+    cache.sourcePdfPageIndex = page.sourcePdfPageIndex;
     cache.pixels.assign(static_cast<std::size_t>(cache.stride * cache.height), 255);
 
     BITMAPINFO bitmapInfo {};
@@ -4720,11 +4701,16 @@ void App::EnsureSidebarThumbnailCache(std::size_t pageIndex, int width, int heig
     FillRect(cacheDc, &cacheRect, pageBrush);
     DeleteObject(pageBrush);
 
+    const bool drewNativeBackground = PaintNativePdfBackground(cacheDc, page, cacheRect);
+
     Gdiplus::Graphics imageGraphics(cacheDc);
     imageGraphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
     imageGraphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
     imageGraphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
-    if (!page.raster.pixels.empty() && page.raster.width > 0 && page.raster.height > 0) {
+    if (!drewNativeBackground
+        && !page.raster.pixels.empty()
+        && page.raster.width > 0
+        && page.raster.height > 0) {
         Gdiplus::Bitmap bitmap(
             page.raster.width,
             page.raster.height,
@@ -4796,7 +4782,6 @@ void App::BeginStroke(POINT cursor) {
         return;
     }
 
-    CancelDeferredRasterRefresh(false);
     const auto hitPage = HitTestPage(cursor);
     if (!hitPage.has_value()) {
         return;
@@ -4967,9 +4952,6 @@ void App::EndStroke() {
     activeStrokePageIndex_.reset();
     isDrawing_ = false;
     UpdateCaptureState();
-    if (rasterRefreshPending_) {
-        ScheduleDeferredRasterRefresh();
-    }
     if (committedStroke.has_value() && committedPageIndex.has_value()) {
         NotifyDocumentMutated();
         if (window_ != nullptr && committedPageView.has_value()) {
@@ -5147,7 +5129,6 @@ void App::BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, Ima
         return;
     }
 
-    CancelDeferredRasterRefresh(false);
     isTransformingImage_ = true;
     transformingImagePageIndex_ = pageIndex;
     transformingImageIndex_ = imageIndex;
@@ -5284,7 +5265,6 @@ void App::BeginTextTransform(std::size_t pageIndex, std::size_t textIndex, Image
     pendingTextEditClick_ = false;
     pendingTextEditPageIndex_.reset();
     pendingTextEditIndex_.reset();
-    CancelDeferredRasterRefresh(false);
     isTransformingText_ = true;
     transformingTextPageIndex_ = pageIndex;
     transformingTextIndex_ = textIndex;
@@ -5575,9 +5555,6 @@ void App::EndTextTransform() {
         InvalidatePageSurfaceCache(pageIndex);
     }
 
-    if (rasterRefreshPending_) {
-        ScheduleDeferredRasterRefresh();
-    }
     InvalidateCanvas();
 }
 
@@ -5586,7 +5563,6 @@ void App::BeginStrokeTransform(std::size_t pageIndex, ImageTransformHandle handl
         return;
     }
 
-    CancelDeferredRasterRefresh(false);
     isTransformingStroke_ = true;
     transformingStrokePageIndex_ = pageIndex;
     strokeTransformHandle_ = handle;
@@ -5759,7 +5735,6 @@ void App::BeginMoveSelection(POINT cursor) {
         return;
     }
 
-    CancelDeferredRasterRefresh(false);
     pendingTextEditClick_ = false;
     pendingTextEditPageIndex_.reset();
     pendingTextEditIndex_.reset();
@@ -5826,9 +5801,6 @@ void App::EndStrokeTransform() {
     NotifyDocumentMutated();
     InvalidateCanvas();
     UpdateCaptureState();
-    if (rasterRefreshPending_) {
-        ScheduleDeferredRasterRefresh();
-    }
 }
 
 void App::UpdateMoveSelection(POINT cursor) {
@@ -5849,7 +5821,6 @@ void App::UpdateMoveSelection(POINT cursor) {
             return;
         }
 
-        CancelDeferredRasterRefresh(false);
         isMovingSelection_ = true;
         moveSelectionPageIndex_ = pageIndex;
         interactionPreviewMode_ = InteractionPreviewMode::MoveSelection;
@@ -5911,9 +5882,6 @@ void App::EndImageTransform() {
     NotifyDocumentMutated();
     InvalidateCanvas();
     UpdateCaptureState();
-    if (rasterRefreshPending_) {
-        ScheduleDeferredRasterRefresh();
-    }
 }
 
 void App::EndMoveSelection() {
@@ -5927,9 +5895,6 @@ void App::EndMoveSelection() {
         moveSelectionPageIndex_.reset();
         InvalidateCanvas();
         UpdateCaptureState();
-        if (rasterRefreshPending_) {
-            ScheduleDeferredRasterRefresh();
-        }
         return;
     }
 
@@ -5962,9 +5927,6 @@ void App::EndMoveSelection() {
     NotifyDocumentMutated();
     InvalidateCanvas();
     UpdateCaptureState();
-    if (rasterRefreshPending_) {
-        ScheduleDeferredRasterRefresh();
-    }
 }
 
 void App::BeginErase(POINT cursor) {
@@ -5976,7 +5938,6 @@ void App::BeginErase(POINT cursor) {
         return;
     }
 
-    CancelDeferredRasterRefresh(false);
     if (HasSelection()) {
         ClearSelection();
         InvalidateCanvas();
@@ -6117,9 +6078,6 @@ void App::EndErase() {
         PushReplacePagesHistoryAction(std::move(affectedPageIndices), std::move(beforePages), document_.CurrentPageIndex());
         NotifyDocumentMutated();
     }
-    if (rasterRefreshPending_) {
-        ScheduleDeferredRasterRefresh();
-    }
     InvalidateCanvas();
 }
 
@@ -6208,7 +6166,6 @@ void App::BeginPan(POINT cursor, bool fromMiddleButton) {
         EndStroke();
     }
 
-    CancelDeferredRasterRefresh(false);
     if (!fromMiddleButton && HasSelection()) {
         ClearSelection();
     }
@@ -6234,9 +6191,6 @@ void App::EndPan() {
     isPanning_ = false;
     panFromMiddleButton_ = false;
     UpdateCaptureState();
-    if (rasterRefreshPending_) {
-        ScheduleDeferredRasterRefresh();
-    }
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -7805,6 +7759,26 @@ void App::PaintCanvas(HDC hdc, RECT clientRect) {
     PaintSelectionOverlay(hdc, canvasRect);
 }
 
+bool App::PaintNativePdfBackground(HDC hdc, const Page& page, const RECT& destinationRect) const {
+    if (hdc == nullptr || destinationRect.right <= destinationRect.left || destinationRect.bottom <= destinationRect.top) {
+        return false;
+    }
+
+    const Document::PdfSource* pdfSource = document_.PdfSourceAtIndex(page.sourcePdfSourceIndex);
+    if (pdfSource == nullptr || page.sourcePdfPageIndex < 0) {
+        return false;
+    }
+
+    return pdfBackend_.RenderPageToHdc(
+        pdfSource->pdfData,
+        static_cast<std::size_t>(page.sourcePdfPageIndex),
+        hdc,
+        destinationRect.left,
+        destinationRect.top,
+        destinationRect.right - destinationRect.left,
+        destinationRect.bottom - destinationRect.top);
+}
+
 bool App::TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke& stroke) {
     if (pageIndex >= pageSurfaceCaches_.size() || stroke.points.empty()) {
         return false;
@@ -7822,7 +7796,9 @@ bool App::TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke&
         || cache.textCount != page.texts.size()
         || cache.rasterWidth != page.raster.width
         || cache.rasterHeight != page.raster.height
-        || std::abs(cache.rasterScale - page.raster.scale) >= 0.001f) {
+        || std::abs(cache.rasterScale - page.raster.scale) >= 0.001f
+        || cache.sourcePdfSourceIndex != page.sourcePdfSourceIndex
+        || cache.sourcePdfPageIndex != page.sourcePdfPageIndex) {
         return false;
     }
 
@@ -7905,6 +7881,8 @@ bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect
         || cache.rasterWidth != page.raster.width
         || cache.rasterHeight != page.raster.height
         || std::abs(cache.rasterScale - page.raster.scale) >= 0.001f
+        || cache.sourcePdfSourceIndex != page.sourcePdfSourceIndex
+        || cache.sourcePdfPageIndex != page.sourcePdfPageIndex
         || cache.pageScale <= 0.0f) {
         return false;
     }
@@ -7948,7 +7926,10 @@ bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect
     FillRect(cacheDc, &clippedDirtyRect, pageBrush);
     DeleteObject(pageBrush);
 
-    if (!page.raster.pixels.empty() && page.raster.width > 0 && page.raster.height > 0) {
+    if (!PaintNativePdfBackground(cacheDc, page, cacheBounds)
+        && !page.raster.pixels.empty()
+        && page.raster.width > 0
+        && page.raster.height > 0) {
         BITMAPINFO pageBitmapInfo {};
         pageBitmapInfo.bmiHeader.biSize = sizeof(pageBitmapInfo.bmiHeader);
         pageBitmapInfo.bmiHeader.biWidth = page.raster.width;
@@ -8083,6 +8064,8 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
         && cache.rasterWidth == page.raster.width
         && cache.rasterHeight == page.raster.height
         && std::abs(cache.rasterScale - page.raster.scale) < 0.001f
+        && cache.sourcePdfSourceIndex == page.sourcePdfSourceIndex
+        && cache.sourcePdfPageIndex == page.sourcePdfPageIndex
         && std::abs(cache.pageScale - cacheScale) < 0.001f
         && !cache.pixels.empty();
     if (cacheMatches) {
@@ -8119,7 +8102,10 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
     FillRect(cacheDc, &cacheRect, pageBrush);
     DeleteObject(pageBrush);
 
-    if (!page.raster.pixels.empty() && page.raster.width > 0 && page.raster.height > 0) {
+    if (!PaintNativePdfBackground(cacheDc, page, cacheRect)
+        && !page.raster.pixels.empty()
+        && page.raster.width > 0
+        && page.raster.height > 0) {
         BITMAPINFO pageBitmapInfo {};
         pageBitmapInfo.bmiHeader.biSize = sizeof(pageBitmapInfo.bmiHeader);
         pageBitmapInfo.bmiHeader.biWidth = page.raster.width;
@@ -8202,6 +8188,8 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
     cache.rasterWidth = page.raster.width;
     cache.rasterHeight = page.raster.height;
     cache.rasterScale = page.raster.scale;
+    cache.sourcePdfSourceIndex = page.sourcePdfSourceIndex;
+    cache.sourcePdfPageIndex = page.sourcePdfPageIndex;
     cache.pageScale = cacheScale;
     cache.valid = true;
 
@@ -8338,7 +8326,10 @@ void App::BuildInteractionPageSnapshot(const PageView& pageView) {
     FillRect(cacheDc, &cacheRect, pageBrush);
     DeleteObject(pageBrush);
 
-    if (!page.raster.pixels.empty() && page.raster.width > 0 && page.raster.height > 0) {
+    if (!PaintNativePdfBackground(cacheDc, page, cacheRect)
+        && !page.raster.pixels.empty()
+        && page.raster.width > 0
+        && page.raster.height > 0) {
         BITMAPINFO pageBitmapInfo {};
         pageBitmapInfo.bmiHeader.biSize = sizeof(pageBitmapInfo.bmiHeader);
         pageBitmapInfo.bmiHeader.biWidth = page.raster.width;
@@ -8428,6 +8419,8 @@ void App::BuildInteractionPageSnapshot(const PageView& pageView) {
     cache.rasterWidth = page.raster.width;
     cache.rasterHeight = page.raster.height;
     cache.rasterScale = page.raster.scale;
+    cache.sourcePdfSourceIndex = page.sourcePdfSourceIndex;
+    cache.sourcePdfPageIndex = page.sourcePdfPageIndex;
     cache.pageScale = cacheScale;
     cache.valid = true;
 
@@ -9251,7 +9244,10 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     }
 
     if (pageHasPendingErase) {
-        if (!page.raster.pixels.empty() && page.raster.width > 0 && page.raster.height > 0) {
+        if (!PaintNativePdfBackground(hdc, page, pageView.rect)
+            && !page.raster.pixels.empty()
+            && page.raster.width > 0
+            && page.raster.height > 0) {
             BITMAPINFO pageBitmapInfo {};
             pageBitmapInfo.bmiHeader.biSize = sizeof(pageBitmapInfo.bmiHeader);
             pageBitmapInfo.bmiHeader.biWidth = page.raster.width;
