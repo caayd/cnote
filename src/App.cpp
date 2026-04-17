@@ -2107,6 +2107,14 @@ void AppendStrokePointWithResampling(Stroke& stroke, Vec2 point, float spacing) 
     }
 }
 
+float InputSpacingPageUnits(float pageSpacing, float pageScale) {
+    constexpr float kMinScreenSpacing = 1.75f;
+    constexpr float kMaxScreenSpacing = 3.0f;
+    const float scale = std::max(0.1f, pageScale);
+    const float screenSpacing = std::clamp(std::max(0.05f, pageSpacing) * scale, kMinScreenSpacing, kMaxScreenSpacing);
+    return screenSpacing / scale;
+}
+
 std::array<Vec2, 4> ImageCorners(const PageImage& image);
 
 Vec2 PointToVec2(POINT point) {
@@ -4670,15 +4678,16 @@ void App::ExtendStroke(POINT cursor) {
 
     const Vec2 rawPoint = ScreenToPage(pageView, cursor, true);
     Vec2 filteredPoint = rawPoint;
+    const float inputSpacing = InputSpacingPageUnits(settings_.inputSpacing, pageView.scale);
 
     if (!activeStroke_->points.empty()) {
         filteredPoint = Lerp(activeStroke_->points.back(), rawPoint, settings_.inputSmoothing);
-        if (Distance(filteredPoint, activeStroke_->points.back()) < settings_.inputSpacing) {
+        if (Distance(filteredPoint, activeStroke_->points.back()) < inputSpacing) {
             return;
         }
     }
 
-    AppendStrokePointWithResampling(*activeStroke_, filteredPoint, settings_.inputSpacing);
+    AppendStrokePointWithResampling(*activeStroke_, filteredPoint, inputSpacing);
     std::optional<RECT> currentDirtyRect = StrokeRenderBoundsRect(
         *activeStroke_,
         pageView.scale,
