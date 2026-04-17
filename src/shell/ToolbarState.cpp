@@ -61,7 +61,13 @@ void App::CancelQuickSizePopup(bool cancelInput) {
         GetClientRect(window_, &clientRect);
         const RECT canvasRect = CanvasRect(clientRect);
         const UINT dpi = WindowDpi(window_);
-        popupRect = appui::QuickSizePopupBounds(appui::BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_, dpi), dpi);
+        popupRect = appui::QuickSizePopupBounds(
+            appui::BuildQuickSizePopupLayout(
+                canvasRect,
+                quickSizePopupAnchor_,
+                dpi,
+                QuickSizePreviewExtentForTool(*quickSizePopupTool_, clientRect)),
+            dpi);
         invalidatePopup = true;
     }
 
@@ -289,7 +295,11 @@ void App::UpdateToolbarBrushSliderDrag(POINT cursor) {
     GetClientRect(window_, &clientRect);
     const RECT canvasRect = CanvasRect(clientRect);
     const UINT dpi = WindowDpi(window_);
-    const appui::QuickSizePopupLayout popupLayout = appui::BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_, dpi);
+    const appui::QuickSizePopupLayout popupLayout = appui::BuildQuickSizePopupLayout(
+        canvasRect,
+        quickSizePopupAnchor_,
+        dpi,
+        QuickSizePreviewExtentForTool(*quickSizePopupTool_, clientRect));
     const RECT trackRect = appui::ToolbarBrushTrackRect(popupLayout.sliderRect, dpi);
     if (trackRect.right <= trackRect.left) {
         return;
@@ -331,6 +341,7 @@ void App::SetBrushSizeForTool(Tool tool, float size, bool refreshUi) {
     switch (tool) {
     case Tool::Erase:
         settings_.eraseBrushSize = clamped;
+        ReleaseEraserCursor();
         break;
     case Tool::Draw:
     default:

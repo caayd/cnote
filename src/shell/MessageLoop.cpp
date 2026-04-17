@@ -361,12 +361,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         } else if (isSelecting_) {
             EndSelection();
         } else if (isErasing_) {
-            isErasing_ = false;
-            UpdateCaptureState();
-            if (rasterRefreshPending_) {
-                ScheduleDeferredRasterRefresh();
-            }
-            InvalidateCanvas();
+            EndErase();
         } else if (isPanning_ && !panFromMiddleButton_) {
             EndPan();
         }
@@ -495,7 +490,14 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             GetClientRect(window_, &clientRect);
             const RECT sidebarRect = PdfSidebarRect(clientRect);
             const UINT dpi = WindowDpi(window_);
-            const QuickSizePopupLayout quickSizePopupLayout = BuildQuickSizePopupLayout(CanvasRect(clientRect), quickSizePopupAnchor_, dpi);
+            const int quickSizePreviewExtent = quickSizePopupTool_.has_value()
+                ? QuickSizePreviewExtentForTool(*quickSizePopupTool_, clientRect)
+                : 0;
+            const QuickSizePopupLayout quickSizePopupLayout = BuildQuickSizePopupLayout(
+                CanvasRect(clientRect),
+                quickSizePopupAnchor_,
+                dpi,
+                quickSizePreviewExtent);
             const RECT quickSizePopupBounds = QuickSizePopupBounds(quickSizePopupLayout, dpi);
             const RECT liveTextFrameRect = LiveTextEditFrameRect(textEditBounds_, dpi);
             if (pdfSidebarOpen_ && IsPdfSidebarVisible() && PtInRect(&sidebarRect, cursor) != 0) {
@@ -547,7 +549,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             } else if (activeTool_ == Tool::Text) {
                 SetCursor(LoadCursorW(nullptr, HitTestText(cursor).has_value() ? IDC_IBEAM : IDC_CROSS));
             } else if (activeTool_ == Tool::Erase) {
-                SetCursor(eraserCursor_ != nullptr ? eraserCursor_ : LoadCursorW(nullptr, IDC_CROSS));
+                HCURSOR eraserCursor = EraserCursorForCurrentSize();
+                SetCursor(eraserCursor != nullptr ? eraserCursor : LoadCursorW(nullptr, IDC_CROSS));
             } else {
                 SetCursor(LoadCursorW(nullptr, IDC_CROSS));
             }

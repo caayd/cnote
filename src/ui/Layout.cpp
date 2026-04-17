@@ -255,19 +255,23 @@ SidebarHeaderLayout BuildSidebarHeaderLayout(RECT sidebarRect, UINT dpi) {
     return layout;
 }
 
-QuickSizePopupLayout BuildQuickSizePopupLayout(RECT clientRect, POINT anchor, UINT dpi) {
+QuickSizePopupLayout BuildQuickSizePopupLayout(RECT clientRect, POINT anchor, UINT dpi, int previewExtent) {
     QuickSizePopupLayout layout {};
     const int panelWidth = ScaleForDpi(188, dpi);
     const int panelHeight = ScaleForDpi(38, dpi);
-    const int previewBounds = ScaleForDpi(28, dpi);
+    const int previewBounds = std::max(ScaleForDpi(28, dpi), previewExtent);
     const int cursorGap = ScaleForDpi(14, dpi);
     const int previewGap = ScaleForDpi(5, dpi);
     const int totalHeight = previewBounds + previewGap + panelHeight;
     const int toolbarBottom = clientRect.top;
+    const int minLeft = static_cast<int>(clientRect.left) + ScaleForDpi(8, dpi);
+    const int maxLeft = std::max(minLeft, static_cast<int>(clientRect.right) - panelWidth - ScaleForDpi(8, dpi));
+    const int minTop = toolbarBottom + ScaleForDpi(8, dpi);
+    const int maxTop = std::max(minTop, static_cast<int>(clientRect.bottom) - totalHeight - ScaleForDpi(8, dpi));
     int left = anchor.x - (panelWidth / 2);
     int top = anchor.y - totalHeight - cursorGap;
-    left = std::clamp(left, static_cast<int>(clientRect.left) + ScaleForDpi(8, dpi), static_cast<int>(clientRect.right) - panelWidth - ScaleForDpi(8, dpi));
-    top = std::clamp(top, toolbarBottom + ScaleForDpi(8, dpi), static_cast<int>(clientRect.bottom) - totalHeight - ScaleForDpi(8, dpi));
+    left = std::clamp(left, minLeft, maxLeft);
+    top = std::clamp(top, minTop, maxTop);
     const int panelTop = top + previewBounds + previewGap;
     layout.panelRect = MakeRect(left, panelTop, left + panelWidth, panelTop + panelHeight);
     layout.sliderRect = MakeRect(left + ScaleForDpi(10, dpi), panelTop + ScaleForDpi(10, dpi), left + ScaleForDpi(144, dpi), panelTop + ScaleForDpi(28, dpi));

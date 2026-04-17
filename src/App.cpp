@@ -87,10 +87,13 @@ constexpr float kPaletteWheelSelectedStrokeDip = 3.0f;
 constexpr float kPaletteWheelStrokeDip = 1.2f;
 constexpr float kPaletteWheelBorderDip = 1.5f;
 constexpr int kQuickSizePreviewMinDip = 4;
-constexpr int kQuickSizePreviewMaxDip = 28;
 constexpr int kQuickSizeThumbHalfDip = 6;
 constexpr int kQuickSizeValuePaddingDip = 5;
 constexpr int kQuickSizeCaretInsetDip = 6;
+constexpr BYTE kEraserPreviewAlpha = 255;
+constexpr float kEraserMinRadiusPixels = 3.5f;
+constexpr float kEraserOutlinePixels = 0.75f;
+constexpr float kPendingEraseObjectOpacity = 0.5f;
 constexpr int kQuickWheelBadgeInsetRightDip = 3;
 constexpr int kQuickWheelBadgeTopDip = 4;
 constexpr int kQuickWheelBadgeSizeDip = 6;
@@ -227,13 +230,6 @@ int PaletteWheelHoverGrow(UINT dpi) {
 
 float PaletteWheelStrokeWidth(float baseDip, UINT dpi) {
     return std::max(1.0f, ScaleForDpi(baseDip, dpi));
-}
-
-int QuickSizePreviewDiameter(float brushSize, UINT dpi) {
-    return std::clamp(
-        static_cast<int>(std::lround(ScaleForDpi(brushSize * 1.5f, dpi))),
-        std::max(1, ScaleForDpi(kQuickSizePreviewMinDip, dpi)),
-        std::max(1, ScaleForDpi(kQuickSizePreviewMaxDip, dpi)));
 }
 
 int QuickSizeThumbHalfSize(UINT dpi) {
@@ -771,18 +767,17 @@ SidebarMetrics BuildSidebarMetrics(UINT dpi) {
     return metrics;
 }
 
-HCURSOR CreateWhiteSquareCursor() {
-    constexpr int kCursorSize = 32;
-    constexpr int kSquareSize = 10;
-    constexpr int kHotspot = kCursorSize / 2;
+HCURSOR CreateEraserCursor(int eraserDiameter) {
+    const int cursorSize = std::max(32, eraserDiameter + 2);
+    const int hotspot = cursorSize / 2;
+    const float radius = static_cast<float>(eraserDiameter) * 0.5f;
+    const float center = static_cast<float>(hotspot) + 0.5f;
     constexpr std::uint32_t kTransparent = 0x00000000;
-    constexpr std::uint32_t kWhite = 0xFFFFFFFF;
-    constexpr std::uint32_t kBlack = 0xFF111111;
 
     BITMAPV5HEADER bitmapHeader {};
     bitmapHeader.bV5Size = sizeof(bitmapHeader);
-    bitmapHeader.bV5Width = kCursorSize;
-    bitmapHeader.bV5Height = -kCursorSize;
+    bitmapHeader.bV5Width = cursorSize;
+    bitmapHeader.bV5Height = -cursorSize;
     bitmapHeader.bV5Planes = 1;
     bitmapHeader.bV5BitCount = 32;
     bitmapHeader.bV5Compression = BI_BITFIELDS;
@@ -806,18 +801,43 @@ HCURSOR CreateWhiteSquareCursor() {
         return nullptr;
     }
 
-    std::fill_n(static_cast<std::uint32_t*>(colorBits), kCursorSize * kCursorSize, kTransparent);
-    const int squareLeft = kHotspot - (kSquareSize / 2);
-    const int squareTop = kHotspot - (kSquareSize / 2);
-    for (int y = 0; y < kSquareSize; ++y) {
-        for (int x = 0; x < kSquareSize; ++x) {
-            const bool border = x == 0 || y == 0 || x == kSquareSize - 1 || y == kSquareSize - 1;
-            const int pixelIndex = (squareTop + y) * kCursorSize + (squareLeft + x);
-            static_cast<std::uint32_t*>(colorBits)[pixelIndex] = border ? kBlack : kWhite;
+    auto* pixels = static_cast<std::uint32_t*>(colorBits);
+    std::fill_n(pixels, cursorSize * cursorSize, kTransparent);
+    const auto alphaPixel = [](BYTE alpha, BYTE red, BYTE green, BYTE blue) {
+        return (static_cast<std::uint32_t>(alpha) << 24U)
+            | (static_cast<std::uint32_t>(red) << 16U)
+            | (static_cast<std::uint32_t>(green) << 8U)
+            | static_cast<std::uint32_t>(blue);
+    };
+    const auto edgeCoverage = [](float distance, float edge) {
+        return std::clamp(edge + 0.5f - distance, 0.0f, 1.0f);
+    };
+    const float outlineInnerRadius = std::max(0.0f, radius - kEraserOutlinePixels);
+    for (int y = 0; y < cursorSize; ++y) {
+        for (int x = 0; x < cursorSize; ++x) {
+            const float dx = (static_cast<float>(x) + 0.5f) - center;
+            const float dy = (static_cast<float>(y) + 0.5f) - center;
+            const float distance = std::sqrt((dx * dx) + (dy * dy));
+            const float outerCoverage = edgeCoverage(distance, radius);
+            if (outerCoverage <= 0.0f) {
+                continue;
+            }
+
+            const float fillCoverage = std::min(outerCoverage, edgeCoverage(distance, outlineInnerRadius));
+            const float outlineCoverage = std::max(0.0f, outerCoverage - fillCoverage);
+            const float totalCoverage = std::clamp(fillCoverage + outlineCoverage, 0.0f, 1.0f);
+            if (totalCoverage <= 0.0f) {
+                continue;
+            }
+
+            const float whiteContribution = fillCoverage / totalCoverage;
+            const BYTE alpha = static_cast<BYTE>(std::lround(totalCoverage * 255.0f));
+            const BYTE color = static_cast<BYTE>(std::lround(whiteContribution * 255.0f));
+            pixels[(y * cursorSize) + x] = alphaPixel(alpha, color, color, color);
         }
     }
 
-    HBITMAP maskBitmap = CreateBitmap(kCursorSize, kCursorSize, 1, 1, nullptr);
+    HBITMAP maskBitmap = CreateBitmap(cursorSize, cursorSize, 1, 1, nullptr);
     if (maskBitmap == nullptr) {
         DeleteObject(colorBitmap);
         return nullptr;
@@ -825,8 +845,8 @@ HCURSOR CreateWhiteSquareCursor() {
 
     ICONINFO iconInfo {};
     iconInfo.fIcon = FALSE;
-    iconInfo.xHotspot = kHotspot;
-    iconInfo.yHotspot = kHotspot;
+    iconInfo.xHotspot = hotspot;
+    iconInfo.yHotspot = hotspot;
     iconInfo.hbmMask = maskBitmap;
     iconInfo.hbmColor = colorBitmap;
     HCURSOR cursor = CreateIconIndirect(&iconInfo);
@@ -1677,19 +1697,23 @@ SidebarHeaderLayout BuildSidebarHeaderLayout(RECT sidebarRect, UINT dpi) {
     return layout;
 }
 
-QuickSizePopupLayout BuildQuickSizePopupLayout(RECT clientRect, POINT anchor, UINT dpi) {
+QuickSizePopupLayout BuildQuickSizePopupLayout(RECT clientRect, POINT anchor, UINT dpi, int previewExtent) {
     QuickSizePopupLayout layout {};
     const int kPanelWidth = ScaleForDpi(188, dpi);
     const int kPanelHeight = ScaleForDpi(38, dpi);
-    const int kPreviewBounds = ScaleForDpi(28, dpi);
+    const int kPreviewBounds = std::max(ScaleForDpi(28, dpi), previewExtent);
     const int kCursorGap = ScaleForDpi(14, dpi);
     const int kPreviewGap = ScaleForDpi(5, dpi);
     const int totalHeight = kPreviewBounds + kPreviewGap + kPanelHeight;
     const int toolbarBottom = clientRect.top;
+    const int minLeft = static_cast<int>(clientRect.left) + ScaleForDpi(8, dpi);
+    const int maxLeft = std::max(minLeft, static_cast<int>(clientRect.right) - kPanelWidth - ScaleForDpi(8, dpi));
+    const int minTop = toolbarBottom + ScaleForDpi(8, dpi);
+    const int maxTop = std::max(minTop, static_cast<int>(clientRect.bottom) - totalHeight - ScaleForDpi(8, dpi));
     int left = anchor.x - (kPanelWidth / 2);
     int top = anchor.y - totalHeight - kCursorGap;
-    left = std::clamp(left, static_cast<int>(clientRect.left) + ScaleForDpi(8, dpi), static_cast<int>(clientRect.right) - kPanelWidth - ScaleForDpi(8, dpi));
-    top = std::clamp(top, toolbarBottom + ScaleForDpi(8, dpi), static_cast<int>(clientRect.bottom) - totalHeight - ScaleForDpi(8, dpi));
+    left = std::clamp(left, minLeft, maxLeft);
+    top = std::clamp(top, minTop, maxTop);
     const int panelTop = top + kPreviewBounds + kPreviewGap;
     layout.panelRect = MakeRect(left, panelTop, left + kPanelWidth, panelTop + kPanelHeight);
     layout.sliderRect = MakeRect(left + ScaleForDpi(10, dpi), panelTop + ScaleForDpi(10, dpi), left + ScaleForDpi(144, dpi), panelTop + ScaleForDpi(28, dpi));
@@ -2533,6 +2557,24 @@ bool ImageHitsPoint(const PageImage& image, Vec2 point) {
     return PointInRectF(local, image.x, image.y, image.x + image.width, image.y + image.height);
 }
 
+bool CircleHitsRect(float left, float top, float right, float bottom, Vec2 center, float radius) {
+    const float closestX = std::clamp(center.x, left, right);
+    const float closestY = std::clamp(center.y, top, bottom);
+    const float dx = center.x - closestX;
+    const float dy = center.y - closestY;
+    return (dx * dx) + (dy * dy) <= radius * radius;
+}
+
+bool ImageHitsCircle(const PageImage& image, Vec2 center, float radius) {
+    const Vec2 localCenter = ToImageLocalPoint(image, center);
+    return CircleHitsRect(image.x, image.y, image.x + image.width, image.y + image.height, localCenter, radius);
+}
+
+bool TextHitsCircle(const PageText& text, float pageWidth, Vec2 center, float radius) {
+    const PageTextBounds bounds = MeasurePageTextBounds(text, pageWidth);
+    return CircleHitsRect(bounds.left, bounds.top, bounds.right, bounds.bottom, center, radius);
+}
+
 bool ImageIntersectsRectSelection(const PageImage& image, Vec2 a, Vec2 b) {
     const float left = std::min(a.x, b.x);
     const float top = std::min(a.y, b.y);
@@ -2602,7 +2644,6 @@ App::App(HINSTANCE instance) : instance_(instance) {
     }
     LoadAppSettings();
     ClearSelection();
-    eraserCursor_ = CreateWhiteSquareCursor();
     StartRenderWorker();
 }
 
@@ -2617,10 +2658,7 @@ App::~App() {
     ClearZoomSessionSnapshots();
     ReleasePaintBackbuffer();
     ReleaseCompositionResources();
-    if (eraserCursor_ != nullptr) {
-        DestroyCursor(eraserCursor_);
-        eraserCursor_ = nullptr;
-    }
+    ReleaseEraserCursor();
     if (gdiplusToken_ != 0) {
         Gdiplus::GdiplusShutdown(gdiplusToken_);
     }
@@ -5852,6 +5890,135 @@ void App::ExtendErase(POINT cursor) {
     static_cast<void>(EraseAt(cursor));
 }
 
+void App::EnsurePendingEraseStorage() {
+    if (pendingEraseStrokeIndices_.size() != document_.PageCount()) {
+        pendingEraseStrokeIndices_.assign(document_.PageCount(), {});
+    }
+    if (pendingEraseImageIndices_.size() != document_.PageCount()) {
+        pendingEraseImageIndices_.assign(document_.PageCount(), {});
+    }
+    if (pendingEraseTextIndices_.size() != document_.PageCount()) {
+        pendingEraseTextIndices_.assign(document_.PageCount(), {});
+    }
+}
+
+bool App::PageHasPendingErase(std::size_t pageIndex) const {
+    return (pageIndex < pendingEraseStrokeIndices_.size() && !pendingEraseStrokeIndices_[pageIndex].empty())
+        || (pageIndex < pendingEraseImageIndices_.size() && !pendingEraseImageIndices_[pageIndex].empty())
+        || (pageIndex < pendingEraseTextIndices_.size() && !pendingEraseTextIndices_[pageIndex].empty());
+}
+
+bool App::IsStrokePendingErase(std::size_t pageIndex, std::size_t strokeIndex) const {
+    if (pageIndex >= pendingEraseStrokeIndices_.size()) {
+        return false;
+    }
+
+    const auto& pending = pendingEraseStrokeIndices_[pageIndex];
+    return std::find(pending.begin(), pending.end(), strokeIndex) != pending.end();
+}
+
+bool App::IsImagePendingErase(std::size_t pageIndex, std::size_t imageIndex) const {
+    if (pageIndex >= pendingEraseImageIndices_.size()) {
+        return false;
+    }
+
+    const auto& pending = pendingEraseImageIndices_[pageIndex];
+    return std::find(pending.begin(), pending.end(), imageIndex) != pending.end();
+}
+
+bool App::IsTextPendingErase(std::size_t pageIndex, std::size_t textIndex) const {
+    if (pageIndex >= pendingEraseTextIndices_.size()) {
+        return false;
+    }
+
+    const auto& pending = pendingEraseTextIndices_[pageIndex];
+    return std::find(pending.begin(), pending.end(), textIndex) != pending.end();
+}
+
+void App::ClearPendingEraseObjects() {
+    for (auto& pagePending : pendingEraseStrokeIndices_) {
+        pagePending.clear();
+    }
+    for (auto& pagePending : pendingEraseImageIndices_) {
+        pagePending.clear();
+    }
+    for (auto& pagePending : pendingEraseTextIndices_) {
+        pagePending.clear();
+    }
+}
+
+void App::EndErase() {
+    isErasing_ = false;
+    UpdateCaptureState();
+
+    bool removedAny = false;
+    std::vector<std::size_t> affectedPageIndices;
+    std::vector<Page> beforePages;
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        const bool hasPendingStrokes = pageIndex < pendingEraseStrokeIndices_.size() && !pendingEraseStrokeIndices_[pageIndex].empty();
+        const bool hasPendingImages = pageIndex < pendingEraseImageIndices_.size() && !pendingEraseImageIndices_[pageIndex].empty();
+        const bool hasPendingTexts = pageIndex < pendingEraseTextIndices_.size() && !pendingEraseTextIndices_[pageIndex].empty();
+        if (!hasPendingStrokes && !hasPendingImages && !hasPendingTexts) {
+            continue;
+        }
+
+        Page& page = document_.PageAt(pageIndex);
+        affectedPageIndices.push_back(pageIndex);
+        beforePages.push_back(page);
+        bool pageRemovedAny = false;
+
+        auto removeObjects = [&](auto& objects, std::vector<std::size_t>& pending) {
+            std::sort(pending.begin(), pending.end());
+            pending.erase(std::unique(pending.begin(), pending.end()), pending.end());
+            for (auto it = pending.rbegin(); it != pending.rend(); ++it) {
+                const std::size_t objectIndex = *it;
+                if (objectIndex < objects.size()) {
+                    objects.erase(objects.begin() + static_cast<std::ptrdiff_t>(objectIndex));
+                    pageRemovedAny = true;
+                    removedAny = true;
+                }
+            }
+        };
+
+        if (hasPendingTexts) {
+            removeObjects(page.texts, pendingEraseTextIndices_[pageIndex]);
+        }
+        if (hasPendingImages) {
+            removeObjects(page.images, pendingEraseImageIndices_[pageIndex]);
+        }
+        if (hasPendingStrokes) {
+            auto& pending = pendingEraseStrokeIndices_[pageIndex];
+            std::sort(pending.begin(), pending.end());
+            pending.erase(std::unique(pending.begin(), pending.end()), pending.end());
+            for (auto it = pending.rbegin(); it != pending.rend(); ++it) {
+                const std::size_t strokeIndex = *it;
+                if (strokeIndex >= page.strokes.size()) {
+                    continue;
+                }
+
+                page.strokes.erase(page.strokes.begin() + static_cast<std::ptrdiff_t>(strokeIndex));
+                AdjustSelectionForRemoval(pageIndex, strokeIndex);
+                removedAny = true;
+                pageRemovedAny = true;
+            }
+        }
+
+        if (pageRemovedAny) {
+            InvalidatePageSurfaceCache(pageIndex);
+        }
+    }
+
+    ClearPendingEraseObjects();
+    if (removedAny) {
+        PushReplacePagesHistoryAction(std::move(affectedPageIndices), std::move(beforePages), document_.CurrentPageIndex());
+        NotifyDocumentMutated();
+    }
+    if (rasterRefreshPending_) {
+        ScheduleDeferredRasterRefresh();
+    }
+    InvalidateCanvas();
+}
+
 bool App::EraseAt(POINT cursor) {
     const auto hitPage = HitTestPage(cursor);
     if (!hitPage.has_value()) {
@@ -5863,15 +6030,37 @@ bool App::EraseAt(POINT cursor) {
         return false;
     }
 
-    const Vec2 center = ScreenToPage(cursor, nullptr);
-    const float eraseRadiusPage = std::max(10.0f, settings_.eraseBrushSize * 4.0f) / pageView.scale;
+    const Vec2 center = ScreenToPage(pageView, cursor, true);
+    const float eraseRadiusPage = EraserRadiusPixels() / pageView.scale;
     const float eraseRadiusSquared = eraseRadiusPage * eraseRadiusPage;
-    auto& strokes = document_.PageAt(pageView.pageIndex).strokes;
+    Page& page = document_.PageAt(pageView.pageIndex);
     document_.SetCurrentPageIndex(pageView.pageIndex);
     MarkPdfSidebarCompositionDirty();
+    EnsurePendingEraseStorage();
 
-    for (std::size_t strokeIndex = 0; strokeIndex < strokes.size(); ++strokeIndex) {
-        const Stroke& stroke = strokes[strokeIndex];
+    bool hitAny = false;
+    for (std::size_t imageIndex = 0; imageIndex < page.images.size(); ++imageIndex) {
+        if (!IsImagePendingErase(pageView.pageIndex, imageIndex)
+            && ImageHitsCircle(page.images[imageIndex], center, eraseRadiusPage)) {
+            pendingEraseImageIndices_[pageView.pageIndex].push_back(imageIndex);
+            hitAny = true;
+        }
+    }
+
+    for (std::size_t textIndex = 0; textIndex < page.texts.size(); ++textIndex) {
+        if (!IsTextPendingErase(pageView.pageIndex, textIndex)
+            && TextHitsCircle(page.texts[textIndex], page.width, center, eraseRadiusPage)) {
+            pendingEraseTextIndices_[pageView.pageIndex].push_back(textIndex);
+            hitAny = true;
+        }
+    }
+
+    for (std::size_t strokeIndex = 0; strokeIndex < page.strokes.size(); ++strokeIndex) {
+        if (IsStrokePendingErase(pageView.pageIndex, strokeIndex)) {
+            continue;
+        }
+
+        const Stroke& stroke = page.strokes[strokeIndex];
         if (stroke.points.empty()) {
             continue;
         }
@@ -5898,26 +6087,16 @@ bool App::EraseAt(POINT cursor) {
         }
 
         if (hit) {
-            Stroke removed = strokes[strokeIndex];
-            strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(strokeIndex));
-            AdjustSelectionForRemoval(pageView.pageIndex, strokeIndex);
-            HistoryAction action {};
-            action.type = HistoryActionType::RemoveStroke;
-            action.stroke = removed;
-            action.index = strokeIndex;
-            action.pageIndex = pageView.pageIndex;
-            undoActions_.push_back(std::move(action));
-            redoActions_.clear();
-            NotifyDocumentMutated();
-            if (!TryRefreshPageSurfaceCacheForStroke(pageView.pageIndex, removed)) {
-                InvalidatePageSurfaceCache(pageView.pageIndex);
-            }
-            InvalidateStrokeRegion(removed, pageView.pageIndex, false);
-            return true;
+            pendingEraseStrokeIndices_[pageView.pageIndex].push_back(strokeIndex);
+            hitAny = true;
         }
     }
 
-    return false;
+    if (hitAny) {
+        InvalidateCanvas();
+    }
+
+    return hitAny;
 }
 
 void App::BeginPan(POINT cursor, bool fromMiddleButton) {
@@ -6236,7 +6415,11 @@ bool App::HandleQuickSizePopupClick(POINT cursor) {
     GetClientRect(window_, &clientRect);
     const RECT canvasRect = CanvasRect(clientRect);
     const UINT dpi = WindowDpi(window_);
-    const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_, dpi);
+    const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(
+        canvasRect,
+        quickSizePopupAnchor_,
+        dpi,
+        QuickSizePreviewExtentForTool(*quickSizePopupTool_, clientRect));
     const bool clickedSlider = PtInRect(&popupLayout.sliderRect, cursor) != 0;
     const bool clickedValue = PtInRect(&popupLayout.valueRect, cursor) != 0;
     const RECT popupBounds = QuickSizePopupBounds(popupLayout, dpi);
@@ -7191,6 +7374,59 @@ void App::PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSe
     }
 }
 
+float App::EraserRadiusPixels() const {
+    return std::max(kEraserMinRadiusPixels, settings_.eraseBrushSize * 4.0f);
+}
+
+float App::EraserDiameterPixels() const {
+    return EraserRadiusPixels() * 2.0f;
+}
+
+float App::QuickSizePreviewDiameterForTool(Tool tool, RECT clientRect) const {
+    const float brushSize = BrushSizeForTool(tool);
+    if (tool == Tool::Erase) {
+        return EraserDiameterPixels();
+    }
+
+    float pageScale = std::max(0.1f, zoom_);
+    if (document_.PageCount() > 0U) {
+        const std::size_t pageIndex = std::min(document_.CurrentPageIndex(), document_.PageCount() - 1U);
+        const PageView pageView = CalculatePageView(clientRect, pageIndex);
+        if (pageView.valid && pageView.scale > 0.0f) {
+            pageScale = pageView.scale;
+        }
+    }
+
+    return std::max(1.25f, brushSize * pageScale / 2.15f);
+}
+
+int App::QuickSizePreviewExtentForTool(Tool tool, RECT clientRect) const {
+    const UINT dpi = WindowDpi(window_);
+    return std::max(
+        std::max(1, ScaleForDpi(kQuickSizePreviewMinDip, dpi)),
+        static_cast<int>(std::ceil(QuickSizePreviewDiameterForTool(tool, clientRect))) + ScaleForDpi(2, dpi));
+}
+
+HCURSOR App::EraserCursorForCurrentSize() {
+    const int diameter = std::max(1, static_cast<int>(std::lround(EraserDiameterPixels())));
+    if (eraserCursor_ != nullptr && eraserCursorDiameter_ == diameter) {
+        return eraserCursor_;
+    }
+
+    ReleaseEraserCursor();
+    eraserCursor_ = CreateEraserCursor(diameter);
+    eraserCursorDiameter_ = eraserCursor_ != nullptr ? diameter : 0;
+    return eraserCursor_;
+}
+
+void App::ReleaseEraserCursor() {
+    if (eraserCursor_ != nullptr) {
+        DestroyCursor(eraserCursor_);
+        eraserCursor_ = nullptr;
+    }
+    eraserCursorDiameter_ = 0;
+}
+
 void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
     if (!quickSizePopupTool_.has_value()) {
         return;
@@ -7198,8 +7434,13 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
 
     const RECT canvasRect = CanvasRect(clientRect);
     const UINT dpi = WindowDpi(window_);
-    const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(canvasRect, quickSizePopupAnchor_, dpi);
     const Tool popupTool = *quickSizePopupTool_;
+    const float previewDiameter = QuickSizePreviewDiameterForTool(popupTool, clientRect);
+    const QuickSizePopupLayout popupLayout = BuildQuickSizePopupLayout(
+        canvasRect,
+        quickSizePopupAnchor_,
+        dpi,
+        QuickSizePreviewExtentForTool(popupTool, clientRect));
     const COLORREF primaryText = RGB(236, 240, 245);
     const COLORREF accent = ui::kAccent;
 
@@ -7211,39 +7452,34 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
     SetBkMode(hdc, TRANSPARENT);
 
     const float brushSize = BrushSizeForTool(popupTool);
-    const int previewDiameter = QuickSizePreviewDiameter(brushSize, dpi);
     const int previewCenterX = (popupLayout.previewRect.left + popupLayout.previewRect.right) / 2;
     const int previewCenterY = (popupLayout.previewRect.top + popupLayout.previewRect.bottom) / 2;
-    const RECT previewDotRect = MakeRect(
-        previewCenterX - (previewDiameter / 2),
-        previewCenterY - (previewDiameter / 2),
-        previewCenterX + ((previewDiameter + 1) / 2),
-        previewCenterY + ((previewDiameter + 1) / 2));
-    const COLORREF previewFill = popupTool == Tool::Erase ? RGB(244, 247, 252) : ToColorRef(palette_[colorIndex_]);
+    const Gdiplus::REAL previewLeft = static_cast<Gdiplus::REAL>(previewCenterX) - (static_cast<Gdiplus::REAL>(previewDiameter) * 0.5f);
+    const Gdiplus::REAL previewTop = static_cast<Gdiplus::REAL>(previewCenterY) - (static_cast<Gdiplus::REAL>(previewDiameter) * 0.5f);
+    const COLORREF previewFill = popupTool == Tool::Erase ? RGB(255, 255, 255) : ToColorRef(palette_[colorIndex_]);
+    const BYTE previewAlpha = popupTool == Tool::Erase ? kEraserPreviewAlpha : 255;
     {
         Gdiplus::Graphics graphics(hdc);
         graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-        Gdiplus::SolidBrush brush(Gdiplus::Color(255, GetRValue(previewFill), GetGValue(previewFill), GetBValue(previewFill)));
-        Gdiplus::Pen pen(
-            Gdiplus::Color(
-                255,
-                GetRValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : ui::kPanelBorder),
-                GetGValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : ui::kPanelBorder),
-                GetBValue(popupTool == Tool::Erase ? RGB(120, 138, 162) : ui::kPanelBorder)),
-            PaletteWheelStrokeWidth(1.0f, dpi));
+        Gdiplus::SolidBrush brush(Gdiplus::Color(previewAlpha, GetRValue(previewFill), GetGValue(previewFill), GetBValue(previewFill)));
+        Gdiplus::Pen eraserOutline(
+            Gdiplus::Color(255, 0, 0, 0),
+            std::max(0.5f, ScaleForDpi(kEraserOutlinePixels, dpi)));
         graphics.FillEllipse(
             &brush,
-            static_cast<Gdiplus::REAL>(previewDotRect.left),
-            static_cast<Gdiplus::REAL>(previewDotRect.top),
-            static_cast<Gdiplus::REAL>(previewDotRect.right - previewDotRect.left),
-            static_cast<Gdiplus::REAL>(previewDotRect.bottom - previewDotRect.top));
-        graphics.DrawEllipse(
-            &pen,
-            static_cast<Gdiplus::REAL>(previewDotRect.left),
-            static_cast<Gdiplus::REAL>(previewDotRect.top),
-            static_cast<Gdiplus::REAL>(previewDotRect.right - previewDotRect.left),
-            static_cast<Gdiplus::REAL>(previewDotRect.bottom - previewDotRect.top));
+            previewLeft,
+            previewTop,
+            static_cast<Gdiplus::REAL>(previewDiameter),
+            static_cast<Gdiplus::REAL>(previewDiameter));
+        if (popupTool == Tool::Erase) {
+            graphics.DrawEllipse(
+                &eraserOutline,
+                previewLeft,
+                previewTop,
+                static_cast<Gdiplus::REAL>(previewDiameter),
+                static_cast<Gdiplus::REAL>(previewDiameter));
+        }
     }
 
     const RECT sliderTrackRect = ToolbarBrushTrackRect(popupLayout.sliderRect, dpi);
@@ -8872,6 +9108,8 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     SaveDC(hdc);
     IntersectClipRect(hdc, pageView.rect.left, pageView.rect.top, pageView.rect.right, pageView.rect.bottom);
 
+    const Page& page = document_.PageAt(pageView.pageIndex);
+    const bool pageHasPendingErase = PageHasPendingErase(pageView.pageIndex);
     const ZoomPageSnapshot* zoomSnapshot = nullptr;
     const PageSurfaceCache* interactionSnapshot = nullptr;
     bool canReuseFrozenCache = false;
@@ -8893,11 +9131,102 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         const PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
         canReuseFrozenCache = canReuseFrozenCache || (cache.valid && !cache.pixels.empty());
     }
-    if (!zoomSessionActive_) {
+    if (!zoomSessionActive_ && !pageHasPendingErase) {
         EnsurePageSurfaceCache(pageView);
     }
 
-    if (interactionSnapshot != nullptr) {
+    if (pageHasPendingErase) {
+        if (!page.raster.pixels.empty() && page.raster.width > 0 && page.raster.height > 0) {
+            BITMAPINFO pageBitmapInfo {};
+            pageBitmapInfo.bmiHeader.biSize = sizeof(pageBitmapInfo.bmiHeader);
+            pageBitmapInfo.bmiHeader.biWidth = page.raster.width;
+            pageBitmapInfo.bmiHeader.biHeight = -page.raster.height;
+            pageBitmapInfo.bmiHeader.biPlanes = 1;
+            pageBitmapInfo.bmiHeader.biBitCount = 32;
+            pageBitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+            SetStretchBltMode(hdc, HALFTONE);
+            SetBrushOrgEx(hdc, 0, 0, nullptr);
+            StretchDIBits(
+                hdc,
+                pageView.rect.left,
+                pageView.rect.top,
+                pageView.rect.right - pageView.rect.left,
+                pageView.rect.bottom - pageView.rect.top,
+                0,
+                0,
+                page.raster.width,
+                page.raster.height,
+                page.raster.pixels.data(),
+                &pageBitmapInfo,
+                DIB_RGB_COLORS,
+                SRCCOPY);
+        }
+
+        Gdiplus::Graphics imageGraphics(hdc);
+        imageGraphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        imageGraphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+        imageGraphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+        for (std::size_t imageIndex = 0; imageIndex < page.images.size(); ++imageIndex) {
+            const PageImage& image = page.images[imageIndex];
+            if (image.pixels.empty() || image.pixelWidth <= 0 || image.pixelHeight <= 0) {
+                continue;
+            }
+
+            Gdiplus::Bitmap bitmap(
+                image.pixelWidth,
+                image.pixelHeight,
+                image.stride,
+                PixelFormat32bppRGB,
+                const_cast<BYTE*>(reinterpret_cast<const BYTE*>(image.pixels.data())));
+            const Gdiplus::REAL centerX = static_cast<Gdiplus::REAL>(pageView.rect.left + ((image.x + (image.width * 0.5f)) * pageView.scale));
+            const Gdiplus::REAL centerY = static_cast<Gdiplus::REAL>(pageView.rect.top + ((image.y + (image.height * 0.5f)) * pageView.scale));
+            const Gdiplus::REAL drawWidth = static_cast<Gdiplus::REAL>(image.width * pageView.scale);
+            const Gdiplus::REAL drawHeight = static_cast<Gdiplus::REAL>(image.height * pageView.scale);
+            const float opacity = IsImagePendingErase(pageView.pageIndex, imageIndex) ? kPendingEraseObjectOpacity : 1.0f;
+
+            imageGraphics.ResetTransform();
+            imageGraphics.TranslateTransform(centerX, centerY);
+            imageGraphics.RotateTransform(image.rotationDegrees);
+            if (opacity < 1.0f) {
+                Gdiplus::ColorMatrix matrix {
+                    1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                    0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+                    0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                    0.0f, 0.0f, 0.0f, opacity, 0.0f,
+                    0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                };
+                Gdiplus::ImageAttributes attributes;
+                attributes.SetColorMatrix(&matrix);
+                Gdiplus::RectF destRect(-drawWidth * 0.5f, -drawHeight * 0.5f, drawWidth, drawHeight);
+                imageGraphics.DrawImage(
+                    &bitmap,
+                    destRect,
+                    0.0f,
+                    0.0f,
+                    static_cast<Gdiplus::REAL>(image.pixelWidth),
+                    static_cast<Gdiplus::REAL>(image.pixelHeight),
+                    Gdiplus::UnitPixel,
+                    &attributes);
+            } else {
+                imageGraphics.DrawImage(&bitmap, -drawWidth * 0.5f, -drawHeight * 0.5f, drawWidth, drawHeight);
+            }
+        }
+        imageGraphics.ResetTransform();
+
+        for (std::size_t textIndex = 0; textIndex < page.texts.size(); ++textIndex) {
+            if (IsEditingText(pageView.pageIndex, textIndex)) {
+                continue;
+            }
+            const float opacity = IsTextPendingErase(pageView.pageIndex, textIndex) ? kPendingEraseObjectOpacity : 1.0f;
+            PaintText(hdc, page.texts[textIndex], pageView, opacity);
+        }
+
+        for (std::size_t strokeIndex = 0; strokeIndex < page.strokes.size(); ++strokeIndex) {
+            const float opacity = IsStrokePendingErase(pageView.pageIndex, strokeIndex) ? kPendingEraseObjectOpacity : 1.0f;
+            PaintStroke(hdc, page.strokes[strokeIndex], pageView, false, false, opacity);
+        }
+    } else if (interactionSnapshot != nullptr) {
         BITMAPINFO bitmapInfo {};
         bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
         bitmapInfo.bmiHeader.biWidth = interactionSnapshot->width;
@@ -8978,7 +9307,6 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         }
     }
 
-    const Page& page = document_.PageAt(pageView.pageIndex);
     const bool pageHasInteractionPreview = interactionPreviewMode_ != InteractionPreviewMode::None
         && ((pageView.pageIndex < interactionPreviewStrokes_.size() && !interactionPreviewStrokes_[pageView.pageIndex].empty())
             || (pageView.pageIndex < interactionPreviewTexts_.size() && !interactionPreviewTexts_[pageView.pageIndex].empty())
@@ -9200,7 +9528,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     RestoreDC(hdc, -1);
 }
 
-void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke, bool fastPreview) const {
+void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke, bool fastPreview, float opacity) const {
     if (stroke.points.empty()) {
         return;
     }
@@ -9219,7 +9547,8 @@ void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, b
                 static_cast<Gdiplus::REAL>(pageView.rect.top + (point.y * pageView.scale)));
         }
 
-        const auto alpha = static_cast<BYTE>((stroke.style.color >> 24U) & 0xFFU);
+        const float clampedOpacity = std::clamp(opacity, 0.0f, 1.0f);
+        const auto alpha = static_cast<BYTE>(std::lround(static_cast<float>((stroke.style.color >> 24U) & 0xFFU) * clampedOpacity));
         const auto red = static_cast<BYTE>((stroke.style.color >> 16U) & 0xFFU);
         const auto green = static_cast<BYTE>((stroke.style.color >> 8U) & 0xFFU);
         const auto blue = static_cast<BYTE>(stroke.style.color & 0xFFU);
@@ -9256,7 +9585,14 @@ void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, b
     }
 
     const int fallbackWidth = std::max(1, static_cast<int>(std::lround(penWidth)));
-    HPEN pen = CreatePen(PS_SOLID, fallbackWidth, ToColorRef(stroke.style.color));
+    const auto blendChannel = [](BYTE channel, float opacityValue) {
+        return static_cast<BYTE>(std::lround((static_cast<float>(channel) * opacityValue) + (255.0f * (1.0f - opacityValue))));
+    };
+    const float clampedOpacity = std::clamp(opacity, 0.0f, 1.0f);
+    const BYTE red = static_cast<BYTE>((stroke.style.color >> 16U) & 0xFFU);
+    const BYTE green = static_cast<BYTE>((stroke.style.color >> 8U) & 0xFFU);
+    const BYTE blue = static_cast<BYTE>(stroke.style.color & 0xFFU);
+    HPEN pen = CreatePen(PS_SOLID, fallbackWidth, RGB(blendChannel(red, clampedOpacity), blendChannel(green, clampedOpacity), blendChannel(blue, clampedOpacity)));
     HGDIOBJ oldPen = SelectObject(hdc, pen);
 
     POINT first {
@@ -9281,7 +9617,7 @@ void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, b
     DeleteObject(pen);
 }
 
-void App::PaintText(HDC hdc, const PageText& text, const PageView& pageView) const {
+void App::PaintText(HDC hdc, const PageText& text, const PageView& pageView, float opacity) const {
     if (pageView.pageIndex >= document_.PageCount()) {
         return;
     }
@@ -9299,8 +9635,15 @@ void App::PaintText(HDC hdc, const PageText& text, const PageView& pageView) con
     const int left = pageView.rect.left + static_cast<int>(std::lround(text.x * pageView.scale));
     const int top = pageView.rect.top + static_cast<int>(std::lround(text.y * pageView.scale));
     const int renderWidth = std::max(1, static_cast<int>(std::ceil(ResolvedPageTextWidth(text, page.width) * std::max(0.1f, pageView.scale))));
+    const auto blendChannel = [](BYTE channel, float opacityValue) {
+        return static_cast<BYTE>(std::lround((static_cast<float>(channel) * opacityValue) + (255.0f * (1.0f - opacityValue))));
+    };
+    const float clampedOpacity = std::clamp(opacity, 0.0f, 1.0f);
+    const BYTE red = static_cast<BYTE>((text.color >> 16U) & 0xFFU);
+    const BYTE green = static_cast<BYTE>((text.color >> 8U) & 0xFFU);
+    const BYTE blue = static_cast<BYTE>(text.color & 0xFFU);
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, ToColorRef(text.color));
+    SetTextColor(hdc, RGB(blendChannel(red, clampedOpacity), blendChannel(green, clampedOpacity), blendChannel(blue, clampedOpacity)));
     const UINT alignmentFlags = DrawTextAlignmentFlags(text.alignment);
     for (std::size_t lineIndex = 0; lineIndex < layout.lines.size(); ++lineIndex) {
         const int lineTop = top + (renderLineHeight * static_cast<int>(lineIndex));

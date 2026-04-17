@@ -338,6 +338,13 @@ private:
     void BeginErase(POINT cursor);
     void ExtendErase(POINT cursor);
     [[nodiscard]] bool EraseAt(POINT cursor);
+    void EndErase();
+    void EnsurePendingEraseStorage();
+    [[nodiscard]] bool PageHasPendingErase(std::size_t pageIndex) const;
+    [[nodiscard]] bool IsStrokePendingErase(std::size_t pageIndex, std::size_t strokeIndex) const;
+    [[nodiscard]] bool IsImagePendingErase(std::size_t pageIndex, std::size_t imageIndex) const;
+    [[nodiscard]] bool IsTextPendingErase(std::size_t pageIndex, std::size_t textIndex) const;
+    void ClearPendingEraseObjects();
     void BeginPan(POINT cursor, bool fromMiddleButton);
     void UpdatePan(POINT cursor);
     void EndPan();
@@ -496,6 +503,12 @@ private:
     void CancelToolbarBrushSizeInput();
     void BeginToolbarBrushSizeInput();
     void ApplyToolbarBrushSizeInput();
+    [[nodiscard]] float EraserRadiusPixels() const;
+    [[nodiscard]] float EraserDiameterPixels() const;
+    [[nodiscard]] float QuickSizePreviewDiameterForTool(Tool tool, RECT clientRect) const;
+    [[nodiscard]] int QuickSizePreviewExtentForTool(Tool tool, RECT clientRect) const;
+    [[nodiscard]] HCURSOR EraserCursorForCurrentSize();
+    void ReleaseEraserCursor();
     void CancelToolbarZoomInput();
     void BeginToolbarZoomInput();
     void ApplyToolbarZoomInput();
@@ -531,8 +544,8 @@ private:
     void PaintPage(HDC hdc, const PageView& pageView);
     void PaintSelectionOverlay(HDC hdc, RECT canvasRect) const;
     void PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSelectToolSelectionAffordances) const;
-    void PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke, bool fastPreview = false) const;
-    void PaintText(HDC hdc, const PageText& text, const PageView& pageView) const;
+    void PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke, bool fastPreview = false, float opacity = 1.0f) const;
+    void PaintText(HDC hdc, const PageText& text, const PageView& pageView, float opacity = 1.0f) const;
     bool TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke& stroke);
     bool TryRefreshPageSurfaceCacheForStroke(std::size_t pageIndex, const Stroke& stroke);
     bool TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect);
@@ -618,6 +631,9 @@ private:
     std::vector<std::vector<std::size_t>> selectedImageIndices_ {};
     std::vector<std::vector<std::size_t>> selectedTextIndices_ {};
     std::vector<std::vector<std::size_t>> selectedStrokeIndices_ {};
+    std::vector<std::vector<std::size_t>> pendingEraseStrokeIndices_ {};
+    std::vector<std::vector<std::size_t>> pendingEraseImageIndices_ {};
+    std::vector<std::vector<std::size_t>> pendingEraseTextIndices_ {};
     bool selectionBoxOverride_ = false;
     bool rasterRefreshPending_ = false;
     bool zoomSessionActive_ = false;
@@ -657,6 +673,7 @@ private:
     SettingsState settings_ {};
     NewPageSettingsState newPageSettings_ {};
     HCURSOR eraserCursor_ = nullptr;
+    int eraserCursorDiameter_ = 0;
     bool pdfSidebarOpen_ = false;
     float pdfSidebarSlideProgress_ = 0.0f;
     float pdfSidebarSlideAnimationStartProgress_ = 0.0f;
