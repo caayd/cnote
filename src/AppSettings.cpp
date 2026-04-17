@@ -712,6 +712,20 @@ void App::LoadAppSettings() {
             continue;
         }
 
+        if (key == "dash_length") {
+            if (const auto parsed = ParseFloat(value); parsed.has_value()) {
+                settings_.dashLength = std::clamp(*parsed, 0.5f, 8.0f);
+            }
+            continue;
+        }
+
+        if (key == "dash_gap") {
+            if (const auto parsed = ParseFloat(value); parsed.has_value()) {
+                settings_.dashGap = std::clamp(*parsed, 0.5f, 8.0f);
+            }
+            continue;
+        }
+
         if (key == "auto_save_interval_seconds") {
             if (const auto parsed = ParseUnsignedInt(value); parsed.has_value()) {
                 settings_.autoSaveIntervalSeconds = std::min(*parsed, 300U);
@@ -861,6 +875,8 @@ void App::SaveAppSettings() const {
     output << "input_smoothing=" << settings_.inputSmoothing << '\n';
     output << "input_spacing=" << settings_.inputSpacing << '\n';
     output << "stroke_smoothing=" << settings_.strokeSmoothing << '\n';
+    output << "dash_length=" << settings_.dashLength << '\n';
+    output << "dash_gap=" << settings_.dashGap << '\n';
     output << "auto_save_interval_seconds=" << settings_.autoSaveIntervalSeconds << '\n';
     output << "auto_hide_toolbar=" << (settings_.autoHideToolbar ? 1 : 0) << '\n';
     for (std::size_t index = 0; index < settings_.zoomPresets.size(); ++index) {

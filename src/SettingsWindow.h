@@ -32,6 +32,8 @@ private:
         Stabilization,
         Spacing,
         StrokeSmoothing,
+        DashLength,
+        DashGap,
         AutoSave,
     };
 
@@ -109,6 +111,10 @@ private:
     HWND spacingLabel_ = nullptr;
     HWND strokeSmoothingSlider_ = nullptr;
     HWND strokeSmoothingLabel_ = nullptr;
+    HWND dashLengthSlider_ = nullptr;
+    HWND dashLengthLabel_ = nullptr;
+    HWND dashGapSlider_ = nullptr;
+    HWND dashGapLabel_ = nullptr;
     HWND autoSaveSlider_ = nullptr;
     HWND autoSaveLabel_ = nullptr;
     HWND autoHideToolbarSwitch_ = nullptr;

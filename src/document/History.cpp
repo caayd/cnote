@@ -63,7 +63,7 @@ bool Vec2Equal(const Vec2& a, const Vec2& b) {
 }
 
 bool StrokeStyleEqual(const StrokeStyle& a, const StrokeStyle& b) {
-    return a.color == b.color && a.width == b.width;
+    return a.color == b.color && a.width == b.width && a.dotted == b.dotted;
 }
 
 bool StrokeEqual(const Stroke& a, const Stroke& b) {

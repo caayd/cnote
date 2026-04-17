@@ -250,7 +250,7 @@ bool Vec2Equal(const Vec2& a, const Vec2& b) {
 }
 
 bool StrokeStyleEqual(const StrokeStyle& a, const StrokeStyle& b) {
-    return a.color == b.color && a.width == b.width;
+    return a.color == b.color && a.width == b.width && a.dotted == b.dotted;
 }
 
 bool StrokeEqual(const Stroke& a, const Stroke& b) {
@@ -2169,6 +2169,74 @@ void AppendStrokePointWithResampling(Stroke& stroke, Vec2 point, float spacing) 
         const float t = static_cast<float>(segment) / static_cast<float>(segmentCount);
         stroke.points.push_back(Lerp(from, point, t));
     }
+}
+
+bool StraightLineStrokeModifierPressed() {
+    return (GetKeyState('A') & 0x8000) != 0;
+}
+
+bool SnapLineModifierPressed() {
+    return (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+}
+
+bool DottedStrokeModifierPressed() {
+    return (GetKeyState(VK_SPACE) & 0x8000) != 0;
+}
+
+bool OvalStrokeModifierPressed() {
+    return (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+}
+
+Vec2 SnapLineEndpoint(Vec2 start, Vec2 end) {
+    constexpr float kSnapAngleRadians = 3.14159265358979323846f / 12.0f;
+    const float dx = end.x - start.x;
+    const float dy = end.y - start.y;
+    const float distance = std::sqrt((dx * dx) + (dy * dy));
+    if (distance <= 0.001f) {
+        return end;
+    }
+
+    const float snappedAngle = std::round(std::atan2(dy, dx) / kSnapAngleRadians) * kSnapAngleRadians;
+    return {
+        start.x + (std::cos(snappedAngle) * distance),
+        start.y + (std::sin(snappedAngle) * distance),
+    };
+}
+
+std::vector<Vec2> BuildOvalStrokePoints(Vec2 start, Vec2 end, bool circle) {
+    constexpr int kOvalSegmentCount = 72;
+    float endX = end.x;
+    float endY = end.y;
+    if (circle) {
+        const float dx = end.x - start.x;
+        const float dy = end.y - start.y;
+        const float side = std::max(std::abs(dx), std::abs(dy));
+        endX = start.x + (dx < 0.0f ? -side : side);
+        endY = start.y + (dy < 0.0f ? -side : side);
+    }
+
+    const float left = std::min(start.x, endX);
+    const float top = std::min(start.y, endY);
+    const float right = std::max(start.x, endX);
+    const float bottom = std::max(start.y, endY);
+    const float radiusX = (right - left) * 0.5f;
+    const float radiusY = (bottom - top) * 0.5f;
+    if (radiusX <= 0.001f || radiusY <= 0.001f) {
+        return { start, { endX, endY } };
+    }
+
+    const float centerX = left + radiusX;
+    const float centerY = top + radiusY;
+    std::vector<Vec2> points;
+    points.reserve(kOvalSegmentCount + 1);
+    for (int index = 0; index <= kOvalSegmentCount; ++index) {
+        const float angle = (static_cast<float>(index) / static_cast<float>(kOvalSegmentCount)) * 2.0f * 3.14159265358979323846f;
+        points.push_back({
+            centerX + (std::cos(angle) * radiusX),
+            centerY + (std::sin(angle) * radiusY),
+        });
+    }
+    return points;
 }
 
 float InputSpacingPageUnits(float pageSpacing, float pageScale) {
@@ -4778,15 +4846,47 @@ void App::ExtendStroke(POINT cursor) {
     const Vec2 rawPoint = ScreenToPage(pageView, cursor, true);
     Vec2 filteredPoint = rawPoint;
     const float inputSpacing = InputSpacingPageUnits(settings_.inputSpacing, pageView.scale);
+    const bool straightLineMode = StraightLineStrokeModifierPressed();
 
-    if (!activeStroke_->points.empty()) {
-        filteredPoint = Lerp(activeStroke_->points.back(), rawPoint, settings_.inputSmoothing);
-        if (Distance(filteredPoint, activeStroke_->points.back()) < inputSpacing) {
-            return;
+    if (!activeFreehandStroke_.has_value()) {
+        activeFreehandStroke_ = *activeStroke_;
+    }
+
+    const bool dottedMode = DottedStrokeModifierPressed();
+    const bool styleChanged = activeStroke_->style.dotted != dottedMode;
+    activeStroke_->style.dotted = dottedMode;
+    activeFreehandStroke_->style.dotted = dottedMode;
+
+    bool pointAppended = true;
+    if (!activeFreehandStroke_->points.empty()) {
+        filteredPoint = Lerp(activeFreehandStroke_->points.back(), rawPoint, settings_.inputSmoothing);
+        if (Distance(filteredPoint, activeFreehandStroke_->points.back()) < inputSpacing) {
+            pointAppended = false;
         }
     }
 
-    AppendStrokePointWithResampling(*activeStroke_, filteredPoint, inputSpacing);
+    if (pointAppended) {
+        AppendStrokePointWithResampling(*activeFreehandStroke_, filteredPoint, inputSpacing);
+    }
+
+    if (straightLineMode && !activeFreehandStroke_->points.empty()) {
+        const Vec2 startPoint = activeFreehandStroke_->points.front();
+        if (OvalStrokeModifierPressed()) {
+            activeStroke_->points = BuildOvalStrokePoints(startPoint, rawPoint, SnapLineModifierPressed());
+        } else {
+            const Vec2 endPoint = SnapLineModifierPressed()
+                ? SnapLineEndpoint(startPoint, rawPoint)
+                : rawPoint;
+            activeStroke_->points.clear();
+            activeStroke_->points.push_back(startPoint);
+            activeStroke_->points.push_back(endPoint);
+        }
+    } else {
+        if (!pointAppended && !styleChanged) {
+            return;
+        }
+        *activeStroke_ = *activeFreehandStroke_;
+    }
     std::optional<RECT> currentDirtyRect = StrokeRenderBoundsRect(
         *activeStroke_,
         pageView.scale,
@@ -4814,7 +4914,9 @@ void App::StartStrokeSegment(std::size_t pageIndex, Vec2 pagePoint) {
     activeStrokePageIndex_ = pageIndex;
     activeStroke_->style.color = palette_.at(colorIndex_);
     activeStroke_->style.width = settings_.drawBrushSize;
+    activeStroke_->style.dotted = DottedStrokeModifierPressed();
     activeStroke_->points.push_back(pagePoint);
+    activeFreehandStroke_ = activeStroke_;
     isDrawing_ = true;
     UpdateCaptureState();
     InvalidateStrokeRegion(*activeStroke_, pageIndex, true);
@@ -4861,6 +4963,7 @@ void App::EndStroke() {
     }
 
     activeStroke_.reset();
+    activeFreehandStroke_.reset();
     activeStrokePageIndex_.reset();
     isDrawing_ = false;
     UpdateCaptureState();
@@ -9575,6 +9678,14 @@ void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, b
         pen.SetLineJoin(Gdiplus::LineJoinRound);
         pen.SetStartCap(Gdiplus::LineCapRound);
         pen.SetEndCap(Gdiplus::LineCapRound);
+        if (stroke.style.dotted) {
+            const Gdiplus::REAL dashPattern[] {
+                static_cast<Gdiplus::REAL>(std::max(0.5f, settings_.dashLength)),
+                static_cast<Gdiplus::REAL>(std::max(0.5f, settings_.dashGap)),
+            };
+            pen.SetDashPattern(dashPattern, 2);
+            pen.SetDashCap(Gdiplus::DashCapRound);
+        }
 
         if (screenPoints.size() == 1U) {
             Gdiplus::SolidBrush brush(color);
@@ -9604,7 +9715,8 @@ void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, b
     const BYTE red = static_cast<BYTE>((stroke.style.color >> 16U) & 0xFFU);
     const BYTE green = static_cast<BYTE>((stroke.style.color >> 8U) & 0xFFU);
     const BYTE blue = static_cast<BYTE>(stroke.style.color & 0xFFU);
-    HPEN pen = CreatePen(PS_SOLID, fallbackWidth, RGB(blendChannel(red, clampedOpacity), blendChannel(green, clampedOpacity), blendChannel(blue, clampedOpacity)));
+    const COLORREF fallbackColor = RGB(blendChannel(red, clampedOpacity), blendChannel(green, clampedOpacity), blendChannel(blue, clampedOpacity));
+    HPEN pen = CreatePen(stroke.style.dotted ? PS_DASH : PS_SOLID, fallbackWidth, fallbackColor);
     HGDIOBJ oldPen = SelectObject(hdc, pen);
 
     POINT first {

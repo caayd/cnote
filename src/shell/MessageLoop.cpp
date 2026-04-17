@@ -769,6 +769,20 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        if (isDrawing_
+            && (wParam == 'A'
+                || wParam == VK_SHIFT
+                || wParam == VK_SPACE
+                || wParam == VK_CONTROL
+                || wParam == VK_LCONTROL
+                || wParam == VK_RCONTROL)) {
+            POINT cursor {};
+            GetCursorPos(&cursor);
+            ScreenToClient(window_, &cursor);
+            ExtendStroke(cursor);
+            return 0;
+        }
+
         if (ctrlPressed && wParam == 'W') {
             const auto selectedText = SingleSelectedText();
             if (selectedText.has_value()
@@ -842,6 +856,21 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         break;
     }
+    case WM_KEYUP:
+        if (isDrawing_
+            && (wParam == 'A'
+                || wParam == VK_SHIFT
+                || wParam == VK_SPACE
+                || wParam == VK_CONTROL
+                || wParam == VK_LCONTROL
+                || wParam == VK_RCONTROL)) {
+            POINT cursor {};
+            GetCursorPos(&cursor);
+            ScreenToClient(window_, &cursor);
+            ExtendStroke(cursor);
+            return 0;
+        }
+        break;
     case WM_PAINT:
         Paint();
         return 0;

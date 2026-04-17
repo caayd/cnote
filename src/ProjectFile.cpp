@@ -16,9 +16,10 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 8;
+constexpr std::uint32_t kProjectVersion = 9;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
+constexpr std::uint8_t kStrokeStyleFlagDotted = 1U << 0U;
 constexpr std::uint8_t kTextStyleFlagBold = 1U << 0U;
 constexpr std::uint8_t kTextStyleFlagItalic = 1U << 1U;
 constexpr std::uint8_t kTextStyleFlagUnderline = 1U << 2U;
@@ -168,8 +169,13 @@ void AppendBlob(std::vector<std::uint8_t>& output, const std::vector<std::uint8_
 }
 
 void AppendStroke(std::vector<std::uint8_t>& output, const Stroke& stroke) {
+    std::uint8_t styleFlags = 0;
+    if (stroke.style.dotted) {
+        styleFlags |= kStrokeStyleFlagDotted;
+    }
     AppendValue(output, stroke.style.color);
     AppendValue(output, stroke.style.width);
+    AppendValue(output, styleFlags);
     const auto pointCount = static_cast<std::uint32_t>(stroke.points.size());
     AppendValue(output, pointCount);
     for (const Vec2& point : stroke.points) {
@@ -178,9 +184,17 @@ void AppendStroke(std::vector<std::uint8_t>& output, const Stroke& stroke) {
     }
 }
 
-bool ReadStroke(ByteReader& reader, Stroke& stroke) {
+bool ReadStroke(ByteReader& reader, std::uint32_t version, Stroke& stroke) {
     std::uint32_t pointCount = 0;
-    if (!reader.Read(stroke.style.color) || !reader.Read(stroke.style.width) || !reader.Read(pointCount)) {
+    std::uint8_t styleFlags = 0;
+    if (!reader.Read(stroke.style.color) || !reader.Read(stroke.style.width)) {
+        return false;
+    }
+    if (version >= 9U && !reader.Read(styleFlags)) {
+        return false;
+    }
+    stroke.style.dotted = (styleFlags & kStrokeStyleFlagDotted) != 0U;
+    if (!reader.Read(pointCount)) {
         return false;
     }
 
@@ -458,7 +472,7 @@ std::optional<Document> ProjectFile::LoadFromBytes(
         page.strokes.reserve(strokeCount);
         for (std::uint32_t strokeIndex = 0; strokeIndex < strokeCount; ++strokeIndex) {
             Stroke stroke {};
-            if (!ReadStroke(reader, stroke)) {
+            if (!ReadStroke(reader, version, stroke)) {
                 return std::nullopt;
             }
             page.strokes.push_back(std::move(stroke));

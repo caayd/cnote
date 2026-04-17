@@ -235,6 +235,8 @@ public:
         float inputSpacing = 0.85f;
         float inputSmoothing = 0.3f;
         float strokeSmoothing = 0.55f;
+        float dashLength = 3.0f;
+        float dashGap = 2.0f;
         unsigned int autoSaveIntervalSeconds = 60;
         bool autoHideToolbar = false;
         std::array<float, kZoomPresetCount> zoomPresets {};
@@ -597,6 +599,7 @@ private:
     bool isTransformingStroke_ = false;
     bool isTransformingText_ = false;
     std::optional<Stroke> activeStroke_ {};
+    std::optional<Stroke> activeFreehandStroke_ {};
     std::optional<std::size_t> activeStrokePageIndex_ {};
     std::vector<HistoryAction> undoActions_ {};
     std::vector<HistoryAction> redoActions_ {};

@@ -87,6 +87,8 @@ constexpr int kIdSpacingSlider = 206;
 constexpr int kIdStrokeSmoothingSlider = 207;
 constexpr int kIdAutoSaveSlider = 208;
 constexpr int kIdAutoHideToolbarSwitch = 209;
+constexpr int kIdDashLengthSlider = 210;
+constexpr int kIdDashGapSlider = 211;
 constexpr int kIdZoomPresetBase = 300;
 
 struct SettingsWindowLayout {
@@ -124,6 +126,11 @@ struct SettingsWindowLayout {
     RECT spacingSliderRect {};
     RECT strokeSmoothingLabelRect {};
     RECT strokeSmoothingSliderRect {};
+    RECT dashPreviewRect {};
+    RECT dashLengthLabelRect {};
+    RECT dashLengthSliderRect {};
+    RECT dashGapLabelRect {};
+    RECT dashGapSliderRect {};
     RECT autoSaveLabelRect {};
     RECT autoSaveSliderRect {};
     RECT autoHideToolbarSwitchRect {};
@@ -192,6 +199,12 @@ std::wstring FormatFloatSliderLabel(const wchar_t* prefix, float value, int mult
 std::wstring FormatSpacingLabel(float spacing) {
     wchar_t buffer[64] = {};
     std::swprintf(buffer, std::size(buffer), L"Point Spacing: %.2f", spacing);
+    return buffer;
+}
+
+std::wstring FormatDashLabel(const wchar_t* prefix, float value) {
+    wchar_t buffer[64] = {};
+    std::swprintf(buffer, std::size(buffer), L"%ls: %.1fx", prefix, value);
     return buffer;
 }
 
@@ -398,6 +411,11 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, UINT dpi) {
     layout.spacingSliderRect = MakeRect(drawingSliderLeft, layout.spacingLabelRect.bottom + px(4), drawingSliderRight, layout.spacingLabelRect.bottom + px(32));
     layout.strokeSmoothingLabelRect = MakeRect(drawingSliderLeft, layout.spacingSliderRect.bottom + px(16), drawingSliderRight, layout.spacingSliderRect.bottom + px(34));
     layout.strokeSmoothingSliderRect = MakeRect(drawingSliderLeft, layout.strokeSmoothingLabelRect.bottom + px(4), drawingSliderRight, layout.strokeSmoothingLabelRect.bottom + px(32));
+    layout.dashPreviewRect = MakeRect(drawingSliderLeft, layout.strokeSmoothingSliderRect.bottom + px(18), drawingSliderRight, layout.strokeSmoothingSliderRect.bottom + px(70));
+    layout.dashLengthLabelRect = MakeRect(drawingSliderLeft, layout.dashPreviewRect.bottom + px(16), drawingSliderRight, layout.dashPreviewRect.bottom + px(34));
+    layout.dashLengthSliderRect = MakeRect(drawingSliderLeft, layout.dashLengthLabelRect.bottom + px(4), drawingSliderRight, layout.dashLengthLabelRect.bottom + px(32));
+    layout.dashGapLabelRect = MakeRect(drawingSliderLeft, layout.dashLengthSliderRect.bottom + px(16), drawingSliderRight, layout.dashLengthSliderRect.bottom + px(34));
+    layout.dashGapSliderRect = MakeRect(drawingSliderLeft, layout.dashGapLabelRect.bottom + px(4), drawingSliderRight, layout.dashGapLabelRect.bottom + px(32));
 
     const int metaLeft = layout.drawingMetaSection.left + sectionPadding;
     const int metaRight = layout.drawingMetaSection.right - sectionPadding;
@@ -690,6 +708,10 @@ void SettingsWindow::CreateControls() {
     spacingSlider_ = createSlider(kIdSpacingSlider, 0, 0, ScaleForDpi(320, dpi), ScaleForDpi(30, dpi));
     strokeSmoothingLabel_ = createLabel(L"Stroke Smoothing", 0, 0, ScaleForDpi(260, dpi), ScaleForDpi(20, dpi));
     strokeSmoothingSlider_ = createSlider(kIdStrokeSmoothingSlider, 0, 0, ScaleForDpi(320, dpi), ScaleForDpi(30, dpi));
+    dashLengthLabel_ = createLabel(L"Dash Length", 0, 0, ScaleForDpi(260, dpi), ScaleForDpi(20, dpi));
+    dashLengthSlider_ = createSlider(kIdDashLengthSlider, 0, 0, ScaleForDpi(320, dpi), ScaleForDpi(30, dpi));
+    dashGapLabel_ = createLabel(L"Dash Gap", 0, 0, ScaleForDpi(260, dpi), ScaleForDpi(20, dpi));
+    dashGapSlider_ = createSlider(kIdDashGapSlider, 0, 0, ScaleForDpi(320, dpi), ScaleForDpi(30, dpi));
     autoSaveLabel_ = createLabel(L"Auto Save", 0, 0, ScaleForDpi(260, dpi), ScaleForDpi(20, dpi));
     autoSaveSlider_ = createSlider(kIdAutoSaveSlider, 0, 0, ScaleForDpi(320, dpi), ScaleForDpi(30, dpi));
     autoHideToolbarSwitch_ = CreateWindowExW(
@@ -737,6 +759,8 @@ void SettingsWindow::CreateControls() {
     SendMessageW(stabilizationSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(5, 95));
     SendMessageW(spacingSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(5, 405));
     SendMessageW(strokeSmoothingSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+    SendMessageW(dashLengthSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(5, 80));
+    SendMessageW(dashGapSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(5, 80));
     SendMessageW(autoSaveSlider_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 300));
     SendMessageW(autoSaveSlider_, TBM_SETTICFREQ, 15, 0);
     SendMessageW(paletteList_, LB_SETITEMHEIGHT, 0, ScaleForDpi(46, dpi));
@@ -777,7 +801,7 @@ void SettingsWindow::RebuildDpiResources(UINT dpi) {
     backgroundBrush_ = CreateSolidBrush(kWindowBackground);
     panelBrush_ = CreateSolidBrush(kPanelFill);
     std::vector<HWND> controls;
-    controls.reserve(37);
+    controls.reserve(41);
     controls.insert(controls.end(), categoryButtons_.begin(), categoryButtons_.end());
     controls.push_back(paletteList_);
     controls.push_back(addColorButton_);
@@ -801,6 +825,10 @@ void SettingsWindow::RebuildDpiResources(UINT dpi) {
     controls.push_back(spacingSlider_);
     controls.push_back(strokeSmoothingLabel_);
     controls.push_back(strokeSmoothingSlider_);
+    controls.push_back(dashLengthLabel_);
+    controls.push_back(dashLengthSlider_);
+    controls.push_back(dashGapLabel_);
+    controls.push_back(dashGapSlider_);
     controls.push_back(autoSaveLabel_);
     controls.push_back(autoSaveSlider_);
     controls.push_back(autoHideToolbarSwitch_);
@@ -841,7 +869,7 @@ void SettingsWindow::LayoutControls() {
     GetClientRect(window_, &clientRect);
     const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
 
-    HDWP deferred = BeginDeferWindowPos(41);
+    HDWP deferred = BeginDeferWindowPos(45);
     for (std::size_t index = 0; index < categoryButtons_.size(); ++index) {
         DeferMoveControl(deferred, categoryButtons_[index], layout.categoryButtons[index]);
     }
@@ -867,6 +895,10 @@ void SettingsWindow::LayoutControls() {
     DeferMoveControl(deferred, spacingSlider_, layout.spacingSliderRect);
     DeferMoveControl(deferred, strokeSmoothingLabel_, layout.strokeSmoothingLabelRect);
     DeferMoveControl(deferred, strokeSmoothingSlider_, layout.strokeSmoothingSliderRect);
+    DeferMoveControl(deferred, dashLengthLabel_, layout.dashLengthLabelRect);
+    DeferMoveControl(deferred, dashLengthSlider_, layout.dashLengthSliderRect);
+    DeferMoveControl(deferred, dashGapLabel_, layout.dashGapLabelRect);
+    DeferMoveControl(deferred, dashGapSlider_, layout.dashGapSliderRect);
     DeferMoveControl(deferred, autoSaveLabel_, layout.autoSaveLabelRect);
     DeferMoveControl(deferred, autoSaveSlider_, layout.autoSaveSliderRect);
     DeferMoveControl(deferred, autoHideToolbarSwitch_, layout.autoHideToolbarSwitchRect);
@@ -961,6 +993,10 @@ void SettingsWindow::RefreshVisibleControls() {
     setVisible(spacingSlider_, false);
     setVisible(strokeSmoothingLabel_, showDrawing);
     setVisible(strokeSmoothingSlider_, false);
+    setVisible(dashLengthLabel_, showDrawing);
+    setVisible(dashLengthSlider_, false);
+    setVisible(dashGapLabel_, showDrawing);
+    setVisible(dashGapSlider_, false);
     setVisible(autoSaveLabel_, showDrawing);
     setVisible(autoSaveSlider_, false);
     setVisible(autoHideToolbarSwitch_, showDrawing);
@@ -1072,6 +1108,14 @@ void SettingsWindow::InvalidateSliderPresentation(SliderKind kind) {
     case SliderKind::StrokeSmoothing:
         dirtyRect = UnionRectCopy(layout.strokeSmoothingLabelRect, layout.strokeSmoothingSliderRect);
         break;
+    case SliderKind::DashLength:
+    case SliderKind::DashGap:
+        dirtyRect = UnionRectCopy(
+            layout.dashPreviewRect,
+            UnionRectCopy(
+                UnionRectCopy(layout.dashLengthLabelRect, layout.dashLengthSliderRect),
+                UnionRectCopy(layout.dashGapLabelRect, layout.dashGapSliderRect)));
+        break;
     case SliderKind::AutoSave:
         dirtyRect = UnionRectCopy(layout.autoSaveLabelRect, layout.autoSaveSliderRect);
         break;
@@ -1145,6 +1189,8 @@ void SettingsWindow::RefreshSliderValues() {
     SendMessageW(stabilizationSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.inputSmoothing * 100.0f)));
     SendMessageW(spacingSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.inputSpacing * 100.0f)));
     SendMessageW(strokeSmoothingSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.strokeSmoothing * 100.0f)));
+    SendMessageW(dashLengthSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.dashLength * 10.0f)));
+    SendMessageW(dashGapSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(app_.settings_.dashGap * 10.0f)));
     SendMessageW(autoSaveSlider_, TBM_SETPOS, TRUE, static_cast<LPARAM>(app_.settings_.autoSaveIntervalSeconds));
 
     SetControlText(redLabel_, FormatHueLabel(hue));
@@ -1153,6 +1199,8 @@ void SettingsWindow::RefreshSliderValues() {
     SetControlText(stabilizationLabel_, FormatFloatSliderLabel(L"Stabilization", app_.settings_.inputSmoothing, 100));
     SetControlText(spacingLabel_, FormatSpacingLabel(app_.settings_.inputSpacing));
     SetControlText(strokeSmoothingLabel_, FormatFloatSliderLabel(L"Stroke Smoothing", app_.settings_.strokeSmoothing, 100));
+    SetControlText(dashLengthLabel_, FormatDashLabel(L"Dash Length", app_.settings_.dashLength));
+    SetControlText(dashGapLabel_, FormatDashLabel(L"Dash Gap", app_.settings_.dashGap));
     SetControlText(autoSaveLabel_, FormatAutoSaveLabel(app_.settings_.autoSaveIntervalSeconds));
 }
 
@@ -1380,6 +1428,10 @@ void SettingsWindow::HandleHScroll(LPARAM lParam) {
         app_.settings_.inputSpacing = static_cast<float>(SendMessageW(spacingSlider_, TBM_GETPOS, 0, 0)) / 100.0f;
     } else if (reinterpret_cast<HWND>(lParam) == strokeSmoothingSlider_) {
         app_.settings_.strokeSmoothing = static_cast<float>(SendMessageW(strokeSmoothingSlider_, TBM_GETPOS, 0, 0)) / 100.0f;
+    } else if (reinterpret_cast<HWND>(lParam) == dashLengthSlider_) {
+        app_.settings_.dashLength = static_cast<float>(SendMessageW(dashLengthSlider_, TBM_GETPOS, 0, 0)) / 10.0f;
+    } else if (reinterpret_cast<HWND>(lParam) == dashGapSlider_) {
+        app_.settings_.dashGap = static_cast<float>(SendMessageW(dashGapSlider_, TBM_GETPOS, 0, 0)) / 10.0f;
     } else if (reinterpret_cast<HWND>(lParam) == autoSaveSlider_) {
         const int value = static_cast<int>(SendMessageW(autoSaveSlider_, TBM_GETPOS, 0, 0));
         app_.settings_.autoSaveIntervalSeconds = static_cast<unsigned int>(std::clamp(std::lround(static_cast<float>(value) / 15.0f) * 15, 0L, 300L));
@@ -1390,6 +1442,9 @@ void SettingsWindow::HandleHScroll(LPARAM lParam) {
 
     app_.SaveAppSettings();
     app_.UpdateAutoSaveTimer();
+    if (reinterpret_cast<HWND>(lParam) == dashLengthSlider_ || reinterpret_cast<HWND>(lParam) == dashGapSlider_) {
+        InvalidateRect(app_.window_, nullptr, FALSE);
+    }
     RefreshSliderValues();
     if (reinterpret_cast<HWND>(lParam) == stabilizationSlider_) {
         InvalidateSliderPresentation(SliderKind::Stabilization);
@@ -1397,6 +1452,10 @@ void SettingsWindow::HandleHScroll(LPARAM lParam) {
         InvalidateSliderPresentation(SliderKind::Spacing);
     } else if (reinterpret_cast<HWND>(lParam) == strokeSmoothingSlider_) {
         InvalidateSliderPresentation(SliderKind::StrokeSmoothing);
+    } else if (reinterpret_cast<HWND>(lParam) == dashLengthSlider_) {
+        InvalidateSliderPresentation(SliderKind::DashLength);
+    } else if (reinterpret_cast<HWND>(lParam) == dashGapSlider_) {
+        InvalidateSliderPresentation(SliderKind::DashGap);
     } else if (reinterpret_cast<HWND>(lParam) == autoSaveSlider_) {
         InvalidateSliderPresentation(SliderKind::AutoSave);
     }
@@ -1541,9 +1600,45 @@ void SettingsWindow::PaintWindow() {
         paintSlider(SliderKind::Saturation, layout.greenSliderRect, 0, 100);
         paintSlider(SliderKind::Lightness, layout.blueSliderRect, 0, 100);
     } else if (activeCategory_ == Category::Drawing) {
+        FillRoundedRect(memoryDc, layout.dashPreviewRect, RGB(18, 24, 32));
+        StrokeRoundedRect(memoryDc, layout.dashPreviewRect, kPanelBorder, 1);
+        SetTextColor(memoryDc, kTextMuted);
+        RECT dashPreviewLabel = layout.dashPreviewRect;
+        dashPreviewLabel.left += Scale(12);
+        dashPreviewLabel.right -= Scale(12);
+        dashPreviewLabel.bottom = dashPreviewLabel.top + Scale(20);
+        DrawTextW(memoryDc, L"Dash Preview", -1, &dashPreviewLabel, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        const int previewY = layout.dashPreviewRect.top + ((layout.dashPreviewRect.bottom - layout.dashPreviewRect.top) * 2 / 3);
+        const int previewLeft = layout.dashPreviewRect.left + Scale(14);
+        const int previewRight = layout.dashPreviewRect.right - Scale(14);
+        const float previewWidth = static_cast<float>(Scale(6));
+        const float dashLength = std::max(0.5f, app_.settings_.dashLength) * previewWidth;
+        const float dashGap = std::max(0.5f, app_.settings_.dashGap) * previewWidth;
+        HBRUSH dashBrush = CreateSolidBrush(app_.ToColorRef(app_.palette_.empty() ? 0xFF2563EB : app_.palette_[app_.colorIndex_]));
+        HGDIOBJ previousDashBrush = SelectObject(memoryDc, dashBrush);
+        HGDIOBJ previousDashPen = SelectObject(memoryDc, GetStockObject(NULL_PEN));
+        for (float x = static_cast<float>(previewLeft); x < static_cast<float>(previewRight); x += dashLength + dashGap) {
+            const int dashLeft = static_cast<int>(std::lround(x));
+            const int dashRight = std::min(previewRight, static_cast<int>(std::lround(x + dashLength)));
+            if (dashRight > dashLeft) {
+                RoundRect(
+                    memoryDc,
+                    dashLeft,
+                    previewY - Scale(3),
+                    dashRight,
+                    previewY + Scale(4),
+                    Scale(6),
+                    Scale(6));
+            }
+        }
+        SelectObject(memoryDc, previousDashPen);
+        SelectObject(memoryDc, previousDashBrush);
+        DeleteObject(dashBrush);
         paintSlider(SliderKind::Stabilization, layout.stabilizationSliderRect, 5, 95);
         paintSlider(SliderKind::Spacing, layout.spacingSliderRect, 5, 405);
         paintSlider(SliderKind::StrokeSmoothing, layout.strokeSmoothingSliderRect, 0, 100);
+        paintSlider(SliderKind::DashLength, layout.dashLengthSliderRect, 5, 80);
+        paintSlider(SliderKind::DashGap, layout.dashGapSliderRect, 5, 80);
         paintSlider(SliderKind::AutoSave, layout.autoSaveSliderRect, 0, 300);
     } else if (activeCategory_ == Category::Shortcuts) {
         const RECT shortcutListRect = ControlRectInParent(shortcutList_, window_);
@@ -1962,6 +2057,10 @@ HWND SettingsWindow::SliderHandle(SliderKind kind) const {
         return spacingSlider_;
     case SliderKind::StrokeSmoothing:
         return strokeSmoothingSlider_;
+    case SliderKind::DashLength:
+        return dashLengthSlider_;
+    case SliderKind::DashGap:
+        return dashGapSlider_;
     case SliderKind::AutoSave:
         return autoSaveSlider_;
     default:
@@ -2012,6 +2111,14 @@ void SettingsWindow::UpdateSliderValue(SliderKind kind, int value) {
             SendMessageW(slider, TBM_SETPOS, TRUE, clampValue(0, 100));
             app_.settings_.strokeSmoothing = static_cast<float>(SliderValue(kind)) / 100.0f;
             break;
+        case SliderKind::DashLength:
+            SendMessageW(slider, TBM_SETPOS, TRUE, clampValue(5, 80));
+            app_.settings_.dashLength = static_cast<float>(SliderValue(kind)) / 10.0f;
+            break;
+        case SliderKind::DashGap:
+            SendMessageW(slider, TBM_SETPOS, TRUE, clampValue(5, 80));
+            app_.settings_.dashGap = static_cast<float>(SliderValue(kind)) / 10.0f;
+            break;
         case SliderKind::AutoSave:
             SendMessageW(slider, TBM_SETPOS, TRUE, clampValue(0, 300));
             app_.settings_.autoSaveIntervalSeconds = static_cast<unsigned int>(std::clamp(std::lround(static_cast<float>(SliderValue(kind)) / 15.0f) * 15, 0L, 300L));
@@ -2024,6 +2131,9 @@ void SettingsWindow::UpdateSliderValue(SliderKind kind, int value) {
 
     app_.SaveAppSettings();
     app_.UpdateAutoSaveTimer();
+    if (kind == SliderKind::DashLength || kind == SliderKind::DashGap) {
+        InvalidateRect(app_.window_, nullptr, FALSE);
+    }
     RefreshSliderValues();
     InvalidateSliderPresentation(kind);
 }
@@ -2070,6 +2180,16 @@ void SettingsWindow::UpdateSliderFromPoint(SliderKind kind, POINT cursor) {
         minimum = 0;
         maximum = 100;
         break;
+    case SliderKind::DashLength:
+        sliderRect = layout.dashLengthSliderRect;
+        minimum = 5;
+        maximum = 80;
+        break;
+    case SliderKind::DashGap:
+        sliderRect = layout.dashGapSliderRect;
+        minimum = 5;
+        maximum = 80;
+        break;
     case SliderKind::AutoSave:
         sliderRect = layout.autoSaveSliderRect;
         minimum = 0;
@@ -2114,10 +2234,12 @@ std::optional<SettingsWindow::SliderKind> SettingsWindow::HitTestSlider(POINT cu
     }
 
     if (activeCategory_ == Category::Drawing) {
-        const std::array<std::pair<SliderKind, RECT>, 4> sliders {{
+        const std::array<std::pair<SliderKind, RECT>, 6> sliders {{
             { SliderKind::Stabilization, layout.stabilizationSliderRect },
             { SliderKind::Spacing, layout.spacingSliderRect },
             { SliderKind::StrokeSmoothing, layout.strokeSmoothingSliderRect },
+            { SliderKind::DashLength, layout.dashLengthSliderRect },
+            { SliderKind::DashGap, layout.dashGapSliderRect },
             { SliderKind::AutoSave, layout.autoSaveSliderRect },
         }};
         for (const auto& [kind, rect] : sliders) {

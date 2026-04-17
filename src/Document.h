@@ -27,6 +27,7 @@ struct Vec2 {
 struct StrokeStyle {
     std::uint32_t color = 0xFF1F2937;
     float width = 3.0f;
+    bool dotted = false;
 };
 
 struct Stroke {

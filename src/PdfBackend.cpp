@@ -462,7 +462,7 @@ void DrawPageImage(Gdiplus::Graphics& graphics, const PageImage& image, float re
     graphics.Restore(state);
 }
 
-void DrawStroke(Gdiplus::Graphics& graphics, const Stroke& stroke, float renderScale, float strokeSmoothing) {
+void DrawStroke(Gdiplus::Graphics& graphics, const Stroke& stroke, float renderScale, float strokeSmoothing, float dashLength, float dashGap) {
     if (stroke.points.empty()) {
         return;
     }
@@ -488,6 +488,14 @@ void DrawStroke(Gdiplus::Graphics& graphics, const Stroke& stroke, float renderS
     pen.SetLineJoin(Gdiplus::LineJoinRound);
     pen.SetStartCap(Gdiplus::LineCapRound);
     pen.SetEndCap(Gdiplus::LineCapRound);
+    if (stroke.style.dotted) {
+        const Gdiplus::REAL dashPattern[] {
+            static_cast<Gdiplus::REAL>(std::max(0.5f, dashLength)),
+            static_cast<Gdiplus::REAL>(std::max(0.5f, dashGap)),
+        };
+        pen.SetDashPattern(dashPattern, 2);
+        pen.SetDashCap(Gdiplus::DashCapRound);
+    }
 
     if (screenPoints.size() == 1U) {
         Gdiplus::SolidBrush brush(color);
@@ -598,6 +606,8 @@ RasterImage ComposePageRaster(
     std::size_t pageIndex,
     float renderScale,
     float strokeSmoothing,
+    float dashLength,
+    float dashGap,
     bool includeStrokes) {
     const Page& page = document.PageAt(pageIndex);
     std::optional<RasterImage> pdfRaster;
@@ -647,7 +657,7 @@ RasterImage ComposePageRaster(
 
     if (includeStrokes) {
         for (const Stroke& stroke : page.strokes) {
-            DrawStroke(graphics, stroke, renderScale, strokeSmoothing);
+            DrawStroke(graphics, stroke, renderScale, strokeSmoothing, dashLength, dashGap);
         }
     }
 
@@ -658,7 +668,7 @@ float ToPdfY(float pageHeight, float pageY) {
     return pageHeight - pageY;
 }
 
-bool AppendVectorStroke(FPDF_PAGE pageHandle, const Page& page, const Stroke& stroke, float strokeSmoothing) {
+bool AppendVectorStroke(FPDF_PAGE pageHandle, const Page& page, const Stroke& stroke, float strokeSmoothing, float dashLength, float dashGap) {
     if (stroke.points.empty()) {
         return true;
     }
@@ -698,6 +708,13 @@ bool AppendVectorStroke(FPDF_PAGE pageHandle, const Page& page, const Stroke& st
         && FPDFPageObj_SetLineJoin(path, FPDF_LINEJOIN_ROUND) != 0
         && FPDFPageObj_SetLineCap(path, FPDF_LINECAP_ROUND) != 0
         && FPDFPath_SetDrawMode(path, FPDF_FILLMODE_NONE, 1) != 0;
+    if (ok && stroke.style.dotted) {
+        const float dashArray[] {
+            std::max(0.01f, pdfStrokeWidth * std::max(0.5f, dashLength)),
+            std::max(0.01f, pdfStrokeWidth * std::max(0.5f, dashGap)),
+        };
+        ok = FPDFPageObj_SetDashArray(path, dashArray, 2, 0.0f) != 0;
+    }
     if (!ok) {
         return false;
     }
@@ -945,7 +962,9 @@ bool PdfiumBackend::ExportPdf(
     const Document& document,
     const std::wstring& filePath,
     float renderScale,
-    float strokeSmoothing) const {
+    float strokeSmoothing,
+    float dashLength,
+    float dashGap) const {
     if (!initialized_ || filePath.empty() || document.PageCount() == 0U || renderScale <= 0.0f) {
         return false;
     }
@@ -1008,7 +1027,7 @@ bool PdfiumBackend::ExportPdf(
 
             bool hasBackgroundRaster = false;
             if (!importedSourcePage && sourcePage.sourcePdfPageIndex >= 0) {
-                flattenedPages.push_back(ComposePageRaster(*this, document, pageIndex, renderScale, strokeSmoothing, false));
+                flattenedPages.push_back(ComposePageRaster(*this, document, pageIndex, renderScale, strokeSmoothing, dashLength, dashGap, false));
                 hasBackgroundRaster = true;
                 imagesAlreadyFlattened = true;
             } else if (!sourcePage.raster.pixels.empty()
@@ -1057,7 +1076,7 @@ bool PdfiumBackend::ExportPdf(
         }
 
         for (const Stroke& stroke : sourcePage.strokes) {
-            ok = AppendVectorStroke(pageHandle, sourcePage, stroke, strokeSmoothing);
+            ok = AppendVectorStroke(pageHandle, sourcePage, stroke, strokeSmoothing, dashLength, dashGap);
             if (!ok) {
                 break;
             }

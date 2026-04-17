@@ -33,7 +33,9 @@ public:
         const Document& document,
         const std::wstring& filePath,
         float renderScale,
-        float strokeSmoothing) const;
+        float strokeSmoothing,
+        float dashLength,
+        float dashGap) const;
 
 private:
     bool initialized_ = false;
