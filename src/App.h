@@ -268,6 +268,7 @@ private:
     void InvalidateAllPageSurfaceCaches();
     void InvalidateVisiblePageSurfaceCaches();
     void InvalidateStrokeRegion(const Stroke& stroke, std::size_t pageIndex, bool smoothLiveStroke);
+    void RefreshCursor();
     void ResetView();
     void SetActiveTool(Tool tool);
     void PreviousPage();

@@ -3035,6 +3035,26 @@ void App::InvalidateStrokeRegion(const Stroke& stroke, std::size_t pageIndex, bo
     InvalidateRect(window_, &dirtyRect, FALSE);
 }
 
+void App::RefreshCursor() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    POINT cursor {};
+    if (GetCursorPos(&cursor) == FALSE) {
+        return;
+    }
+
+    ScreenToClient(window_, &cursor);
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    if (PtInRect(&clientRect, cursor) == 0) {
+        return;
+    }
+
+    SendMessageW(window_, WM_SETCURSOR, reinterpret_cast<WPARAM>(window_), MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+}
+
 void App::SetActiveTool(Tool tool) {
     if (tool != Tool::Text) {
         CommitTextEdit();
@@ -3076,6 +3096,7 @@ void App::SetActiveTool(Tool tool) {
     }
     activeTool_ = tool;
     SyncBrushWidthFromActiveTool();
+    RefreshCursor();
     InvalidateRect(window_, nullptr, FALSE);
 }
 
