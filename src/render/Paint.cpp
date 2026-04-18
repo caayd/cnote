@@ -79,16 +79,29 @@ void App::Paint() {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
 
+    RefreshTextEditControl();
+    const bool contentComposited = UpdateContentComposition(clientRect, paint.rcPaint);
+    if (contentComposited) {
+        const bool sidebarComposited = UpdatePdfSidebarComposition(clientRect);
+        const bool toolbarComposited = UpdateToolbarComposition(clientRect);
+        const bool popupComposited = UpdatePopupComposition(clientRect);
+        if (sidebarComposited && toolbarComposited && popupComposited) {
+            EndPaint(window_, &paint);
+            return;
+        }
+    }
+
+    const bool repaintFullFallback = contentCompositionContentAttached_;
+    const RECT fallbackPaintRect = repaintFullFallback ? clientRect : paint.rcPaint;
     EnsurePaintBackbuffer(windowDc, clientRect.right, clientRect.bottom);
     HDC memoryDc = paintBackbufferDc_ != nullptr ? paintBackbufferDc_ : windowDc;
     SaveDC(memoryDc);
-    IntersectClipRect(memoryDc, paint.rcPaint.left, paint.rcPaint.top, paint.rcPaint.right, paint.rcPaint.bottom);
+    IntersectClipRect(memoryDc, fallbackPaintRect.left, fallbackPaintRect.top, fallbackPaintRect.right, fallbackPaintRect.bottom);
 
     HBRUSH backgroundBrush = CreateSolidBrush(RGB(18, 22, 29));
-    FillRect(memoryDc, &paint.rcPaint, backgroundBrush);
+    FillRect(memoryDc, &fallbackPaintRect, backgroundBrush);
     DeleteObject(backgroundBrush);
 
-    RefreshTextEditControl();
     PaintCanvas(memoryDc, clientRect);
     if (!UpdatePdfSidebarComposition(clientRect)) {
         PaintPdfSidebar(memoryDc, clientRect);
@@ -106,19 +119,21 @@ void App::Paint() {
     if (memoryDc != windowDc) {
         BitBlt(
             windowDc,
-            paint.rcPaint.left,
-            paint.rcPaint.top,
-            paint.rcPaint.right - paint.rcPaint.left,
-            paint.rcPaint.bottom - paint.rcPaint.top,
+            fallbackPaintRect.left,
+            fallbackPaintRect.top,
+            fallbackPaintRect.right - fallbackPaintRect.left,
+            fallbackPaintRect.bottom - fallbackPaintRect.top,
             memoryDc,
-            paint.rcPaint.left,
-            paint.rcPaint.top,
+            fallbackPaintRect.left,
+            fallbackPaintRect.top,
             SRCCOPY);
     }
 
     RestoreDC(memoryDc, -1);
 
     EndPaint(window_, &paint);
+    DetachContentComposition(true);
+    DetachPopupComposition(true);
 }
 
 }  // namespace cnote

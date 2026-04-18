@@ -16,6 +16,7 @@ void App::PrepareForDocumentSwitch() {
     ClearInteractionPreview();
     zoomSessionActive_ = false;
     zoomAnchorValid_ = false;
+    contentCompositionDirty_ = true;
     ClearZoomSessionSnapshots();
 }
 
@@ -37,6 +38,7 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
     editingTextBeforePage_.reset();
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
+    contentCompositionDirty_ = true;
     ClearInteractionPreview();
     ClearSelection();
     ClosePaletteOverlays();

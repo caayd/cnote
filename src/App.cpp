@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
@@ -3952,9 +3953,11 @@ bool App::EnsureCompositionDevice() {
     if (compositionDevice_ != nullptr
         && compositionTarget_ != nullptr
         && compositionRootVisual_ != nullptr
+        && contentCompositionVisual_ != nullptr
         && toolbarViewportCompositionVisual_ != nullptr
         && toolbarCompositionVisual_ != nullptr
-        && pdfSidebarCompositionVisual_ != nullptr) {
+        && pdfSidebarCompositionVisual_ != nullptr
+        && popupCompositionVisual_ != nullptr) {
         return true;
     }
     if (window_ == nullptr) {
@@ -4009,6 +4012,12 @@ bool App::EnsureCompositionDevice() {
         return false;
     }
 
+    hr = compositionDevice_->CreateVisual(&contentCompositionVisual_);
+    if (FAILED(hr) || contentCompositionVisual_ == nullptr) {
+        ReleaseCompositionResources();
+        return false;
+    }
+
     hr = compositionDevice_->CreateVisual(&pdfSidebarCompositionVisual_);
     if (FAILED(hr) || pdfSidebarCompositionVisual_ == nullptr) {
         ReleaseCompositionResources();
@@ -4027,12 +4036,22 @@ bool App::EnsureCompositionDevice() {
         return false;
     }
 
+    hr = compositionDevice_->CreateVisual(&popupCompositionVisual_);
+    if (FAILED(hr) || popupCompositionVisual_ == nullptr) {
+        ReleaseCompositionResources();
+        return false;
+    }
+
+    contentCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
     pdfSidebarCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
     toolbarViewportCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
     toolbarCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
+    popupCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
     toolbarViewportCompositionVisual_->AddVisual(toolbarCompositionVisual_, TRUE, nullptr);
-    compositionRootVisual_->AddVisual(pdfSidebarCompositionVisual_, TRUE, nullptr);
+    compositionRootVisual_->AddVisual(contentCompositionVisual_, TRUE, nullptr);
+    compositionRootVisual_->AddVisual(pdfSidebarCompositionVisual_, TRUE, contentCompositionVisual_);
     compositionRootVisual_->AddVisual(toolbarViewportCompositionVisual_, TRUE, pdfSidebarCompositionVisual_);
+    compositionRootVisual_->AddVisual(popupCompositionVisual_, TRUE, toolbarViewportCompositionVisual_);
     compositionTarget_->SetRoot(compositionRootVisual_);
     compositionDevice_->Commit();
     pdfSidebarCompositionDirty_ = true;
@@ -4041,17 +4060,27 @@ bool App::EnsureCompositionDevice() {
 
 void App::ReleaseCompositionResources() {
     if (compositionDevice_ != nullptr && pdfSidebarCompositionVisual_ != nullptr) {
+        if (contentCompositionVisual_ != nullptr) {
+            contentCompositionVisual_->SetContent(nullptr);
+        }
         pdfSidebarCompositionVisual_->SetContent(nullptr);
         if (toolbarCompositionVisual_ != nullptr) {
             toolbarCompositionVisual_->SetContent(nullptr);
         }
+        if (popupCompositionVisual_ != nullptr) {
+            popupCompositionVisual_->SetContent(nullptr);
+        }
         compositionDevice_->Commit();
     }
+    ReleaseCom(contentCompositionSurface_);
     ReleaseCom(toolbarCompositionSurface_);
     ReleaseCom(pdfSidebarCompositionSurface_);
+    ReleaseCom(popupCompositionSurface_);
+    ReleaseCom(popupCompositionVisual_);
     ReleaseCom(toolbarCompositionVisual_);
     ReleaseCom(toolbarViewportCompositionVisual_);
     ReleaseCom(pdfSidebarCompositionVisual_);
+    ReleaseCom(contentCompositionVisual_);
     ReleaseCom(compositionRootVisual_);
     ReleaseCom(compositionTarget_);
     ReleaseCom(compositionDevice_);
@@ -4059,6 +4088,15 @@ void App::ReleaseCompositionResources() {
     ReleaseCom(compositionD3dDevice_);
     pdfSidebarCompositionDirty_ = true;
     pdfSidebarCompositionAnimationActive_ = false;
+    contentCompositionContentAttached_ = false;
+    contentCompositionDirty_ = true;
+    contentCompositionWidth_ = 0;
+    contentCompositionHeight_ = 0;
+    contentCompositionDpi_ = 0;
+    popupCompositionContentAttached_ = false;
+    popupCompositionWidth_ = 0;
+    popupCompositionHeight_ = 0;
+    popupCompositionDpi_ = 0;
     pdfSidebarCompositionWidth_ = 0;
     pdfSidebarCompositionHeight_ = 0;
     pdfSidebarCompositionDpi_ = 0;
@@ -4070,6 +4108,376 @@ void App::ReleaseCompositionResources() {
     toolbarCompositionHeight_ = 0;
     toolbarCompositionDpi_ = 0;
     toolbarCompositionMaximized_ = false;
+}
+
+void App::DetachContentComposition(bool waitForCommitCompletion) {
+    if (compositionDevice_ == nullptr || contentCompositionVisual_ == nullptr || !contentCompositionContentAttached_) {
+        return;
+    }
+
+    contentCompositionVisual_->SetContent(nullptr);
+    compositionDevice_->Commit();
+    if (waitForCommitCompletion) {
+        compositionDevice_->WaitForCommitCompletion();
+    }
+    contentCompositionContentAttached_ = false;
+    contentCompositionDirty_ = true;
+}
+
+bool App::UpdateContentComposition(RECT clientRect, RECT dirtyRect) {
+    if (textEditWindow_ != nullptr && IsWindowVisible(textEditWindow_) != FALSE) {
+        return false;
+    }
+    if (textFormatPopupOpen_) {
+        return false;
+    }
+    if (!EnsureCompositionDevice()) {
+        return false;
+    }
+
+    const UINT dpi = WindowDpi(window_);
+    const int width = std::max(1, static_cast<int>(clientRect.right - clientRect.left));
+    const int height = std::max(1, static_cast<int>(clientRect.bottom - clientRect.top));
+    const RECT surfaceRect { 0, 0, width, height };
+    RECT updateRect {};
+    if (IntersectRect(&updateRect, &dirtyRect, &surfaceRect) == 0) {
+        return true;
+    }
+
+    bool createdSurface = false;
+    if (contentCompositionSurface_ == nullptr
+        || contentCompositionWidth_ != width
+        || contentCompositionHeight_ != height
+        || contentCompositionDpi_ != dpi) {
+        ReleaseCom(contentCompositionSurface_);
+        contentCompositionContentAttached_ = false;
+        contentCompositionDirty_ = true;
+        const HRESULT hr = compositionDevice_->CreateSurface(
+            static_cast<UINT>(width),
+            static_cast<UINT>(height),
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_IGNORE,
+            &contentCompositionSurface_);
+        if (FAILED(hr) || contentCompositionSurface_ == nullptr) {
+            ReleaseCom(contentCompositionSurface_);
+            return false;
+        }
+        contentCompositionWidth_ = width;
+        contentCompositionHeight_ = height;
+        contentCompositionDpi_ = dpi;
+        createdSurface = true;
+    }
+    if (createdSurface || contentCompositionDirty_) {
+        updateRect = surfaceRect;
+    }
+
+    IDXGISurface* dxgiSurface = nullptr;
+    POINT updateOffset {};
+    HRESULT hr = contentCompositionSurface_->BeginDraw(
+        &updateRect,
+        __uuidof(IDXGISurface),
+        reinterpret_cast<void**>(&dxgiSurface),
+        &updateOffset);
+    if (FAILED(hr) || dxgiSurface == nullptr) {
+        ReleaseCom(dxgiSurface);
+        return false;
+    }
+
+    IDXGISurface1* gdiSurface = nullptr;
+    hr = dxgiSurface->QueryInterface(__uuidof(IDXGISurface1), reinterpret_cast<void**>(&gdiSurface));
+    ReleaseCom(dxgiSurface);
+    if (FAILED(hr) || gdiSurface == nullptr) {
+        contentCompositionSurface_->EndDraw();
+        ReleaseCom(gdiSurface);
+        return false;
+    }
+
+    HDC contentDc = nullptr;
+    hr = gdiSurface->GetDC(FALSE, &contentDc);
+    if (FAILED(hr) || contentDc == nullptr) {
+        contentCompositionSurface_->EndDraw();
+        ReleaseCom(gdiSurface);
+        return false;
+    }
+
+    const int savedDc = SaveDC(contentDc);
+    SetViewportOrgEx(contentDc, updateOffset.x - updateRect.left, updateOffset.y - updateRect.top, nullptr);
+    IntersectClipRect(contentDc, updateRect.left, updateRect.top, updateRect.right, updateRect.bottom);
+    HBRUSH backgroundBrush = CreateSolidBrush(RGB(18, 22, 29));
+    FillRect(contentDc, &updateRect, backgroundBrush);
+    DeleteObject(backgroundBrush);
+    PaintCanvas(contentDc, clientRect);
+    if (savedDc != 0) {
+        RestoreDC(contentDc, savedDc);
+    }
+
+    gdiSurface->ReleaseDC(nullptr);
+    ReleaseCom(gdiSurface);
+    contentCompositionSurface_->EndDraw();
+
+    contentCompositionVisual_->SetOffsetX(0.0f);
+    contentCompositionVisual_->SetOffsetY(0.0f);
+    contentCompositionVisual_->SetContent(contentCompositionSurface_);
+    contentCompositionContentAttached_ = true;
+    contentCompositionDirty_ = false;
+    compositionDevice_->Commit();
+    return true;
+}
+
+void App::DetachPopupComposition(bool waitForCommitCompletion) {
+    if (compositionDevice_ == nullptr || popupCompositionVisual_ == nullptr || !popupCompositionContentAttached_) {
+        return;
+    }
+
+    popupCompositionVisual_->SetContent(nullptr);
+    compositionDevice_->Commit();
+    if (waitForCommitCompletion) {
+        compositionDevice_->WaitForCommitCompletion();
+    }
+    popupCompositionContentAttached_ = false;
+}
+
+bool App::UpdatePopupComposition(RECT clientRect) {
+    std::optional<RECT> overlayBounds;
+    const UINT dpi = WindowDpi(window_);
+    const auto includeBounds = [&](RECT rect) {
+        RECT clipped {};
+        if (IntersectRect(&clipped, &rect, &clientRect) == 0) {
+            return;
+        }
+        overlayBounds = overlayBounds.has_value() ? UnionRectangles(*overlayBounds, clipped) : clipped;
+    };
+
+    if (quickSizePopupTool_.has_value()) {
+        const RECT canvasRect = CanvasRect(clientRect);
+        const Tool popupTool = *quickSizePopupTool_;
+        const QuickSizePopupLayout layout = BuildQuickSizePopupLayout(
+            canvasRect,
+            quickSizePopupAnchor_,
+            dpi,
+            QuickSizePreviewExtentForTool(popupTool, clientRect));
+        includeBounds(QuickSizePopupBounds(layout, dpi));
+    }
+    if (wheel_.paletteMenuOpen) {
+        const ToolbarLayout toolbarLayout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_, dpi);
+        const PaletteMenuLayout layout = BuildPaletteMenuLayout(toolbarLayout, palette_.size(), dpi);
+        includeBounds(InflateRectCopy(layout.panelRect, ScaleForDpi(3, dpi)));
+    }
+    if (wheel_.paletteWheelOpen) {
+        const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
+        if (wheelEntryCount > 0U) {
+            const PaletteWheelLayout layout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, VisibleToolbarHeight(), dpi);
+            const int radius = layout.outerRadius
+                + PaletteWheelShadowInset(dpi)
+                + PaletteWheelHoverOffset(dpi)
+                + PaletteWheelHoverGrow(dpi)
+                + ScaleForDpi(4, dpi);
+            includeBounds(MakeRect(
+                layout.center.x - radius,
+                layout.center.y - radius,
+                layout.center.x + radius,
+                layout.center.y + radius));
+        }
+    }
+
+    if (!overlayBounds.has_value() || !HasRect(*overlayBounds)) {
+        DetachPopupComposition();
+        return true;
+    }
+    if (!EnsureCompositionDevice()) {
+        return false;
+    }
+
+    const RECT bounds = *overlayBounds;
+    const int width = std::max(1, static_cast<int>(bounds.right - bounds.left));
+    const int height = std::max(1, static_cast<int>(bounds.bottom - bounds.top));
+    if (popupCompositionSurface_ == nullptr
+        || popupCompositionWidth_ != width
+        || popupCompositionHeight_ != height
+        || popupCompositionDpi_ != dpi) {
+        ReleaseCom(popupCompositionSurface_);
+        popupCompositionContentAttached_ = false;
+        const HRESULT hr = compositionDevice_->CreateSurface(
+            static_cast<UINT>(width),
+            static_cast<UINT>(height),
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_PREMULTIPLIED,
+            &popupCompositionSurface_);
+        if (FAILED(hr) || popupCompositionSurface_ == nullptr) {
+            ReleaseCom(popupCompositionSurface_);
+            return false;
+        }
+        popupCompositionWidth_ = width;
+        popupCompositionHeight_ = height;
+        popupCompositionDpi_ = dpi;
+    }
+
+    HDC blackDc = CreateCompatibleDC(nullptr);
+    HDC whiteDc = CreateCompatibleDC(nullptr);
+    if (blackDc == nullptr || whiteDc == nullptr) {
+        if (blackDc != nullptr) {
+            DeleteDC(blackDc);
+        }
+        if (whiteDc != nullptr) {
+            DeleteDC(whiteDc);
+        }
+        return false;
+    }
+
+    void* blackBits = nullptr;
+    void* whiteBits = nullptr;
+    HBITMAP blackBitmap = CreateTopDown32BitDibSection(blackDc, width, height, &blackBits);
+    HBITMAP whiteBitmap = CreateTopDown32BitDibSection(whiteDc, width, height, &whiteBits);
+    if (blackBitmap == nullptr || blackBits == nullptr || whiteBitmap == nullptr || whiteBits == nullptr) {
+        if (blackBitmap != nullptr) {
+            DeleteObject(blackBitmap);
+        }
+        if (whiteBitmap != nullptr) {
+            DeleteObject(whiteBitmap);
+        }
+        DeleteDC(blackDc);
+        DeleteDC(whiteDc);
+        return false;
+    }
+
+    HGDIOBJ previousBlackBitmap = SelectObject(blackDc, blackBitmap);
+    HGDIOBJ previousWhiteBitmap = SelectObject(whiteDc, whiteBitmap);
+    const auto releaseOverlayBitmaps = [&]() {
+        if (blackDc != nullptr && previousBlackBitmap != nullptr) {
+            SelectObject(blackDc, previousBlackBitmap);
+        }
+        if (whiteDc != nullptr && previousWhiteBitmap != nullptr) {
+            SelectObject(whiteDc, previousWhiteBitmap);
+        }
+        if (blackBitmap != nullptr) {
+            DeleteObject(blackBitmap);
+        }
+        if (whiteBitmap != nullptr) {
+            DeleteObject(whiteBitmap);
+        }
+        if (blackDc != nullptr) {
+            DeleteDC(blackDc);
+        }
+        if (whiteDc != nullptr) {
+            DeleteDC(whiteDc);
+        }
+    };
+    auto* pixels = static_cast<std::uint8_t*>(blackBits);
+    auto* whitePixels = static_cast<std::uint8_t*>(whiteBits);
+    const std::size_t totalPixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    for (std::size_t index = 0; index < totalPixels; ++index) {
+        pixels[(index * 4U) + 0U] = 0;
+        pixels[(index * 4U) + 1U] = 0;
+        pixels[(index * 4U) + 2U] = 0;
+        pixels[(index * 4U) + 3U] = 0;
+        whitePixels[(index * 4U) + 0U] = 255;
+        whitePixels[(index * 4U) + 1U] = 255;
+        whitePixels[(index * 4U) + 2U] = 255;
+        whitePixels[(index * 4U) + 3U] = 0;
+    }
+
+    const auto paintOverlay = [&](HDC hdc) {
+        const int savedDc = SaveDC(hdc);
+        SetViewportOrgEx(hdc, -bounds.left, -bounds.top, nullptr);
+        IntersectClipRect(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+        PaintQuickSizePopup(hdc, clientRect);
+        PaintPaletteMenu(hdc, clientRect);
+        PaintPaletteWheel(hdc, clientRect);
+        if (savedDc != 0) {
+            RestoreDC(hdc, savedDc);
+        }
+    };
+    paintOverlay(blackDc);
+    paintOverlay(whiteDc);
+
+    for (std::size_t index = 0; index < totalPixels; ++index) {
+        std::uint8_t* pixel = pixels + (index * 4U);
+        const std::uint8_t* whitePixel = whitePixels + (index * 4U);
+        const int blueDelta = static_cast<int>(whitePixel[0]) - static_cast<int>(pixel[0]);
+        const int greenDelta = static_cast<int>(whitePixel[1]) - static_cast<int>(pixel[1]);
+        const int redDelta = static_cast<int>(whitePixel[2]) - static_cast<int>(pixel[2]);
+        const int alpha = std::clamp(255 - ((blueDelta + greenDelta + redDelta) / 3), 0, 255);
+        if (alpha == 0) {
+            pixel[0] = 0;
+            pixel[1] = 0;
+            pixel[2] = 0;
+            pixel[3] = 0;
+        } else {
+            pixel[0] = static_cast<std::uint8_t>(std::clamp(static_cast<int>(pixel[0]), 0, alpha));
+            pixel[1] = static_cast<std::uint8_t>(std::clamp(static_cast<int>(pixel[1]), 0, alpha));
+            pixel[2] = static_cast<std::uint8_t>(std::clamp(static_cast<int>(pixel[2]), 0, alpha));
+            pixel[3] = static_cast<std::uint8_t>(alpha);
+        }
+    }
+
+    RECT updateRect { 0, 0, width, height };
+    IDXGISurface* dxgiSurface = nullptr;
+    POINT updateOffset {};
+    HRESULT hr = popupCompositionSurface_->BeginDraw(
+        &updateRect,
+        __uuidof(IDXGISurface),
+        reinterpret_cast<void**>(&dxgiSurface),
+        &updateOffset);
+    if (FAILED(hr) || dxgiSurface == nullptr) {
+        releaseOverlayBitmaps();
+        ReleaseCom(dxgiSurface);
+        return false;
+    }
+
+    IDXGISurface1* gdiSurface = nullptr;
+    hr = dxgiSurface->QueryInterface(__uuidof(IDXGISurface1), reinterpret_cast<void**>(&gdiSurface));
+    ReleaseCom(dxgiSurface);
+    if (FAILED(hr) || gdiSurface == nullptr) {
+        popupCompositionSurface_->EndDraw();
+        releaseOverlayBitmaps();
+        ReleaseCom(gdiSurface);
+        return false;
+    }
+
+    HDC popupDc = nullptr;
+    hr = gdiSurface->GetDC(FALSE, &popupDc);
+    if (FAILED(hr) || popupDc == nullptr) {
+        popupCompositionSurface_->EndDraw();
+        releaseOverlayBitmaps();
+        ReleaseCom(gdiSurface);
+        return false;
+    }
+
+    BITMAPINFO bitmapInfo {};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = width;
+    bitmapInfo.bmiHeader.biHeight = -height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    const int copiedLines = SetDIBitsToDevice(
+        popupDc,
+        updateOffset.x,
+        updateOffset.y,
+        static_cast<DWORD>(width),
+        static_cast<DWORD>(height),
+        0,
+        0,
+        0,
+        static_cast<UINT>(height),
+        pixels,
+        &bitmapInfo,
+        DIB_RGB_COLORS);
+
+    gdiSurface->ReleaseDC(nullptr);
+    ReleaseCom(gdiSurface);
+    popupCompositionSurface_->EndDraw();
+    releaseOverlayBitmaps();
+    if (copiedLines == 0) {
+        return false;
+    }
+
+    popupCompositionVisual_->SetOffsetX(static_cast<float>(bounds.left));
+    popupCompositionVisual_->SetOffsetY(static_cast<float>(bounds.top));
+    popupCompositionVisual_->SetContent(popupCompositionSurface_);
+    popupCompositionContentAttached_ = true;
+    compositionDevice_->Commit();
+    return true;
 }
 
 bool App::UpdateToolbarComposition(RECT clientRect) {

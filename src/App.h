@@ -441,6 +441,10 @@ private:
     void InvalidatePdfSidebarAnimationRegion();
     [[nodiscard]] bool UpdatePdfSidebarComposition(RECT clientRect);
     [[nodiscard]] bool EnsureCompositionDevice();
+    [[nodiscard]] bool UpdateContentComposition(RECT clientRect, RECT dirtyRect);
+    void DetachContentComposition(bool waitForCommitCompletion = false);
+    [[nodiscard]] bool UpdatePopupComposition(RECT clientRect);
+    void DetachPopupComposition(bool waitForCommitCompletion = false);
     [[nodiscard]] bool StartPdfSidebarCompositionAnimation(float startProgress, float targetProgress);
     void ReleaseCompositionResources();
     void MarkPdfSidebarCompositionDirty();
@@ -721,11 +725,24 @@ private:
     IDCompositionDevice* compositionDevice_ = nullptr;
     IDCompositionTarget* compositionTarget_ = nullptr;
     IDCompositionVisual* compositionRootVisual_ = nullptr;
+    IDCompositionVisual* contentCompositionVisual_ = nullptr;
+    IDCompositionSurface* contentCompositionSurface_ = nullptr;
+    bool contentCompositionContentAttached_ = false;
+    bool contentCompositionDirty_ = true;
     IDCompositionVisual* toolbarViewportCompositionVisual_ = nullptr;
     IDCompositionVisual* toolbarCompositionVisual_ = nullptr;
     IDCompositionSurface* toolbarCompositionSurface_ = nullptr;
     IDCompositionVisual* pdfSidebarCompositionVisual_ = nullptr;
     IDCompositionSurface* pdfSidebarCompositionSurface_ = nullptr;
+    IDCompositionVisual* popupCompositionVisual_ = nullptr;
+    IDCompositionSurface* popupCompositionSurface_ = nullptr;
+    int contentCompositionWidth_ = 0;
+    int contentCompositionHeight_ = 0;
+    UINT contentCompositionDpi_ = 0;
+    bool popupCompositionContentAttached_ = false;
+    int popupCompositionWidth_ = 0;
+    int popupCompositionHeight_ = 0;
+    UINT popupCompositionDpi_ = 0;
 
     static constexpr int kToolbarHeight = 45;
     static constexpr int kSettingsPanelWidth = 320;
