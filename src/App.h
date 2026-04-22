@@ -301,6 +301,10 @@ private:
     void UpdateWindowTitle();
     void BeginStroke(POINT cursor);
     void ExtendStroke(POINT cursor);
+    bool ApplyStrokePoint(POINT cursor);
+    [[nodiscard]] std::optional<RECT> ActiveStrokeWindowDirtyRect() const;
+    [[nodiscard]] std::optional<RECT> ActiveStrokeIncrementalWindowDirtyRect() const;
+    void InvalidateStrokeDirtyDelta(const std::optional<RECT>& previousDirtyRect);
     bool ExtendStrokeFromPointerHistory(WPARAM wParam);
     void EndStroke();
     void StartStrokeSegment(std::size_t pageIndex, Vec2 pagePoint);

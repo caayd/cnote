@@ -5437,34 +5437,35 @@ void App::BeginStroke(POINT cursor) {
 }
 
 void App::ExtendStroke(POINT cursor) {
-    if (!isDrawing_ || isPanning_ || !activeStroke_.has_value()) {
+    const std::optional<RECT> previousDirtyRect = ActiveStrokeIncrementalWindowDirtyRect();
+    if (!ApplyStrokePoint(cursor)) {
         return;
+    }
+    InvalidateStrokeDirtyDelta(previousDirtyRect);
+}
+
+bool App::ApplyStrokePoint(POINT cursor) {
+    if (window_ == nullptr || !isDrawing_ || isPanning_ || !activeStroke_.has_value()) {
+        return false;
     }
 
     if (!activeStrokePageIndex_.has_value()) {
-        return;
+        return false;
     }
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const PageView pageView = CalculatePageView(clientRect, *activeStrokePageIndex_);
     if (!pageView.valid || pageView.scale <= 0.0f) {
-        return;
+        return false;
     }
-
-    const std::optional<RECT> previousDirtyRect = StrokeRenderBoundsRect(
-        *activeStroke_,
-        pageView.scale,
-        true,
-        settings_.strokeSmoothing,
-        12);
 
     if (const auto hitPage = HitTestPage(cursor); hitPage.has_value() && hitPage->pageIndex != *activeStrokePageIndex_) {
         EndStroke();
         document_.SetCurrentPageIndex(hitPage->pageIndex);
         MarkPdfSidebarCompositionDirty();
         StartStrokeSegment(hitPage->pageIndex, ScreenToPage(*hitPage, cursor, true));
-        return;
+        return true;
     }
 
     const Vec2 rawPoint = ScreenToPage(pageView, cursor, true);
@@ -5508,25 +5509,96 @@ void App::ExtendStroke(POINT cursor) {
         }
     } else {
         if (!pointAppended && !styleChanged) {
-            return;
+            return false;
         }
         *activeStroke_ = *activeFreehandStroke_;
     }
+    return true;
+}
+
+std::optional<RECT> App::ActiveStrokeWindowDirtyRect() const {
+    if (window_ == nullptr || !activeStroke_.has_value() || !activeStrokePageIndex_.has_value()) {
+        return std::nullopt;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, *activeStrokePageIndex_);
+    if (!pageView.valid || pageView.scale <= 0.0f) {
+        return std::nullopt;
+    }
+
     std::optional<RECT> currentDirtyRect = StrokeRenderBoundsRect(
         *activeStroke_,
         pageView.scale,
         true,
         settings_.strokeSmoothing,
         12);
+    if (!currentDirtyRect.has_value()) {
+        return std::nullopt;
+    }
+
+    OffsetRect(&*currentDirtyRect, pageView.rect.left, pageView.rect.top);
+    return currentDirtyRect;
+}
+
+std::optional<RECT> App::ActiveStrokeIncrementalWindowDirtyRect() const {
+    if (window_ == nullptr || !activeStroke_.has_value() || !activeStrokePageIndex_.has_value()) {
+        return std::nullopt;
+    }
+
+    if (StraightLineStrokeModifierPressed() || activeStroke_->style.dotted != DottedStrokeModifierPressed()) {
+        return ActiveStrokeWindowDirtyRect();
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, *activeStrokePageIndex_);
+    if (!pageView.valid || pageView.scale <= 0.0f) {
+        return std::nullopt;
+    }
+
+    constexpr std::size_t kActiveStrokeDirtyTailPointCount = 12;
+    const std::vector<Vec2>& points = activeStroke_->points;
+    if (points.empty()) {
+        return std::nullopt;
+    }
+
+    Stroke dirtyStroke {};
+    dirtyStroke.style = activeStroke_->style;
+    dirtyStroke.smoothing = activeStroke_->smoothing;
+    const std::size_t firstPointIndex = points.size() > kActiveStrokeDirtyTailPointCount
+        ? points.size() - kActiveStrokeDirtyTailPointCount
+        : 0U;
+    dirtyStroke.points.assign(points.begin() + static_cast<std::ptrdiff_t>(firstPointIndex), points.end());
+
+    std::optional<RECT> currentDirtyRect = StrokeRenderBoundsRect(
+        dirtyStroke,
+        pageView.scale,
+        true,
+        settings_.strokeSmoothing,
+        18);
+    if (!currentDirtyRect.has_value()) {
+        return std::nullopt;
+    }
+
+    OffsetRect(&*currentDirtyRect, pageView.rect.left, pageView.rect.top);
+    return currentDirtyRect;
+}
+
+void App::InvalidateStrokeDirtyDelta(const std::optional<RECT>& previousDirtyRect) {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    std::optional<RECT> currentDirtyRect = ActiveStrokeIncrementalWindowDirtyRect();
     if (previousDirtyRect.has_value()) {
         currentDirtyRect = currentDirtyRect.has_value()
             ? UnionRectangles(*previousDirtyRect, *currentDirtyRect)
             : previousDirtyRect;
     }
     if (currentDirtyRect.has_value()) {
-        RECT dirtyRect = *currentDirtyRect;
-        OffsetRect(&dirtyRect, pageView.rect.left, pageView.rect.top);
-        InvalidateRect(window_, &dirtyRect, FALSE);
+        InvalidateRect(window_, &*currentDirtyRect, FALSE);
     }
 }
 
@@ -5568,10 +5640,15 @@ bool App::ExtendStrokeFromPointerHistory(WPARAM wParam) {
     });
 
     activeStrokePointerId_ = pointerId;
+    const std::optional<RECT> previousDirtyRect = ActiveStrokeIncrementalWindowDirtyRect();
+    bool strokeChanged = false;
     for (const POINTER_INFO& pointerInfo : history) {
         POINT cursor = pointerInfo.ptPixelLocation;
         ScreenToClient(window_, &cursor);
-        ExtendStroke(cursor);
+        strokeChanged = ApplyStrokePoint(cursor) || strokeChanged;
+    }
+    if (strokeChanged) {
+        InvalidateStrokeDirtyDelta(previousDirtyRect);
     }
     return true;
 }
