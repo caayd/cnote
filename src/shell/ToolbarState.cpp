@@ -462,11 +462,13 @@ void App::SetBrushSizeForTool(Tool tool, float size, bool refreshUi) {
     case Tool::Draw:
     default:
         settings_.drawBrushSize = clamped;
+        ReleaseDrawCursor();
         break;
     }
 
     SyncBrushWidthFromActiveTool();
     SaveAppSettings();
+    RefreshCursor();
     if (refreshUi) {
         RefreshSettingsWindow();
         InvalidateRect(window_, nullptr, FALSE);
@@ -491,6 +493,7 @@ void App::SetColorIndex(std::size_t index) {
     }
 
     colorIndex_ = index;
+    ReleaseDrawCursor();
     SaveAppSettings();
     ClosePaletteOverlays();
     bool recoloredSelection = false;
@@ -512,10 +515,12 @@ void App::SetColorIndex(std::size_t index) {
 
     if (recoloredSelection) {
         InvalidateCanvas();
+        RefreshCursor();
         return;
     }
 
     InvalidateRect(window_, nullptr, FALSE);
+    RefreshCursor();
 }
 
 }  // namespace cnote

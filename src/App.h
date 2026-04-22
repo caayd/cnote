@@ -216,6 +216,7 @@ public:
         std::size_t paletteIndex = 0;
         float drawBrushSize = 3.0f;
         float eraseBrushSize = 3.0f;
+        float drawCursorSize = 8.0f;
         float inputSpacing = 0.85f;
         float inputSmoothing = 0.3f;
         float strokeSmoothing = 0.55f;
@@ -492,7 +493,9 @@ private:
     [[nodiscard]] float QuickSizePreviewDiameterForTool(Tool tool, RECT clientRect) const;
     [[nodiscard]] int QuickSizePreviewExtentForTool(Tool tool, RECT clientRect) const;
     [[nodiscard]] HCURSOR EraserCursorForCurrentSize();
+    [[nodiscard]] HCURSOR DrawCursorForCurrentSize(RECT clientRect);
     void ReleaseEraserCursor();
+    void ReleaseDrawCursor();
     void CancelToolbarZoomInput();
     void BeginToolbarZoomInput();
     void ApplyToolbarZoomInput();
@@ -620,6 +623,8 @@ private:
     std::vector<std::vector<std::size_t>> pendingEraseStrokeIndices_ {};
     std::vector<std::vector<std::size_t>> pendingEraseImageIndices_ {};
     std::vector<std::vector<std::size_t>> pendingEraseTextIndices_ {};
+    std::optional<std::size_t> lastErasePageIndex_ {};
+    Vec2 lastErasePagePoint_ {};
     bool selectionBoxOverride_ = false;
     bool zoomSessionActive_ = false;
     bool zoomAnchorValid_ = false;
@@ -654,6 +659,9 @@ private:
     NewPageSettingsState newPageSettings_ {};
     HCURSOR eraserCursor_ = nullptr;
     int eraserCursorDiameter_ = 0;
+    HCURSOR drawCursor_ = nullptr;
+    int drawCursorDiameter_ = 0;
+    std::uint32_t drawCursorColor_ = 0;
     bool pdfSidebarOpen_ = false;
     float pdfSidebarSlideProgress_ = 0.0f;
     float pdfSidebarSlideAnimationStartProgress_ = 0.0f;

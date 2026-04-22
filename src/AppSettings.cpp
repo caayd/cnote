@@ -518,9 +518,11 @@ void App::AddPaletteColor() {
     palette_.push_back(sourceColor);
     settings_.paletteIndex = palette_.size() - 1U;
     colorIndex_ = std::min(colorIndex_, palette_.size() - 1U);
+    ReleaseDrawCursor();
     SaveAppSettings();
     RefreshSettingsWindow();
     InvalidateRect(window_, nullptr, FALSE);
+    RefreshCursor();
 }
 
 void App::RemovePaletteColor() {
@@ -535,9 +537,11 @@ void App::RemovePaletteColor() {
     if (colorIndex_ >= palette_.size()) {
         colorIndex_ = palette_.size() - 1U;
     }
+    ReleaseDrawCursor();
     SaveAppSettings();
     RefreshSettingsWindow();
     InvalidateRect(window_, nullptr, FALSE);
+    RefreshCursor();
 }
 
 bool App::ApplyHexColorFromClipboard() {
@@ -560,9 +564,11 @@ bool App::ApplyHexColorFromClipboard() {
 
     CloseClipboard();
     if (applied) {
+        ReleaseDrawCursor();
         SaveAppSettings();
         RefreshSettingsWindow();
         InvalidateRect(window_, nullptr, FALSE);
+        RefreshCursor();
     }
     return applied;
 }
@@ -687,6 +693,13 @@ void App::LoadAppSettings() {
         if (key == "erase_brush_size") {
             if (const auto parsed = ParseFloat(value); parsed.has_value()) {
                 settings_.eraseBrushSize = std::clamp(*parsed, 0.5f, 20.0f);
+            }
+            continue;
+        }
+
+        if (key == "draw_cursor_size") {
+            if (const auto parsed = ParseFloat(value); parsed.has_value()) {
+                settings_.drawCursorSize = std::clamp(*parsed, 4.0f, 24.0f);
             }
             continue;
         }
@@ -872,6 +885,7 @@ void App::SaveAppSettings() const {
     }
     output << "draw_brush_size=" << settings_.drawBrushSize << '\n';
     output << "erase_brush_size=" << settings_.eraseBrushSize << '\n';
+    output << "draw_cursor_size=" << settings_.drawCursorSize << '\n';
     output << "input_smoothing=" << settings_.inputSmoothing << '\n';
     output << "input_spacing=" << settings_.inputSpacing << '\n';
     output << "stroke_smoothing=" << settings_.strokeSmoothing << '\n';
@@ -931,10 +945,12 @@ bool App::ApplyNamedPalette(std::size_t index) {
     palette_ = savedPalettes_[index].colors;
     settings_.paletteIndex = std::min(settings_.paletteIndex, palette_.size() - 1U);
     colorIndex_ = std::min(colorIndex_, palette_.size() - 1U);
+    ReleaseDrawCursor();
     SaveAppSettings();
     RefreshSettingsWindow();
     ClosePaletteOverlays();
     InvalidateRect(window_, nullptr, FALSE);
+    RefreshCursor();
     return true;
 }
 

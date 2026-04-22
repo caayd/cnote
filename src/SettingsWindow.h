@@ -32,6 +32,7 @@ private:
         Stabilization,
         Spacing,
         StrokeSmoothing,
+        DrawCursorSize,
         DashLength,
         DashGap,
         AutoSave,
@@ -111,6 +112,8 @@ private:
     HWND spacingLabel_ = nullptr;
     HWND strokeSmoothingSlider_ = nullptr;
     HWND strokeSmoothingLabel_ = nullptr;
+    HWND drawCursorSizeSlider_ = nullptr;
+    HWND drawCursorSizeLabel_ = nullptr;
     HWND dashLengthSlider_ = nullptr;
     HWND dashLengthLabel_ = nullptr;
     HWND dashGapSlider_ = nullptr;

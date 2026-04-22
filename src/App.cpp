@@ -94,6 +94,8 @@ constexpr int kQuickSizeCaretInsetDip = 6;
 constexpr BYTE kEraserPreviewAlpha = 255;
 constexpr float kEraserMinRadiusPixels = 3.5f;
 constexpr float kEraserOutlinePixels = 0.75f;
+constexpr float kMinDrawCursorDiameterPixels = 4.0f;
+constexpr float kMaxDrawCursorDiameterPixels = 24.0f;
 constexpr float kPendingEraseObjectOpacity = 0.5f;
 constexpr int kQuickWheelBadgeInsetRightDip = 3;
 constexpr int kQuickWheelBadgeTopDip = 4;
@@ -769,10 +771,10 @@ SidebarMetrics BuildSidebarMetrics(UINT dpi) {
     return metrics;
 }
 
-HCURSOR CreateEraserCursor(int eraserDiameter) {
-    const int cursorSize = std::max(32, eraserDiameter + 2);
+HCURSOR CreateBrushCursor(int brushDiameter, COLORREF fillColor) {
+    const int cursorSize = std::max(32, brushDiameter + 2);
     const int hotspot = cursorSize / 2;
-    const float radius = static_cast<float>(eraserDiameter) * 0.5f;
+    const float radius = static_cast<float>(brushDiameter) * 0.5f;
     const float center = static_cast<float>(hotspot) + 0.5f;
     constexpr std::uint32_t kTransparent = 0x00000000;
 
@@ -815,27 +817,141 @@ HCURSOR CreateEraserCursor(int eraserDiameter) {
         return std::clamp(edge + 0.5f - distance, 0.0f, 1.0f);
     };
     const float outlineInnerRadius = std::max(0.0f, radius - kEraserOutlinePixels);
+    constexpr int kSampleCount = 3;
+    constexpr float kSampleWeight = 1.0f / static_cast<float>(kSampleCount * kSampleCount);
     for (int y = 0; y < cursorSize; ++y) {
         for (int x = 0; x < cursorSize; ++x) {
-            const float dx = (static_cast<float>(x) + 0.5f) - center;
-            const float dy = (static_cast<float>(y) + 0.5f) - center;
-            const float distance = std::sqrt((dx * dx) + (dy * dy));
-            const float outerCoverage = edgeCoverage(distance, radius);
-            if (outerCoverage <= 0.0f) {
-                continue;
-            }
+            float fillCoverage = 0.0f;
+            float outlineCoverage = 0.0f;
+            for (int sampleY = 0; sampleY < kSampleCount; ++sampleY) {
+                for (int sampleX = 0; sampleX < kSampleCount; ++sampleX) {
+                    const float dx = (static_cast<float>(x) + ((static_cast<float>(sampleX) + 0.5f) / static_cast<float>(kSampleCount))) - center;
+                    const float dy = (static_cast<float>(y) + ((static_cast<float>(sampleY) + 0.5f) / static_cast<float>(kSampleCount))) - center;
+                    const float distance = std::sqrt((dx * dx) + (dy * dy));
+                    const float outerCoverage = edgeCoverage(distance, radius);
+                    if (outerCoverage <= 0.0f) {
+                        continue;
+                    }
 
-            const float fillCoverage = std::min(outerCoverage, edgeCoverage(distance, outlineInnerRadius));
-            const float outlineCoverage = std::max(0.0f, outerCoverage - fillCoverage);
+                    const float sampleFillCoverage = std::min(outerCoverage, edgeCoverage(distance, outlineInnerRadius));
+                    fillCoverage += sampleFillCoverage * kSampleWeight;
+                    outlineCoverage += std::max(0.0f, outerCoverage - sampleFillCoverage) * kSampleWeight;
+                }
+            }
             const float totalCoverage = std::clamp(fillCoverage + outlineCoverage, 0.0f, 1.0f);
             if (totalCoverage <= 0.0f) {
                 continue;
             }
 
-            const float whiteContribution = fillCoverage / totalCoverage;
+            const float fillContribution = fillCoverage / totalCoverage;
             const BYTE alpha = static_cast<BYTE>(std::lround(totalCoverage * 255.0f));
-            const BYTE color = static_cast<BYTE>(std::lround(whiteContribution * 255.0f));
-            pixels[(y * cursorSize) + x] = alphaPixel(alpha, color, color, color);
+            const BYTE red = static_cast<BYTE>(std::lround(static_cast<float>(GetRValue(fillColor)) * fillContribution));
+            const BYTE green = static_cast<BYTE>(std::lround(static_cast<float>(GetGValue(fillColor)) * fillContribution));
+            const BYTE blue = static_cast<BYTE>(std::lround(static_cast<float>(GetBValue(fillColor)) * fillContribution));
+            pixels[(y * cursorSize) + x] = alphaPixel(alpha, red, green, blue);
+        }
+    }
+
+    HBITMAP maskBitmap = CreateBitmap(cursorSize, cursorSize, 1, 1, nullptr);
+    if (maskBitmap == nullptr) {
+        DeleteObject(colorBitmap);
+        return nullptr;
+    }
+
+    ICONINFO iconInfo {};
+    iconInfo.fIcon = FALSE;
+    iconInfo.xHotspot = hotspot;
+    iconInfo.yHotspot = hotspot;
+    iconInfo.hbmMask = maskBitmap;
+    iconInfo.hbmColor = colorBitmap;
+    HCURSOR cursor = CreateIconIndirect(&iconInfo);
+
+    DeleteObject(maskBitmap);
+    DeleteObject(colorBitmap);
+    return cursor;
+}
+
+HCURSOR CreateSquareBrushCursor(int brushDiameter, COLORREF fillColor) {
+    const int cursorSize = std::max(32, brushDiameter + 2);
+    const int hotspot = cursorSize / 2;
+    const float halfSize = static_cast<float>(brushDiameter) * 0.5f;
+    const float center = static_cast<float>(hotspot) + 0.5f;
+    constexpr std::uint32_t kTransparent = 0x00000000;
+
+    BITMAPV5HEADER bitmapHeader {};
+    bitmapHeader.bV5Size = sizeof(bitmapHeader);
+    bitmapHeader.bV5Width = cursorSize;
+    bitmapHeader.bV5Height = -cursorSize;
+    bitmapHeader.bV5Planes = 1;
+    bitmapHeader.bV5BitCount = 32;
+    bitmapHeader.bV5Compression = BI_BITFIELDS;
+    bitmapHeader.bV5RedMask = 0x00FF0000;
+    bitmapHeader.bV5GreenMask = 0x0000FF00;
+    bitmapHeader.bV5BlueMask = 0x000000FF;
+    bitmapHeader.bV5AlphaMask = 0xFF000000;
+
+    HDC screenDc = GetDC(nullptr);
+    if (screenDc == nullptr) {
+        return nullptr;
+    }
+
+    void* colorBits = nullptr;
+    HBITMAP colorBitmap = CreateDIBSection(screenDc, reinterpret_cast<BITMAPINFO*>(&bitmapHeader), DIB_RGB_COLORS, &colorBits, nullptr, 0);
+    ReleaseDC(nullptr, screenDc);
+    if (colorBitmap == nullptr || colorBits == nullptr) {
+        if (colorBitmap != nullptr) {
+            DeleteObject(colorBitmap);
+        }
+        return nullptr;
+    }
+
+    auto* pixels = static_cast<std::uint32_t*>(colorBits);
+    std::fill_n(pixels, cursorSize * cursorSize, kTransparent);
+    const auto alphaPixel = [](BYTE alpha, BYTE red, BYTE green, BYTE blue) {
+        return (static_cast<std::uint32_t>(alpha) << 24U)
+            | (static_cast<std::uint32_t>(red) << 16U)
+            | (static_cast<std::uint32_t>(green) << 8U)
+            | static_cast<std::uint32_t>(blue);
+    };
+    const auto edgeCoverage = [](float distanceToEdge) {
+        return std::clamp(distanceToEdge + 0.5f, 0.0f, 1.0f);
+    };
+
+    const float innerHalfSize = std::max(0.0f, halfSize - kEraserOutlinePixels);
+    constexpr int kSampleCount = 3;
+    constexpr float kSampleWeight = 1.0f / static_cast<float>(kSampleCount * kSampleCount);
+    for (int y = 0; y < cursorSize; ++y) {
+        for (int x = 0; x < cursorSize; ++x) {
+            float fillCoverage = 0.0f;
+            float outlineCoverage = 0.0f;
+            for (int sampleY = 0; sampleY < kSampleCount; ++sampleY) {
+                for (int sampleX = 0; sampleX < kSampleCount; ++sampleX) {
+                    const float dx = std::abs((static_cast<float>(x) + ((static_cast<float>(sampleX) + 0.5f) / static_cast<float>(kSampleCount))) - center);
+                    const float dy = std::abs((static_cast<float>(y) + ((static_cast<float>(sampleY) + 0.5f) / static_cast<float>(kSampleCount))) - center);
+                    const float outerDistanceToEdge = halfSize - std::max(dx, dy);
+                    const float outerCoverage = edgeCoverage(outerDistanceToEdge);
+                    if (outerCoverage <= 0.0f) {
+                        continue;
+                    }
+
+                    const float innerDistanceToEdge = innerHalfSize - std::max(dx, dy);
+                    const float sampleFillCoverage = std::min(outerCoverage, edgeCoverage(innerDistanceToEdge));
+                    fillCoverage += sampleFillCoverage * kSampleWeight;
+                    outlineCoverage += std::max(0.0f, outerCoverage - sampleFillCoverage) * kSampleWeight;
+                }
+            }
+
+            const float totalCoverage = std::clamp(fillCoverage + outlineCoverage, 0.0f, 1.0f);
+            if (totalCoverage <= 0.0f) {
+                continue;
+            }
+
+            const float fillContribution = fillCoverage / totalCoverage;
+            const BYTE alpha = static_cast<BYTE>(std::lround(totalCoverage * 255.0f));
+            const BYTE red = static_cast<BYTE>(std::lround(static_cast<float>(GetRValue(fillColor)) * fillContribution));
+            const BYTE green = static_cast<BYTE>(std::lround(static_cast<float>(GetGValue(fillColor)) * fillContribution));
+            const BYTE blue = static_cast<BYTE>(std::lround(static_cast<float>(GetBValue(fillColor)) * fillContribution));
+            pixels[(y * cursorSize) + x] = alphaPixel(alpha, red, green, blue);
         }
     }
 
@@ -2422,6 +2538,19 @@ float DistancePointToSegmentSquared(Vec2 point, Vec2 a, Vec2 b) {
     return DistanceSquared(point, projection);
 }
 
+float DistanceSegmentToSegmentSquared(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2) {
+    if (SegmentsIntersect(a1, a2, b1, b2)) {
+        return 0.0f;
+    }
+
+    return std::min({
+        DistancePointToSegmentSquared(a1, b1, b2),
+        DistancePointToSegmentSquared(a2, b1, b2),
+        DistancePointToSegmentSquared(b1, a1, a2),
+        DistancePointToSegmentSquared(b2, a1, a2),
+    });
+}
+
 float CrossProduct(Vec2 a, Vec2 b, Vec2 c) {
     return ((b.x - a.x) * (c.y - a.y)) - ((b.y - a.y) * (c.x - a.x));
 }
@@ -2641,14 +2770,59 @@ bool CircleHitsRect(float left, float top, float right, float bottom, Vec2 cente
     return (dx * dx) + (dy * dy) <= radius * radius;
 }
 
-bool ImageHitsCircle(const PageImage& image, Vec2 center, float radius) {
-    const Vec2 localCenter = ToImageLocalPoint(image, center);
-    return CircleHitsRect(image.x, image.y, image.x + image.width, image.y + image.height, localCenter, radius);
+bool SegmentHitsRect(float left, float top, float right, float bottom, Vec2 a, Vec2 b, float radius) {
+    if (CircleHitsRect(left, top, right, bottom, a, radius)
+        || CircleHitsRect(left, top, right, bottom, b, radius)
+        || SegmentIntersectsRectF(a, b, left, top, right, bottom)) {
+        return true;
+    }
+
+    const float radiusSquared = radius * radius;
+    return DistancePointToSegmentSquared({ left, top }, a, b) <= radiusSquared
+        || DistancePointToSegmentSquared({ right, top }, a, b) <= radiusSquared
+        || DistancePointToSegmentSquared({ right, bottom }, a, b) <= radiusSquared
+        || DistancePointToSegmentSquared({ left, bottom }, a, b) <= radiusSquared;
 }
 
-bool TextHitsCircle(const PageText& text, float pageWidth, Vec2 center, float radius) {
+bool ImageHitsSegment(const PageImage& image, Vec2 a, Vec2 b, float radius) {
+    return SegmentHitsRect(
+        image.x,
+        image.y,
+        image.x + image.width,
+        image.y + image.height,
+        ToImageLocalPoint(image, a),
+        ToImageLocalPoint(image, b),
+        radius);
+}
+
+bool TextHitsSegment(const PageText& text, float pageWidth, Vec2 a, Vec2 b, float radius) {
     const PageTextBounds bounds = MeasurePageTextBounds(text, pageWidth);
-    return CircleHitsRect(bounds.left, bounds.top, bounds.right, bounds.bottom, center, radius);
+    return SegmentHitsRect(bounds.left, bounds.top, bounds.right, bounds.bottom, a, b, radius);
+}
+
+std::optional<RECT> ImageBoundsRect(const PageImage& image, float scale, int extraPadding = 0) {
+    if (scale <= 0.0f) {
+        return std::nullopt;
+    }
+
+    const auto corners = ImageCorners(image);
+    float minX = corners.front().x;
+    float minY = corners.front().y;
+    float maxX = corners.front().x;
+    float maxY = corners.front().y;
+    for (const Vec2& corner : corners) {
+        minX = std::min(minX, corner.x);
+        minY = std::min(minY, corner.y);
+        maxX = std::max(maxX, corner.x);
+        maxY = std::max(maxY, corner.y);
+    }
+
+    const float padding = static_cast<float>(extraPadding);
+    return MakeRectFromFloatBounds(
+        (minX * scale) - padding,
+        (minY * scale) - padding,
+        (maxX * scale) + padding + 1.0f,
+        (maxY * scale) + padding + 1.0f);
 }
 
 bool ImageIntersectsRectSelection(const PageImage& image, Vec2 a, Vec2 b) {
@@ -2733,6 +2907,7 @@ App::~App() {
     ReleasePaintBackbuffer();
     ReleaseCompositionResources();
     ReleaseEraserCursor();
+    ReleaseDrawCursor();
     if (gdiplusToken_ != 0) {
         Gdiplus::GdiplusShutdown(gdiplusToken_);
     }
@@ -6357,6 +6532,7 @@ void App::BeginErase(POINT cursor) {
         InvalidateCanvas();
     }
     isErasing_ = true;
+    lastErasePageIndex_.reset();
     UpdateCaptureState();
     static_cast<void>(EraseAt(cursor));
 }
@@ -6428,6 +6604,7 @@ void App::ClearPendingEraseObjects() {
 
 void App::EndErase() {
     isErasing_ = false;
+    lastErasePageIndex_.reset();
     UpdateCaptureState();
 
     bool removedAny = false;
@@ -6498,35 +6675,52 @@ void App::EndErase() {
 bool App::EraseAt(POINT cursor) {
     const auto hitPage = HitTestPage(cursor);
     if (!hitPage.has_value()) {
+        lastErasePageIndex_.reset();
         return false;
     }
 
     const PageView pageView = *hitPage;
     if (!pageView.valid || pageView.scale <= 0.0f) {
+        lastErasePageIndex_.reset();
         return false;
     }
 
     const Vec2 center = ScreenToPage(pageView, cursor, true);
+    const Vec2 eraseStart = lastErasePageIndex_.has_value() && *lastErasePageIndex_ == pageView.pageIndex
+        ? lastErasePagePoint_
+        : center;
     const float eraseRadiusPage = EraserRadiusPixels() / pageView.scale;
     const float eraseRadiusSquared = eraseRadiusPage * eraseRadiusPage;
     Page& page = document_.PageAt(pageView.pageIndex);
-    document_.SetCurrentPageIndex(pageView.pageIndex);
-    MarkPdfSidebarCompositionDirty();
+    if (document_.SetCurrentPageIndex(pageView.pageIndex)) {
+        MarkPdfSidebarCompositionDirty();
+    }
     EnsurePendingEraseStorage();
 
     bool hitAny = false;
+    std::optional<RECT> dirtyPageRect;
+    const auto addDirtyRect = [&](std::optional<RECT> bounds) {
+        if (!bounds.has_value()) {
+            return;
+        }
+        dirtyPageRect = dirtyPageRect.has_value()
+            ? UnionRectangles(*dirtyPageRect, *bounds)
+            : bounds;
+    };
     for (std::size_t imageIndex = 0; imageIndex < page.images.size(); ++imageIndex) {
         if (!IsImagePendingErase(pageView.pageIndex, imageIndex)
-            && ImageHitsCircle(page.images[imageIndex], center, eraseRadiusPage)) {
+            && ImageHitsSegment(page.images[imageIndex], eraseStart, center, eraseRadiusPage)) {
             pendingEraseImageIndices_[pageView.pageIndex].push_back(imageIndex);
+            addDirtyRect(ImageBoundsRect(page.images[imageIndex], pageView.scale, 8));
             hitAny = true;
         }
     }
 
     for (std::size_t textIndex = 0; textIndex < page.texts.size(); ++textIndex) {
         if (!IsTextPendingErase(pageView.pageIndex, textIndex)
-            && TextHitsCircle(page.texts[textIndex], page.width, center, eraseRadiusPage)) {
+            && TextHitsSegment(page.texts[textIndex], page.width, eraseStart, center, eraseRadiusPage)) {
             pendingEraseTextIndices_[pageView.pageIndex].push_back(textIndex);
+            addDirtyRect(PageTextBoundsRect(page.texts[textIndex], page.width, pageView.scale, 8));
             hitAny = true;
         }
     }
@@ -6541,35 +6735,25 @@ bool App::EraseAt(POINT cursor) {
             continue;
         }
 
-        bool hit = DistanceSquared(stroke.points.front(), center) <= eraseRadiusSquared;
+        bool hit = DistancePointToSegmentSquared(stroke.points.front(), eraseStart, center) <= eraseRadiusSquared;
         for (std::size_t index = 1; !hit && index < stroke.points.size(); ++index) {
-            const Vec2 a = stroke.points[index - 1];
-            const Vec2 b = stroke.points[index];
-            const float segmentDx = b.x - a.x;
-            const float segmentDy = b.y - a.y;
-            const float lengthSquared = (segmentDx * segmentDx) + (segmentDy * segmentDy);
-
-            float t = 0.0f;
-            if (lengthSquared > 0.0001f) {
-                t = ((center.x - a.x) * segmentDx + (center.y - a.y) * segmentDy) / lengthSquared;
-                t = std::clamp(t, 0.0f, 1.0f);
-            }
-
-            const Vec2 closest {
-                a.x + (segmentDx * t),
-                a.y + (segmentDy * t),
-            };
-            hit = DistanceSquared(closest, center) <= eraseRadiusSquared;
+            hit = DistanceSegmentToSegmentSquared(eraseStart, center, stroke.points[index - 1], stroke.points[index]) <= eraseRadiusSquared;
         }
 
         if (hit) {
             pendingEraseStrokeIndices_[pageView.pageIndex].push_back(strokeIndex);
+            addDirtyRect(StrokeRenderBoundsRect(stroke, pageView.scale, false, settings_.strokeSmoothing, 12));
             hitAny = true;
         }
     }
 
+    lastErasePageIndex_ = pageView.pageIndex;
+    lastErasePagePoint_ = center;
+
     if (hitAny) {
-        InvalidateCanvas();
+        RECT dirtyRect = dirtyPageRect.value_or(MakeRect(0, 0, pageView.rect.right - pageView.rect.left, pageView.rect.bottom - pageView.rect.top));
+        OffsetRect(&dirtyRect, pageView.rect.left, pageView.rect.top);
+        InvalidateRect(window_, &dirtyRect, FALSE);
     }
 
     return hitAny;
@@ -7938,9 +8122,26 @@ HCURSOR App::EraserCursorForCurrentSize() {
     }
 
     ReleaseEraserCursor();
-    eraserCursor_ = CreateEraserCursor(diameter);
+    eraserCursor_ = CreateSquareBrushCursor(diameter, RGB(255, 255, 255));
     eraserCursorDiameter_ = eraserCursor_ != nullptr ? diameter : 0;
     return eraserCursor_;
+}
+
+HCURSOR App::DrawCursorForCurrentSize(RECT clientRect) {
+    static_cast<void>(clientRect);
+    const int diameter = std::max(
+        1,
+        static_cast<int>(std::lround(std::clamp(settings_.drawCursorSize, kMinDrawCursorDiameterPixels, kMaxDrawCursorDiameterPixels))));
+    const std::uint32_t color = palette_.empty() ? 0xFF000000U : palette_.at(std::min(colorIndex_, palette_.size() - 1U));
+    if (drawCursor_ != nullptr && drawCursorDiameter_ == diameter && drawCursorColor_ == color) {
+        return drawCursor_;
+    }
+
+    ReleaseDrawCursor();
+    drawCursor_ = CreateBrushCursor(diameter, ToColorRef(color));
+    drawCursorDiameter_ = drawCursor_ != nullptr ? diameter : 0;
+    drawCursorColor_ = drawCursor_ != nullptr ? color : 0;
+    return drawCursor_;
 }
 
 void App::ReleaseEraserCursor() {
@@ -7949,6 +8150,15 @@ void App::ReleaseEraserCursor() {
         eraserCursor_ = nullptr;
     }
     eraserCursorDiameter_ = 0;
+}
+
+void App::ReleaseDrawCursor() {
+    if (drawCursor_ != nullptr) {
+        DestroyCursor(drawCursor_);
+        drawCursor_ = nullptr;
+    }
+    drawCursorDiameter_ = 0;
+    drawCursorColor_ = 0;
 }
 
 void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
@@ -7990,15 +8200,22 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
         Gdiplus::Pen eraserOutline(
             Gdiplus::Color(255, 0, 0, 0),
             std::max(0.5f, ScaleForDpi(kEraserOutlinePixels, dpi)));
-        graphics.FillEllipse(
-            &brush,
-            previewLeft,
-            previewTop,
-            static_cast<Gdiplus::REAL>(previewDiameter),
-            static_cast<Gdiplus::REAL>(previewDiameter));
         if (popupTool == Tool::Erase) {
-            graphics.DrawEllipse(
+            graphics.FillRectangle(
+                &brush,
+                previewLeft,
+                previewTop,
+                static_cast<Gdiplus::REAL>(previewDiameter),
+                static_cast<Gdiplus::REAL>(previewDiameter));
+            graphics.DrawRectangle(
                 &eraserOutline,
+                previewLeft,
+                previewTop,
+                static_cast<Gdiplus::REAL>(previewDiameter),
+                static_cast<Gdiplus::REAL>(previewDiameter));
+        } else {
+            graphics.FillEllipse(
+                &brush,
                 previewLeft,
                 previewTop,
                 static_cast<Gdiplus::REAL>(previewDiameter),

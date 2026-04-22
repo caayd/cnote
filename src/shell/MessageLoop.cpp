@@ -548,6 +548,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             } else if (activeTool_ == Tool::Erase) {
                 HCURSOR eraserCursor = EraserCursorForCurrentSize();
                 SetCursor(eraserCursor != nullptr ? eraserCursor : LoadCursorW(nullptr, IDC_CROSS));
+            } else if (activeTool_ == Tool::Draw) {
+                HCURSOR drawCursor = DrawCursorForCurrentSize(clientRect);
+                SetCursor(drawCursor != nullptr ? drawCursor : LoadCursorW(nullptr, IDC_CROSS));
             } else {
                 SetCursor(LoadCursorW(nullptr, IDC_CROSS));
             }
