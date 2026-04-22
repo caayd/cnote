@@ -45,7 +45,8 @@ public:
         float renderScale,
         float strokeSmoothing,
         float dashLength,
-        float dashGap) const;
+        float dashGap,
+        bool embedProject) const;
 
 private:
     bool initialized_ = false;

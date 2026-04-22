@@ -223,6 +223,7 @@ public:
         float dashGap = 2.0f;
         unsigned int autoSaveIntervalSeconds = 60;
         bool autoHideToolbar = false;
+        bool embedProjectInExportedPdfs = true;
         std::array<float, kZoomPresetCount> zoomPresets {};
     };
 

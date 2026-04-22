@@ -733,6 +733,13 @@ void App::LoadAppSettings() {
             continue;
         }
 
+        if (key == "embed_project_in_exported_pdfs") {
+            if (const auto parsed = ParseUnsignedInt(value); parsed.has_value()) {
+                settings_.embedProjectInExportedPdfs = *parsed != 0U;
+            }
+            continue;
+        }
+
         if (key.starts_with("zoom_preset_")) {
             if (const auto index = ParseUnsignedInt(std::string_view(key).substr(12)); index.has_value()
                 && *index >= 1U
@@ -872,6 +879,7 @@ void App::SaveAppSettings() const {
     output << "dash_gap=" << settings_.dashGap << '\n';
     output << "auto_save_interval_seconds=" << settings_.autoSaveIntervalSeconds << '\n';
     output << "auto_hide_toolbar=" << (settings_.autoHideToolbar ? 1 : 0) << '\n';
+    output << "embed_project_in_exported_pdfs=" << (settings_.embedProjectInExportedPdfs ? 1 : 0) << '\n';
     for (std::size_t index = 0; index < settings_.zoomPresets.size(); ++index) {
         output << "zoom_preset_" << (index + 1U) << '=' << settings_.zoomPresets[index] << '\n';
     }

@@ -269,7 +269,14 @@ bool App::ExportAsPdf() {
         return false;
     }
 
-    if (!pdfBackend_.ExportPdf(document_, fileBuffer, kPdfExportFallbackRenderScale, settings_.strokeSmoothing, settings_.dashLength, settings_.dashGap)) {
+    if (!pdfBackend_.ExportPdf(
+            document_,
+            fileBuffer,
+            kPdfExportFallbackRenderScale,
+            settings_.strokeSmoothing,
+            settings_.dashLength,
+            settings_.dashGap,
+            settings_.embedProjectInExportedPdfs)) {
         MessageBoxW(window_, L"Failed to export the PDF.", L"Export as PDF", MB_OK | MB_ICONERROR);
         return false;
     }

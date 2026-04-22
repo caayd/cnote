@@ -89,6 +89,7 @@ constexpr int kIdAutoSaveSlider = 208;
 constexpr int kIdAutoHideToolbarSwitch = 209;
 constexpr int kIdDashLengthSlider = 210;
 constexpr int kIdDashGapSlider = 211;
+constexpr int kIdEmbedProjectInPdfSwitch = 212;
 constexpr int kIdZoomPresetBase = 300;
 
 struct SettingsWindowLayout {
@@ -134,6 +135,7 @@ struct SettingsWindowLayout {
     RECT autoSaveLabelRect {};
     RECT autoSaveSliderRect {};
     RECT autoHideToolbarSwitchRect {};
+    RECT embedProjectInPdfSwitchRect {};
     std::array<RECT, App::kZoomPresetCount> zoomPresetLabelRects {};
     std::array<RECT, App::kZoomPresetCount> zoomPresetEditRects {};
     RECT zoomPresetHintRect {};
@@ -422,9 +424,10 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, UINT dpi) {
     layout.autoSaveLabelRect = MakeRect(metaLeft, layout.drawingMetaSection.top + sectionHeaderContentTop, metaRight, layout.drawingMetaSection.top + sectionHeaderContentTop + px(18));
     layout.autoSaveSliderRect = MakeRect(metaLeft, layout.autoSaveLabelRect.bottom + px(4), metaRight, layout.autoSaveLabelRect.bottom + px(32));
     layout.autoHideToolbarSwitchRect = MakeRect(metaLeft, layout.autoSaveSliderRect.bottom + px(16), metaRight, layout.autoSaveSliderRect.bottom + px(42));
+    layout.embedProjectInPdfSwitchRect = MakeRect(metaLeft, layout.autoHideToolbarSwitchRect.bottom + px(10), metaRight, layout.autoHideToolbarSwitchRect.bottom + px(36));
     const int zoomLabelWidth = px(74);
     const int zoomEditWidth = px(90);
-    const int zoomRowTop = layout.autoHideToolbarSwitchRect.bottom + px(20);
+    const int zoomRowTop = layout.embedProjectInPdfSwitchRect.bottom + px(20);
     const int zoomRowHeight = px(26);
     const int zoomRowGap = px(10);
     for (std::size_t index = 0; index < layout.zoomPresetLabelRects.size(); ++index) {
@@ -727,6 +730,19 @@ void SettingsWindow::CreateControls() {
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdAutoHideToolbarSwitch)),
         app_.instance_,
         nullptr);
+    embedProjectInPdfSwitch_ = CreateWindowExW(
+        0,
+        L"BUTTON",
+        L"Embed project in exported PDFs",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0,
+        0,
+        ScaleForDpi(260, dpi),
+        ScaleForDpi(24, dpi),
+        window_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdEmbedProjectInPdfSwitch)),
+        app_.instance_,
+        nullptr);
     for (std::size_t index = 0; index < zoomPresetLabels_.size(); ++index) {
         const std::wstring label = L"Preset " + std::to_wstring(index + 1U) + L" (%)";
         zoomPresetLabels_[index] = createLabel(label.c_str(), 0, 0, ScaleForDpi(80, dpi), ScaleForDpi(20, dpi));
@@ -801,7 +817,7 @@ void SettingsWindow::RebuildDpiResources(UINT dpi) {
     backgroundBrush_ = CreateSolidBrush(kWindowBackground);
     panelBrush_ = CreateSolidBrush(kPanelFill);
     std::vector<HWND> controls;
-    controls.reserve(41);
+    controls.reserve(42);
     controls.insert(controls.end(), categoryButtons_.begin(), categoryButtons_.end());
     controls.push_back(paletteList_);
     controls.push_back(addColorButton_);
@@ -832,6 +848,7 @@ void SettingsWindow::RebuildDpiResources(UINT dpi) {
     controls.push_back(autoSaveLabel_);
     controls.push_back(autoSaveSlider_);
     controls.push_back(autoHideToolbarSwitch_);
+    controls.push_back(embedProjectInPdfSwitch_);
     controls.push_back(zoomPresetHintLabel_);
     controls.push_back(shortcutList_);
     controls.push_back(changeShortcutButton_);
@@ -869,7 +886,7 @@ void SettingsWindow::LayoutControls() {
     GetClientRect(window_, &clientRect);
     const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
 
-    HDWP deferred = BeginDeferWindowPos(45);
+    HDWP deferred = BeginDeferWindowPos(46);
     for (std::size_t index = 0; index < categoryButtons_.size(); ++index) {
         DeferMoveControl(deferred, categoryButtons_[index], layout.categoryButtons[index]);
     }
@@ -902,6 +919,7 @@ void SettingsWindow::LayoutControls() {
     DeferMoveControl(deferred, autoSaveLabel_, layout.autoSaveLabelRect);
     DeferMoveControl(deferred, autoSaveSlider_, layout.autoSaveSliderRect);
     DeferMoveControl(deferred, autoHideToolbarSwitch_, layout.autoHideToolbarSwitchRect);
+    DeferMoveControl(deferred, embedProjectInPdfSwitch_, layout.embedProjectInPdfSwitchRect);
     for (std::size_t index = 0; index < zoomPresetLabels_.size(); ++index) {
         DeferMoveControl(deferred, zoomPresetLabels_[index], layout.zoomPresetLabelRects[index]);
         DeferMoveControl(deferred, zoomPresetEdits_[index], layout.zoomPresetEditRects[index]);
@@ -1000,6 +1018,7 @@ void SettingsWindow::RefreshVisibleControls() {
     setVisible(autoSaveLabel_, showDrawing);
     setVisible(autoSaveSlider_, false);
     setVisible(autoHideToolbarSwitch_, showDrawing);
+    setVisible(embedProjectInPdfSwitch_, showDrawing);
     for (HWND control : zoomPresetLabels_) {
         setVisible(control, showDrawing);
     }
@@ -1391,6 +1410,13 @@ void SettingsWindow::HandleCommand(WPARAM wParam, LPARAM lParam) {
             RefreshSliderValues();
         }
         break;
+    case kIdEmbedProjectInPdfSwitch:
+        if (notification == BN_CLICKED) {
+            app_.settings_.embedProjectInExportedPdfs = !app_.settings_.embedProjectInExportedPdfs;
+            app_.SaveAppSettings();
+            InvalidateRect(embedProjectInPdfSwitch_, nullptr, FALSE);
+        }
+        break;
     default:
         if (controlId >= kIdZoomPresetBase && controlId < kIdZoomPresetBase + static_cast<int>(zoomPresetEdits_.size())) {
             if (notification == EN_CHANGE) {
@@ -1672,12 +1698,14 @@ void SettingsWindow::DrawButton(const DRAWITEMSTRUCT& drawItem) {
     const bool selected = (drawItem.itemState & ODS_SELECTED) != 0;
     const bool focused = (drawItem.itemState & ODS_FOCUS) != 0;
     const bool disabled = (drawItem.itemState & ODS_DISABLED) != 0;
-    if (drawItem.CtlID == kIdAutoHideToolbarSwitch) {
+    if (drawItem.CtlID == kIdAutoHideToolbarSwitch || drawItem.CtlID == kIdEmbedProjectInPdfSwitch) {
         HBRUSH backgroundBrush = CreateSolidBrush(kPanelFill);
         FillRect(drawItem.hDC, &drawItem.rcItem, backgroundBrush);
         DeleteObject(backgroundBrush);
 
-        const bool checked = app_.settings_.autoHideToolbar;
+        const bool checked = drawItem.CtlID == kIdAutoHideToolbarSwitch
+            ? app_.settings_.autoHideToolbar
+            : app_.settings_.embedProjectInExportedPdfs;
         RECT labelRect = drawItem.rcItem;
         labelRect.left += Scale(2);
         labelRect.right -= Scale(66);

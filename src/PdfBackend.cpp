@@ -1016,7 +1016,8 @@ bool PdfiumBackend::ExportPdf(
     float renderScale,
     float strokeSmoothing,
     float dashLength,
-    float dashGap) const {
+    float dashGap,
+    bool embedProject) const {
     if (!initialized_ || filePath.empty() || document.PageCount() == 0U || renderScale <= 0.0f) {
         return false;
     }
@@ -1136,7 +1137,7 @@ bool PdfiumBackend::ExportPdf(
         ok = FPDFPage_GenerateContent(pageHandle) != 0;
     }
 
-    if (ok) {
+    if (ok && embedProject) {
         const std::vector<std::uint8_t> projectBytes = ProjectFile::Serialize(document);
         static_cast<void>(AppendEmbeddedCnoteProject(outputDocument, projectBytes));
     }
