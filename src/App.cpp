@@ -2906,6 +2906,7 @@ App::~App() {
     ClearZoomSessionSnapshots();
     ReleasePaintBackbuffer();
     ReleaseCompositionResources();
+    StopSmoothScroll();
     ReleaseEraserCursor();
     ReleaseDrawCursor();
     if (gdiplusToken_ != 0) {

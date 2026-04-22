@@ -152,6 +152,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     }
     case WM_LBUTTONDOWN: {
         SetFocus(window_);
+        StopSmoothScroll();
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         UpdateToolbarAutoHide(cursor);
         if (HandleTextFormatPopupClick(cursor)) {
@@ -202,12 +203,14 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     }
     case WM_MBUTTONDOWN: {
         SetFocus(window_);
+        StopSmoothScroll();
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         BeginPan(cursor, true);
         return 0;
     }
     case WM_RBUTTONDOWN: {
         SetFocus(window_);
+        StopSmoothScroll();
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         UpdateToolbarAutoHide(cursor);
         if (HandleToolbarRightClick(cursor)) {
@@ -410,7 +413,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
         }
-        PanBy(0.0f, WheelScrollPixels(wheelDelta, WindowDpi(window_), false));
+        SmoothPanBy(0.0f, WheelScrollPixels(wheelDelta, WindowDpi(window_), false));
         return 0;
     }
     case WM_MOUSEHWHEEL: {
@@ -419,7 +422,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         GetClientRect(window_, &clientRect);
         const RECT viewportRect = CanvasRect(clientRect);
         const int viewportWidth = std::max(1, static_cast<int>(viewportRect.right - viewportRect.left));
-        PanBy(-WheelScrollPixels(wheelDelta, WindowDpi(window_), true, viewportWidth), 0.0f);
+        SmoothPanBy(-WheelScrollPixels(wheelDelta, WindowDpi(window_), true, viewportWidth), 0.0f);
         return 0;
     }
     case WM_ACTIVATEAPP:
@@ -454,6 +457,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         if (wParam == kPaletteWheelHoverTimerId) {
             HandlePaletteWheelHoverAnimationTimer();
+            return 0;
+        }
+        if (wParam == kSmoothScrollTimerId) {
+            HandleSmoothScrollTimer();
             return 0;
         }
         break;
@@ -899,6 +906,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         KillTimer(window_, kZoomSessionTimerId);
         StopToolbarRevealAnimationTimer();
         StopPdfSidebarSlideAnimationTimer();
+        StopSmoothScroll();
         toolbarRevealProgress_ = toolbarRevealed_ ? 1.0f : 0.0f;
         pdfSidebarSlideProgress_ = pdfSidebarOpen_ ? 1.0f : 0.0f;
         zoomSessionActive_ = false;
@@ -924,6 +932,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         KillTimer(window_, kZoomSessionTimerId);
         StopToolbarRevealAnimationTimer();
         StopPdfSidebarSlideAnimationTimer();
+        StopSmoothScroll();
         toolbarRevealProgress_ = toolbarRevealed_ ? 1.0f : 0.0f;
         pdfSidebarSlideProgress_ = pdfSidebarOpen_ ? 1.0f : 0.0f;
         zoomSessionActive_ = false;
@@ -945,6 +954,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         KillTimer(window_, kZoomSessionTimerId);
         StopToolbarRevealAnimationTimer();
         StopPdfSidebarSlideAnimationTimer();
+        StopSmoothScroll();
         ClearZoomSessionSnapshots();
         ReleasePaintBackbuffer();
         ReleaseCompositionResources();

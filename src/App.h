@@ -374,6 +374,11 @@ private:
     [[nodiscard]] bool AppendPagesFromFile();
     [[nodiscard]] bool AppendPagesFromDocumentPath(const std::wstring& filePath);
     void PanBy(float dx, float dy);
+    void SmoothPanBy(float dx, float dy);
+    void ApplyPanDelta(float dx, float dy);
+    void StartSmoothScrollTimer();
+    void StopSmoothScroll();
+    void HandleSmoothScrollTimer();
     void ZoomAt(int delta, POINT cursor);
     void SetZoom(float zoom, std::optional<POINT> anchor = std::nullopt);
     [[nodiscard]] bool ApplyZoomPreset(std::size_t presetIndex);
@@ -578,6 +583,9 @@ private:
     float targetZoom_ = 1.0f;
     float panX_ = 0.0f;
     float panY_ = 0.0f;
+    float smoothScrollTargetPanX_ = 0.0f;
+    float smoothScrollTargetPanY_ = 0.0f;
+    ULONGLONG smoothScrollLastMs_ = 0;
     float brushWidth_ = 3.0f;
     Tool activeTool_ = Tool::Draw;
     std::size_t colorIndex_ = 0;
@@ -661,6 +669,8 @@ private:
     std::vector<float> paletteWheelHoverProgresses_ {};
     ULONGLONG paletteWheelHoverAnimationLastMs_ = 0;
     bool paletteWheelHoverTimerResolutionActive_ = false;
+    bool smoothScrollActive_ = false;
+    bool smoothScrollTimerResolutionActive_ = false;
     SettingsState settings_ {};
     NewPageSettingsState newPageSettings_ {};
     HCURSOR eraserCursor_ = nullptr;
@@ -776,6 +786,7 @@ private:
     static constexpr UINT_PTR kToolbarRevealTimerId = 4;
     static constexpr UINT_PTR kPdfSidebarSlideTimerId = 5;
     static constexpr UINT_PTR kPaletteWheelHoverTimerId = 6;
+    static constexpr UINT_PTR kSmoothScrollTimerId = 7;
     static constexpr UINT kZoomSessionDelayMs = 100;
     static constexpr UINT kToolbarRevealFrameMs = 1;
     static constexpr UINT kToolbarRevealDurationMs = 120;
@@ -783,7 +794,10 @@ private:
     static constexpr UINT kPdfSidebarSlideFrameMs = 1;
     static constexpr UINT kPdfSidebarSlideDurationMs = 150;
     static constexpr UINT kPaletteWheelHoverFrameMs = 1;
+    static constexpr UINT kSmoothScrollFrameMs = 1;
     static constexpr float kPaletteWheelHoverAnimationSpeed = 18.0f;
+    static constexpr float kSmoothScrollFollowSpeed = 24.0f;
+    static constexpr float kSmoothScrollSnapPixels = 1.0f;
     static constexpr float kMinBrushSize = 0.5f;
     static constexpr float kMaxBrushSize = 20.0f;
     static constexpr float kBrushSizeStep = 0.25f;

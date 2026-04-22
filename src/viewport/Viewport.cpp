@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include <mmsystem.h>
+
 #include "DpiUtil.h"
 
 namespace cnote {
@@ -47,6 +49,7 @@ int MaximizedCanvasWidthForZoom(HWND window, int fallbackCanvasWidth, int sideba
 
 void App::ResetView() {
     CancelToolbarZoomInput();
+    StopSmoothScroll();
     zoom_ = 1.0f;
     targetZoom_ = 1.0f;
     panX_ = 0.0f;
@@ -77,6 +80,7 @@ void App::FocusPage(std::size_t index) {
     }
 
     EnsureSidebarCurrentPageVisible();
+    StopSmoothScroll();
     const int toolbarHeight = ReservedToolbarHeight();
     const int canvasTop = toolbarHeight;
     const int canvasHeight = std::max(1, static_cast<int>(clientRect.bottom - clientRect.top) - toolbarHeight);
@@ -97,12 +101,120 @@ RECT App::CanvasRect(RECT clientRect) const {
 }
 
 void App::PanBy(float dx, float dy) {
+    StopSmoothScroll();
+    ApplyPanDelta(dx, dy);
+}
+
+void App::ApplyPanDelta(float dx, float dy) {
     panX_ += dx;
     panY_ += dy;
-    InvalidateRect(window_, nullptr, FALSE);
+    InvalidateViewport();
+}
+
+void App::SmoothPanBy(float dx, float dy) {
+    if (window_ == nullptr) {
+        ApplyPanDelta(dx, dy);
+        return;
+    }
+
+    const bool wasActive = smoothScrollActive_;
+    if (!smoothScrollActive_) {
+        smoothScrollTargetPanX_ = panX_;
+        smoothScrollTargetPanY_ = panY_;
+    }
+    smoothScrollTargetPanX_ += dx;
+    smoothScrollTargetPanY_ += dy;
+    if (!wasActive) {
+        StartSmoothScrollTimer();
+    }
+}
+
+void App::StartSmoothScrollTimer() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    if (smoothScrollActive_) {
+        return;
+    }
+
+    smoothScrollActive_ = true;
+    smoothScrollLastMs_ = GetTickCount64();
+    if (!smoothScrollTimerResolutionActive_ && timeBeginPeriod(1) == TIMERR_NOERROR) {
+        smoothScrollTimerResolutionActive_ = true;
+    }
+    SetTimer(window_, kSmoothScrollTimerId, kSmoothScrollFrameMs, nullptr);
+}
+
+void App::StopSmoothScroll() {
+    if (window_ != nullptr) {
+        KillTimer(window_, kSmoothScrollTimerId);
+    }
+    if (smoothScrollTimerResolutionActive_) {
+        timeEndPeriod(1);
+        smoothScrollTimerResolutionActive_ = false;
+    }
+    smoothScrollActive_ = false;
+    smoothScrollLastMs_ = 0;
+    smoothScrollTargetPanX_ = panX_;
+    smoothScrollTargetPanY_ = panY_;
+}
+
+void App::HandleSmoothScrollTimer() {
+    if (window_ == nullptr || !smoothScrollActive_) {
+        StopSmoothScroll();
+        return;
+    }
+    if (IsDocumentInteractionActive() || isPanning_) {
+        StopSmoothScroll();
+        return;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    const float dt = smoothScrollLastMs_ == 0
+        ? (static_cast<float>(kSmoothScrollFrameMs) / 1000.0f)
+        : std::clamp(static_cast<float>(now - smoothScrollLastMs_) / 1000.0f, 0.001f, 0.050f);
+    smoothScrollLastMs_ = now;
+
+    const float dx = smoothScrollTargetPanX_ - panX_;
+    const float dy = smoothScrollTargetPanY_ - panY_;
+    if ((dx * dx) + (dy * dy) <= (kSmoothScrollSnapPixels * kSmoothScrollSnapPixels)) {
+        panX_ = smoothScrollTargetPanX_;
+        panY_ = smoothScrollTargetPanY_;
+        StopSmoothScroll();
+        InvalidateViewport();
+        return;
+    }
+
+    const float step = 1.0f - std::exp(-kSmoothScrollFollowSpeed * dt);
+    float nextPanX = panX_ + (dx * step);
+    float nextPanY = panY_ + (dy * step);
+
+    const auto forceVisiblePixelStep = [](float current, float next, float target) {
+        const int currentPixel = static_cast<int>(std::lround(current));
+        const int nextPixel = static_cast<int>(std::lround(next));
+        const int targetPixel = static_cast<int>(std::lround(target));
+        if (nextPixel != currentPixel || targetPixel == currentPixel) {
+            return next;
+        }
+        const int direction = targetPixel > currentPixel ? 1 : -1;
+        return static_cast<float>(currentPixel + direction);
+    };
+
+    nextPanX = forceVisiblePixelStep(panX_, nextPanX, smoothScrollTargetPanX_);
+    nextPanY = forceVisiblePixelStep(panY_, nextPanY, smoothScrollTargetPanY_);
+
+    const bool visiblePanChanged = static_cast<int>(std::lround(nextPanX)) != static_cast<int>(std::lround(panX_))
+        || static_cast<int>(std::lround(nextPanY)) != static_cast<int>(std::lround(panY_));
+    panX_ = nextPanX;
+    panY_ = nextPanY;
+    if (visiblePanChanged) {
+        InvalidateViewport();
+    }
 }
 
 void App::SetZoom(float zoom, std::optional<POINT> anchor) {
+    StopSmoothScroll();
     if (window_ == nullptr) {
         zoom_ = std::clamp(zoom, kMinZoom, kMaxZoom);
         targetZoom_ = zoom_;
@@ -348,6 +460,7 @@ bool App::ApplyZoomPreset(std::size_t presetIndex) {
     if (toolbarZoomEditing_) {
         CancelToolbarZoomInput();
     }
+    StopSmoothScroll();
     BeginZoomSession(*anchor);
     zoom_ = clampedZoom;
     targetZoom_ = clampedZoom;
@@ -387,6 +500,7 @@ void App::BeginZoomSession(POINT cursor) {
 }
 
 void App::ZoomAt(int delta, POINT cursor) {
+    StopSmoothScroll();
     const float factor = delta > 0 ? 1.1f : 0.9f;
     const float newZoom = std::clamp(zoom_ * factor, kMinZoom, kMaxZoom);
 
