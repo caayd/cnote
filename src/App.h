@@ -42,6 +42,11 @@ public:
         Erase,
     };
 
+    enum class DrawCursorKind {
+        Dot,
+        PrecisionCrosshair,
+    };
+
     enum class SelectionMode {
         Box,
         Lasso,
@@ -216,6 +221,7 @@ public:
         std::size_t paletteIndex = 0;
         float drawBrushSize = 3.0f;
         float eraseBrushSize = 3.0f;
+        DrawCursorKind drawCursorKind = DrawCursorKind::Dot;
         float drawCursorSize = 8.0f;
         float inputSpacing = 0.85f;
         float inputSmoothing = 0.3f;

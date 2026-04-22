@@ -8129,6 +8129,11 @@ HCURSOR App::EraserCursorForCurrentSize() {
 
 HCURSOR App::DrawCursorForCurrentSize(RECT clientRect) {
     static_cast<void>(clientRect);
+    if (settings_.drawCursorKind == DrawCursorKind::PrecisionCrosshair) {
+        ReleaseDrawCursor();
+        return LoadCursorW(nullptr, IDC_CROSS);
+    }
+
     const int diameter = std::max(
         1,
         static_cast<int>(std::lround(std::clamp(settings_.drawCursorSize, kMinDrawCursorDiameterPixels, kMaxDrawCursorDiameterPixels))));

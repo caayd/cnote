@@ -45,6 +45,7 @@ using ui::HslColor;
 using ui::kButtonFill;
 using ui::kButtonFillActive;
 using ui::kButtonFillHover;
+using ui::kInputFill;
 using ui::kPanelBorder;
 using ui::kPanelFill;
 using ui::kScrollbarGap;
@@ -92,6 +93,7 @@ constexpr int kIdDashGapSlider = 211;
 constexpr int kIdEmbedProjectInPdfSwitch = 212;
 constexpr int kIdDrawCursorSizeSlider = 213;
 constexpr int kIdZoomPresetBase = 300;
+constexpr UINT kDrawCursorKindMenuBase = 500;
 
 struct SettingsWindowLayout {
     RECT tabRail {};
@@ -128,6 +130,8 @@ struct SettingsWindowLayout {
     RECT spacingSliderRect {};
     RECT strokeSmoothingLabelRect {};
     RECT strokeSmoothingSliderRect {};
+    RECT drawCursorKindLabelRect {};
+    RECT drawCursorKindComboRect {};
     RECT drawCursorSizeLabelRect {};
     RECT drawCursorSizeSliderRect {};
     RECT dashPreviewRect {};
@@ -219,6 +223,32 @@ std::wstring FormatPixelLabel(const wchar_t* prefix, float value) {
     return buffer;
 }
 
+int DrawCursorKindComboIndex(App::DrawCursorKind kind) {
+    switch (kind) {
+    case App::DrawCursorKind::PrecisionCrosshair:
+        return 1;
+    case App::DrawCursorKind::Dot:
+    default:
+        return 0;
+    }
+}
+
+App::DrawCursorKind DrawCursorKindFromComboIndex(int index) {
+    return index == 1
+        ? App::DrawCursorKind::PrecisionCrosshair
+        : App::DrawCursorKind::Dot;
+}
+
+std::wstring DrawCursorKindLabel(App::DrawCursorKind kind) {
+    switch (kind) {
+    case App::DrawCursorKind::PrecisionCrosshair:
+        return L"Precision Crosshair";
+    case App::DrawCursorKind::Dot:
+    default:
+        return L"Dot";
+    }
+}
+
 std::wstring FormatAutoSaveLabel(unsigned int seconds) {
     if (seconds == 0U) {
         return L"Auto Save: Off";
@@ -277,7 +307,7 @@ RECT UnionRectCopy(const RECT& a, const RECT& b) {
     return out;
 }
 
-SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, UINT dpi) {
+SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, UINT dpi, bool showDotCursorSize) {
     SettingsWindowLayout layout {};
     const auto px = [dpi](int value) {
         return ScaleForDpi(value, dpi);
@@ -422,9 +452,18 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, UINT dpi) {
     layout.spacingSliderRect = MakeRect(drawingSliderLeft, layout.spacingLabelRect.bottom + px(4), drawingSliderRight, layout.spacingLabelRect.bottom + px(32));
     layout.strokeSmoothingLabelRect = MakeRect(drawingSliderLeft, layout.spacingSliderRect.bottom + px(16), drawingSliderRight, layout.spacingSliderRect.bottom + px(34));
     layout.strokeSmoothingSliderRect = MakeRect(drawingSliderLeft, layout.strokeSmoothingLabelRect.bottom + px(4), drawingSliderRight, layout.strokeSmoothingLabelRect.bottom + px(32));
-    layout.drawCursorSizeLabelRect = MakeRect(drawingSliderLeft, layout.strokeSmoothingSliderRect.bottom + px(16), drawingSliderRight, layout.strokeSmoothingSliderRect.bottom + px(34));
-    layout.drawCursorSizeSliderRect = MakeRect(drawingSliderLeft, layout.drawCursorSizeLabelRect.bottom + px(4), drawingSliderRight, layout.drawCursorSizeLabelRect.bottom + px(32));
-    layout.dashPreviewRect = MakeRect(drawingSliderLeft, layout.drawCursorSizeSliderRect.bottom + px(18), drawingSliderRight, layout.drawCursorSizeSliderRect.bottom + px(70));
+    layout.drawCursorKindLabelRect = MakeRect(drawingSliderLeft, layout.strokeSmoothingSliderRect.bottom + px(16), drawingSliderRight, layout.strokeSmoothingSliderRect.bottom + px(34));
+    layout.drawCursorKindComboRect = MakeRect(drawingSliderLeft, layout.drawCursorKindLabelRect.bottom + px(4), drawingSliderRight, layout.drawCursorKindLabelRect.bottom + px(30));
+    int dashPreviewTop = layout.drawCursorKindComboRect.bottom + px(18);
+    if (showDotCursorSize) {
+        layout.drawCursorSizeLabelRect = MakeRect(drawingSliderLeft, layout.drawCursorKindComboRect.bottom + px(16), drawingSliderRight, layout.drawCursorKindComboRect.bottom + px(34));
+        layout.drawCursorSizeSliderRect = MakeRect(drawingSliderLeft, layout.drawCursorSizeLabelRect.bottom + px(4), drawingSliderRight, layout.drawCursorSizeLabelRect.bottom + px(32));
+        dashPreviewTop = layout.drawCursorSizeSliderRect.bottom + px(18);
+    } else {
+        layout.drawCursorSizeLabelRect = MakeRect(drawingSliderLeft, dashPreviewTop, drawingSliderRight, dashPreviewTop);
+        layout.drawCursorSizeSliderRect = layout.drawCursorSizeLabelRect;
+    }
+    layout.dashPreviewRect = MakeRect(drawingSliderLeft, dashPreviewTop, drawingSliderRight, dashPreviewTop + px(52));
     layout.dashLengthLabelRect = MakeRect(drawingSliderLeft, layout.dashPreviewRect.bottom + px(16), drawingSliderRight, layout.dashPreviewRect.bottom + px(34));
     layout.dashLengthSliderRect = MakeRect(drawingSliderLeft, layout.dashLengthLabelRect.bottom + px(4), drawingSliderRight, layout.dashLengthLabelRect.bottom + px(32));
     layout.dashGapLabelRect = MakeRect(drawingSliderLeft, layout.dashLengthSliderRect.bottom + px(16), drawingSliderRight, layout.dashLengthSliderRect.bottom + px(34));
@@ -722,6 +761,7 @@ void SettingsWindow::CreateControls() {
     spacingSlider_ = createSlider(kIdSpacingSlider, 0, 0, ScaleForDpi(320, dpi), ScaleForDpi(30, dpi));
     strokeSmoothingLabel_ = createLabel(L"Stroke Smoothing", 0, 0, ScaleForDpi(260, dpi), ScaleForDpi(20, dpi));
     strokeSmoothingSlider_ = createSlider(kIdStrokeSmoothingSlider, 0, 0, ScaleForDpi(320, dpi), ScaleForDpi(30, dpi));
+    drawCursorKindLabel_ = createLabel(L"Draw Cursor", 0, 0, ScaleForDpi(260, dpi), ScaleForDpi(20, dpi));
     drawCursorSizeLabel_ = createLabel(L"Draw Cursor Size", 0, 0, ScaleForDpi(260, dpi), ScaleForDpi(20, dpi));
     drawCursorSizeSlider_ = createSlider(kIdDrawCursorSizeSlider, 0, 0, ScaleForDpi(320, dpi), ScaleForDpi(30, dpi));
     dashLengthLabel_ = createLabel(L"Dash Length", 0, 0, ScaleForDpi(260, dpi), ScaleForDpi(20, dpi));
@@ -831,7 +871,7 @@ void SettingsWindow::RebuildDpiResources(UINT dpi) {
     backgroundBrush_ = CreateSolidBrush(kWindowBackground);
     panelBrush_ = CreateSolidBrush(kPanelFill);
     std::vector<HWND> controls;
-    controls.reserve(44);
+    controls.reserve(45);
     controls.insert(controls.end(), categoryButtons_.begin(), categoryButtons_.end());
     controls.push_back(paletteList_);
     controls.push_back(addColorButton_);
@@ -855,6 +895,7 @@ void SettingsWindow::RebuildDpiResources(UINT dpi) {
     controls.push_back(spacingSlider_);
     controls.push_back(strokeSmoothingLabel_);
     controls.push_back(strokeSmoothingSlider_);
+    controls.push_back(drawCursorKindLabel_);
     controls.push_back(drawCursorSizeLabel_);
     controls.push_back(drawCursorSizeSlider_);
     controls.push_back(dashLengthLabel_);
@@ -900,9 +941,9 @@ void SettingsWindow::LayoutControls() {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi(), app_.settings_.drawCursorKind == App::DrawCursorKind::Dot);
 
-    HDWP deferred = BeginDeferWindowPos(48);
+    HDWP deferred = BeginDeferWindowPos(49);
     for (std::size_t index = 0; index < categoryButtons_.size(); ++index) {
         DeferMoveControl(deferred, categoryButtons_[index], layout.categoryButtons[index]);
     }
@@ -928,6 +969,7 @@ void SettingsWindow::LayoutControls() {
     DeferMoveControl(deferred, spacingSlider_, layout.spacingSliderRect);
     DeferMoveControl(deferred, strokeSmoothingLabel_, layout.strokeSmoothingLabelRect);
     DeferMoveControl(deferred, strokeSmoothingSlider_, layout.strokeSmoothingSliderRect);
+    DeferMoveControl(deferred, drawCursorKindLabel_, layout.drawCursorKindLabelRect);
     DeferMoveControl(deferred, drawCursorSizeLabel_, layout.drawCursorSizeLabelRect);
     DeferMoveControl(deferred, drawCursorSizeSlider_, layout.drawCursorSizeSliderRect);
     DeferMoveControl(deferred, dashLengthLabel_, layout.dashLengthLabelRect);
@@ -1029,7 +1071,9 @@ void SettingsWindow::RefreshVisibleControls() {
     setVisible(spacingSlider_, false);
     setVisible(strokeSmoothingLabel_, showDrawing);
     setVisible(strokeSmoothingSlider_, false);
-    setVisible(drawCursorSizeLabel_, showDrawing);
+    setVisible(drawCursorKindLabel_, showDrawing);
+    const bool showDotCursorSize = showDrawing && app_.settings_.drawCursorKind == App::DrawCursorKind::Dot;
+    setVisible(drawCursorSizeLabel_, showDotCursorSize);
     setVisible(drawCursorSizeSlider_, false);
     setVisible(dashLengthLabel_, showDrawing);
     setVisible(dashLengthSlider_, false);
@@ -1074,7 +1118,7 @@ void SettingsWindow::BeginHexColorEdit() {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi(), app_.settings_.drawCursorKind == App::DrawCursorKind::Dot);
     InvalidateWindowRegion(layout.colorPreviewRect);
 }
 
@@ -1100,7 +1144,7 @@ void SettingsWindow::CommitHexColorEdit(bool applyChanges) {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi(), app_.settings_.drawCursorKind == App::DrawCursorKind::Dot);
     InvalidateWindowRegion(layout.colorPreviewRect);
     InvalidateSliderPresentation(SliderKind::Hue);
     InvalidateSliderPresentation(SliderKind::Saturation);
@@ -1124,7 +1168,7 @@ void SettingsWindow::InvalidateSliderPresentation(SliderKind kind) {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi(), app_.settings_.drawCursorKind == App::DrawCursorKind::Dot);
 
     RECT dirtyRect {};
     switch (kind) {
@@ -1520,7 +1564,12 @@ void SettingsWindow::HandleHScroll(LPARAM lParam) {
 
 HBRUSH SettingsWindow::HandleControlColor(HDC hdc, HWND control) {
     const bool isZoomEdit = std::find(zoomPresetEdits_.begin(), zoomPresetEdits_.end(), control) != zoomPresetEdits_.end();
-    if (isZoomEdit || control == hexColorEdit_ || control == savedPaletteNameEdit_ || control == savedPaletteList_ || control == paletteList_ || control == shortcutList_) {
+    if (isZoomEdit
+        || control == hexColorEdit_
+        || control == savedPaletteNameEdit_
+        || control == savedPaletteList_
+        || control == paletteList_
+        || control == shortcutList_) {
         SetBkMode(hdc, OPAQUE);
         SetBkColor(hdc, kPanelFill);
         SetTextColor(hdc, kTextPrimary);
@@ -1542,7 +1591,7 @@ void SettingsWindow::PaintWindow() {
     HBITMAP bitmap = CreateCompatibleBitmap(windowDc, clientRect.right, clientRect.bottom);
     HGDIOBJ previousBitmap = SelectObject(memoryDc, bitmap);
     FillRect(memoryDc, &clientRect, backgroundBrush_);
-    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi(), app_.settings_.drawCursorKind == App::DrawCursorKind::Dot);
 
     SetBkMode(memoryDc, TRANSPARENT);
     HGDIOBJ previousFont = SelectObject(memoryDc, titleFont_ != nullptr ? titleFont_ : font_);
@@ -1657,6 +1706,31 @@ void SettingsWindow::PaintWindow() {
         paintSlider(SliderKind::Saturation, layout.greenSliderRect, 0, 100);
         paintSlider(SliderKind::Lightness, layout.blueSliderRect, 0, 100);
     } else if (activeCategory_ == Category::Drawing) {
+        FillRoundedRect(memoryDc, layout.drawCursorKindComboRect, kInputFill);
+        StrokeRoundedRect(memoryDc, layout.drawCursorKindComboRect, kPanelBorder, 1);
+        RECT cursorKindTextRect = layout.drawCursorKindComboRect;
+        cursorKindTextRect.left += Scale(12);
+        cursorKindTextRect.right -= Scale(30);
+        SetTextColor(memoryDc, kTextPrimary);
+        const std::wstring cursorKindLabel = DrawCursorKindLabel(app_.settings_.drawCursorKind);
+        DrawTextW(memoryDc, cursorKindLabel.c_str(), -1, &cursorKindTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        const int cursorKindArrowCenterX = layout.drawCursorKindComboRect.right - Scale(16);
+        const int cursorKindArrowCenterY = (layout.drawCursorKindComboRect.top + layout.drawCursorKindComboRect.bottom) / 2;
+        POINT cursorKindArrow[3] {
+            { cursorKindArrowCenterX - Scale(4), cursorKindArrowCenterY - Scale(2) },
+            { cursorKindArrowCenterX + Scale(4), cursorKindArrowCenterY - Scale(2) },
+            { cursorKindArrowCenterX, cursorKindArrowCenterY + Scale(3) },
+        };
+        HBRUSH arrowBrush = CreateSolidBrush(kTextPrimary);
+        HPEN arrowPen = CreatePen(PS_SOLID, 1, kTextPrimary);
+        HGDIOBJ previousArrowBrush = SelectObject(memoryDc, arrowBrush);
+        HGDIOBJ previousArrowPen = SelectObject(memoryDc, arrowPen);
+        Polygon(memoryDc, cursorKindArrow, 3);
+        SelectObject(memoryDc, previousArrowPen);
+        SelectObject(memoryDc, previousArrowBrush);
+        DeleteObject(arrowPen);
+        DeleteObject(arrowBrush);
+
         FillRoundedRect(memoryDc, layout.dashPreviewRect, RGB(18, 24, 32));
         StrokeRoundedRect(memoryDc, layout.dashPreviewRect, kPanelBorder, 1);
         SetTextColor(memoryDc, kTextMuted);
@@ -1694,7 +1768,9 @@ void SettingsWindow::PaintWindow() {
         paintSlider(SliderKind::Stabilization, layout.stabilizationSliderRect, 5, 95);
         paintSlider(SliderKind::Spacing, layout.spacingSliderRect, 5, 405);
         paintSlider(SliderKind::StrokeSmoothing, layout.strokeSmoothingSliderRect, 0, 100);
-        paintSlider(SliderKind::DrawCursorSize, layout.drawCursorSizeSliderRect, 4, 24);
+        if (app_.settings_.drawCursorKind == App::DrawCursorKind::Dot) {
+            paintSlider(SliderKind::DrawCursorSize, layout.drawCursorSizeSliderRect, 4, 24);
+        }
         paintSlider(SliderKind::DashLength, layout.dashLengthSliderRect, 5, 80);
         paintSlider(SliderKind::DashGap, layout.dashGapSliderRect, 5, 80);
         paintSlider(SliderKind::AutoSave, layout.autoSaveSliderRect, 0, 300);
@@ -1932,6 +2008,49 @@ void SettingsWindow::DrawShortcutItem(const DRAWITEMSTRUCT& drawItem) {
     SetTextColor(drawItem.hDC, kTextPrimary);
     SelectObject(drawItem.hDC, font_);
     DrawTextW(drawItem.hDC, buffer, -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+void SettingsWindow::OpenDrawCursorKindMenu() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi(), app_.settings_.drawCursorKind == App::DrawCursorKind::Dot);
+
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+
+    const int selectedIndex = DrawCursorKindComboIndex(app_.settings_.drawCursorKind);
+    AppendMenuW(menu, MF_STRING | (selectedIndex == 0 ? MF_CHECKED : 0), kDrawCursorKindMenuBase, L"Dot");
+    AppendMenuW(menu, MF_STRING | (selectedIndex == 1 ? MF_CHECKED : 0), kDrawCursorKindMenuBase + 1U, L"Precision Crosshair");
+
+    POINT anchor { layout.drawCursorKindComboRect.left, layout.drawCursorKindComboRect.bottom };
+    ClientToScreen(window_, &anchor);
+    const UINT command = TrackPopupMenuEx(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY, anchor.x, anchor.y, window_, nullptr);
+    DestroyMenu(menu);
+
+    if (command < kDrawCursorKindMenuBase || command > kDrawCursorKindMenuBase + 1U) {
+        RedrawWindow(window_, &layout.drawCursorKindComboRect, nullptr, RDW_INVALIDATE | RDW_NOERASE);
+        return;
+    }
+
+    const App::DrawCursorKind nextKind = DrawCursorKindFromComboIndex(static_cast<int>(command - kDrawCursorKindMenuBase));
+    if (app_.settings_.drawCursorKind == nextKind) {
+        RedrawWindow(window_, &layout.drawCursorKindComboRect, nullptr, RDW_INVALIDATE | RDW_NOERASE);
+        return;
+    }
+
+    app_.settings_.drawCursorKind = nextKind;
+    app_.ReleaseDrawCursor();
+    app_.SaveAppSettings();
+    app_.RefreshCursor();
+    LayoutControls();
+    RefreshVisibleControls();
+    RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_NOERASE);
 }
 
 void SettingsWindow::HandleShortcutSelectionChanged() {
@@ -2217,7 +2336,7 @@ void SettingsWindow::UpdateSliderFromPoint(SliderKind kind, POINT cursor) {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi(), app_.settings_.drawCursorKind == App::DrawCursorKind::Dot);
     RECT sliderRect {};
     int minimum = 0;
     int maximum = 100;
@@ -2291,7 +2410,7 @@ std::optional<SettingsWindow::SliderKind> SettingsWindow::HitTestSlider(POINT cu
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+    const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi(), app_.settings_.drawCursorKind == App::DrawCursorKind::Dot);
 
     if (activeCategory_ == Category::Palette) {
         const std::array<std::pair<SliderKind, RECT>, 3> sliders {{
@@ -2311,15 +2430,17 @@ std::optional<SettingsWindow::SliderKind> SettingsWindow::HitTestSlider(POINT cu
     }
 
     if (activeCategory_ == Category::Drawing) {
-        const std::array<std::pair<SliderKind, RECT>, 7> sliders {{
+        std::vector<std::pair<SliderKind, RECT>> sliders {
             { SliderKind::Stabilization, layout.stabilizationSliderRect },
             { SliderKind::Spacing, layout.spacingSliderRect },
             { SliderKind::StrokeSmoothing, layout.strokeSmoothingSliderRect },
-            { SliderKind::DrawCursorSize, layout.drawCursorSizeSliderRect },
             { SliderKind::DashLength, layout.dashLengthSliderRect },
             { SliderKind::DashGap, layout.dashGapSliderRect },
             { SliderKind::AutoSave, layout.autoSaveSliderRect },
-        }};
+        };
+        if (app_.settings_.drawCursorKind == App::DrawCursorKind::Dot) {
+            sliders.push_back({ SliderKind::DrawCursorSize, layout.drawCursorSizeSliderRect });
+        }
         for (const auto& [kind, rect] : sliders) {
             RECT hitRect = rect;
             hitRect.top -= Scale(4);
@@ -2385,7 +2506,7 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
             ScreenToClient(window_, &cursor);
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
-            const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+            const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi(), app_.settings_.drawCursorKind == App::DrawCursorKind::Dot);
             const RECT shortcutListRect = ControlRectInParent(shortcutList_, window_);
             const RECT shortcutTrackRect = MakeRect(
                 shortcutListRect.right + Scale(kScrollbarGap),
@@ -2403,7 +2524,7 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         RECT clientRect {};
         GetClientRect(window_, &clientRect);
-        const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+        const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi(), app_.settings_.drawCursorKind == App::DrawCursorKind::Dot);
 
         if (editingHexColor_ && PtInRect(&layout.hexColorEditRect, cursor) == 0) {
             CommitHexColorEdit(true);
@@ -2438,6 +2559,10 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
             BeginHexColorEdit();
             return 0;
         }
+        if (activeCategory_ == Category::Drawing && PtInRect(&layout.drawCursorKindComboRect, cursor) != 0) {
+            OpenDrawCursorKindMenu();
+            return 0;
+        }
         if (const auto slider = HitTestSlider(cursor); slider.has_value()) {
             draggingSlider_ = slider;
             SetCapture(window_);
@@ -2450,7 +2575,7 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
         if (draggingShortcutScrollbar_) {
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
-            const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+            const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi(), app_.settings_.drawCursorKind == App::DrawCursorKind::Dot);
             const RECT shortcutListRect = ControlRectInParent(shortcutList_, window_);
             const RECT shortcutTrackRect = MakeRect(
                 shortcutListRect.right + Scale(kScrollbarGap),
@@ -2580,7 +2705,7 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
     {
         RECT clientRect {};
         GetClientRect(window_, &clientRect);
-        const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi());
+        const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi(), app_.settings_.drawCursorKind == App::DrawCursorKind::Dot);
         InvalidateWindowRegion(layout.shortcutListSection);
         return 0;
     }

@@ -65,6 +65,7 @@ private:
     void DrawPaletteItem(const DRAWITEMSTRUCT& drawItem);
     void DrawSavedPaletteItem(const DRAWITEMSTRUCT& drawItem);
     void DrawShortcutItem(const DRAWITEMSTRUCT& drawItem);
+    void OpenDrawCursorKindMenu();
     void HandleShortcutSelectionChanged();
     void HandleSavedPaletteSelectionChanged(bool syncNameField);
     void BeginShortcutCapture();
@@ -112,6 +113,7 @@ private:
     HWND spacingLabel_ = nullptr;
     HWND strokeSmoothingSlider_ = nullptr;
     HWND strokeSmoothingLabel_ = nullptr;
+    HWND drawCursorKindLabel_ = nullptr;
     HWND drawCursorSizeSlider_ = nullptr;
     HWND drawCursorSizeLabel_ = nullptr;
     HWND dashLengthSlider_ = nullptr;

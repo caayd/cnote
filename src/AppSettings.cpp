@@ -128,6 +128,26 @@ std::vector<std::string> SplitAscii(std::string_view value, char delimiter) {
     return parts;
 }
 
+std::string DrawCursorKindConfigName(App::DrawCursorKind kind) {
+    switch (kind) {
+    case App::DrawCursorKind::PrecisionCrosshair:
+        return "precision_crosshair";
+    case App::DrawCursorKind::Dot:
+    default:
+        return "dot";
+    }
+}
+
+std::optional<App::DrawCursorKind> ParseDrawCursorKindConfigName(std::string_view name) {
+    if (name == "dot") {
+        return App::DrawCursorKind::Dot;
+    }
+    if (name == "precision_crosshair") {
+        return App::DrawCursorKind::PrecisionCrosshair;
+    }
+    return std::nullopt;
+}
+
 std::optional<unsigned int> ParseUnsignedInt(std::string_view value, int base = 10);
 
 std::optional<std::vector<std::uint32_t>> ParsePaletteColors(std::string_view value) {
@@ -704,6 +724,13 @@ void App::LoadAppSettings() {
             continue;
         }
 
+        if (key == "draw_cursor_kind") {
+            if (const auto parsed = ParseDrawCursorKindConfigName(value); parsed.has_value()) {
+                settings_.drawCursorKind = *parsed;
+            }
+            continue;
+        }
+
         if (key == "input_spacing") {
             if (const auto parsed = ParseFloat(value); parsed.has_value()) {
                 settings_.inputSpacing = std::clamp(*parsed, 0.05f, 4.05f);
@@ -885,6 +912,7 @@ void App::SaveAppSettings() const {
     }
     output << "draw_brush_size=" << settings_.drawBrushSize << '\n';
     output << "erase_brush_size=" << settings_.eraseBrushSize << '\n';
+    output << "draw_cursor_kind=" << DrawCursorKindConfigName(settings_.drawCursorKind) << '\n';
     output << "draw_cursor_size=" << settings_.drawCursorSize << '\n';
     output << "input_smoothing=" << settings_.inputSmoothing << '\n';
     output << "input_spacing=" << settings_.inputSpacing << '\n';
