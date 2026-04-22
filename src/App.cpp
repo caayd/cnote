@@ -258,7 +258,7 @@ bool StrokeStyleEqual(const StrokeStyle& a, const StrokeStyle& b) {
 }
 
 bool StrokeEqual(const Stroke& a, const Stroke& b) {
-    if (!StrokeStyleEqual(a.style, b.style) || a.points.size() != b.points.size()) {
+    if (!StrokeStyleEqual(a.style, b.style) || a.smoothing != b.smoothing || a.points.size() != b.points.size()) {
         return false;
     }
 
@@ -2480,19 +2480,26 @@ std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float str
     return smoothed;
 }
 
+float StrokeRenderSmoothing(const Stroke& stroke, float fallbackSmoothing) {
+    const float smoothing = std::isfinite(stroke.smoothing) ? stroke.smoothing : fallbackSmoothing;
+    return std::clamp(smoothing, 0.0f, 1.0f);
+}
+
+std::vector<Vec2> StrokeRenderPoints(const Stroke& stroke, float fallbackSmoothing) {
+    return BuildSmoothedPoints(stroke.points, StrokeRenderSmoothing(stroke, fallbackSmoothing));
+}
+
 std::optional<RECT> StrokeRenderBoundsRect(
     const Stroke& stroke,
     float scale,
-    bool smoothLiveStroke,
+    bool,
     float strokeSmoothing,
     int extraPadding = 0) {
     if (stroke.points.empty() || scale <= 0.0f) {
         return std::nullopt;
     }
 
-    const std::vector<Vec2> renderPoints = smoothLiveStroke
-        ? BuildSmoothedPoints(stroke.points, strokeSmoothing)
-        : stroke.points;
+    const std::vector<Vec2> renderPoints = StrokeRenderPoints(stroke, strokeSmoothing);
     if (renderPoints.empty()) {
         return std::nullopt;
     }
@@ -2636,18 +2643,19 @@ bool PointInPolygon(Vec2 point, const std::vector<Vec2>& polygon) {
     return inside;
 }
 
-bool StrokeHitsPoint(const Stroke& stroke, Vec2 point, float radius) {
+bool StrokeHitsPoint(const Stroke& stroke, Vec2 point, float radius, float fallbackSmoothing) {
     const float radiusSquared = radius * radius;
-    if (stroke.points.empty()) {
+    const std::vector<Vec2> points = StrokeRenderPoints(stroke, fallbackSmoothing);
+    if (points.empty()) {
         return false;
     }
 
-    if (DistanceSquared(stroke.points.front(), point) <= radiusSquared) {
+    if (DistanceSquared(points.front(), point) <= radiusSquared) {
         return true;
     }
 
-    for (std::size_t index = 1; index < stroke.points.size(); ++index) {
-        if (DistancePointToSegmentSquared(point, stroke.points[index - 1], stroke.points[index]) <= radiusSquared) {
+    for (std::size_t index = 1; index < points.size(); ++index) {
+        if (DistancePointToSegmentSquared(point, points[index - 1], points[index]) <= radiusSquared) {
             return true;
         }
     }
@@ -2655,8 +2663,9 @@ bool StrokeHitsPoint(const Stroke& stroke, Vec2 point, float radius) {
     return false;
 }
 
-bool StrokeIntersectsRectSelection(const Stroke& stroke, Vec2 a, Vec2 b) {
-    if (stroke.points.empty()) {
+bool StrokeIntersectsRectSelection(const Stroke& stroke, Vec2 a, Vec2 b, float fallbackSmoothing) {
+    const std::vector<Vec2> points = StrokeRenderPoints(stroke, fallbackSmoothing);
+    if (points.empty()) {
         return false;
     }
 
@@ -2665,14 +2674,14 @@ bool StrokeIntersectsRectSelection(const Stroke& stroke, Vec2 a, Vec2 b) {
     const float right = std::max(a.x, b.x);
     const float bottom = std::max(a.y, b.y);
 
-    for (const Vec2& point : stroke.points) {
+    for (const Vec2& point : points) {
         if (PointInRectF(point, left, top, right, bottom)) {
             return true;
         }
     }
 
-    for (std::size_t index = 1; index < stroke.points.size(); ++index) {
-        if (SegmentIntersectsRectF(stroke.points[index - 1], stroke.points[index], left, top, right, bottom)) {
+    for (std::size_t index = 1; index < points.size(); ++index) {
+        if (SegmentIntersectsRectF(points[index - 1], points[index], left, top, right, bottom)) {
             return true;
         }
     }
@@ -2680,20 +2689,21 @@ bool StrokeIntersectsRectSelection(const Stroke& stroke, Vec2 a, Vec2 b) {
     return false;
 }
 
-bool StrokeIntersectsPolygonSelection(const Stroke& stroke, const std::vector<Vec2>& polygon) {
-    if (stroke.points.empty() || polygon.size() < 3U) {
+bool StrokeIntersectsPolygonSelection(const Stroke& stroke, const std::vector<Vec2>& polygon, float fallbackSmoothing) {
+    const std::vector<Vec2> points = StrokeRenderPoints(stroke, fallbackSmoothing);
+    if (points.empty() || polygon.size() < 3U) {
         return false;
     }
 
-    for (const Vec2& point : stroke.points) {
+    for (const Vec2& point : points) {
         if (PointInPolygon(point, polygon)) {
             return true;
         }
     }
 
-    for (std::size_t index = 1; index < stroke.points.size(); ++index) {
-        const Vec2 strokeA = stroke.points[index - 1];
-        const Vec2 strokeB = stroke.points[index];
+    for (std::size_t index = 1; index < points.size(); ++index) {
+        const Vec2 strokeA = points[index - 1];
+        const Vec2 strokeB = points[index];
         for (std::size_t edgeIndex = 0; edgeIndex < polygon.size(); ++edgeIndex) {
             const Vec2 polyA = polygon[edgeIndex];
             const Vec2 polyB = polygon[(edgeIndex + 1U) % polygon.size()];
@@ -3657,7 +3667,7 @@ bool App::CursorHitsSelectedContent(POINT cursor) const {
 
     if (pageIndex < selectedStrokeIndices_.size()) {
         for (std::size_t strokeIndex : selectedStrokeIndices_[pageIndex]) {
-            if (strokeIndex < page.strokes.size() && StrokeHitsPoint(page.strokes[strokeIndex], pagePoint, hitRadius)) {
+            if (strokeIndex < page.strokes.size() && StrokeHitsPoint(page.strokes[strokeIndex], pagePoint, hitRadius, settings_.strokeSmoothing)) {
                 return true;
             }
         }
@@ -5434,7 +5444,8 @@ void App::ExtendStroke(POINT cursor) {
 
     bool pointAppended = true;
     if (!activeFreehandStroke_->points.empty()) {
-        filteredPoint = Lerp(activeFreehandStroke_->points.back(), rawPoint, settings_.inputSmoothing);
+        const float followAmount = std::clamp(1.0f - settings_.inputSmoothing, 0.05f, 0.95f);
+        filteredPoint = Lerp(activeFreehandStroke_->points.back(), rawPoint, followAmount);
         if (Distance(filteredPoint, activeFreehandStroke_->points.back()) < inputSpacing) {
             pointAppended = false;
         }
@@ -5480,6 +5491,52 @@ void App::ExtendStroke(POINT cursor) {
     }
 }
 
+bool App::ExtendStrokeFromPointerHistory(WPARAM wParam) {
+    if (!isDrawing_ || activeTool_ != Tool::Draw || window_ == nullptr || !activeStroke_.has_value()) {
+        return false;
+    }
+
+    const UINT32 pointerId = GET_POINTERID_WPARAM(wParam);
+    if (activeStrokePointerId_.has_value() && *activeStrokePointerId_ != pointerId) {
+        return false;
+    }
+
+    UINT32 entryCount = 0;
+    static_cast<void>(GetPointerInfoHistory(pointerId, &entryCount, nullptr));
+    if (entryCount == 0U) {
+        POINTER_INFO pointerInfo {};
+        if (GetPointerInfo(pointerId, &pointerInfo) == FALSE) {
+            return false;
+        }
+
+        POINT cursor = pointerInfo.ptPixelLocation;
+        ScreenToClient(window_, &cursor);
+        activeStrokePointerId_ = pointerId;
+        ExtendStroke(cursor);
+        return true;
+    }
+
+    std::vector<POINTER_INFO> history(entryCount);
+    if (GetPointerInfoHistory(pointerId, &entryCount, history.data()) == FALSE || entryCount == 0U) {
+        return false;
+    }
+    history.resize(entryCount);
+    std::sort(history.begin(), history.end(), [](const POINTER_INFO& a, const POINTER_INFO& b) {
+        if (a.PerformanceCount != b.PerformanceCount) {
+            return a.PerformanceCount < b.PerformanceCount;
+        }
+        return a.frameId < b.frameId;
+    });
+
+    activeStrokePointerId_ = pointerId;
+    for (const POINTER_INFO& pointerInfo : history) {
+        POINT cursor = pointerInfo.ptPixelLocation;
+        ScreenToClient(window_, &cursor);
+        ExtendStroke(cursor);
+    }
+    return true;
+}
+
 void App::StartStrokeSegment(std::size_t pageIndex, Vec2 pagePoint) {
     if (pageIndex >= document_.PageCount()) {
         return;
@@ -5487,9 +5544,11 @@ void App::StartStrokeSegment(std::size_t pageIndex, Vec2 pagePoint) {
 
     activeStroke_ = Stroke {};
     activeStrokePageIndex_ = pageIndex;
+    activeStrokePointerId_.reset();
     activeStroke_->style.color = palette_.at(colorIndex_);
     activeStroke_->style.width = settings_.drawBrushSize;
     activeStroke_->style.dotted = DottedStrokeModifierPressed();
+    activeStroke_->smoothing = settings_.strokeSmoothing;
     activeStroke_->points.push_back(pagePoint);
     activeFreehandStroke_ = activeStroke_;
     isDrawing_ = true;
@@ -5519,7 +5578,6 @@ void App::EndStroke() {
         }
 
         Stroke finishedStroke = std::move(*activeStroke_);
-        finishedStroke.points = BuildSmoothedPoints(finishedStroke.points, settings_.strokeSmoothing);
         auto& strokes = document_.PageAt(*activeStrokePageIndex_).strokes;
         const std::size_t insertIndex = strokes.size();
         strokes.push_back(finishedStroke);
@@ -5540,6 +5598,7 @@ void App::EndStroke() {
     activeStroke_.reset();
     activeFreehandStroke_.reset();
     activeStrokePageIndex_.reset();
+    activeStrokePointerId_.reset();
     isDrawing_ = false;
     UpdateCaptureState();
     if (committedStroke.has_value() && committedPageIndex.has_value()) {
@@ -5659,12 +5718,12 @@ void App::EndSelection() {
             bool hit = false;
             if (effectiveSelectionMode == SelectionMode::Box) {
                 hit = clickSelection
-                    ? StrokeHitsPoint(stroke, currentPage, 10.0f / std::max(0.1f, pageView.scale))
-                    : StrokeIntersectsRectSelection(stroke, anchorPage, currentPage);
+                    ? StrokeHitsPoint(stroke, currentPage, 10.0f / std::max(0.1f, pageView.scale), settings_.strokeSmoothing)
+                    : StrokeIntersectsRectSelection(stroke, anchorPage, currentPage, settings_.strokeSmoothing);
             } else {
                 hit = (pagePolygon.size() < 3U)
-                    ? StrokeHitsPoint(stroke, currentPage, 10.0f / std::max(0.1f, pageView.scale))
-                    : StrokeIntersectsPolygonSelection(stroke, pagePolygon);
+                    ? StrokeHitsPoint(stroke, currentPage, 10.0f / std::max(0.1f, pageView.scale), settings_.strokeSmoothing)
+                    : StrokeIntersectsPolygonSelection(stroke, pagePolygon, settings_.strokeSmoothing);
             }
 
             if (hit && pageView.pageIndex < selectedStrokeIndices_.size()) {
@@ -6244,7 +6303,7 @@ void App::BeginMoveSelection(POINT cursor) {
 
     if (!clickedSelectionMoveGrip && pageIndex < selectedStrokeIndices_.size()) {
         for (std::size_t strokeIndex : selectedStrokeIndices_[pageIndex]) {
-            if (strokeIndex < page.strokes.size() && StrokeHitsPoint(page.strokes[strokeIndex], pagePoint, hitRadius)) {
+            if (strokeIndex < page.strokes.size() && StrokeHitsPoint(page.strokes[strokeIndex], pagePoint, hitRadius, settings_.strokeSmoothing)) {
                 clickedSelectedStroke = strokeIndex;
                 break;
             }
@@ -6270,7 +6329,7 @@ void App::BeginMoveSelection(POINT cursor) {
     if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()) {
         for (std::size_t strokeIndex = page.strokes.size(); strokeIndex > 0; --strokeIndex) {
             const std::size_t actualIndex = strokeIndex - 1U;
-            if (StrokeHitsPoint(page.strokes[actualIndex], pagePoint, hitRadius)) {
+            if (StrokeHitsPoint(page.strokes[actualIndex], pagePoint, hitRadius, settings_.strokeSmoothing)) {
                 clickedStroke = actualIndex;
                 break;
             }
@@ -6732,13 +6791,14 @@ bool App::EraseAt(POINT cursor) {
         }
 
         const Stroke& stroke = page.strokes[strokeIndex];
-        if (stroke.points.empty()) {
+        const std::vector<Vec2> strokePoints = StrokeRenderPoints(stroke, settings_.strokeSmoothing);
+        if (strokePoints.empty()) {
             continue;
         }
 
-        bool hit = DistancePointToSegmentSquared(stroke.points.front(), eraseStart, center) <= eraseRadiusSquared;
-        for (std::size_t index = 1; !hit && index < stroke.points.size(); ++index) {
-            hit = DistanceSegmentToSegmentSquared(eraseStart, center, stroke.points[index - 1], stroke.points[index]) <= eraseRadiusSquared;
+        bool hit = DistancePointToSegmentSquared(strokePoints.front(), eraseStart, center) <= eraseRadiusSquared;
+        for (std::size_t index = 1; !hit && index < strokePoints.size(); ++index) {
+            hit = DistanceSegmentToSegmentSquared(eraseStart, center, strokePoints[index - 1], strokePoints[index]) <= eraseRadiusSquared;
         }
 
         if (hit) {
@@ -10317,14 +10377,13 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     RestoreDC(hdc, -1);
 }
 
-void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke, bool fastPreview, float opacity) const {
+void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool, bool fastPreview, float opacity) const {
     if (stroke.points.empty()) {
         return;
     }
 
-    const std::vector<Vec2> smoothedPoints = smoothLiveStroke
-        ? BuildSmoothedPoints(stroke.points, settings_.strokeSmoothing)
-        : stroke.points;
+    const float strokeSmoothing = StrokeRenderSmoothing(stroke, settings_.strokeSmoothing);
+    const std::vector<Vec2> smoothedPoints = BuildSmoothedPoints(stroke.points, strokeSmoothing);
     const float penWidth = std::max(1.25f, stroke.style.width * pageView.scale / 2.15f);
 
     if (gdiplusToken_ != 0) {
@@ -10374,7 +10433,7 @@ void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, b
             graphics.DrawLines(&pen, screenPoints.data(), static_cast<INT>(screenPoints.size()));
         } else {
             Gdiplus::GraphicsPath path;
-            path.AddCurve(screenPoints.data(), static_cast<INT>(screenPoints.size()), 0.1f + (settings_.strokeSmoothing * 0.8f));
+            path.AddCurve(screenPoints.data(), static_cast<INT>(screenPoints.size()), 0.1f + (strokeSmoothing * 0.8f));
             graphics.DrawPath(&pen, &path);
         }
 

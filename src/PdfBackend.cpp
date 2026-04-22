@@ -290,6 +290,11 @@ std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float str
     return smoothed;
 }
 
+float StrokeRenderSmoothing(const Stroke& stroke, float fallbackSmoothing) {
+    const float smoothing = std::isfinite(stroke.smoothing) ? stroke.smoothing : fallbackSmoothing;
+    return std::clamp(smoothing, 0.0f, 1.0f);
+}
+
 int PageTextFontPixelHeight(const PageText& text, float scale) {
     return std::max(1, static_cast<int>(std::lround(std::max(1.0f, text.fontSize) * std::max(0.1f, scale))));
 }
@@ -466,7 +471,8 @@ void DrawStroke(Gdiplus::Graphics& graphics, const Stroke& stroke, float renderS
         return;
     }
 
-    const std::vector<Vec2> smoothedPoints = BuildSmoothedPoints(stroke.points, strokeSmoothing);
+    const float effectiveSmoothing = StrokeRenderSmoothing(stroke, strokeSmoothing);
+    const std::vector<Vec2> smoothedPoints = BuildSmoothedPoints(stroke.points, effectiveSmoothing);
     std::vector<Gdiplus::PointF> screenPoints;
     screenPoints.reserve(smoothedPoints.size());
     for (const Vec2& point : smoothedPoints) {
@@ -514,7 +520,7 @@ void DrawStroke(Gdiplus::Graphics& graphics, const Stroke& stroke, float renderS
     }
 
     Gdiplus::GraphicsPath path;
-    path.AddCurve(screenPoints.data(), static_cast<INT>(screenPoints.size()), 0.1f + (strokeSmoothing * 0.8f));
+    path.AddCurve(screenPoints.data(), static_cast<INT>(screenPoints.size()), 0.1f + (effectiveSmoothing * 0.8f));
     graphics.DrawPath(&pen, &path);
 }
 
@@ -672,7 +678,9 @@ bool AppendVectorStroke(FPDF_PAGE pageHandle, const Page& page, const Stroke& st
         return true;
     }
 
-    const std::vector<Vec2> smoothedPoints = BuildSmoothedPoints(stroke.points, strokeSmoothing);
+    const std::vector<Vec2> smoothedPoints = BuildSmoothedPoints(
+        stroke.points,
+        StrokeRenderSmoothing(stroke, strokeSmoothing));
     if (smoothedPoints.empty()) {
         return true;
     }

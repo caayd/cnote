@@ -300,6 +300,7 @@ private:
     void UpdateWindowTitle();
     void BeginStroke(POINT cursor);
     void ExtendStroke(POINT cursor);
+    bool ExtendStrokeFromPointerHistory(WPARAM wParam);
     void EndStroke();
     void StartStrokeSegment(std::size_t pageIndex, Vec2 pagePoint);
     void BeginSelection(POINT cursor, bool boxOverride = false);
@@ -601,6 +602,7 @@ private:
     std::optional<Stroke> activeStroke_ {};
     std::optional<Stroke> activeFreehandStroke_ {};
     std::optional<std::size_t> activeStrokePageIndex_ {};
+    std::optional<UINT32> activeStrokePointerId_ {};
     std::vector<HistoryAction> undoActions_ {};
     std::vector<HistoryAction> redoActions_ {};
     POINT lastPanCursor_ {};

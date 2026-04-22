@@ -16,7 +16,7 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 9;
+constexpr std::uint32_t kProjectVersion = 10;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
 constexpr std::uint8_t kStrokeStyleFlagDotted = 1U << 0U;
@@ -176,6 +176,7 @@ void AppendStroke(std::vector<std::uint8_t>& output, const Stroke& stroke) {
     AppendValue(output, stroke.style.color);
     AppendValue(output, stroke.style.width);
     AppendValue(output, styleFlags);
+    AppendValue(output, stroke.smoothing);
     const auto pointCount = static_cast<std::uint32_t>(stroke.points.size());
     AppendValue(output, pointCount);
     for (const Vec2& point : stroke.points) {
@@ -194,6 +195,9 @@ bool ReadStroke(ByteReader& reader, std::uint32_t version, Stroke& stroke) {
         return false;
     }
     stroke.style.dotted = (styleFlags & kStrokeStyleFlagDotted) != 0U;
+    if (version >= 10U && !reader.Read(stroke.smoothing)) {
+        return false;
+    }
     if (!reader.Read(pointCount)) {
         return false;
     }

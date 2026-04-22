@@ -32,6 +32,7 @@ struct StrokeStyle {
 
 struct Stroke {
     StrokeStyle style {};
+    float smoothing = 0.55f;
     std::vector<Vec2> points;
 };
 

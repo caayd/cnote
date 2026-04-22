@@ -124,7 +124,7 @@ bool App::CopySelectionToClipboard() {
     const auto appendFloat = [&](float value) { appendBytes(&value, sizeof(value)); };
 
     constexpr std::uint32_t kClipboardStrokeFlagDotted = 1U << 0U;
-    const char magic[] = { 'C', 'T', 'S', '6' };
+    const char magic[] = { 'C', 'T', 'S', '7' };
     appendBytes(magic, sizeof(magic));
     appendUint32(static_cast<std::uint32_t>(strokes.size()));
     appendUint32(static_cast<std::uint32_t>(texts.size()));
@@ -142,6 +142,7 @@ bool App::CopySelectionToClipboard() {
         appendUint32(stroke.style.color);
         appendFloat(stroke.style.width);
         appendUint32(strokeFlags);
+        appendFloat(stroke.smoothing);
         appendUint32(static_cast<std::uint32_t>(stroke.points.size()));
         for (const Vec2& point : stroke.points) {
             appendFloat(point.x);
@@ -251,7 +252,8 @@ bool App::PasteSelectionFromClipboard() {
             && std::memcmp(magic, "CTS3", 4) != 0
             && std::memcmp(magic, "CTS4", 4) != 0
             && std::memcmp(magic, "CTS5", 4) != 0
-            && std::memcmp(magic, "CTS6", 4) != 0)) {
+            && std::memcmp(magic, "CTS6", 4) != 0
+            && std::memcmp(magic, "CTS7", 4) != 0)) {
         GlobalUnlock(clipboardData);
         CloseClipboard();
         return false;
@@ -279,7 +281,7 @@ bool App::PasteSelectionFromClipboard() {
     bool headerOk = readUint32(strokeCount);
     if (headerOk && (std::memcmp(magic, "CTS2", 4) == 0 || std::memcmp(magic, "CTS3", 4) == 0
         || std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0
-        || std::memcmp(magic, "CTS6", 4) == 0)) {
+        || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0)) {
         headerOk = readUint32(textCount);
     }
     headerOk = headerOk && readUint32(imageCount)
@@ -304,10 +306,13 @@ bool App::PasteSelectionFromClipboard() {
         std::uint32_t pointCount = 0;
         std::uint32_t strokeFlags = 0;
         ok = readUint32(stroke.style.color) && readFloat(stroke.style.width);
-        if (ok && std::memcmp(magic, "CTS6", 4) == 0) {
+        if (ok && (std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0)) {
             ok = readUint32(strokeFlags);
         }
         stroke.style.dotted = (strokeFlags & kClipboardStrokeFlagDotted) != 0U;
+        if (ok && std::memcmp(magic, "CTS7", 4) == 0) {
+            ok = readFloat(stroke.smoothing);
+        }
         ok = ok && readUint32(pointCount);
         stroke.points.reserve(pointCount);
         for (std::uint32_t pointIndex = 0; ok && pointIndex < pointCount; ++pointIndex) {
@@ -327,18 +332,18 @@ bool App::PasteSelectionFromClipboard() {
         std::uint32_t charCount = 0;
         std::uint32_t flags = 0;
         ok = readFloat(text.x) && readFloat(text.y);
-        if (ok && (std::memcmp(magic, "CTS3", 4) == 0 || std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0)) {
+        if (ok && (std::memcmp(magic, "CTS3", 4) == 0 || std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0)) {
             ok = readFloat(text.width);
         } else {
             text.width = 0.0f;
         }
-        if (ok && (std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0)) {
+        if (ok && (std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0)) {
             ok = readFloat(text.height);
         } else {
             text.height = 0.0f;
         }
         ok = ok && readFloat(text.fontSize) && readUint32(text.color);
-        if (ok && (std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0)) {
+        if (ok && (std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0)) {
             ok = readUint32(flags);
         }
         ok = ok && readUint32(charCount);

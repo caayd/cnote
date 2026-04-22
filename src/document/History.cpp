@@ -67,7 +67,7 @@ bool StrokeStyleEqual(const StrokeStyle& a, const StrokeStyle& b) {
 }
 
 bool StrokeEqual(const Stroke& a, const Stroke& b) {
-    if (!StrokeStyleEqual(a.style, b.style) || a.points.size() != b.points.size()) {
+    if (!StrokeStyleEqual(a.style, b.style) || a.smoothing != b.smoothing || a.points.size() != b.points.size()) {
         return false;
     }
 

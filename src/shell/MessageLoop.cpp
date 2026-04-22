@@ -218,6 +218,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         break;
     }
+    case WM_POINTERUPDATE:
+        if (ExtendStrokeFromPointerHistory(wParam)) {
+            return 0;
+        }
+        break;
     case WM_MOUSEMOVE: {
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         UpdateToolbarAutoHide(cursor);

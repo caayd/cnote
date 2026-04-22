@@ -64,7 +64,7 @@ set_target_properties(pdfium PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${PDFIUM_ROOT}/include;${PDFIUM_ROOT}/include/cpp"
 )
 
-target_compile_definitions(cnote PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(cnote PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
 
 target_compile_options(cnote PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
