@@ -999,6 +999,20 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
     switch (message) {
     case WM_GETDLGCODE:
         return DLGC_WANTALLKEYS;
+    case WM_ERASEBKGND: {
+        HDC editDc = reinterpret_cast<HDC>(wParam);
+        RECT clientRect {};
+        GetClientRect(window, &clientRect);
+        if (app->textEditBackgroundBrush_ != nullptr) {
+            SetBrushOrgEx(editDc, 0, 0, nullptr);
+            FillRect(editDc, &clientRect, app->textEditBackgroundBrush_);
+        } else {
+            HBRUSH fallbackBrush = CreateSolidBrush(RGB(255, 255, 255));
+            FillRect(editDc, &clientRect, fallbackBrush);
+            DeleteObject(fallbackBrush);
+        }
+        return 1;
+    }
     case WM_KEYDOWN: {
         const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         if (ctrlPressed && wParam == 'W') {
@@ -1043,11 +1057,13 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
         if (ctrlPressed && wParam == 'X') {
             SendMessageW(window, WM_CUT, 0, 0);
             app->RefreshTextEditControl();
+            RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
             return 0;
         }
         if (ctrlPressed && wParam == 'V') {
             SendMessageW(window, WM_PASTE, 0, 0);
             app->RefreshTextEditControl();
+            RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
             return 0;
         }
         if (ctrlPressed && wParam == VK_BACK) {
@@ -1076,6 +1092,7 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
                 SetWindowTextW(window, text.c_str());
                 SendMessageW(window, EM_SETSEL, eraseStart, eraseStart);
                 app->RefreshTextEditControl();
+                RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
             }
             return 0;
         }
@@ -1091,8 +1108,13 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
     }
 
     const LRESULT result = CallWindowProcW(app->textEditOriginalProc_, window, message, wParam, lParam);
-    if (message == WM_CHAR || message == WM_PASTE || message == WM_CUT || message == WM_CLEAR) {
+    if (message == WM_CHAR
+        || message == WM_PASTE
+        || message == WM_CUT
+        || message == WM_CLEAR
+        || (message == WM_KEYDOWN && wParam == VK_DELETE)) {
         app->RefreshTextEditControl();
+        RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
         if (app->textFormatPopupOpen_ && app->window_ != nullptr) {
             InvalidateRect(app->window_, nullptr, FALSE);
         }

@@ -130,6 +130,7 @@ public:
         std::size_t strokeCount = 0;
         std::size_t imageCount = 0;
         std::size_t textCount = 0;
+        std::uint64_t textSignature = 0;
         int rasterWidth = 0;
         int rasterHeight = 0;
         float rasterScale = 0.0f;
@@ -730,6 +731,7 @@ private:
     HBITMAP textEditBackgroundBitmap_ = nullptr;
     HBRUSH textEditBackgroundBrush_ = nullptr;
     bool textEditWindowNeedsLayout_ = false;
+    bool textEditWindowAutoShowSuppressed_ = false;
     RECT textEditBounds_ {};
     int textEditFontPixelHeight_ = 0;
     std::optional<std::size_t> editingTextPageIndex_ {};

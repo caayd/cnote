@@ -505,6 +505,7 @@ void App::EndTextEditControl() {
     textEditItalic_ = false;
     textEditUnderline_ = false;
     textEditWindowNeedsLayout_ = false;
+    textEditWindowAutoShowSuppressed_ = false;
     CancelTextFormatPopup();
     ReleaseTextEditBackgroundBrush();
     textEditBounds_ = RECT {};
@@ -609,6 +610,7 @@ void App::RefreshTextEditControl() {
 
     const bool boundsChanged = EqualRect(&textEditBounds_, &editRect) == 0;
     const bool needsLayout = textEditWindowNeedsLayout_;
+    const bool wasVisible = IsWindowVisible(textEditWindow_) != FALSE;
     RECT dirtyRect {};
     bool needsParentRedraw = false;
     if (boundsChanged || needsLayout) {
@@ -626,13 +628,28 @@ void App::RefreshTextEditControl() {
         }
     }
     if (boundsChanged || needsLayout) {
-        SetWindowPos(textEditWindow_, HWND_TOP, left, top, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
+        UINT setWindowFlags = SWP_NOACTIVATE | SWP_NOCOPYBITS;
+        if (wasVisible) {
+            setWindowFlags |= SWP_SHOWWINDOW;
+        }
+        SetWindowPos(textEditWindow_, HWND_TOP, left, top, width, height, setWindowFlags);
         textEditWindowNeedsLayout_ = false;
-    } else if (!IsWindowVisible(textEditWindow_)) {
+    } else if (!wasVisible && !textEditWindowAutoShowSuppressed_) {
         ShowWindow(textEditWindow_, SW_SHOW);
     }
     if (needsParentRedraw) {
-        RedrawWindow(window_, &dirtyRect, nullptr, RDW_INVALIDATE | RDW_NOCHILDREN);
+        if (!wasVisible) {
+            textEditWindowAutoShowSuppressed_ = true;
+        }
+        RedrawWindow(
+            window_,
+            &dirtyRect,
+            nullptr,
+            RDW_INVALIDATE | RDW_NOCHILDREN | (!wasVisible ? RDW_UPDATENOW : 0U));
+        if (!wasVisible) {
+            textEditWindowAutoShowSuppressed_ = false;
+            ShowWindow(textEditWindow_, SW_SHOW);
+        }
     }
     if (boundsChanged || needsLayout || fontChanged) {
         InvalidateRect(textEditWindow_, nullptr, TRUE);

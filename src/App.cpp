@@ -297,6 +297,43 @@ bool PageTextEqual(const PageText& a, const PageText& b) {
         && a.content == b.content;
 }
 
+void HashPageSurfaceBytes(std::uint64_t& hash, const void* data, std::size_t size) {
+    constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (std::size_t index = 0; index < size; ++index) {
+        hash ^= static_cast<std::uint64_t>(bytes[index]);
+        hash *= kFnvPrime;
+    }
+}
+
+template <typename T>
+void HashPageSurfaceValue(std::uint64_t& hash, const T& value) {
+    HashPageSurfaceBytes(hash, &value, sizeof(value));
+}
+
+std::uint64_t PageTextSurfaceSignature(const Page& page) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    HashPageSurfaceValue(hash, page.texts.size());
+    for (const PageText& text : page.texts) {
+        HashPageSurfaceValue(hash, text.x);
+        HashPageSurfaceValue(hash, text.y);
+        HashPageSurfaceValue(hash, text.width);
+        HashPageSurfaceValue(hash, text.height);
+        HashPageSurfaceValue(hash, text.fontSize);
+        HashPageSurfaceValue(hash, text.color);
+        HashPageSurfaceValue(hash, text.alignment);
+        HashPageSurfaceValue(hash, text.fontFamily);
+        HashPageSurfaceValue(hash, text.bold);
+        HashPageSurfaceValue(hash, text.italic);
+        HashPageSurfaceValue(hash, text.underline);
+        HashPageSurfaceValue(hash, text.content.size());
+        if (!text.content.empty()) {
+            HashPageSurfaceBytes(hash, text.content.data(), text.content.size() * sizeof(wchar_t));
+        }
+    }
+    return hash;
+}
+
 bool RasterImageEqual(const RasterImage& a, const RasterImage& b) {
     return a.width == b.width
         && a.height == b.height
@@ -3262,6 +3299,7 @@ void App::InvalidatePageSurfaceCache(std::size_t pageIndex) {
         return;
     }
 
+    contentCompositionDirty_ = true;
     PageSurfaceCache& cache = pageSurfaceCaches_[pageIndex];
     cache.valid = false;
     cache.pixels.clear();
@@ -3270,6 +3308,7 @@ void App::InvalidatePageSurfaceCache(std::size_t pageIndex) {
     cache.stride = 0;
     cache.imageCount = 0;
     cache.textCount = 0;
+    cache.textSignature = 0;
     cache.rasterWidth = 0;
     cache.rasterHeight = 0;
     cache.rasterScale = 0.0f;
@@ -8532,6 +8571,7 @@ bool App::TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke&
         || cache.strokeCount + 1U != page.strokes.size()
         || cache.imageCount != page.images.size()
         || cache.textCount != page.texts.size()
+        || cache.textSignature != PageTextSurfaceSignature(page)
         || cache.rasterWidth != page.raster.width
         || cache.rasterHeight != page.raster.height
         || std::abs(cache.rasterScale - page.raster.scale) >= 0.001f
@@ -8616,6 +8656,7 @@ bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect
         || cache.pageIndex != pageIndex
         || cache.imageCount != page.images.size()
         || cache.textCount != page.texts.size()
+        || cache.textSignature != PageTextSurfaceSignature(page)
         || cache.rasterWidth != page.raster.width
         || cache.rasterHeight != page.raster.height
         || std::abs(cache.rasterScale - page.raster.scale) >= 0.001f
@@ -8771,6 +8812,7 @@ bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect
     cache.strokeCount = page.strokes.size();
     cache.imageCount = page.images.size();
     cache.textCount = page.texts.size();
+    cache.textSignature = PageTextSurfaceSignature(page);
 
     SelectObject(cacheDc, previousBitmap);
     DeleteObject(cacheBitmap);
@@ -8786,6 +8828,7 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
     const Page& page = document_.PageAt(pageView.pageIndex);
     PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
     const float cacheScale = std::max(0.1f, pageView.scale);
+    const std::uint64_t textSignature = PageTextSurfaceSignature(page);
     const int width = std::max(1, static_cast<int>(std::lround(std::max(1.0f, page.width) * cacheScale)));
     const int height = std::max(1, static_cast<int>(std::lround(std::max(1.0f, page.height) * cacheScale)));
     if (width <= 0 || height <= 0) {
@@ -8799,6 +8842,7 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
         && cache.strokeCount == page.strokes.size()
         && cache.imageCount == page.images.size()
         && cache.textCount == page.texts.size()
+        && cache.textSignature == textSignature
         && cache.rasterWidth == page.raster.width
         && cache.rasterHeight == page.raster.height
         && std::abs(cache.rasterScale - page.raster.scale) < 0.001f
@@ -8923,6 +8967,7 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
     cache.strokeCount = page.strokes.size();
     cache.imageCount = page.images.size();
     cache.textCount = page.texts.size();
+    cache.textSignature = textSignature;
     cache.rasterWidth = page.raster.width;
     cache.rasterHeight = page.raster.height;
     cache.rasterScale = page.raster.scale;
