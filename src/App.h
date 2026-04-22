@@ -343,6 +343,11 @@ private:
     void ToggleQuickSizePopup();
     void CancelQuickSizePopup(bool cancelInput = true);
     void ClosePaletteOverlays();
+    void UpdatePaletteWheelHover(POINT cursor);
+    void EnsurePaletteWheelHoverState(std::size_t entryCount);
+    void StartPaletteWheelHoverAnimationTimer();
+    void StopPaletteWheelHoverAnimationTimer();
+    void HandlePaletteWheelHoverAnimationTimer();
     void ToggleToolInWheel(Tool tool);
     [[nodiscard]] bool IsToolInWheel(Tool tool) const;
     [[nodiscard]] bool HandleShortcutKey(UINT key, bool ctrl, bool shift, bool alt);
@@ -640,6 +645,10 @@ private:
     std::vector<NamedPalette> savedPalettes_ {};
     ShortcutState shortcuts_ {};
     WheelState wheel_ {};
+    std::optional<std::size_t> paletteWheelHoverTargetIndex_ {};
+    std::vector<float> paletteWheelHoverProgresses_ {};
+    ULONGLONG paletteWheelHoverAnimationLastMs_ = 0;
+    bool paletteWheelHoverTimerResolutionActive_ = false;
     SettingsState settings_ {};
     NewPageSettingsState newPageSettings_ {};
     HCURSOR eraserCursor_ = nullptr;
@@ -751,12 +760,15 @@ private:
     static constexpr UINT_PTR kZoomSessionTimerId = 3;
     static constexpr UINT_PTR kToolbarRevealTimerId = 4;
     static constexpr UINT_PTR kPdfSidebarSlideTimerId = 5;
+    static constexpr UINT_PTR kPaletteWheelHoverTimerId = 6;
     static constexpr UINT kZoomSessionDelayMs = 100;
     static constexpr UINT kToolbarRevealFrameMs = 1;
     static constexpr UINT kToolbarRevealDurationMs = 120;
     static constexpr UINT kToolbarHideDetachDelayMs = 72;
     static constexpr UINT kPdfSidebarSlideFrameMs = 1;
     static constexpr UINT kPdfSidebarSlideDurationMs = 150;
+    static constexpr UINT kPaletteWheelHoverFrameMs = 1;
+    static constexpr float kPaletteWheelHoverAnimationSpeed = 18.0f;
     static constexpr float kMinBrushSize = 0.5f;
     static constexpr float kMaxBrushSize = 20.0f;
     static constexpr float kBrushSizeStep = 0.25f;

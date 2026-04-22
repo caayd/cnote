@@ -83,7 +83,7 @@ constexpr float kSelectionRotateOffsetDip = 18.0f;
 constexpr int kPaletteWheelShadowInsetDip = 6;
 constexpr int kPaletteWheelIconHalfDip = 20;
 constexpr int kPaletteWheelHoverOffsetDip = 8;
-constexpr int kPaletteWheelHoverGrowDip = 5;
+constexpr int kPaletteWheelHoverGrowDip = 8;
 constexpr float kPaletteWheelSelectedStrokeDip = 3.0f;
 constexpr float kPaletteWheelStrokeDip = 1.2f;
 constexpr float kPaletteWheelBorderDip = 1.5f;
@@ -181,6 +181,7 @@ struct PaletteWheelLayout {
     POINT center {};
     int innerRadius = 0;
     int outerRadius = 0;
+    int hitOuterRadius = 0;
 };
 
 bool SegmentsIntersect(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2);
@@ -1830,7 +1831,11 @@ PaletteWheelLayout BuildPaletteWheelLayout(RECT clientRect, POINT requestedCente
     PaletteWheelLayout layout;
     layout.innerRadius = ScaleForDpi(20, dpi);
     layout.outerRadius = colorCount <= 1U ? ScaleForDpi(40, dpi) : ScaleForDpi(86, dpi);
-    const int margin = layout.outerRadius + ScaleForDpi(12, dpi);
+    layout.hitOuterRadius = layout.outerRadius + PaletteWheelHoverGrow(dpi);
+    const int margin = layout.hitOuterRadius
+        + PaletteWheelShadowInset(dpi)
+        + static_cast<int>(std::ceil(PaletteWheelStrokeWidth(kPaletteWheelSelectedStrokeDip, dpi)))
+        + ScaleForDpi(4, dpi);
     layout.center.x = std::clamp(static_cast<int>(requestedCenter.x), margin, static_cast<int>(clientRect.right) - margin);
     layout.center.y = std::clamp(static_cast<int>(requestedCenter.y), toolbarHeight + margin, static_cast<int>(clientRect.bottom) - margin);
     return layout;
@@ -1845,7 +1850,8 @@ std::optional<std::size_t> PaletteWheelIndexAtPoint(const PaletteWheelLayout& la
     const float dy = static_cast<float>(cursor.y - layout.center.y);
     const float distanceSquared = (dx * dx) + (dy * dy);
     const float innerSquared = static_cast<float>(layout.innerRadius * layout.innerRadius);
-    const float outerSquared = static_cast<float>(layout.outerRadius * layout.outerRadius);
+    const int hitOuterRadius = layout.hitOuterRadius > 0 ? layout.hitOuterRadius : layout.outerRadius;
+    const float outerSquared = static_cast<float>(hitOuterRadius * hitOuterRadius);
 
     if (distanceSquared < innerSquared || distanceSquared > outerSquared) {
         return std::nullopt;
@@ -7365,43 +7371,52 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
         static_cast<Gdiplus::REAL>((layout.outerRadius + shadowInset) * 2),
         static_cast<Gdiplus::REAL>((layout.outerRadius + shadowInset) * 2));
 
-    std::optional<std::size_t> hoveredIndex;
-    POINT cursor {};
-    if (GetCursorPos(&cursor) != FALSE) {
-        ScreenToClient(window_, &cursor);
-        hoveredIndex = PaletteWheelIndexAtPoint(layout, cursor, wheelEntryCount);
-    }
+    const auto hoverProgress = [&](std::size_t index) {
+        if (index >= paletteWheelHoverProgresses_.size()) {
+            return 0.0f;
+        }
+        return std::clamp(paletteWheelHoverProgresses_[index], 0.0f, 1.0f);
+    };
+
+    const auto isAnimatingEntry = [&](std::size_t index) {
+        return hoverProgress(index) > 0.001f;
+    };
 
     const float sweep = 360.0f / static_cast<float>(wheelEntryCount);
     const auto paintSegment = [&](std::size_t index, bool paintFill, bool paintStroke, bool paintIcon) {
         const float baseStart = -90.0f + (sweep * static_cast<float>(index));
         const float centerAngleDegrees = baseStart + (sweep * 0.5f);
         const float centerAngleRadians = centerAngleDegrees * (3.14159265358979323846f / 180.0f);
-        const bool hovered = hoveredIndex.has_value() && *hoveredIndex == index;
-        const int iconOffsetX = hovered ? static_cast<int>(std::lround(std::cos(centerAngleRadians) * static_cast<float>(hoverOffset))) : 0;
-        const int iconOffsetY = hovered ? static_cast<int>(std::lround(std::sin(centerAngleRadians) * static_cast<float>(hoverOffset))) : 0;
-        const int grow = hovered ? hoverOffset + hoverGrow : 0;
+        const float progress = hoverProgress(index);
+        const int iconOffsetX = static_cast<int>(std::lround(std::cos(centerAngleRadians) * static_cast<float>(hoverOffset) * progress));
+        const int iconOffsetY = static_cast<int>(std::lround(std::sin(centerAngleRadians) * static_cast<float>(hoverOffset) * progress));
+        const int grow = static_cast<int>(std::lround(static_cast<float>(hoverGrow) * progress));
         Gdiplus::RectF segmentOuterRect(
             outerRect.X - static_cast<Gdiplus::REAL>(grow),
             outerRect.Y - static_cast<Gdiplus::REAL>(grow),
             outerRect.Width + static_cast<Gdiplus::REAL>(grow * 2),
             outerRect.Height + static_cast<Gdiplus::REAL>(grow * 2));
+        Gdiplus::RectF segmentInnerRect(
+            static_cast<Gdiplus::REAL>(layout.center.x - layout.innerRadius),
+            static_cast<Gdiplus::REAL>(layout.center.y - layout.innerRadius),
+            static_cast<Gdiplus::REAL>(innerDiameter),
+            static_cast<Gdiplus::REAL>(innerDiameter));
         const auto pointOnArc = [](const Gdiplus::RectF& rect, float angleDegrees) {
             const float radians = angleDegrees * (3.14159265358979323846f / 180.0f);
             return Gdiplus::PointF(
                 rect.X + (rect.Width * 0.5f) + (std::cos(radians) * rect.Width * 0.5f),
                 rect.Y + (rect.Height * 0.5f) + (std::sin(radians) * rect.Height * 0.5f));
         };
-        const auto buildWedgePath = [&](Gdiplus::GraphicsPath& path, float startAngle, float sweepAngle) {
+        const auto buildSegmentPath = [&](Gdiplus::GraphicsPath& path, float startAngle, float sweepAngle) {
             const Gdiplus::PointF arcStart = pointOnArc(segmentOuterRect, startAngle);
             const Gdiplus::PointF arcEnd = pointOnArc(segmentOuterRect, startAngle + sweepAngle);
-            const Gdiplus::PointF anchor(
-                static_cast<Gdiplus::REAL>(layout.center.x),
-                static_cast<Gdiplus::REAL>(layout.center.y));
+            const Gdiplus::PointF innerEnd = pointOnArc(segmentInnerRect, startAngle + sweepAngle);
+            const Gdiplus::PointF innerStart = pointOnArc(segmentInnerRect, startAngle);
             path.StartFigure();
             path.AddArc(segmentOuterRect, startAngle, sweepAngle);
-            path.AddLine(arcEnd, anchor);
-            path.AddLine(anchor, arcStart);
+            path.AddLine(arcEnd, innerEnd);
+            path.AddArc(segmentInnerRect, startAngle + sweepAngle, -sweepAngle);
+            path.AddLine(innerStart, arcStart);
             path.CloseFigure();
         };
 
@@ -7416,8 +7431,8 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
             fillPath.AddEllipse(segmentOuterRect);
             strokePath.AddEllipse(segmentOuterRect);
         } else {
-            buildWedgePath(fillPath, baseStart, sweep);
-            buildWedgePath(strokePath, baseStart, sweep);
+            buildSegmentPath(fillPath, baseStart, sweep);
+            buildSegmentPath(strokePath, baseStart, sweep);
         }
 
         if (paintFill) {
@@ -7435,7 +7450,7 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
 
         if (paintIcon && !isColorEntry) {
             const float iconRadius = static_cast<float>(layout.innerRadius + ((layout.outerRadius - layout.innerRadius) * 0.5f))
-                + (hovered ? static_cast<float>(grow) * 0.5f : 0.0f);
+                + (static_cast<float>(grow) * 0.5f);
             const int iconCenterX = layout.center.x + iconOffsetX + static_cast<int>(std::lround(std::cos(centerAngleRadians) * iconRadius));
             const int iconCenterY = layout.center.y + iconOffsetY + static_cast<int>(std::lround(std::sin(centerAngleRadians) * iconRadius));
             const RECT iconRect = MakeRect(
@@ -7450,53 +7465,85 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
         }
     };
 
+    const auto isSelectedEntry = [&](std::size_t index) {
+        return index < palette_.size()
+            ? index == colorIndex_
+            : activeTool_ == wheel_.tools[index - palette_.size()];
+    };
+
+    const auto pointOnWheelRadius = [&](float angleDegrees, int radius) {
+        const float radians = angleDegrees * (3.14159265358979323846f / 180.0f);
+        return Gdiplus::PointF(
+            static_cast<Gdiplus::REAL>(layout.center.x) + (std::cos(radians) * static_cast<Gdiplus::REAL>(radius)),
+            static_cast<Gdiplus::REAL>(layout.center.y) + (std::sin(radians) * static_cast<Gdiplus::REAL>(radius)));
+    };
+
+    const auto paintBaseWheelStroke = [&]() {
+        Gdiplus::Pen separatorPen(
+            Gdiplus::Color(120, 244, 247, 252),
+            PaletteWheelStrokeWidth(kPaletteWheelStrokeDip, dpi));
+
+        if (wheelEntryCount <= 1U) {
+            graphics.DrawEllipse(&separatorPen, outerRect);
+            return;
+        }
+
+        for (std::size_t index = 0; index < wheelEntryCount; ++index) {
+            const std::size_t previousIndex = index == 0U ? wheelEntryCount - 1U : index - 1U;
+            if (!isAnimatingEntry(index)) {
+                graphics.DrawArc(
+                    &separatorPen,
+                    outerRect,
+                    -90.0f + (sweep * static_cast<float>(index)),
+                    sweep);
+            }
+
+            if (!isAnimatingEntry(index) && !isAnimatingEntry(previousIndex)) {
+                const float dividerAngle = -90.0f + (sweep * static_cast<float>(index));
+                const Gdiplus::PointF innerPoint = pointOnWheelRadius(dividerAngle, layout.innerRadius);
+                const Gdiplus::PointF outerPoint = pointOnWheelRadius(dividerAngle, layout.outerRadius);
+                graphics.DrawLine(&separatorPen, innerPoint, outerPoint);
+            }
+        }
+    };
+
     for (std::size_t index = 0; index < wheelEntryCount; ++index) {
-        if (!hoveredIndex.has_value() || *hoveredIndex != index) {
+        if (!isAnimatingEntry(index)) {
             paintSegment(index, true, false, false);
         }
     }
-    if (hoveredIndex.has_value()) {
-        paintSegment(*hoveredIndex, true, false, false);
-    }
     for (std::size_t index = 0; index < wheelEntryCount; ++index) {
-        const bool selected = index < palette_.size()
-            ? index == colorIndex_
-            : activeTool_ == wheel_.tools[index - palette_.size()];
-        if (!selected && (!hoveredIndex.has_value() || *hoveredIndex != index)) {
+        if (isAnimatingEntry(index)) {
+            paintSegment(index, true, false, false);
+        }
+    }
+
+    paintBaseWheelStroke();
+
+    for (std::size_t index = 0; index < wheelEntryCount; ++index) {
+        if (isAnimatingEntry(index) && !isSelectedEntry(index)) {
             paintSegment(index, false, true, false);
         }
     }
-    if (hoveredIndex.has_value()) {
-        const bool selected = *hoveredIndex < palette_.size()
-            ? *hoveredIndex == colorIndex_
-            : activeTool_ == wheel_.tools[*hoveredIndex - palette_.size()];
-        if (!selected) {
-            paintSegment(*hoveredIndex, false, true, false);
-        }
-    }
     for (std::size_t index = 0; index < wheelEntryCount; ++index) {
-        const bool selected = index < palette_.size()
-            ? index == colorIndex_
-            : activeTool_ == wheel_.tools[index - palette_.size()];
-        if (selected && (!hoveredIndex.has_value() || *hoveredIndex != index)) {
+        if (isSelectedEntry(index) && !isAnimatingEntry(index)) {
             paintSegment(index, false, true, false);
         }
     }
-    if (hoveredIndex.has_value()) {
-        const bool selected = *hoveredIndex < palette_.size()
-            ? *hoveredIndex == colorIndex_
-            : activeTool_ == wheel_.tools[*hoveredIndex - palette_.size()];
-        if (selected) {
-            paintSegment(*hoveredIndex, false, true, false);
+    for (std::size_t index = 0; index < wheelEntryCount; ++index) {
+        if (isSelectedEntry(index) && isAnimatingEntry(index)) {
+            paintSegment(index, false, true, false);
         }
     }
     for (std::size_t index = 0; index < wheelEntryCount; ++index) {
-        if (!hoveredIndex.has_value() || *hoveredIndex != index) {
+        if (!isAnimatingEntry(index)) {
             paintSegment(index, false, false, true);
         }
     }
-    if (hoveredIndex.has_value()) {
-        paintSegment(*hoveredIndex, false, false, true);
+    for (std::size_t index = 0; index < wheelEntryCount; ++index) {
+        if (isAnimatingEntry(index)) {
+            paintSegment(index, false, false, true);
+        }
     }
 
     Gdiplus::SolidBrush cutoutBrush(Gdiplus::Color(255, 18, 24, 32));

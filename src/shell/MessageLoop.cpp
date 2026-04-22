@@ -265,7 +265,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             InvalidateRect(window_, &clientRect, FALSE);
         }
         if (wheel_.paletteWheelOpen) {
-            InvalidateRect(window_, nullptr, FALSE);
+            UpdatePaletteWheelHover(cursor);
         }
         if (!trackingMouseLeave_) {
             TRACKMOUSEEVENT event {};
@@ -320,7 +320,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             InvalidateRect(window_, &toolbarRect, FALSE);
         }
         if (wheel_.paletteWheelOpen) {
-            InvalidateRect(window_, nullptr, FALSE);
+            UpdatePaletteWheelHover(cursor);
         }
         if (cursorInToolbarBand) {
             SetToolbarRevealed(true);
@@ -450,6 +450,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         if (wParam == kPdfSidebarSlideTimerId) {
             HandlePdfSidebarSlideAnimationTimer();
+            return 0;
+        }
+        if (wParam == kPaletteWheelHoverTimerId) {
+            HandlePaletteWheelHoverAnimationTimer();
             return 0;
         }
         break;

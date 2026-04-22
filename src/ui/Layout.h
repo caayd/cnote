@@ -84,6 +84,7 @@ struct PaletteWheelLayout {
     POINT center {};
     int innerRadius = 0;
     int outerRadius = 0;
+    int hitOuterRadius = 0;
 };
 
 int ToolbarHeight(bool maximized, UINT dpi);

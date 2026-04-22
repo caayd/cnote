@@ -15,6 +15,9 @@ constexpr int kColorSwatchSize = 22;
 constexpr int kBaseToolbarHeight = 34;
 constexpr int kMaximizedToolbarExtraHeight = 5;
 constexpr int kTitleBarButtonHeight = 34;
+constexpr int kPaletteWheelShadowInsetDip = 6;
+constexpr int kPaletteWheelHoverGrowDip = 8;
+constexpr float kPaletteWheelSelectedStrokeDip = 3.0f;
 
 RECT MakeRect(int left, int top, int right, int bottom) {
     RECT rect { left, top, right, bottom };
@@ -395,7 +398,11 @@ PaletteWheelLayout BuildPaletteWheelLayout(RECT clientRect, POINT requestedCente
     PaletteWheelLayout layout {};
     layout.innerRadius = ScaleForDpi(20, dpi);
     layout.outerRadius = colorCount <= 1U ? ScaleForDpi(40, dpi) : ScaleForDpi(86, dpi);
-    const int margin = layout.outerRadius + ScaleForDpi(12, dpi);
+    layout.hitOuterRadius = layout.outerRadius + ScaleForDpi(kPaletteWheelHoverGrowDip, dpi);
+    const int margin = layout.hitOuterRadius
+        + ScaleForDpi(kPaletteWheelShadowInsetDip, dpi)
+        + static_cast<int>(std::ceil(std::max(1.0f, ScaleForDpi(kPaletteWheelSelectedStrokeDip, dpi))))
+        + ScaleForDpi(4, dpi);
     layout.center.x = std::clamp(static_cast<int>(requestedCenter.x), margin, static_cast<int>(clientRect.right) - margin);
     layout.center.y = std::clamp(static_cast<int>(requestedCenter.y), toolbarHeight + margin, static_cast<int>(clientRect.bottom) - margin);
     return layout;
@@ -410,7 +417,8 @@ std::optional<std::size_t> PaletteWheelIndexAtPoint(const PaletteWheelLayout& la
     const float dy = static_cast<float>(cursor.y - layout.center.y);
     const float distanceSquared = (dx * dx) + (dy * dy);
     const float innerSquared = static_cast<float>(layout.innerRadius * layout.innerRadius);
-    const float outerSquared = static_cast<float>(layout.outerRadius * layout.outerRadius);
+    const int hitOuterRadius = layout.hitOuterRadius > 0 ? layout.hitOuterRadius : layout.outerRadius;
+    const float outerSquared = static_cast<float>(hitOuterRadius * hitOuterRadius);
 
     if (distanceSquared < innerSquared || distanceSquared > outerSquared) {
         return std::nullopt;
