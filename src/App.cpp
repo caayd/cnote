@@ -4243,8 +4243,20 @@ bool App::EnsureCompositionDevice() {
         return false;
     }
 
+    hr = compositionDevice_->CreateVisual(&contentViewportCompositionVisual_);
+    if (FAILED(hr) || contentViewportCompositionVisual_ == nullptr) {
+        ReleaseCompositionResources();
+        return false;
+    }
+
     hr = compositionDevice_->CreateVisual(&contentCompositionVisual_);
     if (FAILED(hr) || contentCompositionVisual_ == nullptr) {
+        ReleaseCompositionResources();
+        return false;
+    }
+
+    hr = compositionDevice_->CreateRectangleClip(&contentViewportClip_);
+    if (FAILED(hr) || contentViewportClip_ == nullptr) {
         ReleaseCompositionResources();
         return false;
     }
@@ -4273,14 +4285,17 @@ bool App::EnsureCompositionDevice() {
         return false;
     }
 
+    contentViewportCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
+    contentViewportCompositionVisual_->SetClip(contentViewportClip_);
     contentCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
     pdfSidebarCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
     toolbarViewportCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
     toolbarCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
     popupCompositionVisual_->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD);
+    contentViewportCompositionVisual_->AddVisual(contentCompositionVisual_, TRUE, nullptr);
     toolbarViewportCompositionVisual_->AddVisual(toolbarCompositionVisual_, TRUE, nullptr);
-    compositionRootVisual_->AddVisual(contentCompositionVisual_, TRUE, nullptr);
-    compositionRootVisual_->AddVisual(pdfSidebarCompositionVisual_, TRUE, contentCompositionVisual_);
+    compositionRootVisual_->AddVisual(contentViewportCompositionVisual_, TRUE, nullptr);
+    compositionRootVisual_->AddVisual(pdfSidebarCompositionVisual_, TRUE, contentViewportCompositionVisual_);
     compositionRootVisual_->AddVisual(toolbarViewportCompositionVisual_, TRUE, pdfSidebarCompositionVisual_);
     compositionRootVisual_->AddVisual(popupCompositionVisual_, TRUE, toolbarViewportCompositionVisual_);
     compositionTarget_->SetRoot(compositionRootVisual_);
@@ -4293,6 +4308,9 @@ void App::ReleaseCompositionResources() {
     if (compositionDevice_ != nullptr && pdfSidebarCompositionVisual_ != nullptr) {
         if (contentCompositionVisual_ != nullptr) {
             contentCompositionVisual_->SetContent(nullptr);
+        }
+        if (contentViewportCompositionVisual_ != nullptr) {
+            contentViewportCompositionVisual_->SetClip(nullptr);
         }
         pdfSidebarCompositionVisual_->SetContent(nullptr);
         if (toolbarCompositionVisual_ != nullptr) {
@@ -4312,6 +4330,8 @@ void App::ReleaseCompositionResources() {
     ReleaseCom(toolbarViewportCompositionVisual_);
     ReleaseCom(pdfSidebarCompositionVisual_);
     ReleaseCom(contentCompositionVisual_);
+    ReleaseCom(contentViewportClip_);
+    ReleaseCom(contentViewportCompositionVisual_);
     ReleaseCom(compositionRootVisual_);
     ReleaseCom(compositionTarget_);
     ReleaseCom(compositionDevice_);
@@ -4324,6 +4344,8 @@ void App::ReleaseCompositionResources() {
     contentCompositionWidth_ = 0;
     contentCompositionHeight_ = 0;
     contentCompositionDpi_ = 0;
+    contentCompositionPaddingX_ = 0;
+    contentCompositionPaddingY_ = 0;
     popupCompositionContentAttached_ = false;
     popupCompositionWidth_ = 0;
     popupCompositionHeight_ = 0;
@@ -4369,23 +4391,32 @@ bool App::UpdateContentComposition(RECT clientRect, RECT dirtyRect) {
     const UINT dpi = WindowDpi(window_);
     const int width = std::max(1, static_cast<int>(clientRect.right - clientRect.left));
     const int height = std::max(1, static_cast<int>(clientRect.bottom - clientRect.top));
-    const RECT surfaceRect { 0, 0, width, height };
+    const bool useSmoothScrollPadding = smoothScrollActive_;
+    const int paddingX = useSmoothScrollPadding ? std::max(kSmoothScrollPaddingFloor, static_cast<int>(std::lround(static_cast<float>(width) * kSmoothScrollPaddingRatio))) : 0;
+    const int paddingY = useSmoothScrollPadding ? std::max(kSmoothScrollPaddingFloor, static_cast<int>(std::lround(static_cast<float>(height) * kSmoothScrollPaddingRatio))) : 0;
+    const int surfaceWidth = width + (paddingX * 2);
+    const int surfaceHeight = height + (paddingY * 2);
+    const RECT surfaceRect { 0, 0, surfaceWidth, surfaceHeight };
     RECT updateRect {};
-    if (IntersectRect(&updateRect, &dirtyRect, &surfaceRect) == 0) {
+    if (useSmoothScrollPadding) {
+        updateRect = surfaceRect;
+    } else if (IntersectRect(&updateRect, &dirtyRect, &surfaceRect) == 0) {
         return true;
     }
 
     bool createdSurface = false;
     if (contentCompositionSurface_ == nullptr
-        || contentCompositionWidth_ != width
-        || contentCompositionHeight_ != height
-        || contentCompositionDpi_ != dpi) {
+        || contentCompositionWidth_ != surfaceWidth
+        || contentCompositionHeight_ != surfaceHeight
+        || contentCompositionDpi_ != dpi
+        || contentCompositionPaddingX_ != paddingX
+        || contentCompositionPaddingY_ != paddingY) {
         ReleaseCom(contentCompositionSurface_);
         contentCompositionContentAttached_ = false;
         contentCompositionDirty_ = true;
         const HRESULT hr = compositionDevice_->CreateSurface(
-            static_cast<UINT>(width),
-            static_cast<UINT>(height),
+            static_cast<UINT>(surfaceWidth),
+            static_cast<UINT>(surfaceHeight),
             DXGI_FORMAT_B8G8R8A8_UNORM,
             DXGI_ALPHA_MODE_IGNORE,
             &contentCompositionSurface_);
@@ -4393,13 +4424,17 @@ bool App::UpdateContentComposition(RECT clientRect, RECT dirtyRect) {
             ReleaseCom(contentCompositionSurface_);
             return false;
         }
-        contentCompositionWidth_ = width;
-        contentCompositionHeight_ = height;
+        contentCompositionWidth_ = surfaceWidth;
+        contentCompositionHeight_ = surfaceHeight;
         contentCompositionDpi_ = dpi;
+        contentCompositionPaddingX_ = paddingX;
+        contentCompositionPaddingY_ = paddingY;
         createdSurface = true;
     }
     if (createdSurface || contentCompositionDirty_) {
         updateRect = surfaceRect;
+    } else {
+        OffsetRect(&updateRect, paddingX, paddingY);
     }
 
     IDXGISurface* dxgiSurface = nullptr;
@@ -4432,7 +4467,7 @@ bool App::UpdateContentComposition(RECT clientRect, RECT dirtyRect) {
     }
 
     const int savedDc = SaveDC(contentDc);
-    SetViewportOrgEx(contentDc, updateOffset.x - updateRect.left, updateOffset.y - updateRect.top, nullptr);
+    SetViewportOrgEx(contentDc, updateOffset.x - updateRect.left + paddingX, updateOffset.y - updateRect.top + paddingY, nullptr);
     IntersectClipRect(contentDc, updateRect.left, updateRect.top, updateRect.right, updateRect.bottom);
     HBRUSH backgroundBrush = CreateSolidBrush(RGB(18, 22, 29));
     FillRect(contentDc, &updateRect, backgroundBrush);
@@ -4446,8 +4481,20 @@ bool App::UpdateContentComposition(RECT clientRect, RECT dirtyRect) {
     ReleaseCom(gdiSurface);
     contentCompositionSurface_->EndDraw();
 
-    contentCompositionVisual_->SetOffsetX(0.0f);
-    contentCompositionVisual_->SetOffsetY(0.0f);
+    if (contentViewportClip_ != nullptr) {
+        contentViewportClip_->SetLeft(0.0f);
+        contentViewportClip_->SetTop(0.0f);
+        contentViewportClip_->SetRight(static_cast<float>(width));
+        contentViewportClip_->SetBottom(static_cast<float>(height));
+    }
+    if (contentViewportCompositionVisual_ != nullptr) {
+        contentViewportCompositionVisual_->SetOffsetX(0.0f);
+        contentViewportCompositionVisual_->SetOffsetY(0.0f);
+    }
+    if (!smoothScrollActive_ || smoothScrollAnimationStartMs_ == 0) {
+        contentCompositionVisual_->SetOffsetX(static_cast<float>(-paddingX) + CurrentSmoothScrollOffsetX());
+        contentCompositionVisual_->SetOffsetY(static_cast<float>(-paddingY) + CurrentSmoothScrollOffsetY());
+    }
     contentCompositionVisual_->SetContent(contentCompositionSurface_);
     contentCompositionContentAttached_ = true;
     contentCompositionDirty_ = false;
@@ -10256,7 +10303,9 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
             bitmapInfo.bmiHeader.biBitCount = 32;
             bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
-            const int stretchMode = (isPanning_ || zoomSessionActive_ || interactionPreviewMode_ != InteractionPreviewMode::None) ? COLORONCOLOR : HALFTONE;
+            const int stretchMode = (isPanning_ || smoothScrollActive_ || zoomSessionActive_ || interactionPreviewMode_ != InteractionPreviewMode::None)
+                ? COLORONCOLOR
+                : HALFTONE;
             SetStretchBltMode(hdc, stretchMode);
             if (stretchMode == HALFTONE) {
                 SetBrushOrgEx(hdc, 0, 0, nullptr);

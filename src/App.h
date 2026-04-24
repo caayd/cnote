@@ -16,6 +16,7 @@
 struct ID3D11Device;
 struct IDXGIDevice;
 struct IDCompositionDevice;
+struct IDCompositionRectangleClip;
 struct IDCompositionSurface;
 struct IDCompositionTarget;
 struct IDCompositionVisual;
@@ -385,6 +386,9 @@ private:
     void StartSmoothScrollTimer();
     void StopSmoothScroll();
     void HandleSmoothScrollTimer();
+    [[nodiscard]] float CurrentSmoothScrollOffsetX() const;
+    [[nodiscard]] float CurrentSmoothScrollOffsetY() const;
+    [[nodiscard]] bool StartSmoothScrollCompositionAnimation(float startOffsetX, float startOffsetY, float targetOffsetX, float targetOffsetY);
     void ZoomAt(int delta, POINT cursor);
     void SetZoom(float zoom, std::optional<POINT> anchor = std::nullopt);
     [[nodiscard]] bool ApplyZoomPreset(std::size_t presetIndex);
@@ -589,9 +593,11 @@ private:
     float targetZoom_ = 1.0f;
     float panX_ = 0.0f;
     float panY_ = 0.0f;
-    float smoothScrollTargetPanX_ = 0.0f;
-    float smoothScrollTargetPanY_ = 0.0f;
-    ULONGLONG smoothScrollLastMs_ = 0;
+    float smoothScrollStartOffsetX_ = 0.0f;
+    float smoothScrollStartOffsetY_ = 0.0f;
+    float smoothScrollTargetOffsetX_ = 0.0f;
+    float smoothScrollTargetOffsetY_ = 0.0f;
+    ULONGLONG smoothScrollAnimationStartMs_ = 0;
     float brushWidth_ = 3.0f;
     Tool activeTool_ = Tool::Draw;
     std::size_t colorIndex_ = 0;
@@ -677,7 +683,6 @@ private:
     ULONGLONG paletteWheelHoverAnimationLastMs_ = 0;
     bool paletteWheelHoverTimerResolutionActive_ = false;
     bool smoothScrollActive_ = false;
-    bool smoothScrollTimerResolutionActive_ = false;
     SettingsState settings_ {};
     NewPageSettingsState newPageSettings_ {};
     HCURSOR eraserCursor_ = nullptr;
@@ -767,8 +772,10 @@ private:
     IDCompositionDevice* compositionDevice_ = nullptr;
     IDCompositionTarget* compositionTarget_ = nullptr;
     IDCompositionVisual* compositionRootVisual_ = nullptr;
+    IDCompositionVisual* contentViewportCompositionVisual_ = nullptr;
     IDCompositionVisual* contentCompositionVisual_ = nullptr;
     IDCompositionSurface* contentCompositionSurface_ = nullptr;
+    IDCompositionRectangleClip* contentViewportClip_ = nullptr;
     bool contentCompositionContentAttached_ = false;
     bool contentCompositionDirty_ = true;
     IDCompositionVisual* toolbarViewportCompositionVisual_ = nullptr;
@@ -781,6 +788,8 @@ private:
     int contentCompositionWidth_ = 0;
     int contentCompositionHeight_ = 0;
     UINT contentCompositionDpi_ = 0;
+    int contentCompositionPaddingX_ = 0;
+    int contentCompositionPaddingY_ = 0;
     bool popupCompositionContentAttached_ = false;
     int popupCompositionWidth_ = 0;
     int popupCompositionHeight_ = 0;
@@ -802,10 +811,10 @@ private:
     static constexpr UINT kPdfSidebarSlideFrameMs = 1;
     static constexpr UINT kPdfSidebarSlideDurationMs = 150;
     static constexpr UINT kPaletteWheelHoverFrameMs = 1;
-    static constexpr UINT kSmoothScrollFrameMs = 1;
+    static constexpr UINT kSmoothScrollAnimationDurationMs = 140;
     static constexpr float kPaletteWheelHoverAnimationSpeed = 18.0f;
-    static constexpr float kSmoothScrollFollowSpeed = 24.0f;
-    static constexpr float kSmoothScrollSnapPixels = 1.0f;
+    static constexpr float kSmoothScrollPaddingRatio = 0.5f;
+    static constexpr int kSmoothScrollPaddingFloor = 240;
     static constexpr float kMinBrushSize = 0.5f;
     static constexpr float kMaxBrushSize = 20.0f;
     static constexpr float kBrushSizeStep = 0.25f;

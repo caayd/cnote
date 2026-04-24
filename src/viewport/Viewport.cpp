@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-#include <mmsystem.h>
+#include <dcomp.h>
 
 #include "DpiUtil.h"
 
@@ -18,6 +18,14 @@ RECT MakeRect(int left, int top, int right, int bottom) {
 
 int WindowFrameThicknessX(UINT dpi) {
     return ScaleForDpi(8, dpi);
+}
+
+template <typename T>
+void ReleaseCom(T*& instance) {
+    if (instance != nullptr) {
+        instance->Release();
+        instance = nullptr;
+    }
 }
 
 float DistanceSquaredToRect(const RECT& rect, POINT point) {
@@ -43,6 +51,12 @@ int MaximizedCanvasWidthForZoom(HWND window, int fallbackCanvasWidth, int sideba
     const int workAreaWidth = std::max(1, static_cast<int>(monitorInfo.rcWork.right - monitorInfo.rcWork.left));
     const int maximizedHorizontalInset = WindowFrameThicknessX(dpi) * 2;
     return std::max(1, workAreaWidth - maximizedHorizontalInset - std::max(0, sidebarWidth));
+}
+
+float SmoothScrollInterpolation(float start, float target, double progress) {
+    const double clampedProgress = std::clamp(progress, 0.0, 1.0);
+    const double eased = (3.0 * clampedProgress * clampedProgress) - (2.0 * clampedProgress * clampedProgress * clampedProgress);
+    return start + static_cast<float>((target - start) * eased);
 }
 
 }  // namespace
@@ -117,16 +131,47 @@ void App::SmoothPanBy(float dx, float dy) {
         return;
     }
 
-    const bool wasActive = smoothScrollActive_;
-    if (!smoothScrollActive_) {
-        smoothScrollTargetPanX_ = panX_;
-        smoothScrollTargetPanY_ = panY_;
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+
+    float startOffsetX = 0.0f;
+    float startOffsetY = 0.0f;
+    if (smoothScrollActive_) {
+        startOffsetX = CurrentSmoothScrollOffsetX();
+        startOffsetY = CurrentSmoothScrollOffsetY();
+        const float nextOffsetX = startOffsetX + dx;
+        const float nextOffsetY = startOffsetY + dy;
+        const float maxOffsetX = static_cast<float>(std::max(1, contentCompositionPaddingX_ - 48));
+        const float maxOffsetY = static_cast<float>(std::max(1, contentCompositionPaddingY_ - 48));
+        if (std::abs(nextOffsetX) > maxOffsetX || std::abs(nextOffsetY) > maxOffsetY) {
+            StopSmoothScroll();
+            SmoothPanBy(dx, dy);
+            return;
+        }
+    } else {
+        smoothScrollActive_ = true;
+        contentCompositionDirty_ = true;
+        if (!UpdateContentComposition(clientRect, clientRect)) {
+            smoothScrollActive_ = false;
+            ApplyPanDelta(dx, dy);
+            return;
+        }
     }
-    smoothScrollTargetPanX_ += dx;
-    smoothScrollTargetPanY_ += dy;
-    if (!wasActive) {
-        StartSmoothScrollTimer();
+
+    const float targetOffsetX = startOffsetX + dx;
+    const float targetOffsetY = startOffsetY + dy;
+    if (!StartSmoothScrollCompositionAnimation(startOffsetX, startOffsetY, targetOffsetX, targetOffsetY)) {
+        StopSmoothScroll();
+        ApplyPanDelta(dx, dy);
+        return;
     }
+
+    smoothScrollStartOffsetX_ = startOffsetX;
+    smoothScrollStartOffsetY_ = startOffsetY;
+    smoothScrollTargetOffsetX_ = targetOffsetX;
+    smoothScrollTargetOffsetY_ = targetOffsetY;
+    smoothScrollAnimationStartMs_ = GetTickCount64();
+    StartSmoothScrollTimer();
 }
 
 void App::StartSmoothScrollTimer() {
@@ -134,83 +179,140 @@ void App::StartSmoothScrollTimer() {
         return;
     }
 
-    if (smoothScrollActive_) {
-        return;
-    }
-
-    smoothScrollActive_ = true;
-    smoothScrollLastMs_ = GetTickCount64();
-    if (!smoothScrollTimerResolutionActive_ && timeBeginPeriod(1) == TIMERR_NOERROR) {
-        smoothScrollTimerResolutionActive_ = true;
-    }
-    SetTimer(window_, kSmoothScrollTimerId, kSmoothScrollFrameMs, nullptr);
+    KillTimer(window_, kSmoothScrollTimerId);
+    SetTimer(window_, kSmoothScrollTimerId, kSmoothScrollAnimationDurationMs + 20, nullptr);
 }
 
 void App::StopSmoothScroll() {
     if (window_ != nullptr) {
         KillTimer(window_, kSmoothScrollTimerId);
     }
-    if (smoothScrollTimerResolutionActive_) {
-        timeEndPeriod(1);
-        smoothScrollTimerResolutionActive_ = false;
-    }
+
+    const float offsetX = CurrentSmoothScrollOffsetX();
+    const float offsetY = CurrentSmoothScrollOffsetY();
+    const bool hadVisualOffset = smoothScrollActive_ && (std::abs(offsetX) > 0.001f || std::abs(offsetY) > 0.001f);
     smoothScrollActive_ = false;
-    smoothScrollLastMs_ = 0;
-    smoothScrollTargetPanX_ = panX_;
-    smoothScrollTargetPanY_ = panY_;
+    smoothScrollAnimationStartMs_ = 0;
+    smoothScrollStartOffsetX_ = 0.0f;
+    smoothScrollStartOffsetY_ = 0.0f;
+    smoothScrollTargetOffsetX_ = 0.0f;
+    smoothScrollTargetOffsetY_ = 0.0f;
+
+    if (!hadVisualOffset) {
+        return;
+    }
+
+    panX_ += offsetX;
+    panY_ += offsetY;
+    contentCompositionDirty_ = true;
+
+    if (window_ == nullptr) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    if (!UpdateContentComposition(clientRect, clientRect)) {
+        InvalidateViewport();
+    }
 }
 
 void App::HandleSmoothScrollTimer() {
-    if (window_ == nullptr || !smoothScrollActive_) {
+    if (window_ == nullptr || !smoothScrollActive_ || IsDocumentInteractionActive() || isPanning_) {
         StopSmoothScroll();
         return;
     }
-    if (IsDocumentInteractionActive() || isPanning_) {
-        StopSmoothScroll();
-        return;
+
+    StopSmoothScroll();
+}
+
+float App::CurrentSmoothScrollOffsetX() const {
+    if (!smoothScrollActive_) {
+        return 0.0f;
+    }
+    if (smoothScrollAnimationStartMs_ == 0) {
+        return smoothScrollTargetOffsetX_;
     }
 
     const ULONGLONG now = GetTickCount64();
-    const float dt = smoothScrollLastMs_ == 0
-        ? (static_cast<float>(kSmoothScrollFrameMs) / 1000.0f)
-        : std::clamp(static_cast<float>(now - smoothScrollLastMs_) / 1000.0f, 0.001f, 0.050f);
-    smoothScrollLastMs_ = now;
+    const double durationMs = static_cast<double>(kSmoothScrollAnimationDurationMs);
+    const double elapsedMs = std::clamp(static_cast<double>(now - smoothScrollAnimationStartMs_), 0.0, durationMs);
+    return SmoothScrollInterpolation(smoothScrollStartOffsetX_, smoothScrollTargetOffsetX_, elapsedMs / durationMs);
+}
 
-    const float dx = smoothScrollTargetPanX_ - panX_;
-    const float dy = smoothScrollTargetPanY_ - panY_;
-    if ((dx * dx) + (dy * dy) <= (kSmoothScrollSnapPixels * kSmoothScrollSnapPixels)) {
-        panX_ = smoothScrollTargetPanX_;
-        panY_ = smoothScrollTargetPanY_;
-        StopSmoothScroll();
-        InvalidateViewport();
-        return;
+float App::CurrentSmoothScrollOffsetY() const {
+    if (!smoothScrollActive_) {
+        return 0.0f;
+    }
+    if (smoothScrollAnimationStartMs_ == 0) {
+        return smoothScrollTargetOffsetY_;
     }
 
-    const float step = 1.0f - std::exp(-kSmoothScrollFollowSpeed * dt);
-    float nextPanX = panX_ + (dx * step);
-    float nextPanY = panY_ + (dy * step);
+    const ULONGLONG now = GetTickCount64();
+    const double durationMs = static_cast<double>(kSmoothScrollAnimationDurationMs);
+    const double elapsedMs = std::clamp(static_cast<double>(now - smoothScrollAnimationStartMs_), 0.0, durationMs);
+    return SmoothScrollInterpolation(smoothScrollStartOffsetY_, smoothScrollTargetOffsetY_, elapsedMs / durationMs);
+}
 
-    const auto forceVisiblePixelStep = [](float current, float next, float target) {
-        const int currentPixel = static_cast<int>(std::lround(current));
-        const int nextPixel = static_cast<int>(std::lround(next));
-        const int targetPixel = static_cast<int>(std::lround(target));
-        if (nextPixel != currentPixel || targetPixel == currentPixel) {
-            return next;
+bool App::StartSmoothScrollCompositionAnimation(float startOffsetX, float startOffsetY, float targetOffsetX, float targetOffsetY) {
+    if (window_ == nullptr) {
+        return false;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    if (!UpdateContentComposition(clientRect, clientRect) || compositionDevice_ == nullptr || contentCompositionVisual_ == nullptr) {
+        return false;
+    }
+
+    const auto animateAxis = [&](float startOffset, float targetOffset, bool horizontal) {
+        const float baseOffset = horizontal ? static_cast<float>(-contentCompositionPaddingX_) : static_cast<float>(-contentCompositionPaddingY_);
+        const float startValue = baseOffset + startOffset;
+        const float targetValue = baseOffset + targetOffset;
+        if (std::abs(startValue - targetValue) <= 0.001f) {
+            if (horizontal) {
+                contentCompositionVisual_->SetOffsetX(targetValue);
+            } else {
+                contentCompositionVisual_->SetOffsetY(targetValue);
+            }
+            return S_OK;
         }
-        const int direction = targetPixel > currentPixel ? 1 : -1;
-        return static_cast<float>(currentPixel + direction);
+
+        IDCompositionAnimation* animation = nullptr;
+        HRESULT hr = compositionDevice_->CreateAnimation(&animation);
+        if (FAILED(hr) || animation == nullptr) {
+            ReleaseCom(animation);
+            return hr;
+        }
+
+        const double durationSeconds = static_cast<double>(kSmoothScrollAnimationDurationMs) / 1000.0;
+        const float delta = targetValue - startValue;
+        hr = animation->Reset();
+        if (SUCCEEDED(hr)) {
+            hr = animation->AddCubic(
+                0.0,
+                startValue,
+                0.0f,
+                delta * static_cast<float>(3.0 / (durationSeconds * durationSeconds)),
+                delta * static_cast<float>(-2.0 / (durationSeconds * durationSeconds * durationSeconds)));
+        }
+        if (SUCCEEDED(hr)) {
+            hr = animation->End(durationSeconds, targetValue);
+        }
+        if (SUCCEEDED(hr)) {
+            hr = horizontal ? contentCompositionVisual_->SetOffsetX(animation) : contentCompositionVisual_->SetOffsetY(animation);
+        }
+        ReleaseCom(animation);
+        return hr;
     };
 
-    nextPanX = forceVisiblePixelStep(panX_, nextPanX, smoothScrollTargetPanX_);
-    nextPanY = forceVisiblePixelStep(panY_, nextPanY, smoothScrollTargetPanY_);
-
-    const bool visiblePanChanged = static_cast<int>(std::lround(nextPanX)) != static_cast<int>(std::lround(panX_))
-        || static_cast<int>(std::lround(nextPanY)) != static_cast<int>(std::lround(panY_));
-    panX_ = nextPanX;
-    panY_ = nextPanY;
-    if (visiblePanChanged) {
-        InvalidateViewport();
+    if (FAILED(animateAxis(startOffsetX, targetOffsetX, true)) || FAILED(animateAxis(startOffsetY, targetOffsetY, false))) {
+        StopSmoothScroll();
+        return false;
     }
+
+    compositionDevice_->Commit();
+    return true;
 }
 
 void App::SetZoom(float zoom, std::optional<POINT> anchor) {
