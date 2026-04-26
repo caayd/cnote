@@ -24,6 +24,107 @@ RECT MakeRect(int left, int top, int right, int bottom) {
     return rect;
 }
 
+HBITMAP CreateTopDown32BitDibSection(HDC dc, int width, int height, void** bits) {
+    if (bits == nullptr || width <= 0 || height <= 0) {
+        return nullptr;
+    }
+
+    BITMAPINFO bitmapInfo {};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = width;
+    bitmapInfo.bmiHeader.biHeight = -height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    return CreateDIBSection(dc, &bitmapInfo, DIB_RGB_COLORS, bits, nullptr, 0);
+}
+
+bool Vec2Equal(const Vec2& a, const Vec2& b) {
+    return a.x == b.x && a.y == b.y;
+}
+
+bool StrokeStyleEqual(const StrokeStyle& a, const StrokeStyle& b) {
+    return a.color == b.color && a.width == b.width && a.dotted == b.dotted;
+}
+
+bool StrokeEqual(const Stroke& a, const Stroke& b) {
+    if (!StrokeStyleEqual(a.style, b.style) || a.smoothing != b.smoothing || a.points.size() != b.points.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < a.points.size(); ++index) {
+        if (!Vec2Equal(a.points[index], b.points[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool PageImageEqual(const PageImage& a, const PageImage& b) {
+    return a.x == b.x
+        && a.y == b.y
+        && a.width == b.width
+        && a.height == b.height
+        && a.rotationDegrees == b.rotationDegrees
+        && a.pixelWidth == b.pixelWidth
+        && a.pixelHeight == b.pixelHeight
+        && a.stride == b.stride
+        && a.pixels == b.pixels;
+}
+
+bool PageTextEqual(const PageText& a, const PageText& b) {
+    return a.x == b.x
+        && a.y == b.y
+        && a.width == b.width
+        && a.height == b.height
+        && a.fontSize == b.fontSize
+        && a.color == b.color
+        && a.alignment == b.alignment
+        && a.fontFamily == b.fontFamily
+        && a.bold == b.bold
+        && a.italic == b.italic
+        && a.underline == b.underline
+        && a.content == b.content;
+}
+
+bool RasterImageEqual(const RasterImage& a, const RasterImage& b) {
+    return a.width == b.width
+        && a.height == b.height
+        && a.stride == b.stride
+        && a.scale == b.scale
+        && a.pixels == b.pixels;
+}
+
+bool PageEqual(const Page& a, const Page& b) {
+    if (a.width != b.width
+        || a.height != b.height
+        || a.sourcePdfSourceIndex != b.sourcePdfSourceIndex
+        || a.sourcePdfPageIndex != b.sourcePdfPageIndex
+        || !RasterImageEqual(a.raster, b.raster)
+        || a.images.size() != b.images.size()
+        || a.texts.size() != b.texts.size()
+        || a.strokes.size() != b.strokes.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < a.images.size(); ++index) {
+        if (!PageImageEqual(a.images[index], b.images[index])) {
+            return false;
+        }
+    }
+    for (std::size_t index = 0; index < a.texts.size(); ++index) {
+        if (!PageTextEqual(a.texts[index], b.texts[index])) {
+            return false;
+        }
+    }
+    for (std::size_t index = 0; index < a.strokes.size(); ++index) {
+        if (!StrokeEqual(a.strokes[index], b.strokes[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::wstring FormatTextFontSizeValue(float size) {
     wchar_t buffer[32] = {};
     std::swprintf(buffer, std::size(buffer), L"%.2f", std::max(1.0f, size));
@@ -541,6 +642,69 @@ void App::ReleaseTextEditBackgroundBrush() {
     }
 }
 
+void App::RefreshTextEditBackgroundBrush(const RECT& editRect) {
+    ReleaseTextEditBackgroundBrush();
+    if (window_ == nullptr
+        || !editingTextPageIndex_.has_value()
+        || *editingTextPageIndex_ >= document_.PageCount()
+        || editRect.right <= editRect.left
+        || editRect.bottom <= editRect.top) {
+        return;
+    }
+
+    HDC windowDc = GetDC(window_);
+    if (windowDc == nullptr) {
+        return;
+    }
+
+    HDC backgroundDc = CreateCompatibleDC(windowDc);
+    if (backgroundDc == nullptr) {
+        ReleaseDC(window_, windowDc);
+        return;
+    }
+
+    const int width = editRect.right - editRect.left;
+    const int height = editRect.bottom - editRect.top;
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateTopDown32BitDibSection(backgroundDc, width, height, &bits);
+    if (bitmap == nullptr || bits == nullptr) {
+        if (bitmap != nullptr) {
+            DeleteObject(bitmap);
+        }
+        DeleteDC(backgroundDc);
+        ReleaseDC(window_, windowDc);
+        return;
+    }
+
+    HGDIOBJ previousBitmap = SelectObject(backgroundDc, bitmap);
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const RECT canvasRect = CanvasRect(clientRect);
+    HBRUSH canvasBrush = CreateSolidBrush(RGB(22, 26, 33));
+    FillRect(backgroundDc, &canvasRect, canvasBrush);
+    DeleteObject(canvasBrush);
+
+    const PageView pageView = CalculatePageView(clientRect, *editingTextPageIndex_);
+    SetViewportOrgEx(backgroundDc, -editRect.left, -editRect.top, nullptr);
+    if (pageView.valid) {
+        PaintPage(backgroundDc, pageView);
+    }
+    SetViewportOrgEx(backgroundDc, 0, 0, nullptr);
+
+    HBRUSH brush = CreatePatternBrush(bitmap);
+    SelectObject(backgroundDc, previousBitmap);
+    DeleteDC(backgroundDc);
+    ReleaseDC(window_, windowDc);
+
+    if (brush == nullptr) {
+        DeleteObject(bitmap);
+        return;
+    }
+
+    textEditBackgroundBitmap_ = bitmap;
+    textEditBackgroundBrush_ = brush;
+}
+
 void App::RefreshTextEditControl() {
     if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || window_ == nullptr) {
         return;
@@ -654,6 +818,50 @@ void App::RefreshTextEditControl() {
     if (boundsChanged || needsLayout || fontChanged) {
         InvalidateRect(textEditWindow_, nullptr, TRUE);
     }
+}
+
+void App::CommitTextEdit() {
+    if (textEditWindow_ == nullptr || !editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || !editingTextBeforePage_.has_value()) {
+        return;
+    }
+
+    const std::size_t pageIndex = *editingTextPageIndex_;
+    const std::size_t textIndex = *editingTextIndex_;
+    Page beforePage = *editingTextBeforePage_;
+
+    if (pageIndex < document_.PageCount() && textIndex < document_.PageAt(pageIndex).texts.size()) {
+        const int textLength = GetWindowTextLengthW(textEditWindow_);
+        std::wstring content(static_cast<std::size_t>(textLength), L'\0');
+        if (textLength > 0) {
+            std::vector<wchar_t> buffer(static_cast<std::size_t>(textLength) + 1U, L'\0');
+            GetWindowTextW(textEditWindow_, buffer.data(), textLength + 1);
+            content.assign(buffer.data(), static_cast<std::size_t>(textLength));
+        }
+        Page& page = document_.PageAt(pageIndex);
+        page.texts[textIndex].content = std::move(content);
+        if (page.texts[textIndex].content.empty()) {
+            page.texts.erase(page.texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
+        }
+    }
+
+    EndTextEditControl();
+    editingTextPageIndex_.reset();
+    editingTextIndex_.reset();
+    editingTextBeforePage_.reset();
+    ClearSelection();
+    if (pageIndex < document_.PageCount() && textIndex < document_.PageAt(pageIndex).texts.size()) {
+        selectedTextIndices_[pageIndex].push_back(textIndex);
+    }
+    if (pageIndex < document_.PageCount()) {
+        const bool changed = !PageEqual(beforePage, document_.PageAt(pageIndex));
+        PushReplacePagesHistoryAction({ pageIndex }, { beforePage }, document_.CurrentPageIndex());
+        if (changed) {
+            NotifyDocumentMutated();
+        }
+        InvalidatePageSurfaceCache(pageIndex);
+    }
+    UpdateCaptureState();
+    InvalidateCanvas();
 }
 
 void App::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, Page beforePage) {

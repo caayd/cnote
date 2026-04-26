@@ -28,6 +28,7 @@ add_executable(cnote WIN32
     src/document/Pages.cpp
     src/render/Paint.cpp
     src/selection/Selection.cpp
+    src/selection/Geometry.cpp
     src/selection/Transforms.cpp
     src/shell/Startup.cpp
     src/ui/UiUtil.cpp
