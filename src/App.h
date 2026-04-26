@@ -21,10 +21,17 @@ struct IDCompositionSurface;
 struct IDCompositionTarget;
 struct IDCompositionVisual;
 
+namespace Gdiplus {
+class GraphicsPath;
+}
+
 namespace cnote {
 
 class SettingsWindow;
 class NewPageSettingsWindow;
+struct GraphicsPathDeleter {
+    void operator()(Gdiplus::GraphicsPath* path) const;
+};
 
 class App {
 public:
@@ -303,6 +310,9 @@ private:
     void BeginStroke(POINT cursor);
     void ExtendStroke(POINT cursor);
     bool ApplyStrokePoint(POINT cursor);
+    void InvalidateActiveStrokeRenderCache();
+    void EnsureActiveStrokeRenderCache(const Stroke& stroke) const;
+    [[nodiscard]] const Gdiplus::GraphicsPath* ActiveStrokeScreenPath(const Stroke& stroke, const PageView& pageView) const;
     [[nodiscard]] std::optional<RECT> ActiveStrokeWindowDirtyRect() const;
     [[nodiscard]] std::optional<RECT> ActiveStrokeIncrementalWindowDirtyRect() const;
     void InvalidateStrokeDirtyDelta(const std::optional<RECT>& previousDirtyRect);
@@ -610,8 +620,19 @@ private:
     bool isTransformingImage_ = false;
     bool isTransformingStroke_ = false;
     bool isTransformingText_ = false;
+    struct ActiveStrokeRenderCache {
+        bool valid = false;
+        std::size_t pointCount = 0;
+        bool dotted = false;
+        float smoothing = 0.0f;
+        float pageScale = 0.0f;
+        RECT pageRect {};
+        std::vector<Vec2> smoothedPoints {};
+        std::unique_ptr<Gdiplus::GraphicsPath, GraphicsPathDeleter> screenPath {};
+    };
     std::optional<Stroke> activeStroke_ {};
     std::optional<Stroke> activeFreehandStroke_ {};
+    mutable ActiveStrokeRenderCache activeStrokeRenderCache_ {};
     std::optional<std::size_t> activeStrokePageIndex_ {};
     std::optional<UINT32> activeStrokePointerId_ {};
     std::vector<HistoryAction> undoActions_ {};

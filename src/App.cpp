@@ -36,6 +36,10 @@ namespace cnote {
 
 namespace ui = cnote::ui;
 
+void GraphicsPathDeleter::operator()(Gdiplus::GraphicsPath* path) const {
+    delete path;
+}
+
 namespace {
 
 using ui::FillRoundedRect;
@@ -2401,6 +2405,39 @@ std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float str
     return smoothed;
 }
 
+void AppendSmoothedPointIncrementally(std::vector<Vec2>& smoothed, const std::vector<Vec2>& points, std::size_t appendedPointIndex, float strength) {
+    if (appendedPointIndex >= points.size()) {
+        return;
+    }
+
+    if (appendedPointIndex < 2U || points.size() <= 2U || strength <= 0.001f) {
+        smoothed.assign(points.begin(), points.begin() + static_cast<std::ptrdiff_t>(appendedPointIndex + 1U));
+        return;
+    }
+
+    const float sideWeight = 0.25f * std::clamp(strength, 0.0f, 1.0f);
+    const float centerWeight = 1.0f - (sideWeight * 2.0f);
+    const Vec2 previousRawBack = points[appendedPointIndex - 1U];
+    if (!smoothed.empty() && DistanceSquared(previousRawBack, smoothed.back()) < 0.01f) {
+        smoothed.pop_back();
+    }
+
+    const Vec2 previous = points[appendedPointIndex - 2U];
+    const Vec2 current = points[appendedPointIndex - 1U];
+    const Vec2 next = points[appendedPointIndex];
+    const Vec2 filtered {
+        (previous.x * sideWeight) + (current.x * centerWeight) + (next.x * sideWeight),
+        (previous.y * sideWeight) + (current.y * centerWeight) + (next.y * sideWeight),
+    };
+
+    if (smoothed.empty() || DistanceSquared(filtered, smoothed.back()) >= 0.05f) {
+        smoothed.push_back(filtered);
+    }
+    if (smoothed.empty() || DistanceSquared(points[appendedPointIndex], smoothed.back()) >= 0.01f) {
+        smoothed.push_back(points[appendedPointIndex]);
+    }
+}
+
 float StrokeRenderSmoothing(const Stroke& stroke, float fallbackSmoothing) {
     const float smoothing = std::isfinite(stroke.smoothing) ? stroke.smoothing : fallbackSmoothing;
     return std::clamp(smoothing, 0.0f, 1.0f);
@@ -4600,7 +4637,89 @@ bool App::ApplyStrokePoint(POINT cursor) {
         }
         *activeStroke_ = *activeFreehandStroke_;
     }
+
+    if (straightLineMode) {
+        InvalidateActiveStrokeRenderCache();
+    } else {
+        activeStrokeRenderCache_.pageScale = 0.0f;
+        activeStrokeRenderCache_.screenPath.reset();
+    }
     return true;
+}
+
+void App::InvalidateActiveStrokeRenderCache() {
+    activeStrokeRenderCache_.valid = false;
+    activeStrokeRenderCache_.pointCount = 0;
+    activeStrokeRenderCache_.dotted = false;
+    activeStrokeRenderCache_.smoothing = 0.0f;
+    activeStrokeRenderCache_.pageScale = 0.0f;
+    activeStrokeRenderCache_.screenPath.reset();
+}
+
+void App::EnsureActiveStrokeRenderCache(const Stroke& stroke) const {
+    if (!activeStroke_.has_value() || (&stroke != &*activeStroke_)) {
+        return;
+    }
+
+    const float strokeSmoothing = StrokeRenderSmoothing(stroke, settings_.strokeSmoothing);
+    ActiveStrokeRenderCache& cache = activeStrokeRenderCache_;
+    const bool canAppendIncrementally = cache.valid
+        && stroke.points.size() > cache.pointCount
+        && std::abs(cache.smoothing - strokeSmoothing) < 0.001f;
+    if (canAppendIncrementally) {
+        for (std::size_t appendedPointIndex = cache.pointCount; appendedPointIndex < stroke.points.size(); ++appendedPointIndex) {
+            AppendSmoothedPointIncrementally(cache.smoothedPoints, stroke.points, appendedPointIndex, strokeSmoothing);
+        }
+        cache.pointCount = stroke.points.size();
+        cache.pageScale = 0.0f;
+        return;
+    }
+
+    if (cache.valid
+        && cache.pointCount == stroke.points.size()
+        && std::abs(cache.smoothing - strokeSmoothing) < 0.001f) {
+        return;
+    }
+
+    cache.valid = true;
+    cache.pointCount = stroke.points.size();
+    cache.smoothing = strokeSmoothing;
+    cache.pageScale = 0.0f;
+    cache.smoothedPoints = BuildSmoothedPoints(stroke.points, strokeSmoothing);
+    cache.screenPath.reset();
+}
+
+const Gdiplus::GraphicsPath* App::ActiveStrokeScreenPath(const Stroke& stroke, const PageView& pageView) const {
+    if (!activeStroke_.has_value() || (&stroke != &*activeStroke_)) {
+        return nullptr;
+    }
+
+    EnsureActiveStrokeRenderCache(stroke);
+    ActiveStrokeRenderCache& cache = activeStrokeRenderCache_;
+    if (cache.smoothedPoints.size() <= 2U) {
+        return nullptr;
+    }
+
+    if (cache.screenPath != nullptr
+        && std::abs(cache.pageScale - pageView.scale) < 0.001f
+        && EqualRect(&cache.pageRect, &pageView.rect) != 0) {
+        return cache.screenPath.get();
+    }
+
+    std::vector<Gdiplus::PointF> screenPoints;
+    screenPoints.reserve(cache.smoothedPoints.size());
+    for (const Vec2& point : cache.smoothedPoints) {
+        screenPoints.emplace_back(
+            static_cast<Gdiplus::REAL>(pageView.rect.left + (point.x * pageView.scale)),
+            static_cast<Gdiplus::REAL>(pageView.rect.top + (point.y * pageView.scale)));
+    }
+
+    std::unique_ptr<Gdiplus::GraphicsPath, GraphicsPathDeleter> path(new Gdiplus::GraphicsPath());
+    path->AddCurve(screenPoints.data(), static_cast<INT>(screenPoints.size()), 0.1f + (cache.smoothing * 0.8f));
+    cache.pageScale = pageView.scale;
+    cache.pageRect = pageView.rect;
+    cache.screenPath = std::move(path);
+    return cache.screenPath.get();
 }
 
 std::optional<RECT> App::ActiveStrokeWindowDirtyRect() const {
@@ -4754,6 +4873,7 @@ void App::StartStrokeSegment(std::size_t pageIndex, Vec2 pagePoint) {
     activeStroke_->smoothing = settings_.strokeSmoothing;
     activeStroke_->points.push_back(pagePoint);
     activeFreehandStroke_ = activeStroke_;
+    InvalidateActiveStrokeRenderCache();
     isDrawing_ = true;
     UpdateCaptureState();
     InvalidateStrokeRegion(*activeStroke_, pageIndex, true);
@@ -4800,6 +4920,7 @@ void App::EndStroke() {
 
     activeStroke_.reset();
     activeFreehandStroke_.reset();
+    InvalidateActiveStrokeRenderCache();
     activeStrokePageIndex_.reset();
     activeStrokePointerId_.reset();
     isDrawing_ = false;
@@ -9086,18 +9207,16 @@ void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, b
     }
 
     const float strokeSmoothing = StrokeRenderSmoothing(stroke, settings_.strokeSmoothing);
-    const std::vector<Vec2> smoothedPoints = BuildSmoothedPoints(stroke.points, strokeSmoothing);
+    const bool useActiveStrokeCache = activeStroke_.has_value() && (&stroke == &*activeStroke_);
+    if (useActiveStrokeCache) {
+        EnsureActiveStrokeRenderCache(stroke);
+    }
+    const std::vector<Vec2>& smoothedPoints = useActiveStrokeCache
+        ? activeStrokeRenderCache_.smoothedPoints
+        : BuildSmoothedPoints(stroke.points, strokeSmoothing);
     const float penWidth = std::max(1.25f, stroke.style.width * pageView.scale / 2.15f);
 
     if (gdiplusToken_ != 0) {
-        std::vector<Gdiplus::PointF> screenPoints;
-        screenPoints.reserve(smoothedPoints.size());
-        for (const Vec2& point : smoothedPoints) {
-            screenPoints.emplace_back(
-                static_cast<Gdiplus::REAL>(pageView.rect.left + (point.x * pageView.scale)),
-                static_cast<Gdiplus::REAL>(pageView.rect.top + (point.y * pageView.scale)));
-        }
-
         const float clampedOpacity = std::clamp(opacity, 0.0f, 1.0f);
         const auto alpha = static_cast<BYTE>(std::lround(static_cast<float>((stroke.style.color >> 24U) & 0xFFU) * clampedOpacity));
         const auto red = static_cast<BYTE>((stroke.style.color >> 16U) & 0xFFU);
@@ -9123,21 +9242,47 @@ void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, b
             pen.SetDashCap(Gdiplus::DashCapRound);
         }
 
-        if (screenPoints.size() == 1U) {
+        if (smoothedPoints.size() == 1U) {
+            const Gdiplus::PointF point(
+                static_cast<Gdiplus::REAL>(pageView.rect.left + (smoothedPoints.front().x * pageView.scale)),
+                static_cast<Gdiplus::REAL>(pageView.rect.top + (smoothedPoints.front().y * pageView.scale)));
             Gdiplus::SolidBrush brush(color);
             const Gdiplus::REAL radius = penWidth * 0.5f;
             graphics.FillEllipse(
                 &brush,
-                screenPoints.front().X - radius,
-                screenPoints.front().Y - radius,
+                point.X - radius,
+                point.Y - radius,
                 penWidth,
                 penWidth);
-        } else if (screenPoints.size() == 2U) {
-            graphics.DrawLines(&pen, screenPoints.data(), static_cast<INT>(screenPoints.size()));
+        } else if (smoothedPoints.size() == 2U) {
+            Gdiplus::PointF screenPoints[2] {
+                {
+                    static_cast<Gdiplus::REAL>(pageView.rect.left + (smoothedPoints[0].x * pageView.scale)),
+                    static_cast<Gdiplus::REAL>(pageView.rect.top + (smoothedPoints[0].y * pageView.scale)),
+                },
+                {
+                    static_cast<Gdiplus::REAL>(pageView.rect.left + (smoothedPoints[1].x * pageView.scale)),
+                    static_cast<Gdiplus::REAL>(pageView.rect.top + (smoothedPoints[1].y * pageView.scale)),
+                },
+            };
+            graphics.DrawLines(&pen, screenPoints, 2);
         } else {
-            Gdiplus::GraphicsPath path;
-            path.AddCurve(screenPoints.data(), static_cast<INT>(screenPoints.size()), 0.1f + (strokeSmoothing * 0.8f));
-            graphics.DrawPath(&pen, &path);
+            if (const Gdiplus::GraphicsPath* cachedPath = useActiveStrokeCache ? ActiveStrokeScreenPath(stroke, pageView) : nullptr;
+                cachedPath != nullptr) {
+                graphics.DrawPath(&pen, cachedPath);
+            } else {
+                std::vector<Gdiplus::PointF> screenPoints;
+                screenPoints.reserve(smoothedPoints.size());
+                for (const Vec2& point : smoothedPoints) {
+                    screenPoints.emplace_back(
+                        static_cast<Gdiplus::REAL>(pageView.rect.left + (point.x * pageView.scale)),
+                        static_cast<Gdiplus::REAL>(pageView.rect.top + (point.y * pageView.scale)));
+                }
+
+                Gdiplus::GraphicsPath path;
+                path.AddCurve(screenPoints.data(), static_cast<INT>(screenPoints.size()), 0.1f + (strokeSmoothing * 0.8f));
+                graphics.DrawPath(&pen, &path);
+            }
         }
 
         return;
