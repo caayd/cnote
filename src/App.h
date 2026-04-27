@@ -370,6 +370,13 @@ private:
     void CancelQuickSizePopup(bool cancelInput = true);
     void ClosePaletteOverlays();
     void UpdatePaletteWheelHover(POINT cursor);
+    [[nodiscard]] std::optional<RECT> PaletteWheelBounds(RECT clientRect) const;
+    void ClearPaletteWheelPixelCache();
+    [[nodiscard]] std::uint64_t PaletteWheelPixelCacheSignature(RECT clientRect) const;
+    void RebuildPaletteWheelPixelCache(RECT clientRect);
+    [[nodiscard]] IDCompositionSurface* FindPaletteWheelSurfaceCache(std::optional<std::size_t> hoverIndex) const;
+    [[nodiscard]] IDCompositionSurface* CreatePopupCompositionSurfaceFromPixels(int width, int height, UINT dpi, const std::uint8_t* pixels);
+    [[nodiscard]] bool UpdatePopupCompositionSurfacePixels(RECT bounds, int width, int height, UINT dpi, const std::uint8_t* pixels);
     void EnsurePaletteWheelHoverState(std::size_t entryCount);
     void StartPaletteWheelHoverAnimationTimer();
     void StopPaletteWheelHoverAnimationTimer();
@@ -559,6 +566,7 @@ private:
     void PaintLiveTextEditOverlay(HDC hdc) const;
     void PaintPaletteMenu(HDC hdc, RECT clientRect) const;
     void PaintPaletteWheel(HDC hdc, RECT clientRect) const;
+    void PaintPaletteWheel(HDC hdc, RECT clientRect, std::optional<std::size_t> hoverIndex) const;
     void PaintCanvas(HDC hdc, RECT clientRect);
     void PaintPage(HDC hdc, const PageView& pageView);
     [[nodiscard]] bool PaintNativePdfBackground(HDC hdc, const Page& page, const RECT& destinationRect) const;
@@ -701,9 +709,14 @@ private:
     ShortcutState shortcuts_ {};
     WheelState wheel_ {};
     std::optional<std::size_t> paletteWheelHoverTargetIndex_ {};
+    struct PaletteWheelPixelCacheEntry {
+        std::optional<std::size_t> hoverIndex {};
+        IDCompositionSurface* surface = nullptr;
+    };
+    std::vector<PaletteWheelPixelCacheEntry> paletteWheelPixelCacheEntries_ {};
+    std::uint64_t paletteWheelPixelCacheSignature_ = 0;
     std::vector<float> paletteWheelHoverProgresses_ {};
     ULONGLONG paletteWheelHoverAnimationLastMs_ = 0;
-    bool paletteWheelHoverTimerResolutionActive_ = false;
     bool smoothScrollActive_ = false;
     SettingsState settings_ {};
     NewPageSettingsState newPageSettings_ {};
@@ -832,7 +845,7 @@ private:
     static constexpr UINT kToolbarHideDetachDelayMs = 72;
     static constexpr UINT kPdfSidebarSlideFrameMs = 1;
     static constexpr UINT kPdfSidebarSlideDurationMs = 150;
-    static constexpr UINT kPaletteWheelHoverFrameMs = 1;
+    static constexpr UINT kPaletteWheelHoverFrameMs = 16;
     static constexpr UINT kSmoothScrollAnimationDurationMs = 140;
     static constexpr float kPaletteWheelHoverAnimationSpeed = 18.0f;
     static constexpr float kSmoothScrollPaddingRatio = 0.5f;

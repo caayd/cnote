@@ -4,9 +4,6 @@
 #include <cmath>
 #include <cwchar>
 
-#include <dwmapi.h>
-#include <mmsystem.h>
-
 #include "DpiUtil.h"
 #include "ui/Layout.h"
 
@@ -19,6 +16,9 @@ namespace {
 constexpr float kMinBrushSize = 0.5f;
 constexpr float kMaxBrushSize = 20.0f;
 constexpr float kBrushSizeStep = 0.25f;
+constexpr int kPaletteWheelShadowInsetDip = 6;
+constexpr int kPaletteWheelHoverOffsetDip = 8;
+constexpr int kPaletteWheelBoundsPaddingDip = 4;
 
 float SnapBrushSize(float size) {
     const float clamped = std::clamp(size, kMinBrushSize, kMaxBrushSize);
@@ -55,6 +55,7 @@ void App::ClosePaletteOverlays() {
     wheel_.paletteMenuOpen = false;
     wheel_.paletteWheelOpen = false;
     paletteWheelHoverTargetIndex_.reset();
+    ClearPaletteWheelPixelCache();
     paletteWheelHoverProgresses_.clear();
     paletteWheelHoverAnimationLastMs_ = 0;
     StopPaletteWheelHoverAnimationTimer();
@@ -119,25 +120,55 @@ void App::TogglePaletteWheel() {
     }
 
     wheel_.center = cursor;
+    ClearPaletteWheelPixelCache();
+    const std::optional<RECT> wheelBounds = PaletteWheelBounds(clientRect);
     wheel_.paletteWheelOpen = !wheel_.paletteWheelOpen;
     wheel_.paletteMenuOpen = false;
     if (wheel_.paletteWheelOpen) {
         UpdatePaletteWheelHover(cursor);
     } else {
         paletteWheelHoverTargetIndex_.reset();
+        ClearPaletteWheelPixelCache();
         paletteWheelHoverProgresses_.clear();
         paletteWheelHoverAnimationLastMs_ = 0;
         StopPaletteWheelHoverAnimationTimer();
     }
-    InvalidateRect(window_, nullptr, FALSE);
+    if (wheelBounds.has_value()) {
+        InvalidateRect(window_, &*wheelBounds, FALSE);
+    } else {
+        InvalidateRect(window_, nullptr, FALSE);
+    }
 }
 
 void App::EnsurePaletteWheelHoverState(std::size_t entryCount) {
-    if (paletteWheelHoverProgresses_.size() != entryCount) {
-        paletteWheelHoverProgresses_.assign(entryCount, 0.0f);
+    if (entryCount == 0U) {
         paletteWheelHoverTargetIndex_.reset();
-        paletteWheelHoverAnimationLastMs_ = 0;
     }
+}
+
+std::optional<RECT> App::PaletteWheelBounds(RECT clientRect) const {
+    const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
+    if (wheelEntryCount == 0U) {
+        return std::nullopt;
+    }
+
+    const UINT dpi = WindowDpi(window_);
+    const appui::PaletteWheelLayout layout = appui::BuildPaletteWheelLayout(
+        clientRect,
+        wheel_.center,
+        wheelEntryCount,
+        VisibleToolbarHeight(),
+        dpi);
+    const int radius = layout.hitOuterRadius
+        + ScaleForDpi(kPaletteWheelShadowInsetDip, dpi)
+        + ScaleForDpi(kPaletteWheelHoverOffsetDip, dpi)
+        + ScaleForDpi(kPaletteWheelBoundsPaddingDip, dpi);
+    return RECT {
+        layout.center.x - radius,
+        layout.center.y - radius,
+        layout.center.x + radius,
+        layout.center.y + radius,
+    };
 }
 
 void App::UpdatePaletteWheelHover(POINT cursor) {
@@ -167,70 +198,20 @@ void App::UpdatePaletteWheelHover(POINT cursor) {
     }
 
     paletteWheelHoverTargetIndex_ = nextHover;
-    StartPaletteWheelHoverAnimationTimer();
-    InvalidateRect(window_, nullptr, FALSE);
+    if (const std::optional<RECT> wheelBounds = PaletteWheelBounds(clientRect); wheelBounds.has_value()) {
+        InvalidateRect(window_, &*wheelBounds, FALSE);
+    } else {
+        InvalidateRect(window_, nullptr, FALSE);
+    }
 }
 
 void App::StartPaletteWheelHoverAnimationTimer() {
-    if (window_ == nullptr) {
-        return;
-    }
-
-    if (paletteWheelHoverAnimationLastMs_ == 0) {
-        paletteWheelHoverAnimationLastMs_ = GetTickCount64();
-    }
-    if (!paletteWheelHoverTimerResolutionActive_ && timeBeginPeriod(1) == TIMERR_NOERROR) {
-        paletteWheelHoverTimerResolutionActive_ = true;
-    }
-    SetTimer(window_, kPaletteWheelHoverTimerId, kPaletteWheelHoverFrameMs, nullptr);
 }
 
 void App::StopPaletteWheelHoverAnimationTimer() {
-    if (window_ != nullptr) {
-        KillTimer(window_, kPaletteWheelHoverTimerId);
-    }
-    paletteWheelHoverAnimationLastMs_ = 0;
-    if (paletteWheelHoverTimerResolutionActive_) {
-        timeEndPeriod(1);
-        paletteWheelHoverTimerResolutionActive_ = false;
-    }
 }
 
 void App::HandlePaletteWheelHoverAnimationTimer() {
-    if (window_ == nullptr || !wheel_.paletteWheelOpen) {
-        StopPaletteWheelHoverAnimationTimer();
-        return;
-    }
-
-    const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
-    EnsurePaletteWheelHoverState(wheelEntryCount);
-
-    const ULONGLONG nowMs = GetTickCount64();
-    const ULONGLONG lastMs = paletteWheelHoverAnimationLastMs_ > 0 ? paletteWheelHoverAnimationLastMs_ : nowMs;
-    paletteWheelHoverAnimationLastMs_ = nowMs;
-    const float deltaSeconds = static_cast<float>(std::min<ULONGLONG>(nowMs - lastMs, 50ULL)) / 1000.0f;
-    const float step = std::clamp(deltaSeconds * kPaletteWheelHoverAnimationSpeed, 0.0f, 1.0f);
-
-    bool animating = false;
-    for (std::size_t index = 0; index < paletteWheelHoverProgresses_.size(); ++index) {
-        const float target = (paletteWheelHoverTargetIndex_.has_value() && *paletteWheelHoverTargetIndex_ == index)
-            ? 1.0f
-            : 0.0f;
-        float& progress = paletteWheelHoverProgresses_[index];
-        progress += (target - progress) * step;
-        if (std::abs(target - progress) <= 0.01f) {
-            progress = target;
-        } else {
-            animating = true;
-        }
-    }
-
-    RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
-    DwmFlush();
-
-    if (!animating) {
-        StopPaletteWheelHoverAnimationTimer();
-    }
 }
 
 void App::ToggleQuickSizePopup() {

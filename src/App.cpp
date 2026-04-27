@@ -3439,6 +3439,7 @@ void App::ReleaseCompositionResources() {
         }
         compositionDevice_->Commit();
     }
+    ClearPaletteWheelPixelCache();
     ReleaseCom(contentCompositionSurface_);
     ReleaseCom(toolbarCompositionSurface_);
     ReleaseCom(pdfSidebarCompositionSurface_);
@@ -3641,6 +3642,350 @@ void App::DetachPopupComposition(bool waitForCommitCompletion) {
     popupCompositionContentAttached_ = false;
 }
 
+void App::ClearPaletteWheelPixelCache() {
+    for (PaletteWheelPixelCacheEntry& entry : paletteWheelPixelCacheEntries_) {
+        ReleaseCom(entry.surface);
+    }
+    paletteWheelPixelCacheEntries_.clear();
+    paletteWheelPixelCacheSignature_ = 0;
+}
+
+std::uint64_t App::PaletteWheelPixelCacheSignature(RECT clientRect) const {
+    constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
+    std::uint64_t hash = kFnvOffset;
+    const UINT dpi = WindowDpi(window_);
+    const int activeTool = static_cast<int>(activeTool_);
+    const auto wheelBounds = PaletteWheelBounds(clientRect);
+
+    HashToolbarValue(hash, dpi);
+    HashToolbarValue(hash, activeTool);
+    HashToolbarValue(hash, colorIndex_);
+    HashToolbarValue(hash, wheel_.center.x);
+    HashToolbarValue(hash, wheel_.center.y);
+    HashToolbarValue(hash, VisibleToolbarHeight());
+    HashToolbarValue(hash, wheelBounds.has_value());
+    if (wheelBounds.has_value()) {
+        HashToolbarValue(hash, wheelBounds->left);
+        HashToolbarValue(hash, wheelBounds->top);
+        HashToolbarValue(hash, wheelBounds->right);
+        HashToolbarValue(hash, wheelBounds->bottom);
+    }
+
+    const std::size_t paletteSize = palette_.size();
+    HashToolbarValue(hash, paletteSize);
+    for (std::uint32_t color : palette_) {
+        HashToolbarValue(hash, color);
+    }
+
+    const std::size_t wheelToolCount = wheel_.tools.size();
+    HashToolbarValue(hash, wheelToolCount);
+    for (Tool tool : wheel_.tools) {
+        const int toolValue = static_cast<int>(tool);
+        HashToolbarValue(hash, toolValue);
+    }
+
+    return hash;
+}
+
+IDCompositionSurface* App::FindPaletteWheelSurfaceCache(std::optional<std::size_t> hoverIndex) const {
+    const auto match = std::find_if(
+        paletteWheelPixelCacheEntries_.begin(),
+        paletteWheelPixelCacheEntries_.end(),
+        [&](const PaletteWheelPixelCacheEntry& entry) {
+            return entry.hoverIndex == hoverIndex;
+        });
+    return match != paletteWheelPixelCacheEntries_.end() ? match->surface : nullptr;
+}
+
+void App::RebuildPaletteWheelPixelCache(RECT clientRect) {
+    ClearPaletteWheelPixelCache();
+    if (window_ == nullptr || !wheel_.paletteWheelOpen || compositionDevice_ == nullptr) {
+        return;
+    }
+
+    const std::optional<RECT> wheelBounds = PaletteWheelBounds(clientRect);
+    if (!wheelBounds.has_value()) {
+        return;
+    }
+
+    const int width = std::max(1, static_cast<int>(wheelBounds->right - wheelBounds->left));
+    const int height = std::max(1, static_cast<int>(wheelBounds->bottom - wheelBounds->top));
+    HDC blackDc = CreateCompatibleDC(nullptr);
+    HDC whiteDc = CreateCompatibleDC(nullptr);
+    if (blackDc == nullptr || whiteDc == nullptr) {
+        if (blackDc != nullptr) {
+            DeleteDC(blackDc);
+        }
+        if (whiteDc != nullptr) {
+            DeleteDC(whiteDc);
+        }
+        return;
+    }
+
+    void* blackBits = nullptr;
+    void* whiteBits = nullptr;
+    HBITMAP blackBitmap = CreateTopDown32BitDibSection(blackDc, width, height, &blackBits);
+    HBITMAP whiteBitmap = CreateTopDown32BitDibSection(whiteDc, width, height, &whiteBits);
+    if (blackBitmap == nullptr || blackBits == nullptr || whiteBitmap == nullptr || whiteBits == nullptr) {
+        if (blackBitmap != nullptr) {
+            DeleteObject(blackBitmap);
+        }
+        if (whiteBitmap != nullptr) {
+            DeleteObject(whiteBitmap);
+        }
+        DeleteDC(blackDc);
+        DeleteDC(whiteDc);
+        return;
+    }
+
+    HGDIOBJ previousBlackBitmap = SelectObject(blackDc, blackBitmap);
+    HGDIOBJ previousWhiteBitmap = SelectObject(whiteDc, whiteBitmap);
+    const auto releaseOverlayBitmaps = [&]() {
+        if (previousBlackBitmap != nullptr) {
+            SelectObject(blackDc, previousBlackBitmap);
+        }
+        if (previousWhiteBitmap != nullptr) {
+            SelectObject(whiteDc, previousWhiteBitmap);
+        }
+        DeleteObject(blackBitmap);
+        DeleteObject(whiteBitmap);
+        DeleteDC(blackDc);
+        DeleteDC(whiteDc);
+    };
+
+    auto* blackPixels = static_cast<std::uint8_t*>(blackBits);
+    auto* whitePixels = static_cast<std::uint8_t*>(whiteBits);
+    const std::size_t totalPixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const auto renderWheelPixels = [&](std::optional<std::size_t> hoverIndex) {
+        for (std::size_t index = 0; index < totalPixels; ++index) {
+            blackPixels[(index * 4U) + 0U] = 0;
+            blackPixels[(index * 4U) + 1U] = 0;
+            blackPixels[(index * 4U) + 2U] = 0;
+            blackPixels[(index * 4U) + 3U] = 0;
+            whitePixels[(index * 4U) + 0U] = 255;
+            whitePixels[(index * 4U) + 1U] = 255;
+            whitePixels[(index * 4U) + 2U] = 255;
+            whitePixels[(index * 4U) + 3U] = 0;
+        }
+
+        const auto paintWheel = [&](HDC hdc) {
+            const int savedDc = SaveDC(hdc);
+            SetViewportOrgEx(hdc, -wheelBounds->left, -wheelBounds->top, nullptr);
+            IntersectClipRect(hdc, wheelBounds->left, wheelBounds->top, wheelBounds->right, wheelBounds->bottom);
+            PaintPaletteWheel(hdc, clientRect, hoverIndex);
+            if (savedDc != 0) {
+                RestoreDC(hdc, savedDc);
+            }
+        };
+        paintWheel(blackDc);
+        paintWheel(whiteDc);
+
+        std::vector<std::uint8_t> pixels(totalPixels * 4U, 0);
+        for (std::size_t index = 0; index < totalPixels; ++index) {
+            std::uint8_t* pixel = pixels.data() + (index * 4U);
+            const std::uint8_t* blackPixel = blackPixels + (index * 4U);
+            const std::uint8_t* whitePixel = whitePixels + (index * 4U);
+            const int blueDelta = static_cast<int>(whitePixel[0]) - static_cast<int>(blackPixel[0]);
+            const int greenDelta = static_cast<int>(whitePixel[1]) - static_cast<int>(blackPixel[1]);
+            const int redDelta = static_cast<int>(whitePixel[2]) - static_cast<int>(blackPixel[2]);
+            const int alpha = std::clamp(255 - ((blueDelta + greenDelta + redDelta) / 3), 0, 255);
+            if (alpha == 0) {
+                continue;
+            }
+            pixel[0] = static_cast<std::uint8_t>(std::clamp(static_cast<int>(blackPixel[0]), 0, alpha));
+            pixel[1] = static_cast<std::uint8_t>(std::clamp(static_cast<int>(blackPixel[1]), 0, alpha));
+            pixel[2] = static_cast<std::uint8_t>(std::clamp(static_cast<int>(blackPixel[2]), 0, alpha));
+            pixel[3] = static_cast<std::uint8_t>(alpha);
+        }
+        return CreatePopupCompositionSurfaceFromPixels(width, height, WindowDpi(window_), pixels.data());
+    };
+
+    paletteWheelPixelCacheSignature_ = PaletteWheelPixelCacheSignature(clientRect);
+    const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
+    paletteWheelPixelCacheEntries_.reserve(wheelEntryCount + 1U);
+    paletteWheelPixelCacheEntries_.push_back({ std::nullopt, renderWheelPixels(std::nullopt) });
+    for (std::size_t index = 0; index < wheelEntryCount; ++index) {
+        paletteWheelPixelCacheEntries_.push_back({ index, renderWheelPixels(index) });
+    }
+
+    releaseOverlayBitmaps();
+}
+
+IDCompositionSurface* App::CreatePopupCompositionSurfaceFromPixels(int width, int height, UINT dpi, const std::uint8_t* pixels) {
+    if (compositionDevice_ == nullptr || pixels == nullptr) {
+        return nullptr;
+    }
+
+    IDCompositionSurface* surface = nullptr;
+    const HRESULT createHr = compositionDevice_->CreateSurface(
+        static_cast<UINT>(width),
+        static_cast<UINT>(height),
+        DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_ALPHA_MODE_PREMULTIPLIED,
+        &surface);
+    if (FAILED(createHr) || surface == nullptr) {
+        ReleaseCom(surface);
+        return nullptr;
+    }
+
+    RECT updateRect { 0, 0, width, height };
+    IDXGISurface* dxgiSurface = nullptr;
+    POINT updateOffset {};
+    HRESULT hr = surface->BeginDraw(
+        &updateRect,
+        __uuidof(IDXGISurface),
+        reinterpret_cast<void**>(&dxgiSurface),
+        &updateOffset);
+    if (FAILED(hr) || dxgiSurface == nullptr) {
+        ReleaseCom(dxgiSurface);
+        ReleaseCom(surface);
+        return nullptr;
+    }
+
+    IDXGISurface1* gdiSurface = nullptr;
+    hr = dxgiSurface->QueryInterface(__uuidof(IDXGISurface1), reinterpret_cast<void**>(&gdiSurface));
+    ReleaseCom(dxgiSurface);
+    if (FAILED(hr) || gdiSurface == nullptr) {
+        surface->EndDraw();
+        ReleaseCom(gdiSurface);
+        ReleaseCom(surface);
+        return nullptr;
+    }
+
+    HDC popupDc = nullptr;
+    hr = gdiSurface->GetDC(FALSE, &popupDc);
+    if (FAILED(hr) || popupDc == nullptr) {
+        surface->EndDraw();
+        ReleaseCom(gdiSurface);
+        ReleaseCom(surface);
+        return nullptr;
+    }
+
+    BITMAPINFO bitmapInfo {};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = width;
+    bitmapInfo.bmiHeader.biHeight = -height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    const int copiedLines = SetDIBitsToDevice(
+        popupDc,
+        updateOffset.x,
+        updateOffset.y,
+        static_cast<DWORD>(width),
+        static_cast<DWORD>(height),
+        0,
+        0,
+        0,
+        static_cast<UINT>(height),
+        pixels,
+        &bitmapInfo,
+        DIB_RGB_COLORS);
+
+    gdiSurface->ReleaseDC(nullptr);
+    ReleaseCom(gdiSurface);
+    surface->EndDraw();
+    if (copiedLines == 0) {
+        ReleaseCom(surface);
+        return nullptr;
+    }
+
+    static_cast<void>(dpi);
+    return surface;
+}
+
+bool App::UpdatePopupCompositionSurfacePixels(RECT bounds, int width, int height, UINT dpi, const std::uint8_t* pixels) {
+    if (compositionDevice_ == nullptr || popupCompositionVisual_ == nullptr || pixels == nullptr) {
+        return false;
+    }
+
+    if (popupCompositionSurface_ == nullptr
+        || popupCompositionWidth_ != width
+        || popupCompositionHeight_ != height
+        || popupCompositionDpi_ != dpi) {
+        ReleaseCom(popupCompositionSurface_);
+        popupCompositionContentAttached_ = false;
+        const HRESULT hr = compositionDevice_->CreateSurface(
+            static_cast<UINT>(width),
+            static_cast<UINT>(height),
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_PREMULTIPLIED,
+            &popupCompositionSurface_);
+        if (FAILED(hr) || popupCompositionSurface_ == nullptr) {
+            ReleaseCom(popupCompositionSurface_);
+            return false;
+        }
+        popupCompositionWidth_ = width;
+        popupCompositionHeight_ = height;
+        popupCompositionDpi_ = dpi;
+    }
+
+    RECT updateRect { 0, 0, width, height };
+    IDXGISurface* dxgiSurface = nullptr;
+    POINT updateOffset {};
+    HRESULT hr = popupCompositionSurface_->BeginDraw(
+        &updateRect,
+        __uuidof(IDXGISurface),
+        reinterpret_cast<void**>(&dxgiSurface),
+        &updateOffset);
+    if (FAILED(hr) || dxgiSurface == nullptr) {
+        ReleaseCom(dxgiSurface);
+        return false;
+    }
+
+    IDXGISurface1* gdiSurface = nullptr;
+    hr = dxgiSurface->QueryInterface(__uuidof(IDXGISurface1), reinterpret_cast<void**>(&gdiSurface));
+    ReleaseCom(dxgiSurface);
+    if (FAILED(hr) || gdiSurface == nullptr) {
+        popupCompositionSurface_->EndDraw();
+        ReleaseCom(gdiSurface);
+        return false;
+    }
+
+    HDC popupDc = nullptr;
+    hr = gdiSurface->GetDC(FALSE, &popupDc);
+    if (FAILED(hr) || popupDc == nullptr) {
+        popupCompositionSurface_->EndDraw();
+        ReleaseCom(gdiSurface);
+        return false;
+    }
+
+    BITMAPINFO bitmapInfo {};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = width;
+    bitmapInfo.bmiHeader.biHeight = -height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    const int copiedLines = SetDIBitsToDevice(
+        popupDc,
+        updateOffset.x,
+        updateOffset.y,
+        static_cast<DWORD>(width),
+        static_cast<DWORD>(height),
+        0,
+        0,
+        0,
+        static_cast<UINT>(height),
+        pixels,
+        &bitmapInfo,
+        DIB_RGB_COLORS);
+
+    gdiSurface->ReleaseDC(nullptr);
+    ReleaseCom(gdiSurface);
+    popupCompositionSurface_->EndDraw();
+    if (copiedLines == 0) {
+        return false;
+    }
+
+    popupCompositionVisual_->SetOffsetX(static_cast<float>(bounds.left));
+    popupCompositionVisual_->SetOffsetY(static_cast<float>(bounds.top));
+    popupCompositionVisual_->SetContent(popupCompositionSurface_);
+    popupCompositionContentAttached_ = true;
+    compositionDevice_->Commit();
+    return true;
+}
+
 bool App::UpdatePopupComposition(RECT clientRect) {
     std::optional<RECT> overlayBounds;
     const UINT dpi = WindowDpi(window_);
@@ -3668,19 +4013,8 @@ bool App::UpdatePopupComposition(RECT clientRect) {
         includeBounds(InflateRectCopy(layout.panelRect, ScaleForDpi(3, dpi)));
     }
     if (wheel_.paletteWheelOpen) {
-        const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
-        if (wheelEntryCount > 0U) {
-            const PaletteWheelLayout layout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, VisibleToolbarHeight(), dpi);
-            const int radius = layout.outerRadius
-                + PaletteWheelShadowInset(dpi)
-                + PaletteWheelHoverOffset(dpi)
-                + PaletteWheelHoverGrow(dpi)
-                + ScaleForDpi(4, dpi);
-            includeBounds(MakeRect(
-                layout.center.x - radius,
-                layout.center.y - radius,
-                layout.center.x + radius,
-                layout.center.y + radius));
+        if (const std::optional<RECT> wheelBounds = PaletteWheelBounds(clientRect); wheelBounds.has_value()) {
+            includeBounds(*wheelBounds);
         }
     }
 
@@ -3695,25 +4029,22 @@ bool App::UpdatePopupComposition(RECT clientRect) {
     const RECT bounds = *overlayBounds;
     const int width = std::max(1, static_cast<int>(bounds.right - bounds.left));
     const int height = std::max(1, static_cast<int>(bounds.bottom - bounds.top));
-    if (popupCompositionSurface_ == nullptr
-        || popupCompositionWidth_ != width
-        || popupCompositionHeight_ != height
-        || popupCompositionDpi_ != dpi) {
-        ReleaseCom(popupCompositionSurface_);
-        popupCompositionContentAttached_ = false;
-        const HRESULT hr = compositionDevice_->CreateSurface(
-            static_cast<UINT>(width),
-            static_cast<UINT>(height),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            DXGI_ALPHA_MODE_PREMULTIPLIED,
-            &popupCompositionSurface_);
-        if (FAILED(hr) || popupCompositionSurface_ == nullptr) {
-            ReleaseCom(popupCompositionSurface_);
-            return false;
+    const bool wheelOnlyOverlay = wheel_.paletteWheelOpen
+        && !quickSizePopupTool_.has_value()
+        && !wheel_.paletteMenuOpen;
+    if (wheelOnlyOverlay) {
+        const std::uint64_t wheelCacheSignature = PaletteWheelPixelCacheSignature(clientRect);
+        if (paletteWheelPixelCacheSignature_ != wheelCacheSignature || paletteWheelPixelCacheEntries_.empty()) {
+            RebuildPaletteWheelPixelCache(clientRect);
         }
-        popupCompositionWidth_ = width;
-        popupCompositionHeight_ = height;
-        popupCompositionDpi_ = dpi;
+        if (IDCompositionSurface* cachedSurface = FindPaletteWheelSurfaceCache(paletteWheelHoverTargetIndex_); cachedSurface != nullptr) {
+            popupCompositionVisual_->SetOffsetX(static_cast<float>(bounds.left));
+            popupCompositionVisual_->SetOffsetY(static_cast<float>(bounds.top));
+            popupCompositionVisual_->SetContent(cachedSurface);
+            popupCompositionContentAttached_ = true;
+            compositionDevice_->Commit();
+            return true;
+        }
     }
 
     HDC blackDc = CreateCompatibleDC(nullptr);
@@ -3814,74 +4145,9 @@ bool App::UpdatePopupComposition(RECT clientRect) {
         }
     }
 
-    RECT updateRect { 0, 0, width, height };
-    IDXGISurface* dxgiSurface = nullptr;
-    POINT updateOffset {};
-    HRESULT hr = popupCompositionSurface_->BeginDraw(
-        &updateRect,
-        __uuidof(IDXGISurface),
-        reinterpret_cast<void**>(&dxgiSurface),
-        &updateOffset);
-    if (FAILED(hr) || dxgiSurface == nullptr) {
-        releaseOverlayBitmaps();
-        ReleaseCom(dxgiSurface);
-        return false;
-    }
-
-    IDXGISurface1* gdiSurface = nullptr;
-    hr = dxgiSurface->QueryInterface(__uuidof(IDXGISurface1), reinterpret_cast<void**>(&gdiSurface));
-    ReleaseCom(dxgiSurface);
-    if (FAILED(hr) || gdiSurface == nullptr) {
-        popupCompositionSurface_->EndDraw();
-        releaseOverlayBitmaps();
-        ReleaseCom(gdiSurface);
-        return false;
-    }
-
-    HDC popupDc = nullptr;
-    hr = gdiSurface->GetDC(FALSE, &popupDc);
-    if (FAILED(hr) || popupDc == nullptr) {
-        popupCompositionSurface_->EndDraw();
-        releaseOverlayBitmaps();
-        ReleaseCom(gdiSurface);
-        return false;
-    }
-
-    BITMAPINFO bitmapInfo {};
-    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
-    bitmapInfo.bmiHeader.biWidth = width;
-    bitmapInfo.bmiHeader.biHeight = -height;
-    bitmapInfo.bmiHeader.biPlanes = 1;
-    bitmapInfo.bmiHeader.biBitCount = 32;
-    bitmapInfo.bmiHeader.biCompression = BI_RGB;
-    const int copiedLines = SetDIBitsToDevice(
-        popupDc,
-        updateOffset.x,
-        updateOffset.y,
-        static_cast<DWORD>(width),
-        static_cast<DWORD>(height),
-        0,
-        0,
-        0,
-        static_cast<UINT>(height),
-        pixels,
-        &bitmapInfo,
-        DIB_RGB_COLORS);
-
-    gdiSurface->ReleaseDC(nullptr);
-    ReleaseCom(gdiSurface);
-    popupCompositionSurface_->EndDraw();
+    const bool uploaded = UpdatePopupCompositionSurfacePixels(bounds, width, height, dpi, pixels);
     releaseOverlayBitmaps();
-    if (copiedLines == 0) {
-        return false;
-    }
-
-    popupCompositionVisual_->SetOffsetX(static_cast<float>(bounds.left));
-    popupCompositionVisual_->SetOffsetY(static_cast<float>(bounds.top));
-    popupCompositionVisual_->SetContent(popupCompositionSurface_);
-    popupCompositionContentAttached_ = true;
-    compositionDevice_->Commit();
-    return true;
+    return uploaded;
 }
 
 bool App::UpdateToolbarComposition(RECT clientRect) {
@@ -6450,6 +6716,10 @@ void App::PaintPaletteMenu(HDC hdc, RECT clientRect) const {
 }
 
 void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
+    PaintPaletteWheel(hdc, clientRect, paletteWheelHoverTargetIndex_);
+}
+
+void App::PaintPaletteWheel(HDC hdc, RECT clientRect, std::optional<std::size_t> hoverIndex) const {
     if (!wheel_.paletteWheelOpen) {
         return;
     }
@@ -6486,10 +6756,9 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect) const {
         static_cast<Gdiplus::REAL>((layout.outerRadius + shadowInset) * 2));
 
     const auto hoverProgress = [&](std::size_t index) {
-        if (index >= paletteWheelHoverProgresses_.size()) {
-            return 0.0f;
-        }
-        return std::clamp(paletteWheelHoverProgresses_[index], 0.0f, 1.0f);
+        return hoverIndex.has_value() && *hoverIndex == index
+            ? 1.0f
+            : 0.0f;
     };
 
     const auto isAnimatingEntry = [&](std::size_t index) {
