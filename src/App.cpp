@@ -794,6 +794,9 @@ HCURSOR CreateBrushCursor(int brushDiameter, COLORREF fillColor) {
             | (static_cast<std::uint32_t>(green) << 8U)
             | static_cast<std::uint32_t>(blue);
     };
+    const auto premultiplyChannel = [](BYTE channel, float coverage) {
+        return static_cast<BYTE>(std::lround(static_cast<float>(channel) * std::clamp(coverage, 0.0f, 1.0f)));
+    };
     const auto edgeCoverage = [](float distance, float edge) {
         return std::clamp(edge + 0.5f - distance, 0.0f, 1.0f);
     };
@@ -826,14 +829,22 @@ HCURSOR CreateBrushCursor(int brushDiameter, COLORREF fillColor) {
 
             const float fillContribution = fillCoverage / totalCoverage;
             const BYTE alpha = static_cast<BYTE>(std::lround(totalCoverage * 255.0f));
-            const BYTE red = static_cast<BYTE>(std::lround(static_cast<float>(GetRValue(fillColor)) * fillContribution));
-            const BYTE green = static_cast<BYTE>(std::lround(static_cast<float>(GetGValue(fillColor)) * fillContribution));
-            const BYTE blue = static_cast<BYTE>(std::lround(static_cast<float>(GetBValue(fillColor)) * fillContribution));
+            const float fillCoverageTotal = totalCoverage * fillContribution;
+            const BYTE red = premultiplyChannel(GetRValue(fillColor), fillCoverageTotal);
+            const BYTE green = premultiplyChannel(GetGValue(fillColor), fillCoverageTotal);
+            const BYTE blue = premultiplyChannel(GetBValue(fillColor), fillCoverageTotal);
             pixels[(y * cursorSize) + x] = alphaPixel(alpha, red, green, blue);
         }
     }
 
-    HBITMAP maskBitmap = CreateBitmap(cursorSize, cursorSize, 1, 1, nullptr);
+    const std::size_t maskStrideBytes = static_cast<std::size_t>((cursorSize + 15) / 16) * 2U;
+    std::vector<std::uint8_t> maskBits(maskStrideBytes * static_cast<std::size_t>(cursorSize), 0);
+    HBITMAP maskBitmap = CreateBitmap(
+        cursorSize,
+        cursorSize,
+        1,
+        1,
+        maskBits.data());
     if (maskBitmap == nullptr) {
         DeleteObject(colorBitmap);
         return nullptr;
@@ -894,6 +905,9 @@ HCURSOR CreateSquareBrushCursor(int brushDiameter, COLORREF fillColor) {
             | (static_cast<std::uint32_t>(green) << 8U)
             | static_cast<std::uint32_t>(blue);
     };
+    const auto premultiplyChannel = [](BYTE channel, float coverage) {
+        return static_cast<BYTE>(std::lround(static_cast<float>(channel) * std::clamp(coverage, 0.0f, 1.0f)));
+    };
     const auto edgeCoverage = [](float distanceToEdge) {
         return std::clamp(distanceToEdge + 0.5f, 0.0f, 1.0f);
     };
@@ -929,14 +943,22 @@ HCURSOR CreateSquareBrushCursor(int brushDiameter, COLORREF fillColor) {
 
             const float fillContribution = fillCoverage / totalCoverage;
             const BYTE alpha = static_cast<BYTE>(std::lround(totalCoverage * 255.0f));
-            const BYTE red = static_cast<BYTE>(std::lround(static_cast<float>(GetRValue(fillColor)) * fillContribution));
-            const BYTE green = static_cast<BYTE>(std::lround(static_cast<float>(GetGValue(fillColor)) * fillContribution));
-            const BYTE blue = static_cast<BYTE>(std::lround(static_cast<float>(GetBValue(fillColor)) * fillContribution));
+            const float fillCoverageTotal = totalCoverage * fillContribution;
+            const BYTE red = premultiplyChannel(GetRValue(fillColor), fillCoverageTotal);
+            const BYTE green = premultiplyChannel(GetGValue(fillColor), fillCoverageTotal);
+            const BYTE blue = premultiplyChannel(GetBValue(fillColor), fillCoverageTotal);
             pixels[(y * cursorSize) + x] = alphaPixel(alpha, red, green, blue);
         }
     }
 
-    HBITMAP maskBitmap = CreateBitmap(cursorSize, cursorSize, 1, 1, nullptr);
+    const std::size_t maskStrideBytes = static_cast<std::size_t>((cursorSize + 15) / 16) * 2U;
+    std::vector<std::uint8_t> maskBits(maskStrideBytes * static_cast<std::size_t>(cursorSize), 0);
+    HBITMAP maskBitmap = CreateBitmap(
+        cursorSize,
+        cursorSize,
+        1,
+        1,
+        maskBits.data());
     if (maskBitmap == nullptr) {
         DeleteObject(colorBitmap);
         return nullptr;
@@ -3096,6 +3118,25 @@ void App::InvalidateVisiblePageSurfaceCaches() {
     }
 }
 
+void App::InvalidatePageRegion(std::size_t pageIndex, int extraPadding) {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, pageIndex);
+    if (!pageView.valid) {
+        return;
+    }
+
+    RECT dirtyRect = pageView.rect;
+    if (extraPadding > 0) {
+        InflateRect(&dirtyRect, extraPadding, extraPadding);
+    }
+    InvalidateRect(window_, &dirtyRect, FALSE);
+}
+
 void App::InvalidateStrokeRegion(const Stroke& stroke, std::size_t pageIndex, bool smoothLiveStroke) {
     if (window_ == nullptr || stroke.points.empty()) {
         return;
@@ -3479,6 +3520,14 @@ bool App::UpdateContentComposition(RECT clientRect, RECT dirtyRect) {
         updateRect = surfaceRect;
     } else if (IntersectRect(&updateRect, &dirtyRect, &surfaceRect) == 0) {
         return true;
+    } else {
+        // Partial composition updates can leave stale edge pixels when cached page
+        // surfaces and anti-aliased strokes are redrawn at fractional scales.
+        const int updateBleed = std::max(2, ScaleForDpi(12, dpi));
+        updateRect.left = std::max(surfaceRect.left, updateRect.left - updateBleed);
+        updateRect.top = std::max(surfaceRect.top, updateRect.top - updateBleed);
+        updateRect.right = std::min(surfaceRect.right, updateRect.right + updateBleed);
+        updateRect.bottom = std::min(surfaceRect.bottom, updateRect.bottom + updateBleed);
     }
 
     bool createdSurface = false;
@@ -4561,7 +4610,7 @@ void App::BeginStroke(POINT cursor) {
 }
 
 void App::ExtendStroke(POINT cursor) {
-    const std::optional<RECT> previousDirtyRect = ActiveStrokeIncrementalWindowDirtyRect();
+    const std::optional<RECT> previousDirtyRect = ActiveStrokeWindowDirtyRect();
     if (!ApplyStrokePoint(cursor)) {
         return;
     }
@@ -4739,12 +4788,14 @@ std::optional<RECT> App::ActiveStrokeWindowDirtyRect() const {
         pageView.scale,
         true,
         settings_.strokeSmoothing,
-        12);
+        24);
     if (!currentDirtyRect.has_value()) {
         return std::nullopt;
     }
 
     OffsetRect(&*currentDirtyRect, pageView.rect.left, pageView.rect.top);
+    const UINT dpi = WindowDpi(window_);
+    InflateRect(&*currentDirtyRect, ScaleForDpi(16, dpi), ScaleForDpi(16, dpi));
     return currentDirtyRect;
 }
 
@@ -4797,7 +4848,7 @@ void App::InvalidateStrokeDirtyDelta(const std::optional<RECT>& previousDirtyRec
         return;
     }
 
-    std::optional<RECT> currentDirtyRect = ActiveStrokeIncrementalWindowDirtyRect();
+    std::optional<RECT> currentDirtyRect = ActiveStrokeWindowDirtyRect();
     if (previousDirtyRect.has_value()) {
         currentDirtyRect = currentDirtyRect.has_value()
             ? UnionRectangles(*previousDirtyRect, *currentDirtyRect)
@@ -4846,7 +4897,7 @@ bool App::ExtendStrokeFromPointerHistory(WPARAM wParam) {
     });
 
     activeStrokePointerId_ = pointerId;
-    const std::optional<RECT> previousDirtyRect = ActiveStrokeIncrementalWindowDirtyRect();
+    const std::optional<RECT> previousDirtyRect = ActiveStrokeWindowDirtyRect();
     bool strokeChanged = false;
     for (const POINTER_INFO& pointerInfo : history) {
         POINT cursor = pointerInfo.ptPixelLocation;
@@ -4933,7 +4984,7 @@ void App::EndStroke() {
                 committedPageView->scale,
                 false,
                 settings_.strokeSmoothing,
-                12);
+                24);
             if (previewDirtyRect.has_value()) {
                 dirtyRect = dirtyRect.has_value()
                     ? UnionRectangles(*previewDirtyRect, *dirtyRect)
@@ -4942,6 +4993,8 @@ void App::EndStroke() {
             if (dirtyRect.has_value()) {
                 RECT windowDirtyRect = *dirtyRect;
                 OffsetRect(&windowDirtyRect, committedPageView->rect.left, committedPageView->rect.top);
+                const UINT dpi = WindowDpi(window_);
+                InflateRect(&windowDirtyRect, ScaleForDpi(16, dpi), ScaleForDpi(16, dpi));
                 InvalidateRect(window_, &windowDirtyRect, FALSE);
             } else {
                 InvalidateStrokeRegion(*committedStroke, *committedPageIndex, false);

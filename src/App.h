@@ -268,6 +268,7 @@ private:
     void InvalidatePageSurfaceCache(std::size_t pageIndex);
     void InvalidateAllPageSurfaceCaches();
     void InvalidateVisiblePageSurfaceCaches();
+    void InvalidatePageRegion(std::size_t pageIndex, int extraPadding = 0);
     void InvalidateStrokeRegion(const Stroke& stroke, std::size_t pageIndex, bool smoothLiveStroke);
     void RefreshCursor();
     void ResetView();
