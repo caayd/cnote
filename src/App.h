@@ -377,10 +377,6 @@ private:
     [[nodiscard]] IDCompositionSurface* FindPaletteWheelSurfaceCache(std::optional<std::size_t> hoverIndex) const;
     [[nodiscard]] IDCompositionSurface* CreatePopupCompositionSurfaceFromPixels(int width, int height, UINT dpi, const std::uint8_t* pixels);
     [[nodiscard]] bool UpdatePopupCompositionSurfacePixels(RECT bounds, int width, int height, UINT dpi, const std::uint8_t* pixels);
-    void EnsurePaletteWheelHoverState(std::size_t entryCount);
-    void StartPaletteWheelHoverAnimationTimer();
-    void StopPaletteWheelHoverAnimationTimer();
-    void HandlePaletteWheelHoverAnimationTimer();
     void ToggleToolInWheel(Tool tool);
     [[nodiscard]] bool IsToolInWheel(Tool tool) const;
     [[nodiscard]] bool HandleShortcutKey(UINT key, bool ctrl, bool shift, bool alt);
@@ -715,8 +711,6 @@ private:
     };
     std::vector<PaletteWheelPixelCacheEntry> paletteWheelPixelCacheEntries_ {};
     std::uint64_t paletteWheelPixelCacheSignature_ = 0;
-    std::vector<float> paletteWheelHoverProgresses_ {};
-    ULONGLONG paletteWheelHoverAnimationLastMs_ = 0;
     bool smoothScrollActive_ = false;
     SettingsState settings_ {};
     NewPageSettingsState newPageSettings_ {};
@@ -837,17 +831,14 @@ private:
     static constexpr UINT_PTR kZoomSessionTimerId = 3;
     static constexpr UINT_PTR kToolbarRevealTimerId = 4;
     static constexpr UINT_PTR kPdfSidebarSlideTimerId = 5;
-    static constexpr UINT_PTR kPaletteWheelHoverTimerId = 6;
-    static constexpr UINT_PTR kSmoothScrollTimerId = 7;
+    static constexpr UINT_PTR kSmoothScrollTimerId = 6;
     static constexpr UINT kZoomSessionDelayMs = 100;
     static constexpr UINT kToolbarRevealFrameMs = 1;
     static constexpr UINT kToolbarRevealDurationMs = 120;
     static constexpr UINT kToolbarHideDetachDelayMs = 72;
     static constexpr UINT kPdfSidebarSlideFrameMs = 1;
     static constexpr UINT kPdfSidebarSlideDurationMs = 150;
-    static constexpr UINT kPaletteWheelHoverFrameMs = 16;
     static constexpr UINT kSmoothScrollAnimationDurationMs = 140;
-    static constexpr float kPaletteWheelHoverAnimationSpeed = 18.0f;
     static constexpr float kSmoothScrollPaddingRatio = 0.5f;
     static constexpr int kSmoothScrollPaddingFloor = 240;
     static constexpr float kMinBrushSize = 0.5f;

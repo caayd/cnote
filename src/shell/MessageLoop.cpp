@@ -460,10 +460,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             HandlePdfSidebarSlideAnimationTimer();
             return 0;
         }
-        if (wParam == kPaletteWheelHoverTimerId) {
-            HandlePaletteWheelHoverAnimationTimer();
-            return 0;
-        }
         if (wParam == kSmoothScrollTimerId) {
             HandleSmoothScrollTimer();
             return 0;

@@ -17,8 +17,8 @@ constexpr float kMinBrushSize = 0.5f;
 constexpr float kMaxBrushSize = 20.0f;
 constexpr float kBrushSizeStep = 0.25f;
 constexpr int kPaletteWheelShadowInsetDip = 6;
-constexpr int kPaletteWheelHoverOffsetDip = 8;
-constexpr int kPaletteWheelBoundsPaddingDip = 4;
+constexpr int kPaletteWheelHoverOffsetDip = 10;
+constexpr int kPaletteWheelBoundsPaddingDip = 6;
 
 float SnapBrushSize(float size) {
     const float clamped = std::clamp(size, kMinBrushSize, kMaxBrushSize);
@@ -56,9 +56,6 @@ void App::ClosePaletteOverlays() {
     wheel_.paletteWheelOpen = false;
     paletteWheelHoverTargetIndex_.reset();
     ClearPaletteWheelPixelCache();
-    paletteWheelHoverProgresses_.clear();
-    paletteWheelHoverAnimationLastMs_ = 0;
-    StopPaletteWheelHoverAnimationTimer();
 }
 
 void App::CancelQuickSizePopup(bool cancelInput) {
@@ -129,20 +126,11 @@ void App::TogglePaletteWheel() {
     } else {
         paletteWheelHoverTargetIndex_.reset();
         ClearPaletteWheelPixelCache();
-        paletteWheelHoverProgresses_.clear();
-        paletteWheelHoverAnimationLastMs_ = 0;
-        StopPaletteWheelHoverAnimationTimer();
     }
     if (wheelBounds.has_value()) {
         InvalidateRect(window_, &*wheelBounds, FALSE);
     } else {
         InvalidateRect(window_, nullptr, FALSE);
-    }
-}
-
-void App::EnsurePaletteWheelHoverState(std::size_t entryCount) {
-    if (entryCount == 0U) {
-        paletteWheelHoverTargetIndex_.reset();
     }
 }
 
@@ -180,7 +168,6 @@ void App::UpdatePaletteWheelHover(POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
-    EnsurePaletteWheelHoverState(wheelEntryCount);
 
     std::optional<std::size_t> nextHover;
     if (wheelEntryCount > 0U) {
@@ -198,20 +185,16 @@ void App::UpdatePaletteWheelHover(POINT cursor) {
     }
 
     paletteWheelHoverTargetIndex_ = nextHover;
+    const bool wheelOnlyOverlay = !quickSizePopupTool_.has_value() && !wheel_.paletteMenuOpen;
+    if (wheelOnlyOverlay && UpdatePopupComposition(clientRect)) {
+        return;
+    }
+
     if (const std::optional<RECT> wheelBounds = PaletteWheelBounds(clientRect); wheelBounds.has_value()) {
         InvalidateRect(window_, &*wheelBounds, FALSE);
     } else {
         InvalidateRect(window_, nullptr, FALSE);
     }
-}
-
-void App::StartPaletteWheelHoverAnimationTimer() {
-}
-
-void App::StopPaletteWheelHoverAnimationTimer() {
-}
-
-void App::HandlePaletteWheelHoverAnimationTimer() {
 }
 
 void App::ToggleQuickSizePopup() {
