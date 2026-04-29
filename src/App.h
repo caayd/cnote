@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <windows.h>
+#include <interactioncontext.h>
 
 #include "Document.h"
 #include "PdfBackend.h"
@@ -399,6 +400,16 @@ private:
     void PanBy(float dx, float dy);
     void SmoothPanBy(float dx, float dy);
     void ApplyPanDelta(float dx, float dy);
+    void InitializePrecisionTouchpadSupport();
+    void ShutdownPrecisionTouchpadSupport();
+    [[nodiscard]] bool HandlePrecisionTouchpadPointerMessage(UINT message, WPARAM wParam, LPARAM lParam);
+    void HandlePrecisionTouchpadInteractionOutput(const INTERACTION_CONTEXT_OUTPUT& output);
+    void StartPrecisionTouchpadInertia();
+    void StopPrecisionTouchpadInertia(bool reportToSystem);
+    void ProcessPrecisionTouchpadInertia();
+    void StopPrecisionTouchpadManipulation();
+    [[nodiscard]] bool ShouldRoutePrecisionTouchpadGestureToCanvas(POINT cursor) const;
+    static void CALLBACK PrecisionTouchpadOutputCallback(void* clientData, const INTERACTION_CONTEXT_OUTPUT* output);
     void StartSmoothScrollTimer();
     void StopSmoothScroll();
     void HandleSmoothScrollTimer();
@@ -719,6 +730,13 @@ private:
     std::vector<PaletteWheelPixelCacheEntry> paletteWheelPixelCacheEntries_ {};
     std::uint64_t paletteWheelPixelCacheSignature_ = 0;
     bool smoothScrollActive_ = false;
+    HINTERACTIONCONTEXT precisionTouchpadInteractionContext_ = nullptr;
+    INTERACTION_FLAGS precisionTouchpadLastInteractionFlags_ = INTERACTION_FLAG_NONE;
+    bool precisionTouchpadEnabled_ = false;
+    bool precisionTouchpadCanvasGestureActive_ = false;
+    bool precisionTouchpadManipulationActive_ = false;
+    bool precisionTouchpadInertiaActive_ = false;
+    float precisionTouchpadManipulationStartZoom_ = 1.0f;
     SettingsState settings_ {};
     NewPageSettingsState newPageSettings_ {};
     HCURSOR eraserCursor_ = nullptr;
@@ -839,6 +857,7 @@ private:
     static constexpr UINT_PTR kToolbarRevealTimerId = 4;
     static constexpr UINT_PTR kPdfSidebarSlideTimerId = 5;
     static constexpr UINT_PTR kSmoothScrollTimerId = 6;
+    static constexpr UINT_PTR kPrecisionTouchpadInertiaTimerId = 7;
     static constexpr UINT kZoomSessionDelayMs = 100;
     static constexpr UINT kToolbarRevealFrameMs = 1;
     static constexpr UINT kToolbarRevealDurationMs = 120;

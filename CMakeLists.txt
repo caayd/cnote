@@ -80,6 +80,7 @@ target_link_libraries(cnote PRIVATE
     dxgi
     gdi32
     gdiplus
+    ninput
     pdfium
     uxtheme
     user32

@@ -2728,6 +2728,7 @@ App::~App() {
     ClearZoomSessionSnapshots();
     ReleasePaintBackbuffer();
     ReleaseCompositionResources();
+    ShutdownPrecisionTouchpadSupport();
     StopSmoothScroll();
     ReleaseEraserCursor();
     ReleaseDrawCursor();

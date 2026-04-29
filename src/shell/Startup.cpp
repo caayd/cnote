@@ -87,6 +87,7 @@ bool App::CreateMainWindow(int showCommand) {
     DwmSetWindowAttribute(window_, 33, &cornerPreference, sizeof(cornerPreference));
     UpdateWindowTitle();
     UpdateAutoSaveTimer();
+    InitializePrecisionTouchpadSupport();
 
     ShowWindow(window_, showCommand);
     UpdateWindow(window_);
