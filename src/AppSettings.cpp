@@ -255,6 +255,43 @@ std::optional<float> ParseFloat(std::string_view value) {
     }
 }
 
+float SnapBrushSizeValue(float size) {
+    constexpr float kMinBrushSize = 0.5f;
+    constexpr float kMaxBrushSize = 20.0f;
+    constexpr float kBrushSizeStep = 0.25f;
+    const float clamped = std::clamp(size, kMinBrushSize, kMaxBrushSize);
+    const float steps = std::round((clamped - kMinBrushSize) / kBrushSizeStep);
+    return kMinBrushSize + (steps * kBrushSizeStep);
+}
+
+std::wstring FormatBrushSizePresetValue(float size) {
+    wchar_t buffer[16] = {};
+    std::swprintf(buffer, std::size(buffer), L"%.2f", SnapBrushSizeValue(size));
+    std::wstring value = buffer;
+    while (!value.empty() && value.back() == L'0') {
+        value.pop_back();
+    }
+    if (!value.empty() && value.back() == L'.') {
+        value.pop_back();
+    }
+    return value;
+}
+
+std::vector<float> NormalizeBrushSizePresets(std::vector<float> presets) {
+    for (float& preset : presets) {
+        preset = SnapBrushSizeValue(preset);
+    }
+
+    std::sort(presets.begin(), presets.end());
+    presets.erase(std::unique(presets.begin(), presets.end(), [](float left, float right) {
+        return std::abs(left - right) < 0.001f;
+    }), presets.end());
+    if (presets.size() > 16U) {
+        presets.resize(16U);
+    }
+    return presets;
+}
+
 const char* ToolConfigName(App::Tool tool) {
     switch (tool) {
     case App::Tool::Select:
@@ -593,6 +630,53 @@ bool App::ApplyHexColorFromClipboard() {
     return applied;
 }
 
+bool App::TryParseBrushSizePresets(std::wstring_view text, std::vector<float>& presets) {
+    const std::wstring trimmed = TrimWide(text);
+    if (trimmed.empty()) {
+        presets.clear();
+        return true;
+    }
+
+    std::vector<float> parsedPresets;
+    std::size_t start = 0;
+    while (start <= trimmed.size()) {
+        const std::size_t end = trimmed.find(L',', start);
+        const std::wstring token = TrimWide(trimmed.substr(
+            start,
+            end == std::wstring_view::npos ? std::wstring_view::npos : end - start));
+        if (token.empty()) {
+            return false;
+        }
+
+        wchar_t* parseEnd = nullptr;
+        const float parsedValue = std::wcstof(token.c_str(), &parseEnd);
+        if (parseEnd == token.c_str() || *parseEnd != L'\0' || parsedValue <= 0.0f) {
+            return false;
+        }
+
+        parsedPresets.push_back(parsedValue);
+        if (end == std::wstring_view::npos) {
+            break;
+        }
+        start = end + 1U;
+    }
+
+    presets = NormalizeBrushSizePresets(std::move(parsedPresets));
+    return true;
+}
+
+std::wstring App::FormatBrushSizePresets(const std::vector<float>& presets) {
+    std::wstring formatted;
+    const std::vector<float> normalized = NormalizeBrushSizePresets(presets);
+    for (std::size_t index = 0; index < normalized.size(); ++index) {
+        if (index > 0U) {
+            formatted += L", ";
+        }
+        formatted += FormatBrushSizePresetValue(normalized[index]);
+    }
+    return formatted;
+}
+
 void App::LoadAppSettings() {
     std::ifstream input(AppSettingsPath(), std::ios::binary);
     if (!input) {
@@ -713,6 +797,21 @@ void App::LoadAppSettings() {
         if (key == "erase_brush_size") {
             if (const auto parsed = ParseFloat(value); parsed.has_value()) {
                 settings_.eraseBrushSize = std::clamp(*parsed, 0.5f, 20.0f);
+            }
+            continue;
+        }
+
+        if (key == "quick_size_slider_max") {
+            if (const auto parsed = ParseFloat(value); parsed.has_value()) {
+                settings_.quickSizeSliderMax = std::clamp(*parsed, 1.0f, 20.0f);
+            }
+            continue;
+        }
+
+        if (key == "brush_size_presets") {
+            std::vector<float> parsedPresets;
+            if (TryParseBrushSizePresets(Utf8ToWide(value), parsedPresets)) {
+                settings_.brushSizePresets = std::move(parsedPresets);
             }
             continue;
         }
@@ -873,6 +972,9 @@ void App::LoadAppSettings() {
     if (palette_.empty()) {
         palette_ = DefaultPalette();
     }
+    settings_.quickSizeSliderMax = std::clamp(settings_.quickSizeSliderMax, 1.0f, kMaxBrushSize);
+    settings_.drawBrushSize = std::min(settings_.drawBrushSize, settings_.quickSizeSliderMax);
+    settings_.eraseBrushSize = std::min(settings_.eraseBrushSize, settings_.quickSizeSliderMax);
     colorIndex_ = std::min(loadedColorIndex.value_or(colorIndex_), palette_.size() - 1U);
     settings_.paletteIndex = std::min(loadedSettingsPaletteIndex.value_or(settings_.paletteIndex), palette_.size() - 1U);
     SyncBrushWidthFromActiveTool();
@@ -912,6 +1014,8 @@ void App::SaveAppSettings() const {
     }
     output << "draw_brush_size=" << settings_.drawBrushSize << '\n';
     output << "erase_brush_size=" << settings_.eraseBrushSize << '\n';
+    output << "quick_size_slider_max=" << settings_.quickSizeSliderMax << '\n';
+    output << "brush_size_presets=" << WideToUtf8(FormatBrushSizePresets(settings_.brushSizePresets)) << '\n';
     output << "draw_cursor_kind=" << DrawCursorKindConfigName(settings_.drawCursorKind) << '\n';
     output << "draw_cursor_size=" << settings_.drawCursorSize << '\n';
     output << "input_smoothing=" << settings_.inputSmoothing << '\n';

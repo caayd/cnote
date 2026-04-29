@@ -2003,9 +2003,11 @@ RECT ToolbarBrushTrackRect(const RECT& sliderRect, UINT dpi) {
         centerY + ScaleForDpi(3, dpi));
 }
 
-int ToolbarBrushThumbCenterX(const RECT& sliderRect, float brushSize) {
+int ToolbarBrushThumbCenterX(const RECT& sliderRect, float brushSize, float maxBrushSize) {
     const int width = std::max(1, static_cast<int>(sliderRect.right - sliderRect.left));
-    const float normalized = std::clamp((SnapBrushSize(brushSize) - 0.5f) / 19.5f, 0.0f, 1.0f);
+    const float sliderMax = std::max(1.0f, maxBrushSize);
+    const float span = std::max(0.001f, sliderMax - 0.5f);
+    const float normalized = std::clamp((std::min(SnapBrushSize(brushSize), sliderMax) - 0.5f) / span, 0.0f, 1.0f);
     return sliderRect.left + static_cast<int>(std::lround(normalized * static_cast<float>(width - 1)));
 }
 
@@ -7429,11 +7431,28 @@ void App::PaintQuickSizePopup(HDC hdc, RECT clientRect) const {
 
     const RECT sliderTrackRect = ToolbarBrushTrackRect(popupLayout.sliderRect, dpi);
     const int sliderCenterY = (popupLayout.sliderRect.top + popupLayout.sliderRect.bottom) / 2;
+    const float sliderMax = QuickSizeSliderMax();
     FillRoundedRect(hdc, sliderTrackRect, RGB(41, 51, 66));
-    const int thumbCenterX = ToolbarBrushThumbCenterX(sliderTrackRect, brushSize);
+    const int thumbCenterX = ToolbarBrushThumbCenterX(sliderTrackRect, brushSize, sliderMax);
     RECT sliderFillRect = sliderTrackRect;
     sliderFillRect.right = static_cast<LONG>(std::max<int>(sliderFillRect.left + 1, thumbCenterX + 1));
     FillRoundedRect(hdc, sliderFillRect, accent);
+    if (!settings_.brushSizePresets.empty()) {
+        HPEN tickPen = CreatePen(PS_SOLID, std::max(1, ScaleForDpi(1, dpi)), RGB(228, 233, 240));
+        HGDIOBJ previousPen = SelectObject(hdc, tickPen);
+        const int tickTop = sliderTrackRect.top - ScaleForDpi(2, dpi);
+        const int tickBottom = sliderTrackRect.bottom + ScaleForDpi(2, dpi);
+        for (float preset : settings_.brushSizePresets) {
+            if (preset > sliderMax) {
+                continue;
+            }
+            const int tickX = ToolbarBrushThumbCenterX(sliderTrackRect, preset, sliderMax);
+            MoveToEx(hdc, tickX, tickTop, nullptr);
+            LineTo(hdc, tickX, tickBottom + 1);
+        }
+        SelectObject(hdc, previousPen);
+        DeleteObject(tickPen);
+    }
     const int thumbHalfSize = QuickSizeThumbHalfSize(dpi);
     RECT thumbRect = MakeRect(
         thumbCenterX - thumbHalfSize,

@@ -230,6 +230,8 @@ public:
         std::size_t paletteIndex = 0;
         float drawBrushSize = 3.0f;
         float eraseBrushSize = 3.0f;
+        float quickSizeSliderMax = 20.0f;
+        std::vector<float> brushSizePresets {};
         DrawCursorKind drawCursorKind = DrawCursorKind::Dot;
         float drawCursorSize = 8.0f;
         float inputSpacing = 0.85f;
@@ -442,6 +444,11 @@ private:
     void ChangeBrushSize(float delta);
     [[nodiscard]] float BrushSizeForTool(Tool tool) const;
     void SetBrushSizeForTool(Tool tool, float size, bool refreshUi = true);
+    [[nodiscard]] float QuickSizeSliderMax() const;
+    [[nodiscard]] float SnapBrushSizeValue(float size) const;
+    [[nodiscard]] float SnapQuickSizeBrushValue(float size) const;
+    [[nodiscard]] static bool TryParseBrushSizePresets(std::wstring_view text, std::vector<float>& presets);
+    [[nodiscard]] static std::wstring FormatBrushSizePresets(const std::vector<float>& presets);
     void SyncBrushWidthFromActiveTool();
     void CycleColor();
     void SetColorIndex(std::size_t index);

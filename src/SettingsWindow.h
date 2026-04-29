@@ -54,6 +54,8 @@ private:
     void RefreshSavedPaletteList();
     void RefreshSliderValues();
     void RefreshZoomPresetFields();
+    void RefreshQuickSizeSliderMaxField();
+    void RefreshBrushSizePresetField();
     void RefreshShortcutList();
     void RefreshShortcutButtons();
     void RefreshSavedPaletteButtons();
@@ -72,6 +74,8 @@ private:
     void ClearSelectedShortcut();
     void HandleShortcutCapture(UINT key);
     void HandleZoomPresetEdit(HWND edit, bool normalizeText);
+    void HandleQuickSizeSliderMaxEdit(bool normalizeText);
+    void HandleBrushSizePresetEdit(bool normalizeText);
     void UpdatePaletteFromHslSliders();
     [[nodiscard]] std::optional<std::size_t> SelectedSavedPaletteIndex() const;
     [[nodiscard]] HWND SliderHandle(SliderKind kind) const;
@@ -127,6 +131,11 @@ private:
     std::array<HWND, App::kZoomPresetCount> zoomPresetLabels_ {};
     std::array<HWND, App::kZoomPresetCount> zoomPresetEdits_ {};
     HWND zoomPresetHintLabel_ = nullptr;
+    HWND quickSizeSliderMaxLabel_ = nullptr;
+    HWND quickSizeSliderMaxEdit_ = nullptr;
+    HWND brushSizePresetLabel_ = nullptr;
+    HWND brushSizePresetEdit_ = nullptr;
+    HWND brushSizePresetHintLabel_ = nullptr;
     HWND shortcutList_ = nullptr;
     HWND changeShortcutButton_ = nullptr;
     HWND clearShortcutButton_ = nullptr;

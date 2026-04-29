@@ -480,9 +480,11 @@ RECT ToolbarBrushTrackRect(const RECT& sliderRect, UINT dpi) {
         centerY + ScaleForDpi(3, dpi));
 }
 
-int ToolbarBrushThumbCenterX(const RECT& sliderRect, float brushSize) {
+int ToolbarBrushThumbCenterX(const RECT& sliderRect, float brushSize, float maxBrushSize) {
     const int width = std::max(1, static_cast<int>(sliderRect.right - sliderRect.left));
-    const float normalized = std::clamp((SnapBrushSize(brushSize) - 0.5f) / 19.5f, 0.0f, 1.0f);
+    const float sliderMax = std::max(1.0f, maxBrushSize);
+    const float span = std::max(0.001f, sliderMax - 0.5f);
+    const float normalized = std::clamp((std::min(SnapBrushSize(brushSize), sliderMax) - 0.5f) / span, 0.0f, 1.0f);
     return sliderRect.left + static_cast<int>(std::lround(normalized * static_cast<float>(width - 1)));
 }
 

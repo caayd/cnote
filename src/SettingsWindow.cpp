@@ -93,6 +93,8 @@ constexpr int kIdDashGapSlider = 211;
 constexpr int kIdEmbedProjectInPdfSwitch = 212;
 constexpr int kIdDrawCursorSizeSlider = 213;
 constexpr int kIdZoomPresetBase = 300;
+constexpr int kIdQuickSizeSliderMaxEdit = 320;
+constexpr int kIdBrushSizePresetEdit = 321;
 constexpr UINT kDrawCursorKindMenuBase = 500;
 
 struct SettingsWindowLayout {
@@ -146,6 +148,11 @@ struct SettingsWindowLayout {
     std::array<RECT, App::kZoomPresetCount> zoomPresetLabelRects {};
     std::array<RECT, App::kZoomPresetCount> zoomPresetEditRects {};
     RECT zoomPresetHintRect {};
+    RECT quickSizeSliderMaxLabelRect {};
+    RECT quickSizeSliderMaxEditRect {};
+    RECT brushSizePresetLabelRect {};
+    RECT brushSizePresetEditRect {};
+    RECT brushSizePresetHintRect {};
     RECT shortcutListSection {};
     RECT shortcutListRect {};
     RECT shortcutScrollbarTrackRect {};
@@ -221,6 +228,19 @@ std::wstring FormatPixelLabel(const wchar_t* prefix, float value) {
     wchar_t buffer[64] = {};
     std::swprintf(buffer, std::size(buffer), L"%ls: %.0f px", prefix, value);
     return buffer;
+}
+
+std::wstring FormatBrushSizeValue(float size) {
+    wchar_t buffer[16] = {};
+    std::swprintf(buffer, std::size(buffer), L"%.2f", size);
+    std::wstring value = buffer;
+    while (!value.empty() && value.back() == L'0') {
+        value.pop_back();
+    }
+    if (!value.empty() && value.back() == L'.') {
+        value.pop_back();
+    }
+    return value;
 }
 
 int DrawCursorKindComboIndex(App::DrawCursorKind kind) {
@@ -490,6 +510,31 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, UINT dpi, bool s
         layout.zoomPresetEditRects.back().bottom + px(10),
         metaRight,
         layout.zoomPresetEditRects.back().bottom + px(58));
+    layout.quickSizeSliderMaxLabelRect = MakeRect(
+        metaLeft,
+        layout.zoomPresetHintRect.bottom + px(14),
+        metaRight,
+        layout.zoomPresetHintRect.bottom + px(34));
+    layout.quickSizeSliderMaxEditRect = MakeRect(
+        metaLeft,
+        layout.quickSizeSliderMaxLabelRect.bottom + px(6),
+        metaLeft + px(90),
+        layout.quickSizeSliderMaxLabelRect.bottom + px(34));
+    layout.brushSizePresetLabelRect = MakeRect(
+        metaLeft,
+        layout.quickSizeSliderMaxEditRect.bottom + px(14),
+        metaRight,
+        layout.quickSizeSliderMaxEditRect.bottom + px(34));
+    layout.brushSizePresetEditRect = MakeRect(
+        metaLeft,
+        layout.brushSizePresetLabelRect.bottom + px(6),
+        metaRight,
+        layout.brushSizePresetLabelRect.bottom + px(34));
+    layout.brushSizePresetHintRect = MakeRect(
+        metaLeft,
+        layout.brushSizePresetEditRect.bottom + px(10),
+        metaRight,
+        layout.brushSizePresetEditRect.bottom + px(60));
 
     const int shortcutLeftWidth = (availableWidth * 62) / 100;
     layout.shortcutListSection = MakeRect(contentLeft, contentTopInner, contentLeft + shortcutLeftWidth, contentBottomInner);
@@ -626,6 +671,8 @@ void SettingsWindow::Refresh() {
     RefreshSavedPaletteList();
     RefreshSliderValues();
     RefreshZoomPresetFields();
+    RefreshQuickSizeSliderMaxField();
+    RefreshBrushSizePresetField();
     RefreshShortcutList();
     RefreshShortcutButtons();
     RefreshSavedPaletteButtons();
@@ -802,6 +849,13 @@ void SettingsWindow::CreateControls() {
         zoomPresetEdits_[index] = createEdit(kIdZoomPresetBase + static_cast<int>(index), 0, 0, ScaleForDpi(96, dpi), ScaleForDpi(24, dpi));
     }
     zoomPresetHintLabel_ = createLabel(L"Leave blank to keep a preset unassigned.", 0, 0, ScaleForDpi(280, dpi), ScaleForDpi(56, dpi));
+    quickSizeSliderMaxLabel_ = createLabel(L"Quick Size Slider Max (px)", 0, 0, ScaleForDpi(220, dpi), ScaleForDpi(20, dpi));
+    quickSizeSliderMaxEdit_ = createEdit(kIdQuickSizeSliderMaxEdit, 0, 0, ScaleForDpi(96, dpi), ScaleForDpi(24, dpi));
+    SetWindowSubclass(quickSizeSliderMaxEdit_, ui::EditReturnToParentSubclassProc, 0, 0);
+    brushSizePresetLabel_ = createLabel(L"Brush Size Presets (px)", 0, 0, ScaleForDpi(220, dpi), ScaleForDpi(20, dpi));
+    brushSizePresetEdit_ = createEdit(kIdBrushSizePresetEdit, 0, 0, ScaleForDpi(220, dpi), ScaleForDpi(24, dpi));
+    SetWindowSubclass(brushSizePresetEdit_, ui::EditReturnToParentSubclassProc, 0, 0);
+    brushSizePresetHintLabel_ = createLabel(L"Comma-separated sizes for quick popup snap ticks.", 0, 0, ScaleForDpi(280, dpi), ScaleForDpi(56, dpi));
 
     shortcutList_ = CreateWindowExW(
         0,
@@ -838,6 +892,8 @@ void SettingsWindow::CreateControls() {
     SendMessageW(shortcutList_, LB_SETITEMHEIGHT, 0, ScaleForDpi(26, dpi));
     SendMessageW(hexColorEdit_, EM_LIMITTEXT, 10, 0);
     SendMessageW(savedPaletteNameEdit_, EM_LIMITTEXT, 48, 0);
+    SendMessageW(quickSizeSliderMaxEdit_, EM_LIMITTEXT, 8, 0);
+    SendMessageW(brushSizePresetEdit_, EM_LIMITTEXT, 96, 0);
     LayoutControls();
 }
 
@@ -871,7 +927,7 @@ void SettingsWindow::RebuildDpiResources(UINT dpi) {
     backgroundBrush_ = CreateSolidBrush(kWindowBackground);
     panelBrush_ = CreateSolidBrush(kPanelFill);
     std::vector<HWND> controls;
-    controls.reserve(45);
+    controls.reserve(50);
     controls.insert(controls.end(), categoryButtons_.begin(), categoryButtons_.end());
     controls.push_back(paletteList_);
     controls.push_back(addColorButton_);
@@ -907,6 +963,11 @@ void SettingsWindow::RebuildDpiResources(UINT dpi) {
     controls.push_back(autoHideToolbarSwitch_);
     controls.push_back(embedProjectInPdfSwitch_);
     controls.push_back(zoomPresetHintLabel_);
+    controls.push_back(quickSizeSliderMaxLabel_);
+    controls.push_back(quickSizeSliderMaxEdit_);
+    controls.push_back(brushSizePresetLabel_);
+    controls.push_back(brushSizePresetEdit_);
+    controls.push_back(brushSizePresetHintLabel_);
     controls.push_back(shortcutList_);
     controls.push_back(changeShortcutButton_);
     controls.push_back(clearShortcutButton_);
@@ -943,7 +1004,7 @@ void SettingsWindow::LayoutControls() {
     GetClientRect(window_, &clientRect);
     const SettingsWindowLayout layout = BuildSettingsWindowLayout(clientRect, CurrentDpi(), app_.settings_.drawCursorKind == App::DrawCursorKind::Dot);
 
-    HDWP deferred = BeginDeferWindowPos(49);
+    HDWP deferred = BeginDeferWindowPos(54);
     for (std::size_t index = 0; index < categoryButtons_.size(); ++index) {
         DeferMoveControl(deferred, categoryButtons_[index], layout.categoryButtons[index]);
     }
@@ -985,6 +1046,11 @@ void SettingsWindow::LayoutControls() {
         DeferMoveControl(deferred, zoomPresetEdits_[index], layout.zoomPresetEditRects[index]);
     }
     DeferMoveControl(deferred, zoomPresetHintLabel_, layout.zoomPresetHintRect);
+    DeferMoveControl(deferred, quickSizeSliderMaxLabel_, layout.quickSizeSliderMaxLabelRect);
+    DeferMoveControl(deferred, quickSizeSliderMaxEdit_, layout.quickSizeSliderMaxEditRect);
+    DeferMoveControl(deferred, brushSizePresetLabel_, layout.brushSizePresetLabelRect);
+    DeferMoveControl(deferred, brushSizePresetEdit_, layout.brushSizePresetEditRect);
+    DeferMoveControl(deferred, brushSizePresetHintLabel_, layout.brushSizePresetHintRect);
     DeferMoveControl(deferred, shortcutList_, layout.shortcutListRect);
     DeferMoveControl(deferred, changeShortcutButton_, layout.changeShortcutButton);
     DeferMoveControl(deferred, clearShortcutButton_, layout.clearShortcutButton);
@@ -1090,6 +1156,11 @@ void SettingsWindow::RefreshVisibleControls() {
         setVisible(control, showDrawing);
     }
     setVisible(zoomPresetHintLabel_, showDrawing);
+    setVisible(quickSizeSliderMaxLabel_, showDrawing);
+    setVisible(quickSizeSliderMaxEdit_, showDrawing);
+    setVisible(brushSizePresetLabel_, showDrawing);
+    setVisible(brushSizePresetEdit_, showDrawing);
+    setVisible(brushSizePresetHintLabel_, showDrawing);
 
     setVisible(shortcutList_, showShortcuts);
     setVisible(changeShortcutButton_, showShortcuts);
@@ -1298,6 +1369,14 @@ void SettingsWindow::RefreshZoomPresetFields() {
     }
 }
 
+void SettingsWindow::RefreshQuickSizeSliderMaxField() {
+    SetControlText(quickSizeSliderMaxEdit_, FormatBrushSizeValue(app_.settings_.quickSizeSliderMax));
+}
+
+void SettingsWindow::RefreshBrushSizePresetField() {
+    SetControlText(brushSizePresetEdit_, App::FormatBrushSizePresets(app_.settings_.brushSizePresets));
+}
+
 void SettingsWindow::RefreshShortcutList() {
     if (shortcutList_ == nullptr) {
         return;
@@ -1486,6 +1565,20 @@ void SettingsWindow::HandleCommand(WPARAM wParam, LPARAM lParam) {
             InvalidateRect(embedProjectInPdfSwitch_, nullptr, FALSE);
         }
         break;
+    case kIdQuickSizeSliderMaxEdit:
+        if (notification == EN_CHANGE) {
+            HandleQuickSizeSliderMaxEdit(false);
+        } else if (notification == EN_KILLFOCUS) {
+            HandleQuickSizeSliderMaxEdit(true);
+        }
+        break;
+    case kIdBrushSizePresetEdit:
+        if (notification == EN_CHANGE) {
+            HandleBrushSizePresetEdit(false);
+        } else if (notification == EN_KILLFOCUS) {
+            HandleBrushSizePresetEdit(true);
+        }
+        break;
     default:
         if (controlId >= kIdZoomPresetBase && controlId < kIdZoomPresetBase + static_cast<int>(zoomPresetEdits_.size())) {
             if (notification == EN_CHANGE) {
@@ -1566,6 +1659,8 @@ HBRUSH SettingsWindow::HandleControlColor(HDC hdc, HWND control) {
     const bool isZoomEdit = std::find(zoomPresetEdits_.begin(), zoomPresetEdits_.end(), control) != zoomPresetEdits_.end();
     if (isZoomEdit
         || control == hexColorEdit_
+        || control == quickSizeSliderMaxEdit_
+        || control == brushSizePresetEdit_
         || control == savedPaletteNameEdit_
         || control == savedPaletteList_
         || control == paletteList_
@@ -1577,7 +1672,9 @@ HBRUSH SettingsWindow::HandleControlColor(HDC hdc, HWND control) {
     }
 
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, (control == shortcutHintLabel_ || control == zoomPresetHintLabel_ || control == savedPaletteHintLabel_) ? kTextMuted : kTextPrimary);
+    SetTextColor(hdc, (control == shortcutHintLabel_ || control == zoomPresetHintLabel_ || control == brushSizePresetHintLabel_ || control == savedPaletteHintLabel_)
+        ? kTextMuted
+        : kTextPrimary);
     return panelBrush_;
 }
 
@@ -1653,7 +1750,7 @@ void SettingsWindow::PaintWindow() {
         TextOutW(memoryDc, layout.drawingMetaSection.left + Scale(14), layout.drawingMetaSection.top + Scale(14), L"Persistence", 11);
         SetTextColor(memoryDc, kTextMuted);
         paintWrappedDescription(layout.drawingSection, L"Tune input filtering and smoothing.");
-        paintWrappedDescription(layout.drawingMetaSection, L"Configure auto save and quick zoom presets.");
+        paintWrappedDescription(layout.drawingMetaSection, L"Configure auto save, quick zoom presets, and quick popup brush snaps.");
         break;
     case Category::Shortcuts:
         SetTextColor(memoryDc, kTextPrimary);
@@ -2207,6 +2304,66 @@ void SettingsWindow::HandleZoomPresetEdit(HWND edit, bool normalizeText) {
     app_.SaveAppSettings();
     if (normalizeText) {
         SetControlText(edit, FormatZoomPresetValue(app_.settings_.zoomPresets[presetIndex]));
+    }
+}
+
+void SettingsWindow::HandleQuickSizeSliderMaxEdit(bool normalizeText) {
+    if (quickSizeSliderMaxEdit_ == nullptr) {
+        return;
+    }
+
+    wchar_t buffer[32] = {};
+    GetWindowTextW(quickSizeSliderMaxEdit_, buffer, static_cast<int>(std::size(buffer)));
+    const std::wstring text = TrimWide(buffer);
+    if (text.empty()) {
+        if (normalizeText) {
+            RefreshQuickSizeSliderMaxField();
+        }
+        return;
+    }
+
+    wchar_t* end = nullptr;
+    const float parsed = std::wcstof(text.c_str(), &end);
+    if (end == text.c_str() || *end != L'\0') {
+        if (normalizeText) {
+            RefreshQuickSizeSliderMaxField();
+        }
+        return;
+    }
+
+    app_.settings_.quickSizeSliderMax = std::clamp(parsed, 1.0f, App::kMaxBrushSize);
+    app_.settings_.drawBrushSize = std::min(app_.settings_.drawBrushSize, app_.settings_.quickSizeSliderMax);
+    app_.settings_.eraseBrushSize = std::min(app_.settings_.eraseBrushSize, app_.settings_.quickSizeSliderMax);
+    app_.SyncBrushWidthFromActiveTool();
+    app_.ReleaseDrawCursor();
+    app_.ReleaseEraserCursor();
+    app_.RefreshCursor();
+    app_.SaveAppSettings();
+    if (normalizeText) {
+        RefreshQuickSizeSliderMaxField();
+    }
+    InvalidateRect(app_.window_, nullptr, FALSE);
+}
+
+void SettingsWindow::HandleBrushSizePresetEdit(bool normalizeText) {
+    if (brushSizePresetEdit_ == nullptr) {
+        return;
+    }
+
+    wchar_t buffer[128] = {};
+    GetWindowTextW(brushSizePresetEdit_, buffer, static_cast<int>(std::size(buffer)));
+    std::vector<float> presets;
+    if (!App::TryParseBrushSizePresets(buffer, presets)) {
+        if (normalizeText) {
+            RefreshBrushSizePresetField();
+        }
+        return;
+    }
+
+    app_.settings_.brushSizePresets = std::move(presets);
+    app_.SaveAppSettings();
+    if (normalizeText) {
+        RefreshBrushSizePresetField();
     }
 }
 

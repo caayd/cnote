@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
+#include <limits>
 
 #include "DpiUtil.h"
 #include "ui/Layout.h"
@@ -16,6 +17,7 @@ namespace {
 constexpr float kMinBrushSize = 0.5f;
 constexpr float kMaxBrushSize = 20.0f;
 constexpr float kBrushSizeStep = 0.25f;
+constexpr float kQuickSizePresetSnapRadius = 0.75f;
 constexpr int kPaletteWheelShadowInsetDip = 6;
 constexpr int kPaletteWheelHoverOffsetDip = 10;
 constexpr int kPaletteWheelBoundsPaddingDip = 6;
@@ -388,8 +390,8 @@ void App::UpdateToolbarBrushSliderDrag(POINT cursor) {
     const int clampedX = std::clamp(cursor.x, trackRect.left, trackRect.right - 1);
     const int width = std::max(1, static_cast<int>(trackRect.right - trackRect.left - 1));
     const float normalized = static_cast<float>(clampedX - trackRect.left) / static_cast<float>(width);
-    const float size = 0.5f + (normalized * 19.5f);
-    SetBrushSizeForTool(*tool, size);
+    const float size = kMinBrushSize + (normalized * (QuickSizeSliderMax() - kMinBrushSize));
+    SetBrushSizeForTool(*tool, SnapQuickSizeBrushValue(size));
 }
 
 void App::EndToolbarBrushSliderDrag() {
@@ -406,6 +408,34 @@ void App::ChangeBrushSize(float delta) {
     SetBrushSizeForTool(targetTool, BrushSizeForTool(targetTool) + delta);
 }
 
+float App::SnapBrushSizeValue(float size) const {
+    return std::min(SnapBrushSize(size), QuickSizeSliderMax());
+}
+
+float App::QuickSizeSliderMax() const {
+    return std::clamp(settings_.quickSizeSliderMax, 1.0f, kMaxBrushSize);
+}
+
+float App::SnapQuickSizeBrushValue(float size) const {
+    if (settings_.brushSizePresets.empty()) {
+        return SnapBrushSizeValue(size);
+    }
+
+    const float sliderMax = QuickSizeSliderMax();
+    const float clamped = std::clamp(size, kMinBrushSize, sliderMax);
+    const auto nearestPreset = std::min_element(settings_.brushSizePresets.begin(), settings_.brushSizePresets.end(), [clamped, sliderMax](float left, float right) {
+        const float leftDistance = left > sliderMax ? std::numeric_limits<float>::max() : std::abs(left - clamped);
+        const float rightDistance = right > sliderMax ? std::numeric_limits<float>::max() : std::abs(right - clamped);
+        return leftDistance < rightDistance;
+    });
+    if (nearestPreset != settings_.brushSizePresets.end()
+        && *nearestPreset <= sliderMax
+        && std::abs(*nearestPreset - clamped) <= kQuickSizePresetSnapRadius) {
+        return *nearestPreset;
+    }
+    return SnapBrushSizeValue(clamped);
+}
+
 float App::BrushSizeForTool(Tool tool) const {
     switch (tool) {
     case Tool::Erase:
@@ -417,7 +447,7 @@ float App::BrushSizeForTool(Tool tool) const {
 }
 
 void App::SetBrushSizeForTool(Tool tool, float size, bool refreshUi) {
-    const float clamped = SnapBrushSize(std::clamp(size, kMinBrushSize, kMaxBrushSize));
+    const float clamped = std::clamp(SnapBrushSizeValue(size), kMinBrushSize, QuickSizeSliderMax());
     switch (tool) {
     case Tool::Erase:
         settings_.eraseBrushSize = clamped;
