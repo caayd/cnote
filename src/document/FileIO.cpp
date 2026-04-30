@@ -134,6 +134,8 @@ bool App::OpenProject(const std::wstring& filePath) {
     newPageSettings_.width = document_.NewPageDefaults().width;
     newPageSettings_.height = document_.NewPageDefaults().height;
     newPageSettings_.backgroundColor = document_.NewPageDefaults().backgroundColor;
+    newPageSettings_.paletteProfile = ResolvedPaletteProfile(document_.NewPageDefaults().paletteProfile);
+    newPageSettings_.applyPaletteProfileToExistingStrokes = false;
     RefreshNewPageSettingsWindow();
     RecordRecentDocumentPath(filePath);
     return true;
@@ -148,7 +150,12 @@ bool App::OpenPdf(const std::wstring& filePath) {
 
     PrepareForDocumentSwitch();
     ApplyDocument(*opened);
-    document_.SetNewPageDefaults({ newPageSettings_.width, newPageSettings_.height, newPageSettings_.backgroundColor });
+    document_.SetNewPageDefaults({
+        newPageSettings_.width,
+        newPageSettings_.height,
+        newPageSettings_.backgroundColor,
+        ResolvedPaletteProfile(newPageSettings_.paletteProfile),
+    });
     RecordRecentDocumentPath(filePath);
     return true;
 }

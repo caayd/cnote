@@ -55,6 +55,78 @@ const std::vector<std::uint32_t>& LegacyDefaultPalette() {
     return palette;
 }
 
+RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderScale, std::uint32_t argb);
+
+bool RasterImageEqual(const RasterImage& a, const RasterImage& b) {
+    return a.width == b.width
+        && a.height == b.height
+        && a.stride == b.stride
+        && a.scale == b.scale
+        && a.pixels == b.pixels;
+}
+
+std::uint32_t RemapPaletteColor(
+    std::uint32_t color,
+    const std::vector<std::uint32_t>& sourcePaletteProfile,
+    const std::vector<std::uint32_t>& targetPaletteProfile) {
+    const std::size_t remapCount = std::min(sourcePaletteProfile.size(), targetPaletteProfile.size());
+    for (std::size_t index = 0; index < remapCount; ++index) {
+        if (color == sourcePaletteProfile[index]) {
+            return targetPaletteProfile[index];
+        }
+    }
+    return color;
+}
+
+bool ApplyPaletteProfileToPage(Page& page, const std::vector<std::uint32_t>& targetPaletteProfile) {
+    bool changed = page.paletteProfile != targetPaletteProfile;
+    for (Stroke& stroke : page.strokes) {
+        const std::uint32_t remappedColor = RemapPaletteColor(stroke.style.color, page.paletteProfile, targetPaletteProfile);
+        if (remappedColor != stroke.style.color) {
+            stroke.style.color = remappedColor;
+            changed = true;
+        }
+    }
+    page.paletteProfile = targetPaletteProfile;
+    return changed;
+}
+
+bool ApplyConfiguredSettingsToPage(
+    Page& page,
+    float width,
+    float height,
+    std::uint32_t backgroundColor,
+    const std::vector<std::uint32_t>& paletteProfile,
+    bool applyPaletteProfileToExistingStrokes) {
+    bool changed = false;
+    const float clampedWidth = std::max(72.0f, width);
+    const float clampedHeight = std::max(72.0f, height);
+    if (page.width != clampedWidth) {
+        page.width = clampedWidth;
+        changed = true;
+    }
+    if (page.height != clampedHeight) {
+        page.height = clampedHeight;
+        changed = true;
+    }
+
+    RasterImage raster = CreateSolidRaster(page.width, page.height, 1.5f, backgroundColor);
+    if (page.sourcePdfSourceIndex != -1
+        || page.sourcePdfPageIndex != -1
+        || !RasterImageEqual(page.raster, raster)) {
+        page.sourcePdfSourceIndex = -1;
+        page.sourcePdfPageIndex = -1;
+        page.raster = std::move(raster);
+        changed = true;
+    }
+
+    if (applyPaletteProfileToExistingStrokes) {
+        changed = ApplyPaletteProfileToPage(page, paletteProfile) || changed;
+    }
+
+    return changed;
+}
+
 std::wstring TrimWide(std::wstring_view value) {
     std::size_t start = 0;
     while (start < value.size() && std::iswspace(value[start]) != 0) {
@@ -432,52 +504,103 @@ void App::ResetNewPageSettings() {
     newPageSettings_.width = 612.0f;
     newPageSettings_.height = 792.0f;
     newPageSettings_.backgroundColor = 0xFFFFFFFFU;
+    newPageSettings_.paletteProfile = ResolvedPaletteProfile({});
+    newPageSettings_.applyPaletteProfileToExistingStrokes = false;
     RefreshNewPageSettingsWindow();
+}
+
+std::vector<std::uint32_t> App::ResolvedPaletteProfile(const std::vector<std::uint32_t>& paletteProfile) const {
+    if (!paletteProfile.empty()) {
+        return paletteProfile;
+    }
+    if (!palette_.empty()) {
+        return palette_;
+    }
+    return DefaultPalette();
+}
+
+void App::NormalizeDocumentPaletteProfiles() {
+    document_.SetNewPageDefaults({
+        document_.NewPageDefaults().width,
+        document_.NewPageDefaults().height,
+        document_.NewPageDefaults().backgroundColor,
+        ResolvedPaletteProfile(document_.NewPageDefaults().paletteProfile),
+    });
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        Page& page = document_.PageAt(pageIndex);
+        page.paletteProfile = ResolvedPaletteProfile(page.paletteProfile.empty() ? document_.NewPageDefaults().paletteProfile : page.paletteProfile);
+    }
 }
 
 Page App::BuildConfiguredNewPage() const {
     Page page {};
     page.width = std::max(72.0f, newPageSettings_.width);
     page.height = std::max(72.0f, newPageSettings_.height);
+    page.paletteProfile = ResolvedPaletteProfile(newPageSettings_.paletteProfile);
     page.raster = CreateSolidRaster(page.width, page.height, 1.5f, newPageSettings_.backgroundColor);
     return page;
 }
 
-void App::ApplyConfiguredSettingsToCurrentPage(float width, float height, std::uint32_t backgroundColor) {
+void App::ApplyConfiguredSettingsToCurrentPage(
+    float width,
+    float height,
+    std::uint32_t backgroundColor,
+    const std::vector<std::uint32_t>& paletteProfile,
+    bool applyPaletteProfileToExistingStrokes) {
     if (document_.PageCount() == 0U) {
         return;
     }
 
-    Page& page = document_.CurrentPage();
-    page.width = std::max(72.0f, width);
-    page.height = std::max(72.0f, height);
-    page.sourcePdfSourceIndex = -1;
-    page.sourcePdfPageIndex = -1;
-    page.raster = CreateSolidRaster(page.width, page.height, 1.5f, backgroundColor);
-
+    const std::vector<std::uint32_t> resolvedPaletteProfile = ResolvedPaletteProfile(paletteProfile);
     const std::size_t pageIndex = document_.CurrentPageIndex();
+    const Page beforePage = document_.CurrentPage();
+    Page& page = document_.CurrentPage();
+    if (!ApplyConfiguredSettingsToPage(page, width, height, backgroundColor, resolvedPaletteProfile, applyPaletteProfileToExistingStrokes)) {
+        return;
+    }
+
+    PushReplacePagesHistoryAction({ pageIndex }, { beforePage }, pageIndex);
     NotifyDocumentMutated();
     InvalidatePageSurfaceCache(pageIndex);
     InvalidateSidebarThumbnailCache(pageIndex);
     InvalidateRect(window_, nullptr, FALSE);
 }
 
-void App::ApplyConfiguredSettingsToAllPages(float width, float height, std::uint32_t backgroundColor) {
+void App::ApplyConfiguredSettingsToAllPages(
+    float width,
+    float height,
+    std::uint32_t backgroundColor,
+    const std::vector<std::uint32_t>& paletteProfile,
+    bool applyPaletteProfileToExistingStrokes) {
     if (document_.PageCount() == 0U) {
         return;
     }
 
-    const float clampedWidth = std::max(72.0f, width);
-    const float clampedHeight = std::max(72.0f, height);
+    const std::vector<std::uint32_t> resolvedPaletteProfile = ResolvedPaletteProfile(paletteProfile);
+    std::vector<std::size_t> affectedPageIndices;
+    std::vector<Page> beforePages;
+    affectedPageIndices.reserve(document_.PageCount());
+    beforePages.reserve(document_.PageCount());
+    bool changed = false;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        beforePages.push_back(document_.PageAt(pageIndex));
+        affectedPageIndices.push_back(pageIndex);
         Page& page = document_.PageAt(pageIndex);
-        page.width = clampedWidth;
-        page.height = clampedHeight;
-        page.sourcePdfSourceIndex = -1;
-        page.sourcePdfPageIndex = -1;
-        page.raster = CreateSolidRaster(page.width, page.height, 1.5f, backgroundColor);
+        changed = ApplyConfiguredSettingsToPage(
+            page,
+            width,
+            height,
+            backgroundColor,
+            resolvedPaletteProfile,
+            applyPaletteProfileToExistingStrokes)
+            || changed;
     }
 
+    if (!changed) {
+        return;
+    }
+
+    PushReplacePagesHistoryAction(std::move(affectedPageIndices), std::move(beforePages), document_.CurrentPageIndex());
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
     NotifyDocumentMutated();
@@ -540,6 +663,8 @@ bool App::AppendPagesFromDocumentPath(const std::wstring& filePath) {
     std::vector<std::int32_t> sourceIndexRemap(opened->PdfSourceCount(), -1);
     for (std::size_t pageIndex = 0; pageIndex < opened->PageCount(); ++pageIndex) {
         Page importedPage = opened->PageAt(pageIndex);
+        importedPage.paletteProfile = ResolvedPaletteProfile(
+            importedPage.paletteProfile.empty() ? opened->NewPageDefaults().paletteProfile : importedPage.paletteProfile);
         if (importedPage.sourcePdfSourceIndex >= 0 && importedPage.sourcePdfPageIndex >= 0) {
             const std::size_t sourceIndex = static_cast<std::size_t>(importedPage.sourcePdfSourceIndex);
             if (sourceIndex < sourceIndexRemap.size()) {
@@ -578,6 +703,7 @@ void App::AddPaletteColor() {
     ReleaseDrawCursor();
     SaveAppSettings();
     RefreshSettingsWindow();
+    RefreshNewPageSettingsWindow();
     InvalidateRect(window_, nullptr, FALSE);
     RefreshCursor();
 }
@@ -597,6 +723,7 @@ void App::RemovePaletteColor() {
     ReleaseDrawCursor();
     SaveAppSettings();
     RefreshSettingsWindow();
+    RefreshNewPageSettingsWindow();
     InvalidateRect(window_, nullptr, FALSE);
     RefreshCursor();
 }
@@ -624,6 +751,7 @@ bool App::ApplyHexColorFromClipboard() {
         ReleaseDrawCursor();
         SaveAppSettings();
         RefreshSettingsWindow();
+        RefreshNewPageSettingsWindow();
         InvalidateRect(window_, nullptr, FALSE);
         RefreshCursor();
     }
@@ -977,6 +1105,7 @@ void App::LoadAppSettings() {
     settings_.eraseBrushSize = std::min(settings_.eraseBrushSize, settings_.quickSizeSliderMax);
     colorIndex_ = std::min(loadedColorIndex.value_or(colorIndex_), palette_.size() - 1U);
     settings_.paletteIndex = std::min(loadedSettingsPaletteIndex.value_or(settings_.paletteIndex), palette_.size() - 1U);
+    newPageSettings_.paletteProfile = ResolvedPaletteProfile(newPageSettings_.paletteProfile);
     SyncBrushWidthFromActiveTool();
 }
 
@@ -1066,6 +1195,7 @@ bool App::SaveNamedPalette(const std::wstring& name) {
 
     SaveAppSettings();
     RefreshSettingsWindow();
+    RefreshNewPageSettingsWindow();
     return true;
 }
 
@@ -1080,6 +1210,7 @@ bool App::ApplyNamedPalette(std::size_t index) {
     ReleaseDrawCursor();
     SaveAppSettings();
     RefreshSettingsWindow();
+    RefreshNewPageSettingsWindow();
     ClosePaletteOverlays();
     InvalidateRect(window_, nullptr, FALSE);
     RefreshCursor();
@@ -1094,6 +1225,7 @@ bool App::DeleteNamedPalette(std::size_t index) {
     savedPalettes_.erase(savedPalettes_.begin() + static_cast<std::ptrdiff_t>(index));
     SaveAppSettings();
     RefreshSettingsWindow();
+    RefreshNewPageSettingsWindow();
     return true;
 }
 

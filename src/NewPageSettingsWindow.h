@@ -41,10 +41,12 @@ private:
     void BeginHexColorEdit();
     void CommitHexColorEdit(bool applyChanges);
     void OpenDimensionPresetMenu();
+    void OpenPaletteProfileMenu();
     void ApplyDraftToCurrentPage();
     void ApplyDraftToAllPages();
     void ApplyDraftToFuturePages();
     void ResetDraftToDefaults();
+    [[nodiscard]] std::wstring DraftPaletteProfileLabel() const;
     void UpdateSliderFromPoint(SliderKind kind, POINT cursor);
     [[nodiscard]] std::optional<SliderKind> HitTestSlider(POINT cursor) const;
     [[nodiscard]] int SliderValue(SliderKind kind) const;
@@ -74,6 +76,8 @@ private:
     float draftWidth_ = 612.0f;
     float draftHeight_ = 792.0f;
     std::uint32_t draftBackgroundColor_ = 0xFFFFFFFFU;
+    std::vector<std::uint32_t> draftPaletteProfile_ {};
+    bool draftApplyPaletteProfileToExistingStrokes_ = false;
     std::optional<SliderKind> draggingSlider_ {};
     UINT currentDpi_ = USER_DEFAULT_SCREEN_DPI;
     bool suppressEditRefresh_ = false;

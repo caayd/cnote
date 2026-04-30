@@ -39,6 +39,7 @@ constexpr int kIdHexColorEdit = 105;
 constexpr int kIdApplyFuture = 106;
 constexpr int kIdApplyAll = 108;
 constexpr UINT kDimensionPresetMenuBase = 400;
+constexpr UINT kPaletteProfileMenuBase = 500;
 
 constexpr std::array<std::uint32_t, 10> kDefaultPageColors {
     0xFFFFFFFFU,
@@ -93,6 +94,10 @@ struct NewPageSettingsLayout {
     RECT heightLabelRect {};
     RECT heightEditRect {};
     RECT resetButtonRect {};
+    RECT paletteProfileLabelRect {};
+    RECT paletteProfileComboRect {};
+    RECT paletteProfileApplyToggleRect {};
+    RECT paletteProfileHintRect {};
     RECT applyCurrentButtonRect {};
     RECT applyAllButtonRect {};
     RECT applyFutureButtonRect {};
@@ -319,6 +324,10 @@ NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount,
     layout.heightEditRect = MakeRect(contentLeft + fieldWidth + fieldGap, layout.heightLabelRect.bottom + px(4), contentLeft + (fieldWidth * 2) + fieldGap, layout.heightLabelRect.bottom + px(4) + fieldHeight);
     layout.dimensionsLabelRect = MakeRect(contentLeft, layout.heightEditRect.bottom + px(12), contentRight, layout.heightEditRect.bottom + px(30));
     layout.dimensionsComboRect = MakeRect(contentLeft, layout.dimensionsLabelRect.bottom + px(4), contentRight, layout.dimensionsLabelRect.bottom + px(32));
+    layout.paletteProfileLabelRect = MakeRect(contentLeft, layout.dimensionsComboRect.bottom + px(12), contentRight, layout.dimensionsComboRect.bottom + px(30));
+    layout.paletteProfileComboRect = MakeRect(contentLeft, layout.paletteProfileLabelRect.bottom + px(4), contentRight, layout.paletteProfileLabelRect.bottom + px(32));
+    layout.paletteProfileApplyToggleRect = MakeRect(contentLeft, layout.paletteProfileComboRect.bottom + px(10), contentRight, layout.paletteProfileComboRect.bottom + px(38));
+    layout.paletteProfileHintRect = MakeRect(contentLeft, layout.paletteProfileApplyToggleRect.bottom + px(6), contentRight, layout.paletteProfileApplyToggleRect.bottom + px(54));
 
     const int importContentLeft = rightLeft + panelPadding;
     const int importContentRight = importRight - panelPadding;
@@ -333,7 +342,7 @@ NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount,
         importContentRight,
         layout.appendButtonRect.bottom + px(180));
 
-    const int leftContentBottom = layout.dimensionsComboRect.bottom + panelPadding;
+    const int leftContentBottom = layout.paletteProfileHintRect.bottom + panelPadding;
     const int rightContentBottom = layout.importHintRect.bottom + panelPadding;
     layout.defaultsPanel = MakeRect(defaultsLeft, top, defaultsRight, std::max(scrollViewportBottom, leftContentBottom));
     layout.importPanel = MakeRect(rightLeft, top, importRight, std::max(scrollViewportBottom, rightContentBottom));
@@ -396,6 +405,10 @@ NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount,
     offsetY(layout.heightEditRect);
     offsetY(layout.dimensionsLabelRect);
     offsetY(layout.dimensionsComboRect);
+    offsetY(layout.paletteProfileLabelRect);
+    offsetY(layout.paletteProfileComboRect);
+    offsetY(layout.paletteProfileApplyToggleRect);
+    offsetY(layout.paletteProfileHintRect);
     offsetY(layout.appendButtonRect);
     offsetY(layout.importHintRect);
 
@@ -729,6 +742,8 @@ void NewPageSettingsWindow::SyncDraftFromApp() {
     draftWidth_ = app_.newPageSettings_.width;
     draftHeight_ = app_.newPageSettings_.height;
     draftBackgroundColor_ = app_.newPageSettings_.backgroundColor;
+    draftPaletteProfile_ = app_.ResolvedPaletteProfile(app_.newPageSettings_.paletteProfile);
+    draftApplyPaletteProfileToExistingStrokes_ = app_.newPageSettings_.applyPaletteProfileToExistingStrokes;
 }
 
 void NewPageSettingsWindow::UpdateEditValues() {
@@ -946,10 +961,12 @@ void NewPageSettingsWindow::PaintWindow() {
     RECT widthLabelRect = layout.widthLabelRect;
     RECT heightLabelRect = layout.heightLabelRect;
     RECT dimensionsLabelRect = layout.dimensionsLabelRect;
+    RECT paletteProfileLabelRect = layout.paletteProfileLabelRect;
     SetTextColor(memoryDc, kTextPrimary);
     DrawTextW(memoryDc, L"Width (pt)", -1, &widthLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     DrawTextW(memoryDc, L"Height (pt)", -1, &heightLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     DrawTextW(memoryDc, L"Common Sizes", -1, &dimensionsLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(memoryDc, L"Stroke Color Profile", -1, &paletteProfileLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     FillRoundedRect(memoryDc, layout.dimensionsComboRect, kInputFill);
     StrokeRoundedRect(memoryDc, layout.dimensionsComboRect, kPanelBorder, 1);
@@ -974,6 +991,75 @@ void NewPageSettingsWindow::PaintWindow() {
     SelectObject(memoryDc, previousBrush);
     DeleteObject(arrowPen);
     DeleteObject(arrowBrush);
+
+    FillRoundedRect(memoryDc, layout.paletteProfileComboRect, kInputFill);
+    StrokeRoundedRect(memoryDc, layout.paletteProfileComboRect, kPanelBorder, 1);
+    RECT paletteProfileTextRect = layout.paletteProfileComboRect;
+    paletteProfileTextRect.left += Scale(12);
+    paletteProfileTextRect.right -= Scale(30);
+    const std::vector<std::uint32_t> previewPaletteProfile = app_.ResolvedPaletteProfile(draftPaletteProfile_);
+    const int paletteSwatchSize = Scale(12);
+    const int paletteSwatchGap = Scale(6);
+    int paletteSwatchLeft = paletteProfileTextRect.left;
+    const int paletteSwatchTop = ((layout.paletteProfileComboRect.top + layout.paletteProfileComboRect.bottom) / 2) - (paletteSwatchSize / 2);
+    for (std::size_t index = 0; index < std::min<std::size_t>(previewPaletteProfile.size(), 4U); ++index) {
+        const RECT swatchRect = MakeRect(
+            paletteSwatchLeft,
+            paletteSwatchTop,
+            paletteSwatchLeft + paletteSwatchSize,
+            paletteSwatchTop + paletteSwatchSize);
+        FillRoundedRect(memoryDc, swatchRect, app_.ToColorRef(previewPaletteProfile[index]));
+        StrokeRoundedRect(memoryDc, swatchRect, kPanelBorder, 1);
+        paletteSwatchLeft += paletteSwatchSize + paletteSwatchGap;
+    }
+    paletteProfileTextRect.left = paletteSwatchLeft + Scale(4);
+    DrawTextW(memoryDc, DraftPaletteProfileLabel().c_str(), -1, &paletteProfileTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    const int paletteComboCenterX = layout.paletteProfileComboRect.right - Scale(16);
+    const int paletteComboCenterY = (layout.paletteProfileComboRect.top + layout.paletteProfileComboRect.bottom) / 2;
+    POINT paletteComboArrow[3] {
+        { paletteComboCenterX - Scale(4), paletteComboCenterY - Scale(2) },
+        { paletteComboCenterX + Scale(4), paletteComboCenterY - Scale(2) },
+        { paletteComboCenterX, paletteComboCenterY + Scale(3) },
+    };
+    HBRUSH paletteArrowBrush = CreateSolidBrush(kTextPrimary);
+    HPEN paletteArrowPen = CreatePen(PS_SOLID, 1, kTextPrimary);
+    previousBrush = SelectObject(memoryDc, paletteArrowBrush);
+    previousPen = SelectObject(memoryDc, paletteArrowPen);
+    Polygon(memoryDc, paletteComboArrow, 3);
+    SelectObject(memoryDc, previousPen);
+    SelectObject(memoryDc, previousBrush);
+    DeleteObject(paletteArrowPen);
+    DeleteObject(paletteArrowBrush);
+
+    const RECT toggleBoxRect = MakeRect(
+        layout.paletteProfileApplyToggleRect.left,
+        layout.paletteProfileApplyToggleRect.top + Scale(4),
+        layout.paletteProfileApplyToggleRect.left + Scale(20),
+        layout.paletteProfileApplyToggleRect.top + Scale(24));
+    FillRoundedRect(memoryDc, toggleBoxRect, draftApplyPaletteProfileToExistingStrokes_ ? RGB(32, 63, 102) : kInputFill);
+    StrokeRoundedRect(memoryDc, toggleBoxRect, draftApplyPaletteProfileToExistingStrokes_ ? kAccent : kPanelBorder, draftApplyPaletteProfileToExistingStrokes_ ? 2 : 1);
+    if (draftApplyPaletteProfileToExistingStrokes_) {
+        HPEN checkPen = CreatePen(PS_SOLID, std::max(1, Scale(2)), RGB(244, 247, 252));
+        previousPen = SelectObject(memoryDc, checkPen);
+        MoveToEx(memoryDc, toggleBoxRect.left + Scale(5), toggleBoxRect.top + Scale(10), nullptr);
+        LineTo(memoryDc, toggleBoxRect.left + Scale(9), toggleBoxRect.top + Scale(14));
+        LineTo(memoryDc, toggleBoxRect.left + Scale(15), toggleBoxRect.top + Scale(6));
+        SelectObject(memoryDc, previousPen);
+        DeleteObject(checkPen);
+    }
+    RECT toggleTextRect = layout.paletteProfileApplyToggleRect;
+    toggleTextRect.left = toggleBoxRect.right + Scale(10);
+    SetTextColor(memoryDc, kTextPrimary);
+    DrawTextW(memoryDc, L"Swap existing stroke colors on Current/All apply", -1, &toggleTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    RECT paletteProfileHintRect = layout.paletteProfileHintRect;
+    SetTextColor(memoryDc, kTextMuted);
+    DrawTextW(
+        memoryDc,
+        L"Current and All remap strokes from each page's stored profile. Future Pages stores the selected profile for new pages.",
+        -1,
+        &paletteProfileHintRect,
+        DT_WORDBREAK);
 
     SetTextColor(memoryDc, kTextMuted);
     RECT importHintRect = layout.importHintRect;
@@ -1043,14 +1129,24 @@ void NewPageSettingsWindow::ApplyDraftToCurrentPage() {
     CommitHexColorEdit(true);
     HandleDimensionEdit(widthEdit_, draftWidth_, true);
     HandleDimensionEdit(heightEdit_, draftHeight_, true);
-    app_.ApplyConfiguredSettingsToCurrentPage(draftWidth_, draftHeight_, draftBackgroundColor_);
+    app_.ApplyConfiguredSettingsToCurrentPage(
+        draftWidth_,
+        draftHeight_,
+        draftBackgroundColor_,
+        draftPaletteProfile_,
+        draftApplyPaletteProfileToExistingStrokes_);
 }
 
 void NewPageSettingsWindow::ApplyDraftToAllPages() {
     CommitHexColorEdit(true);
     HandleDimensionEdit(widthEdit_, draftWidth_, true);
     HandleDimensionEdit(heightEdit_, draftHeight_, true);
-    app_.ApplyConfiguredSettingsToAllPages(draftWidth_, draftHeight_, draftBackgroundColor_);
+    app_.ApplyConfiguredSettingsToAllPages(
+        draftWidth_,
+        draftHeight_,
+        draftBackgroundColor_,
+        draftPaletteProfile_,
+        draftApplyPaletteProfileToExistingStrokes_);
 }
 
 void NewPageSettingsWindow::ApplyDraftToFuturePages() {
@@ -1062,10 +1158,13 @@ void NewPageSettingsWindow::ApplyDraftToFuturePages() {
     app_.newPageSettings_.width = std::max(72.0f, draftWidth_);
     app_.newPageSettings_.height = std::max(72.0f, draftHeight_);
     app_.newPageSettings_.backgroundColor = draftBackgroundColor_;
+    app_.newPageSettings_.paletteProfile = app_.ResolvedPaletteProfile(draftPaletteProfile_);
+    app_.newPageSettings_.applyPaletteProfileToExistingStrokes = draftApplyPaletteProfileToExistingStrokes_;
     app_.document_.SetNewPageDefaults({
         app_.newPageSettings_.width,
         app_.newPageSettings_.height,
         app_.newPageSettings_.backgroundColor,
+        app_.newPageSettings_.paletteProfile,
     });
     app_.NotifyDocumentMutated();
 
@@ -1087,6 +1186,8 @@ void NewPageSettingsWindow::ResetDraftToDefaults() {
     draftWidth_ = 612.0f;
     draftHeight_ = 792.0f;
     draftBackgroundColor_ = 0xFFFFFFFFU;
+    draftPaletteProfile_ = app_.ResolvedPaletteProfile({});
+    draftApplyPaletteProfileToExistingStrokes_ = false;
     UpdateEditValues();
     InvalidateRect(window_, nullptr, FALSE);
 }
@@ -1173,6 +1274,73 @@ void NewPageSettingsWindow::OpenDimensionPresetMenu() {
     }
 
     RedrawWindow(window_, &layout.dimensionsComboRect, nullptr, RDW_INVALIDATE | RDW_NOERASE);
+}
+
+std::wstring NewPageSettingsWindow::DraftPaletteProfileLabel() const {
+    const std::vector<std::uint32_t> resolvedPaletteProfile = app_.ResolvedPaletteProfile(draftPaletteProfile_);
+    if (resolvedPaletteProfile == app_.palette_) {
+        return L"Current Palette";
+    }
+    for (const App::NamedPalette& palette : app_.savedPalettes_) {
+        if (palette.colors == resolvedPaletteProfile && !palette.name.empty()) {
+            return palette.name;
+        }
+    }
+    return L"Custom Profile";
+}
+
+void NewPageSettingsWindow::OpenPaletteProfileMenu() {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const NewPageSettingsLayout layout = BuildLayout(clientRect, app_.newPageSettings_.recentColors.size(), scrollOffset_, CurrentDpi());
+
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+
+    const std::vector<std::uint32_t> resolvedPaletteProfile = app_.ResolvedPaletteProfile(draftPaletteProfile_);
+    AppendMenuW(menu, MF_STRING | (resolvedPaletteProfile == app_.palette_ ? MF_CHECKED : 0), kPaletteProfileMenuBase, L"Current Palette");
+    if (!app_.savedPalettes_.empty()) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
+    for (std::size_t index = 0; index < app_.savedPalettes_.size(); ++index) {
+        const App::NamedPalette& palette = app_.savedPalettes_[index];
+        if (palette.colors.empty()) {
+            continue;
+        }
+        const UINT flags = MF_STRING | (palette.colors == resolvedPaletteProfile ? MF_CHECKED : 0);
+        AppendMenuW(menu, flags, kPaletteProfileMenuBase + 1U + static_cast<UINT>(index), palette.name.c_str());
+    }
+
+    POINT anchor { layout.paletteProfileComboRect.left, layout.paletteProfileComboRect.bottom };
+    ClientToScreen(window_, &anchor);
+    const UINT command = TrackPopupMenuEx(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY, anchor.x, anchor.y, window_, nullptr);
+    DestroyMenu(menu);
+
+    if (command == 0U) {
+        RedrawWindow(window_, &layout.paletteProfileComboRect, nullptr, RDW_INVALIDATE | RDW_NOERASE);
+        return;
+    }
+
+    if (command == kPaletteProfileMenuBase) {
+        draftPaletteProfile_ = app_.ResolvedPaletteProfile({});
+        InvalidateRect(window_, nullptr, FALSE);
+        return;
+    }
+
+    const std::size_t paletteIndex = static_cast<std::size_t>(command - kPaletteProfileMenuBase - 1U);
+    if (paletteIndex < app_.savedPalettes_.size()) {
+        draftPaletteProfile_ = app_.savedPalettes_[paletteIndex].colors;
+        InvalidateRect(window_, nullptr, FALSE);
+        return;
+    }
+
+    RedrawWindow(window_, &layout.paletteProfileComboRect, nullptr, RDW_INVALIDATE | RDW_NOERASE);
 }
 
 void NewPageSettingsWindow::UpdateSliderFromPoint(SliderKind kind, POINT cursor) {
@@ -1352,6 +1520,15 @@ LRESULT NewPageSettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM
         }
         if (PtInRect(&layout.dimensionsComboRect, cursor) != 0) {
             OpenDimensionPresetMenu();
+            return 0;
+        }
+        if (PtInRect(&layout.paletteProfileComboRect, cursor) != 0) {
+            OpenPaletteProfileMenu();
+            return 0;
+        }
+        if (PtInRect(&layout.paletteProfileApplyToggleRect, cursor) != 0) {
+            draftApplyPaletteProfileToExistingStrokes_ = !draftApplyPaletteProfileToExistingStrokes_;
+            InvalidateRect(window_, nullptr, FALSE);
             return 0;
         }
         if (PtInRect(&layout.colorPreviewRect, cursor) != 0) {

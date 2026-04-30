@@ -256,7 +256,9 @@ public:
         float width = 612.0f;
         float height = 792.0f;
         std::uint32_t backgroundColor = 0xFFFFFFFFU;
+        std::vector<std::uint32_t> paletteProfile {};
         std::vector<std::uint32_t> recentColors {};
+        bool applyPaletteProfileToExistingStrokes = false;
     };
 
 private:
@@ -392,9 +394,21 @@ private:
     void ToggleNewPageSettings();
     void RefreshNewPageSettingsWindow();
     void ResetNewPageSettings();
+    [[nodiscard]] std::vector<std::uint32_t> ResolvedPaletteProfile(const std::vector<std::uint32_t>& paletteProfile) const;
+    void NormalizeDocumentPaletteProfiles();
     [[nodiscard]] Page BuildConfiguredNewPage() const;
-    void ApplyConfiguredSettingsToCurrentPage(float width, float height, std::uint32_t backgroundColor);
-    void ApplyConfiguredSettingsToAllPages(float width, float height, std::uint32_t backgroundColor);
+    void ApplyConfiguredSettingsToCurrentPage(
+        float width,
+        float height,
+        std::uint32_t backgroundColor,
+        const std::vector<std::uint32_t>& paletteProfile,
+        bool applyPaletteProfileToExistingStrokes);
+    void ApplyConfiguredSettingsToAllPages(
+        float width,
+        float height,
+        std::uint32_t backgroundColor,
+        const std::vector<std::uint32_t>& paletteProfile,
+        bool applyPaletteProfileToExistingStrokes);
     [[nodiscard]] bool AppendPagesFromFile();
     [[nodiscard]] bool AppendPagesFromDocumentPath(const std::wstring& filePath);
     void PanBy(float dx, float dy);

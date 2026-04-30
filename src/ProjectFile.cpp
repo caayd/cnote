@@ -16,7 +16,7 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 10;
+constexpr std::uint32_t kProjectVersion = 11;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
 constexpr std::uint8_t kStrokeStyleFlagDotted = 1U << 0U;
@@ -166,6 +166,32 @@ void AppendBlob(std::vector<std::uint8_t>& output, const std::vector<std::uint8_
     if (!value.empty()) {
         AppendBytes(output, value.data(), value.size());
     }
+}
+
+void AppendPaletteProfile(std::vector<std::uint8_t>& output, const std::vector<std::uint32_t>& paletteProfile) {
+    const auto colorCount = static_cast<std::uint32_t>(paletteProfile.size());
+    AppendValue(output, colorCount);
+    for (std::uint32_t color : paletteProfile) {
+        AppendValue(output, color);
+    }
+}
+
+bool ReadPaletteProfile(ByteReader& reader, std::vector<std::uint32_t>& paletteProfile) {
+    std::uint32_t colorCount = 0;
+    if (!reader.Read(colorCount)) {
+        return false;
+    }
+
+    paletteProfile.clear();
+    paletteProfile.reserve(colorCount);
+    for (std::uint32_t colorIndex = 0; colorIndex < colorCount; ++colorIndex) {
+        std::uint32_t color = 0;
+        if (!reader.Read(color)) {
+            return false;
+        }
+        paletteProfile.push_back(color);
+    }
+    return true;
 }
 
 void AppendStroke(std::vector<std::uint8_t>& output, const Stroke& stroke) {
@@ -409,6 +435,9 @@ std::optional<Document> ProjectFile::LoadFromBytes(
             || !reader.Read(pageDefaults.backgroundColor)) {
             return std::nullopt;
         }
+        if (version >= 11U && !ReadPaletteProfile(reader, pageDefaults.paletteProfile)) {
+            return std::nullopt;
+        }
     } else {
         std::wstring sourcePath;
         std::vector<std::uint8_t> pdfBytes;
@@ -460,6 +489,9 @@ std::optional<Document> ProjectFile::LoadFromBytes(
             if ((pageFlags & kPageFlagHasRaster) != 0U && !ReadRaster(reader, page.raster)) {
                 return std::nullopt;
             }
+        }
+        if (version >= 11U && !ReadPaletteProfile(reader, page.paletteProfile)) {
+            return std::nullopt;
         }
         if (!reader.Read(strokeCount)) {
             return std::nullopt;
@@ -596,6 +628,7 @@ std::vector<std::uint8_t> ProjectFile::Serialize(const Document& document) {
     AppendValue(bytes, document.NewPageDefaults().width);
     AppendValue(bytes, document.NewPageDefaults().height);
     AppendValue(bytes, document.NewPageDefaults().backgroundColor);
+    AppendPaletteProfile(bytes, document.NewPageDefaults().paletteProfile);
 
     for (std::size_t pageIndex = 0; pageIndex < document.PageCount(); ++pageIndex) {
         const Page& page = document.PageAt(pageIndex);
@@ -611,6 +644,7 @@ std::vector<std::uint8_t> ProjectFile::Serialize(const Document& document) {
         if ((pageFlags & kPageFlagHasRaster) != 0U) {
             AppendRaster(bytes, page.raster);
         }
+        AppendPaletteProfile(bytes, page.paletteProfile);
         AppendValue(bytes, strokeCount);
         AppendValue(bytes, textCount);
         AppendValue(bytes, imageCount);

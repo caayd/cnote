@@ -5,7 +5,12 @@ namespace cnote {
 void App::CreateBlankDocument() {
     PrepareForDocumentSwitch();
     ApplyDocument(Document::CreateBlank(), true);
-    document_.SetNewPageDefaults({ newPageSettings_.width, newPageSettings_.height, newPageSettings_.backgroundColor });
+    document_.SetNewPageDefaults({
+        newPageSettings_.width,
+        newPageSettings_.height,
+        newPageSettings_.backgroundColor,
+        ResolvedPaletteProfile(newPageSettings_.paletteProfile),
+    });
 }
 
 void App::PrepareForDocumentSwitch() {
@@ -22,6 +27,7 @@ void App::PrepareForDocumentSwitch() {
 
 void App::ApplyDocument(Document document, bool resetBrushWidth) {
     document_ = std::move(document);
+    NormalizeDocumentPaletteProfiles();
     documentDirty_ = false;
     pdfSidebarOpen_ = pdfSidebarOpen_ && document_.PageCount() > 0U;
     pdfSidebarSlideProgress_ = pdfSidebarOpen_ ? 1.0f : 0.0f;

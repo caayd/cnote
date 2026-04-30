@@ -100,6 +100,7 @@ bool PageEqual(const Page& a, const Page& b) {
         || a.height != b.height
         || a.sourcePdfSourceIndex != b.sourcePdfSourceIndex
         || a.sourcePdfPageIndex != b.sourcePdfPageIndex
+        || a.paletteProfile != b.paletteProfile
         || !RasterImageEqual(a.raster, b.raster)
         || a.images.size() != b.images.size()
         || a.texts.size() != b.texts.size()
