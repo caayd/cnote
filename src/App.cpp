@@ -9095,14 +9095,6 @@ void App::CaptureZoomSessionSnapshots() {
 }
 
 void App::PaintPage(HDC hdc, const PageView& pageView) {
-    if (!zoomSessionActive_) {
-        RECT shadow = pageView.rect;
-        OffsetRect(&shadow, 8, 10);
-        HBRUSH shadowBrush = CreateSolidBrush(RGB(7, 10, 15));
-        FillRect(hdc, &shadow, shadowBrush);
-        DeleteObject(shadowBrush);
-    }
-
     HBRUSH pageBrush = CreateSolidBrush(RGB(255, 255, 255));
     FillRect(hdc, &pageView.rect, pageBrush);
     DeleteObject(pageBrush);

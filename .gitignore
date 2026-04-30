@@ -1,4 +1,5 @@
 /build/
+/build_stable/
 /build_verify/
 /.vs/
 third_party/pdfium-win-x64.tgz
