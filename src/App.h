@@ -372,6 +372,7 @@ private:
     [[nodiscard]] bool HandleQuickSizePopupClick(POINT cursor);
     [[nodiscard]] bool HandleToolbarRightClick(POINT cursor);
     [[nodiscard]] bool HandlePaletteClick(POINT cursor);
+    void OpenToolbarPaletteSwapMenu(const RECT& anchorRect);
     void TogglePaletteWheel();
     void ToggleQuickSizePopup();
     void CancelQuickSizePopup(bool cancelInput = true);

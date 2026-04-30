@@ -113,6 +113,8 @@ constexpr unsigned int kCommandEditBrushSettings = 1103;
 constexpr unsigned int kCommandSelectLasso = 1111;
 constexpr unsigned int kCommandToolToggleQuickWheel = 1301;
 constexpr unsigned int kCommandRecentDocumentBase = 1400;
+constexpr unsigned int kCommandToolbarPaletteEmpty = 1499;
+constexpr unsigned int kCommandToolbarPaletteBase = 1500;
 
 struct ToolbarLayout {
     RECT titleAreaRect {};
@@ -181,6 +183,7 @@ struct TextFormatPopupLayout {
 struct PaletteMenuLayout {
     RECT panelRect {};
     std::vector<RECT> swatchRects;
+    RECT palettePickerRect {};
 };
 
 struct PaletteWheelLayout {
@@ -1974,10 +1977,11 @@ TextFormatPopupLayout BuildTextFormatPopupLayout(RECT canvasRect, RECT editRect,
 
 PaletteMenuLayout BuildPaletteMenuLayout(const ToolbarLayout& toolbarLayout, std::size_t colorCount, UINT dpi) {
     PaletteMenuLayout layout;
-    const int columns = std::min(4, std::max(1, static_cast<int>(colorCount)));
+    const std::size_t entryCount = colorCount + 1U;
+    const int columns = std::min(4, std::max(1, static_cast<int>(entryCount)));
     const int swatchSize = ScaleForDpi(28, dpi);
     const int gap = ScaleForDpi(8, dpi);
-    const int rows = std::max(1, static_cast<int>((colorCount + static_cast<std::size_t>(columns) - 1U) / static_cast<std::size_t>(columns)));
+    const int rows = std::max(1, static_cast<int>((entryCount + static_cast<std::size_t>(columns) - 1U) / static_cast<std::size_t>(columns)));
     const int panelPadding = ScaleForDpi(12, dpi);
     const int panelWidth = (columns * swatchSize) + ((columns - 1) * gap) + (panelPadding * 2);
     const int panelHeight = (rows * swatchSize) + ((rows - 1) * gap) + (panelPadding * 2);
@@ -1995,6 +1999,11 @@ PaletteMenuLayout BuildPaletteMenuLayout(const ToolbarLayout& toolbarLayout, std
         const int top = layout.panelRect.top + panelPadding + (row * (swatchSize + gap));
         layout.swatchRects.push_back(MakeRect(left, top, left + swatchSize, top + swatchSize));
     }
+    const int pickerColumn = static_cast<int>(colorCount % static_cast<std::size_t>(columns));
+    const int pickerRow = static_cast<int>(colorCount / static_cast<std::size_t>(columns));
+    const int pickerLeft = layout.panelRect.left + panelPadding + (pickerColumn * (swatchSize + gap));
+    const int pickerTop = layout.panelRect.top + panelPadding + (pickerRow * (swatchSize + gap));
+    layout.palettePickerRect = MakeRect(pickerLeft, pickerTop, pickerLeft + swatchSize, pickerTop + swatchSize);
 
     return layout;
 }
@@ -6485,6 +6494,16 @@ bool App::HandlePaletteClick(POINT cursor) {
             }
         }
 
+        if (PtInRect(&menuLayout.palettePickerRect, cursor) != 0) {
+            if (toolbarZoomEditing_) {
+                ApplyToolbarZoomInput();
+                CancelToolbarZoomInput();
+            }
+            CancelToolbarBrushSizeInput();
+            OpenToolbarPaletteSwapMenu(menuLayout.palettePickerRect);
+            return true;
+        }
+
         if (PtInRect(&menuLayout.panelRect, cursor) != 0) {
             if (toolbarZoomEditing_) {
                 ApplyToolbarZoomInput();
@@ -6590,6 +6609,56 @@ bool App::HandlePaletteClick(POINT cursor) {
     }
 
     return false;
+}
+
+void App::OpenToolbarPaletteSwapMenu(const RECT& anchorRect) {
+    if (window_ == nullptr) {
+        return;
+    }
+
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+
+    bool hasSavedPaletteEntries = false;
+    for (std::size_t index = 0; index < savedPalettes_.size(); ++index) {
+        const NamedPalette& palette = savedPalettes_[index];
+        if (palette.name.empty() || palette.colors.empty()) {
+            continue;
+        }
+
+        hasSavedPaletteEntries = true;
+
+        const UINT flags = MF_STRING | (palette.colors == palette_ ? MF_CHECKED : 0U);
+        AppendMenuW(menu, flags, kCommandToolbarPaletteBase + static_cast<UINT>(index), palette.name.c_str());
+    }
+
+    if (!hasSavedPaletteEntries) {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, kCommandToolbarPaletteEmpty, L"No saved palettes yet");
+    }
+
+    POINT anchor { anchorRect.left, anchorRect.bottom + ScaleForDpi(4, WindowDpi(window_)) };
+    ClientToScreen(window_, &anchor);
+    const UINT command = TrackPopupMenuEx(
+        menu,
+        TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
+        anchor.x,
+        anchor.y,
+        window_,
+        nullptr);
+    DestroyMenu(menu);
+
+    if (command >= kCommandToolbarPaletteBase) {
+        const std::size_t paletteIndex = static_cast<std::size_t>(command - kCommandToolbarPaletteBase);
+        if (paletteIndex < savedPalettes_.size()) {
+            if (ApplyNamedPalette(paletteIndex)) {
+                return;
+            }
+        }
+    }
+
+    RedrawWindow(window_, &anchorRect, nullptr, RDW_INVALIDATE | RDW_NOERASE);
 }
 
 
@@ -6860,6 +6929,36 @@ void App::PaintPaletteMenu(HDC hdc, RECT clientRect) const {
         const RECT swatchRect = layout.swatchRects[index];
         FillRoundedRect(hdc, swatchRect, ToColorRef(palette_[index]));
         StrokeRoundedRect(hdc, swatchRect, index == colorIndex_ ? ui::kSelectionBorder : ui::kPanelBorder, index == colorIndex_ ? 2 : 1);
+    }
+
+    FillRoundedRect(hdc, layout.palettePickerRect, RGB(36, 46, 58));
+    StrokeRoundedRect(hdc, layout.palettePickerRect, ui::kPanelBorder, 1);
+
+    HFONT pickerFont = CreateFontW(
+        FontHeightForDpi(15, dpi),
+        0,
+        0,
+        0,
+        FW_BOLD,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        VARIABLE_PITCH,
+        L"Segoe UI");
+    HGDIOBJ previousFont = pickerFont != nullptr ? SelectObject(hdc, pickerFont) : nullptr;
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, ui::kSelectionBorder);
+    RECT pickerTextRect = layout.palettePickerRect;
+    DrawTextW(hdc, L"...", -1, &pickerTextRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (previousFont != nullptr) {
+        SelectObject(hdc, previousFont);
+    }
+    if (pickerFont != nullptr) {
+        DeleteObject(pickerFont);
     }
 }
 

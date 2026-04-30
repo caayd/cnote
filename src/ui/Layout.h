@@ -78,6 +78,7 @@ struct TextFormatPopupLayout {
 struct PaletteMenuLayout {
     RECT panelRect {};
     std::vector<RECT> swatchRects;
+    RECT palettePickerRect {};
 };
 
 struct PaletteWheelLayout {

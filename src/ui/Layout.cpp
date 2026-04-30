@@ -369,10 +369,11 @@ RECT TextFormatPopupBounds(const TextFormatPopupLayout& layout, UINT dpi) {
 
 PaletteMenuLayout BuildPaletteMenuLayout(const ToolbarLayout& toolbarLayout, std::size_t colorCount, UINT dpi) {
     PaletteMenuLayout layout {};
-    const int columns = std::min(4, std::max(1, static_cast<int>(colorCount)));
+    const std::size_t entryCount = colorCount + 1U;
+    const int columns = std::min(4, std::max(1, static_cast<int>(entryCount)));
     const int swatchSize = ScaleForDpi(28, dpi);
     const int gap = ScaleForDpi(8, dpi);
-    const int rows = std::max(1, static_cast<int>((colorCount + static_cast<std::size_t>(columns) - 1U) / static_cast<std::size_t>(columns)));
+    const int rows = std::max(1, static_cast<int>((entryCount + static_cast<std::size_t>(columns) - 1U) / static_cast<std::size_t>(columns)));
     const int panelPadding = ScaleForDpi(12, dpi);
     const int panelWidth = (columns * swatchSize) + ((columns - 1) * gap) + (panelPadding * 2);
     const int panelHeight = (rows * swatchSize) + ((rows - 1) * gap) + (panelPadding * 2);
@@ -390,6 +391,11 @@ PaletteMenuLayout BuildPaletteMenuLayout(const ToolbarLayout& toolbarLayout, std
         const int top = layout.panelRect.top + panelPadding + (row * (swatchSize + gap));
         layout.swatchRects.push_back(MakeRect(left, top, left + swatchSize, top + swatchSize));
     }
+    const int pickerColumn = static_cast<int>(colorCount % static_cast<std::size_t>(columns));
+    const int pickerRow = static_cast<int>(colorCount / static_cast<std::size_t>(columns));
+    const int pickerLeft = layout.panelRect.left + panelPadding + (pickerColumn * (swatchSize + gap));
+    const int pickerTop = layout.panelRect.top + panelPadding + (pickerRow * (swatchSize + gap));
+    layout.palettePickerRect = MakeRect(pickerLeft, pickerTop, pickerLeft + swatchSize, pickerTop + swatchSize);
 
     return layout;
 }
