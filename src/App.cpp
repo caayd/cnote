@@ -205,6 +205,56 @@ RECT MakeRectFromFloatBounds(float left, float top, float right, float bottom) {
         static_cast<int>(std::ceil(bottom)));
 }
 
+void StretchBitmapToRect(
+    HDC hdc,
+    const RECT& destinationRect,
+    int sourceWidth,
+    int sourceHeight,
+    const void* pixels,
+    const BITMAPINFO& bitmapInfo,
+    bool highQuality) {
+    if (hdc == nullptr
+        || pixels == nullptr
+        || destinationRect.right <= destinationRect.left
+        || destinationRect.bottom <= destinationRect.top
+        || sourceWidth <= 0
+        || sourceHeight <= 0) {
+        return;
+    }
+
+    RECT clipRect {};
+    if (GetClipBox(hdc, &clipRect) == ERROR) {
+        clipRect = destinationRect;
+    }
+
+    RECT visibleRect {};
+    if (IntersectRect(&visibleRect, &destinationRect, &clipRect) == 0) {
+        return;
+    }
+
+    const bool fullDestinationBlit = EqualRect(&visibleRect, &destinationRect) != 0;
+    const int stretchMode = (highQuality && fullDestinationBlit) ? HALFTONE : COLORONCOLOR;
+    SetStretchBltMode(hdc, stretchMode);
+    if (stretchMode == HALFTONE) {
+        SetBrushOrgEx(hdc, 0, 0, nullptr);
+    }
+
+    StretchDIBits(
+        hdc,
+        destinationRect.left,
+        destinationRect.top,
+        destinationRect.right - destinationRect.left,
+        destinationRect.bottom - destinationRect.top,
+        0,
+        0,
+        sourceWidth,
+        sourceHeight,
+        pixels,
+        &bitmapInfo,
+        DIB_RGB_COLORS,
+        SRCCOPY);
+}
+
 int SelectionHandleHalfSize(UINT dpi) {
     return std::max(1, ScaleForDpi(kSelectionHandleHalfDip, dpi));
 }
@@ -3522,8 +3572,22 @@ bool App::UpdateContentComposition(RECT clientRect, RECT dirtyRect) {
     const int surfaceWidth = width + (paddingX * 2);
     const int surfaceHeight = height + (paddingY * 2);
     const RECT surfaceRect { 0, 0, surfaceWidth, surfaceHeight };
+    RECT activePageCompositionRect {};
+    bool repaintActivePageDuringStroke = false;
+    const bool repaintFullViewportDuringStrokeZoom = !useSmoothScrollPadding && isDrawing_ && zoomSessionActive_;
+    if (!useSmoothScrollPadding && isDrawing_ && activeStrokePageIndex_.has_value()) {
+        const PageView activePageView = CalculatePageView(clientRect, *activeStrokePageIndex_);
+        if (activePageView.valid) {
+            activePageCompositionRect = activePageView.rect;
+            repaintActivePageDuringStroke = IntersectRect(&activePageCompositionRect, &activePageCompositionRect, &surfaceRect) != 0;
+        }
+    }
     RECT updateRect {};
-    if (useSmoothScrollPadding) {
+    if (repaintFullViewportDuringStrokeZoom) {
+        updateRect = surfaceRect;
+    } else if (repaintActivePageDuringStroke) {
+        updateRect = activePageCompositionRect;
+    } else if (useSmoothScrollPadding) {
         updateRect = surfaceRect;
     } else if (IntersectRect(&updateRect, &dirtyRect, &surfaceRect) == 0) {
         return true;
@@ -9272,28 +9336,25 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
 
     const Page& page = document_.PageAt(pageView.pageIndex);
     const bool pageHasPendingErase = PageHasPendingErase(pageView.pageIndex);
+    const bool pageHasLiveStroke = isDrawing_
+        && activeStroke_.has_value()
+        && activeStrokePageIndex_.has_value()
+        && *activeStrokePageIndex_ == pageView.pageIndex;
     const ZoomPageSnapshot* zoomSnapshot = nullptr;
     const PageSurfaceCache* interactionSnapshot = nullptr;
-    bool canReuseFrozenCache = false;
     if (interactionPreviewMode_ != InteractionPreviewMode::None && pageView.pageIndex < interactionPageSnapshots_.size()) {
         const PageSurfaceCache& snapshot = interactionPageSnapshots_[pageView.pageIndex];
         if (snapshot.valid && !snapshot.pixels.empty() && snapshot.width > 0 && snapshot.height > 0) {
             interactionSnapshot = &snapshot;
-            canReuseFrozenCache = true;
         }
     }
-    if (zoomSessionActive_ && pageView.pageIndex < zoomPageSnapshots_.size()) {
+    if (!pageHasLiveStroke && zoomSessionActive_ && pageView.pageIndex < zoomPageSnapshots_.size()) {
         const ZoomPageSnapshot& snapshot = zoomPageSnapshots_[pageView.pageIndex];
         if (snapshot.valid && !snapshot.pixels.empty() && snapshot.width > 0 && snapshot.height > 0) {
             zoomSnapshot = &snapshot;
-            canReuseFrozenCache = true;
         }
     }
-    if (pageView.pageIndex < pageSurfaceCaches_.size()) {
-        const PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
-        canReuseFrozenCache = canReuseFrozenCache || (cache.valid && !cache.pixels.empty());
-    }
-    if (!zoomSessionActive_ && !pageHasPendingErase) {
+    if ((!zoomSessionActive_ || pageHasLiveStroke) && !pageHasPendingErase) {
         EnsurePageSurfaceCache(pageView);
     }
 
@@ -9310,22 +9371,14 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
             pageBitmapInfo.bmiHeader.biBitCount = 32;
             pageBitmapInfo.bmiHeader.biCompression = BI_RGB;
 
-            SetStretchBltMode(hdc, HALFTONE);
-            SetBrushOrgEx(hdc, 0, 0, nullptr);
-            StretchDIBits(
+            StretchBitmapToRect(
                 hdc,
-                pageView.rect.left,
-                pageView.rect.top,
-                pageView.rect.right - pageView.rect.left,
-                pageView.rect.bottom - pageView.rect.top,
-                0,
-                0,
+                pageView.rect,
                 page.raster.width,
                 page.raster.height,
                 page.raster.pixels.data(),
-                &pageBitmapInfo,
-                DIB_RGB_COLORS,
-                SRCCOPY);
+                pageBitmapInfo,
+                true);
         }
 
         Gdiplus::Graphics imageGraphics(hdc);
@@ -9400,21 +9453,14 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         bitmapInfo.bmiHeader.biBitCount = 32;
         bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
-        SetStretchBltMode(hdc, COLORONCOLOR);
-        StretchDIBits(
+        StretchBitmapToRect(
             hdc,
-            pageView.rect.left,
-            pageView.rect.top,
-            pageView.rect.right - pageView.rect.left,
-            pageView.rect.bottom - pageView.rect.top,
-            0,
-            0,
+            pageView.rect,
             interactionSnapshot->width,
             interactionSnapshot->height,
             interactionSnapshot->pixels.data(),
-            &bitmapInfo,
-            DIB_RGB_COLORS,
-            SRCCOPY);
+            bitmapInfo,
+            false);
     } else if (zoomSnapshot != nullptr) {
         BITMAPINFO bitmapInfo {};
         bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
@@ -9424,21 +9470,14 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         bitmapInfo.bmiHeader.biBitCount = 32;
         bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
-        SetStretchBltMode(hdc, COLORONCOLOR);
-        StretchDIBits(
+        StretchBitmapToRect(
             hdc,
-            pageView.rect.left,
-            pageView.rect.top,
-            pageView.rect.right - pageView.rect.left,
-            pageView.rect.bottom - pageView.rect.top,
-            0,
-            0,
+            pageView.rect,
             zoomSnapshot->width,
             zoomSnapshot->height,
             zoomSnapshot->pixels.data(),
-            &bitmapInfo,
-            DIB_RGB_COLORS,
-            SRCCOPY);
+            bitmapInfo,
+            false);
     } else if (pageView.pageIndex < pageSurfaceCaches_.size()) {
         const PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
         if (cache.valid && !cache.pixels.empty()) {
@@ -9450,27 +9489,15 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
             bitmapInfo.bmiHeader.biBitCount = 32;
             bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
-            const int stretchMode = (isPanning_ || smoothScrollActive_ || zoomSessionActive_ || interactionPreviewMode_ != InteractionPreviewMode::None)
-                ? COLORONCOLOR
-                : HALFTONE;
-            SetStretchBltMode(hdc, stretchMode);
-            if (stretchMode == HALFTONE) {
-                SetBrushOrgEx(hdc, 0, 0, nullptr);
-            }
-            StretchDIBits(
+            const bool highQuality = !(isPanning_ || smoothScrollActive_ || zoomSessionActive_ || interactionPreviewMode_ != InteractionPreviewMode::None);
+            StretchBitmapToRect(
                 hdc,
-                pageView.rect.left,
-                pageView.rect.top,
-                pageView.rect.right - pageView.rect.left,
-                pageView.rect.bottom - pageView.rect.top,
-                0,
-                0,
+                pageView.rect,
                 cache.width,
                 cache.height,
                 cache.pixels.data(),
-                &bitmapInfo,
-                DIB_RGB_COLORS,
-                SRCCOPY);
+                bitmapInfo,
+                highQuality);
         }
     }
 
