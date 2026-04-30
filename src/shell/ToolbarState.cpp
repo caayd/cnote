@@ -56,7 +56,10 @@ bool IsToolbarBrushTool(App::Tool tool) {
 void App::ClosePaletteOverlays() {
     wheel_.paletteMenuOpen = false;
     wheel_.paletteWheelOpen = false;
+    wheel_.zoomPresetMode = false;
     paletteWheelHoverTargetIndex_.reset();
+    paletteWheelCenterPressActive_ = false;
+    paletteWheelCenterPressStartedInZoomMode_ = false;
     ClearPaletteWheelPixelCache();
 }
 
@@ -95,12 +98,37 @@ void App::ToggleToolInWheel(Tool tool) {
     } else {
         wheel_.tools.push_back(tool);
     }
+    if (tool == Tool::Zoom && !IsToolInWheel(Tool::Zoom)) {
+        wheel_.zoomPresetMode = false;
+    }
     SaveAppSettings();
     InvalidateRect(window_, nullptr, FALSE);
 }
 
 bool App::IsToolInWheel(Tool tool) const {
     return std::find(wheel_.tools.begin(), wheel_.tools.end(), tool) != wheel_.tools.end();
+}
+
+std::vector<App::Tool> App::PaletteWheelDisplayedTools() const {
+    std::vector<Tool> tools;
+    tools.reserve(wheel_.tools.size());
+    for (Tool tool : wheel_.tools) {
+        if (tool != Tool::Zoom) {
+            tools.push_back(tool);
+        }
+    }
+    return tools;
+}
+
+std::vector<std::size_t> App::PaletteWheelZoomPresetIndices() const {
+    std::vector<std::size_t> indices;
+    indices.reserve(settings_.zoomPresets.size());
+    for (std::size_t index = 0; index < settings_.zoomPresets.size(); ++index) {
+        if (settings_.zoomPresets[index] > 0.0f) {
+            indices.push_back(index);
+        }
+    }
+    return indices;
 }
 
 void App::TogglePaletteWheel() {
@@ -124,6 +152,7 @@ void App::TogglePaletteWheel() {
     wheel_.paletteWheelOpen = !wheel_.paletteWheelOpen;
     wheel_.paletteMenuOpen = false;
     if (wheel_.paletteWheelOpen) {
+        wheel_.zoomPresetMode = false;
         UpdatePaletteWheelHover(cursor);
     } else {
         paletteWheelHoverTargetIndex_.reset();
@@ -137,7 +166,9 @@ void App::TogglePaletteWheel() {
 }
 
 std::optional<RECT> App::PaletteWheelBounds(RECT clientRect) const {
-    const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
+    const std::size_t wheelEntryCount = wheel_.zoomPresetMode
+        ? PaletteWheelZoomPresetIndices().size()
+        : (palette_.size() + PaletteWheelDisplayedTools().size());
     if (wheelEntryCount == 0U) {
         return std::nullopt;
     }
@@ -169,7 +200,9 @@ void App::UpdatePaletteWheelHover(POINT cursor) {
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
+    const std::size_t wheelEntryCount = wheel_.zoomPresetMode
+        ? PaletteWheelZoomPresetIndices().size()
+        : (palette_.size() + PaletteWheelDisplayedTools().size());
 
     std::optional<std::size_t> nextHover;
     if (wheelEntryCount > 0U) {
@@ -179,7 +212,9 @@ void App::UpdatePaletteWheelHover(POINT cursor) {
             wheelEntryCount,
             VisibleToolbarHeight(),
             WindowDpi(window_));
-        nextHover = appui::PaletteWheelIndexAtPoint(layout, cursor, wheelEntryCount);
+        if (!nextHover.has_value()) {
+            nextHover = appui::PaletteWheelIndexAtPoint(layout, cursor, wheelEntryCount);
+        }
     }
 
     if (paletteWheelHoverTargetIndex_ == nextHover) {

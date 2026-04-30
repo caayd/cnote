@@ -49,6 +49,7 @@ public:
         Draw,
         Pan,
         Erase,
+        Zoom,
     };
 
     enum class DrawCursorKind {
@@ -222,6 +223,7 @@ public:
     struct WheelState {
         bool paletteMenuOpen = false;
         bool paletteWheelOpen = false;
+        bool zoomPresetMode = false;
         POINT center {};
         std::vector<Tool> tools {};
     };
@@ -376,6 +378,8 @@ private:
     void ClosePaletteOverlays();
     void UpdatePaletteWheelHover(POINT cursor);
     [[nodiscard]] std::optional<RECT> PaletteWheelBounds(RECT clientRect) const;
+    [[nodiscard]] std::vector<Tool> PaletteWheelDisplayedTools() const;
+    [[nodiscard]] std::vector<std::size_t> PaletteWheelZoomPresetIndices() const;
     void ClearPaletteWheelPixelCache();
     [[nodiscard]] std::uint64_t PaletteWheelPixelCacheSignature(RECT clientRect) const;
     void RebuildPaletteWheelPixelCache(RECT clientRect);
@@ -432,7 +436,7 @@ private:
     [[nodiscard]] bool StartSmoothScrollCompositionAnimation(float startOffsetX, float startOffsetY, float targetOffsetX, float targetOffsetY);
     void ZoomAt(int delta, POINT cursor);
     void SetZoom(float zoom, std::optional<POINT> anchor = std::nullopt);
-    [[nodiscard]] bool ApplyZoomPreset(std::size_t presetIndex);
+    [[nodiscard]] bool ApplyZoomPreset(std::size_t presetIndex, std::optional<POINT> preferredAnchor = std::nullopt);
     void BeginZoomSession(POINT cursor);
     void EndZoomSession();
     [[nodiscard]] bool SidebarOwnsKeyboardShortcuts() const;
@@ -737,6 +741,8 @@ private:
     ShortcutState shortcuts_ {};
     WheelState wheel_ {};
     std::optional<std::size_t> paletteWheelHoverTargetIndex_ {};
+    bool paletteWheelCenterPressActive_ = false;
+    bool paletteWheelCenterPressStartedInZoomMode_ = false;
     struct PaletteWheelPixelCacheEntry {
         std::optional<std::size_t> hoverIndex {};
         IDCompositionSurface* surface = nullptr;

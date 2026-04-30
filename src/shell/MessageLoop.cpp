@@ -622,6 +622,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             }
         }
 
+        if (paletteWheelCenterPressActive_) {
+            return 0;
+        }
+
         if (toolbarBrushSliderDragging_) {
             UpdateToolbarBrushSliderDrag(cursor);
         } else if (isSelecting_) {
@@ -676,6 +680,57 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     }
     case WM_LBUTTONUP: {
         POINT cursor { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (paletteWheelCenterPressActive_) {
+            const bool startedInZoomMode = paletteWheelCenterPressStartedInZoomMode_;
+            paletteWheelCenterPressActive_ = false;
+            paletteWheelCenterPressStartedInZoomMode_ = false;
+            UpdateCaptureState();
+
+            if (wheel_.paletteWheelOpen) {
+                RECT clientRect {};
+                GetClientRect(window_, &clientRect);
+                const UINT dpi = WindowDpi(window_);
+                const std::vector<std::size_t> zoomPresetIndices = PaletteWheelZoomPresetIndices();
+                const std::size_t wheelEntryCount = wheel_.zoomPresetMode && !zoomPresetIndices.empty()
+                    ? zoomPresetIndices.size()
+                    : (palette_.size() + PaletteWheelDisplayedTools().size());
+                if (wheelEntryCount > 0U) {
+                    const appui::PaletteWheelLayout wheelLayout = appui::BuildPaletteWheelLayout(
+                        clientRect,
+                        wheel_.center,
+                        wheelEntryCount,
+                        VisibleToolbarHeight(),
+                        dpi);
+                    const int centerDx = cursor.x - wheelLayout.center.x;
+                    const int centerDy = cursor.y - wheelLayout.center.y;
+                    const bool centerHit = ((centerDx * centerDx) + (centerDy * centerDy)) < (wheelLayout.innerRadius * wheelLayout.innerRadius);
+
+                    if (wheel_.zoomPresetMode && !zoomPresetIndices.empty() && !centerHit) {
+                        if (const auto presetSliceIndex = appui::PaletteWheelIndexAtPoint(wheelLayout, cursor, wheelEntryCount); presetSliceIndex.has_value()) {
+                            if (ApplyZoomPreset(zoomPresetIndices[*presetSliceIndex], wheel_.center)) {
+                                ClosePaletteOverlays();
+                            }
+                            InvalidateRect(window_, nullptr, FALSE);
+                            return 0;
+                        }
+                    }
+
+                    if (centerHit && startedInZoomMode) {
+                        wheel_.zoomPresetMode = false;
+                        paletteWheelHoverTargetIndex_.reset();
+                        ClearPaletteWheelPixelCache();
+                        UpdatePaletteWheelHover(cursor);
+                        InvalidateRect(window_, nullptr, FALSE);
+                        return 0;
+                    }
+                }
+
+                ClearPaletteWheelPixelCache();
+                UpdatePaletteWheelHover(cursor);
+                InvalidateRect(window_, nullptr, FALSE);
+            }
+            return 0;
+        }
         if (toolbarBrushSliderDragging_) {
             EndToolbarBrushSliderDrag();
         } else if (isDrawing_) {

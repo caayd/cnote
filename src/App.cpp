@@ -1144,6 +1144,8 @@ const wchar_t* ToolSvgFileName(App::Tool tool) {
         return L"pan.svg";
     case App::Tool::Erase:
         return L"erase.svg";
+    case App::Tool::Zoom:
+        return L"zoom.svg";
     default:
         return L"";
     }
@@ -3666,6 +3668,7 @@ std::uint64_t App::PaletteWheelPixelCacheSignature(RECT clientRect) const {
     HashToolbarValue(hash, colorIndex_);
     HashToolbarValue(hash, wheel_.center.x);
     HashToolbarValue(hash, wheel_.center.y);
+    HashToolbarValue(hash, wheel_.zoomPresetMode);
     HashToolbarValue(hash, VisibleToolbarHeight());
     HashToolbarValue(hash, wheelBounds.has_value());
     if (wheelBounds.has_value()) {
@@ -3687,6 +3690,10 @@ std::uint64_t App::PaletteWheelPixelCacheSignature(RECT clientRect) const {
         const int toolValue = static_cast<int>(tool);
         HashToolbarValue(hash, toolValue);
     }
+    for (float preset : settings_.zoomPresets) {
+        HashToolbarValue(hash, preset);
+    }
+    HashToolbarValue(hash, zoom_);
 
     return hash;
 }
@@ -3805,7 +3812,9 @@ void App::RebuildPaletteWheelPixelCache(RECT clientRect) {
     };
 
     paletteWheelPixelCacheSignature_ = PaletteWheelPixelCacheSignature(clientRect);
-    const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
+    const std::size_t wheelEntryCount = wheel_.zoomPresetMode
+        ? PaletteWheelZoomPresetIndices().size()
+        : (palette_.size() + PaletteWheelDisplayedTools().size());
     paletteWheelPixelCacheEntries_.reserve(wheelEntryCount + 1U);
     paletteWheelPixelCacheEntries_.push_back({ std::nullopt, renderWheelPixels(std::nullopt) });
     for (std::size_t index = 0; index < wheelEntryCount; ++index) {
@@ -5994,7 +6003,8 @@ void App::EndPan() {
 
 void App::UpdateCaptureState() {
     if (toolbarBrushSliderDragging_ || isDrawing_ || isPanning_ || isSelecting_ || pendingTextEditClick_
-        || isMovingSelection_ || isTransformingImage_ || isTransformingText_ || isTransformingStroke_) {
+        || isMovingSelection_ || isTransformingImage_ || isTransformingText_ || isTransformingStroke_
+        || paletteWheelCenterPressActive_) {
         SetCapture(window_);
         return;
     }
@@ -6316,6 +6326,22 @@ bool App::HandleToolbarRightClick(POINT cursor) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const ToolbarLayout layout = BuildToolbarLayout(clientRect, palette_.size(), IsZoomed(window_), activeTool_, dpi);
+    HDC windowDc = GetDC(window_);
+    HFONT bodyFont = CreateFontW(FontHeightForDpi(15, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
+    HGDIOBJ previousFont = windowDc != nullptr && bodyFont != nullptr ? SelectObject(windowDc, bodyFont) : nullptr;
+    const ToolbarTitleLayout titleLayout = windowDc != nullptr
+        ? ResolveToolbarTitleLayout(layout, windowDc, CurrentWindowTitle(), ZoomIndicatorLabel(), dpi)
+        : ToolbarTitleLayout {};
+    if (windowDc != nullptr && previousFont != nullptr) {
+        SelectObject(windowDc, previousFont);
+    }
+    if (bodyFont != nullptr) {
+        DeleteObject(bodyFont);
+    }
+    if (windowDc != nullptr) {
+        ReleaseDC(window_, windowDc);
+    }
 
     const auto showMenuForTool = [&](const RECT& rect, Tool tool) -> bool {
         if (PtInRect(&rect, cursor) == 0) {
@@ -6348,6 +6374,9 @@ bool App::HandleToolbarRightClick(POINT cursor) {
         return true;
     };
 
+    if (showMenuForTool(titleLayout.zoomRect, Tool::Zoom)) {
+        return true;
+    }
     return showMenuForTool(layout.selectToolRect, Tool::Select)
         || showMenuForTool(layout.textToolRect, Tool::Text)
         || showMenuForTool(layout.moveToolRect, Tool::Move)
@@ -6412,8 +6441,59 @@ bool App::HandlePaletteClick(POINT cursor) {
     }
 
     if (wheel_.paletteWheelOpen) {
-        const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
+        const std::vector<Tool> displayedTools = PaletteWheelDisplayedTools();
+        const std::vector<std::size_t> zoomPresetIndices = PaletteWheelZoomPresetIndices();
+        const std::size_t wheelEntryCount = wheel_.zoomPresetMode
+            ? zoomPresetIndices.size()
+            : (palette_.size() + displayedTools.size());
         const PaletteWheelLayout wheelLayout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, VisibleToolbarHeight(), dpi);
+        const int centerDx = cursor.x - wheelLayout.center.x;
+        const int centerDy = cursor.y - wheelLayout.center.y;
+        const bool centerHit = ((centerDx * centerDx) + (centerDy * centerDy)) < (wheelLayout.innerRadius * wheelLayout.innerRadius);
+
+        if (centerHit && IsToolInWheel(Tool::Zoom)) {
+            const bool startedInZoomMode = wheel_.zoomPresetMode && !zoomPresetIndices.empty();
+            if (!startedInZoomMode && !zoomPresetIndices.empty()) {
+                wheel_.zoomPresetMode = true;
+            }
+            paletteWheelCenterPressActive_ = true;
+            paletteWheelCenterPressStartedInZoomMode_ = startedInZoomMode;
+            UpdateCaptureState();
+            ClearPaletteWheelPixelCache();
+            UpdatePaletteWheelHover(cursor);
+            InvalidateRect(window_, nullptr, FALSE);
+            return true;
+        }
+
+        if (paletteWheelCenterPressActive_) {
+            return true;
+        }
+
+        if (wheel_.zoomPresetMode && wheelEntryCount > 0U) {
+            const auto presetSliceIndex = PaletteWheelIndexAtPoint(wheelLayout, cursor, wheelEntryCount);
+            if (!presetSliceIndex.has_value()) {
+                if (toolbarZoomEditing_) {
+                    ApplyToolbarZoomInput();
+                    CancelToolbarZoomInput();
+                }
+                CancelToolbarBrushSizeInput();
+                ClosePaletteOverlays();
+                InvalidateRect(window_, nullptr, FALSE);
+                return true;
+            }
+
+            if (toolbarZoomEditing_) {
+                ApplyToolbarZoomInput();
+                CancelToolbarZoomInput();
+            }
+            CancelToolbarBrushSizeInput();
+            if (ApplyZoomPreset(zoomPresetIndices[*presetSliceIndex], wheel_.center)) {
+                ClosePaletteOverlays();
+            }
+            InvalidateRect(window_, nullptr, FALSE);
+            return true;
+        }
+
         if (const auto index = PaletteWheelIndexAtPoint(wheelLayout, cursor, wheelEntryCount); index.has_value()) {
             if (*index < palette_.size()) {
                 if (toolbarZoomEditing_) {
@@ -6428,7 +6508,7 @@ bool App::HandlePaletteClick(POINT cursor) {
                     CancelToolbarZoomInput();
                 }
                 CancelToolbarBrushSizeInput();
-                SetActiveTool(wheel_.tools[*index - palette_.size()]);
+                SetActiveTool(displayedTools[*index - palette_.size()]);
                 ClosePaletteOverlays();
                 InvalidateRect(window_, nullptr, FALSE);
             }
@@ -6728,7 +6808,12 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect, std::optional<std::size_t>
         return;
     }
 
-    const std::size_t wheelEntryCount = palette_.size() + wheel_.tools.size();
+    const std::vector<Tool> displayedTools = PaletteWheelDisplayedTools();
+    const std::vector<std::size_t> zoomPresetIndices = PaletteWheelZoomPresetIndices();
+    const bool zoomSliceMode = wheel_.zoomPresetMode && !zoomPresetIndices.empty();
+    const std::size_t wheelEntryCount = zoomSliceMode
+        ? zoomPresetIndices.size()
+        : (palette_.size() + displayedTools.size());
     const UINT dpi = WindowDpi(window_);
     const PaletteWheelLayout layout = BuildPaletteWheelLayout(clientRect, wheel_.center, wheelEntryCount, VisibleToolbarHeight(), dpi);
     if (wheelEntryCount == 0U) {
@@ -6769,6 +6854,18 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect, std::optional<std::size_t>
         return hoverProgress(index) > 0.001f;
     };
 
+    const auto isCurrentZoomPreset = [&](std::size_t presetIndex) {
+        if (presetIndex >= settings_.zoomPresets.size()) {
+            return false;
+        }
+        const float presetZoom = settings_.zoomPresets[presetIndex];
+        return presetZoom > 0.0f && std::abs(presetZoom - zoom_) < 0.001f;
+    };
+
+    const auto isWheelToolSelected = [&](Tool tool) {
+        return tool != Tool::Zoom && activeTool_ == tool;
+    };
+
     const float sweep = 360.0f / static_cast<float>(wheelEntryCount);
     const auto paintSegment = [&](std::size_t index, bool paintFill, bool paintStroke, bool paintIcon) {
         const float baseStart = -90.0f + (sweep * static_cast<float>(index));
@@ -6807,11 +6904,15 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect, std::optional<std::size_t>
             path.CloseFigure();
         };
 
-        const bool isColorEntry = index < palette_.size();
-        const bool selected = isColorEntry ? index == colorIndex_ : activeTool_ == wheel_.tools[index - palette_.size()];
-        const Gdiplus::Color segmentColor = isColorEntry
-            ? Gdiplus::Color(255, GetRValue(ToColorRef(palette_[index])), GetGValue(ToColorRef(palette_[index])), GetBValue(ToColorRef(palette_[index])))
-            : (selected ? Gdiplus::Color(255, 61, 118, 164) : Gdiplus::Color(245, 32, 41, 52));
+        const bool isColorEntry = !zoomSliceMode && index < palette_.size();
+        const bool selected = zoomSliceMode
+            ? isCurrentZoomPreset(zoomPresetIndices[index])
+            : (isColorEntry ? index == colorIndex_ : isWheelToolSelected(displayedTools[index - palette_.size()]));
+        const Gdiplus::Color segmentColor = zoomSliceMode
+            ? (selected ? Gdiplus::Color(255, 61, 118, 164) : Gdiplus::Color(245, 32, 41, 52))
+            : (isColorEntry
+                ? Gdiplus::Color(255, GetRValue(ToColorRef(palette_[index])), GetGValue(ToColorRef(palette_[index])), GetBValue(ToColorRef(palette_[index])))
+                : (selected ? Gdiplus::Color(255, 61, 118, 164) : Gdiplus::Color(245, 32, 41, 52)));
         Gdiplus::GraphicsPath fillPath;
         Gdiplus::GraphicsPath strokePath;
         if (wheelEntryCount == 1U) {
@@ -6835,7 +6936,7 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect, std::optional<std::size_t>
             graphics.DrawPath(&separatorPen, &strokePath);
         }
 
-        if (paintIcon && !isColorEntry) {
+        if (paintIcon && !isColorEntry && !zoomSliceMode) {
             const float iconRadius = static_cast<float>(layout.innerRadius + ((layout.outerRadius - layout.innerRadius) * 0.5f))
                 + (static_cast<float>(grow) * 0.5f);
             const int iconCenterX = layout.center.x + iconOffsetX + static_cast<int>(std::lround(std::cos(centerAngleRadians) * iconRadius));
@@ -6846,16 +6947,19 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect, std::optional<std::size_t>
                 iconCenterX + iconHalfSize,
                 iconCenterY + iconHalfSize);
             const COLORREF iconColor = selected ? RGB(255, 255, 255) : RGB(232, 238, 245);
-            if (const SvgIconData* icon = ToolbarSvgIcon(ToolSvgFileName(wheel_.tools[index - palette_.size()])); icon != nullptr) {
+            if (const SvgIconData* icon = ToolbarSvgIcon(ToolSvgFileName(displayedTools[index - palette_.size()])); icon != nullptr) {
                 PaintSvgIcon(hdc, iconRect, *icon, iconColor);
             }
         }
     };
 
     const auto isSelectedEntry = [&](std::size_t index) {
+        if (zoomSliceMode) {
+            return isCurrentZoomPreset(zoomPresetIndices[index]);
+        }
         return index < palette_.size()
             ? index == colorIndex_
-            : activeTool_ == wheel_.tools[index - palette_.size()];
+            : isWheelToolSelected(displayedTools[index - palette_.size()]);
     };
 
     const auto pointOnWheelRadius = [&](float angleDegrees, int radius) {
@@ -6933,7 +7037,46 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect, std::optional<std::size_t>
         }
     }
 
-    Gdiplus::SolidBrush cutoutBrush(Gdiplus::Color(255, 18, 24, 32));
+    if (zoomSliceMode) {
+        HFONT presetFont = CreateFontW(FontHeightForDpi(12, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
+        HGDIOBJ previousPresetFont = presetFont != nullptr ? SelectObject(hdc, presetFont) : nullptr;
+        SetBkMode(hdc, TRANSPARENT);
+        for (std::size_t index = 0; index < wheelEntryCount; ++index) {
+            const float baseStart = -90.0f + (sweep * static_cast<float>(index));
+            const float centerAngleDegrees = baseStart + (sweep * 0.5f);
+            const float centerAngleRadians = centerAngleDegrees * (3.14159265358979323846f / 180.0f);
+            const float progress = hoverProgress(index);
+            const int iconOffsetX = static_cast<int>(std::lround(std::cos(centerAngleRadians) * static_cast<float>(hoverOffset) * progress));
+            const int iconOffsetY = static_cast<int>(std::lround(std::sin(centerAngleRadians) * static_cast<float>(hoverOffset) * progress));
+            const int grow = static_cast<int>(std::lround(static_cast<float>(hoverGrow) * progress));
+            const float labelRadius = static_cast<float>(layout.innerRadius + ((layout.outerRadius - layout.innerRadius) * 0.5f))
+                + (static_cast<float>(grow) * 0.5f);
+            const int labelCenterX = layout.center.x + iconOffsetX + static_cast<int>(std::lround(std::cos(centerAngleRadians) * labelRadius));
+            const int labelCenterY = layout.center.y + iconOffsetY + static_cast<int>(std::lround(std::sin(centerAngleRadians) * labelRadius));
+            RECT labelRect = MakeRect(
+                labelCenterX - ScaleForDpi(22, dpi),
+                labelCenterY - ScaleForDpi(10, dpi),
+                labelCenterX + ScaleForDpi(22, dpi),
+                labelCenterY + ScaleForDpi(10, dpi));
+            const std::size_t presetIndex = zoomPresetIndices[index];
+            SetTextColor(hdc, isCurrentZoomPreset(presetIndex) ? RGB(255, 255, 255) : RGB(232, 238, 245));
+            const std::wstring presetLabel = FormatZoomPercentValue(settings_.zoomPresets[presetIndex]) + L"%";
+            DrawTextW(hdc, presetLabel.c_str(), -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+        if (previousPresetFont != nullptr) {
+            SelectObject(hdc, previousPresetFont);
+        }
+        if (presetFont != nullptr) {
+            DeleteObject(presetFont);
+        }
+    }
+
+    const bool zoomToggleEnabled = IsToolInWheel(Tool::Zoom);
+    const Gdiplus::Color centerFillColor = zoomToggleEnabled && wheel_.zoomPresetMode
+        ? Gdiplus::Color(255, 37, 58, 78)
+        : Gdiplus::Color(255, 18, 24, 32);
+    Gdiplus::SolidBrush cutoutBrush(centerFillColor);
     graphics.FillEllipse(
         &cutoutBrush,
         static_cast<Gdiplus::REAL>(layout.center.x - layout.innerRadius),
@@ -6941,7 +7084,23 @@ void App::PaintPaletteWheel(HDC hdc, RECT clientRect, std::optional<std::size_t>
         static_cast<Gdiplus::REAL>(innerDiameter),
         static_cast<Gdiplus::REAL>(innerDiameter));
 
-    Gdiplus::Pen centerBorder(Gdiplus::Color(180, 244, 247, 252), PaletteWheelStrokeWidth(kPaletteWheelBorderDip, dpi));
+    if (zoomToggleEnabled) {
+        const int centerIconHalfSize = std::max(1, ScaleForDpi(13, dpi));
+        const RECT centerIconRect = MakeRect(
+            layout.center.x - centerIconHalfSize,
+            layout.center.y - centerIconHalfSize,
+            layout.center.x + centerIconHalfSize,
+            layout.center.y + centerIconHalfSize);
+        if (const SvgIconData* icon = ToolbarSvgIcon(ToolSvgFileName(Tool::Zoom)); icon != nullptr) {
+            PaintSvgIcon(hdc, centerIconRect, *icon, wheel_.zoomPresetMode ? RGB(255, 255, 255) : RGB(232, 238, 245));
+        }
+    }
+
+    Gdiplus::Pen centerBorder(
+        zoomToggleEnabled && wheel_.zoomPresetMode
+            ? Gdiplus::Color(235, 132, 191, 255)
+            : Gdiplus::Color(180, 244, 247, 252),
+        PaletteWheelStrokeWidth(kPaletteWheelBorderDip, dpi));
     graphics.DrawEllipse(
         &centerBorder,
         static_cast<Gdiplus::REAL>(layout.center.x - layout.innerRadius),

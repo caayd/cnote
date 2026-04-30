@@ -378,6 +378,8 @@ const char* ToolConfigName(App::Tool tool) {
         return "Pan";
     case App::Tool::Erase:
         return "Erase";
+    case App::Tool::Zoom:
+        return "Zoom";
     default:
         return "";
     }
@@ -401,6 +403,9 @@ std::optional<App::Tool> ParseToolConfigName(std::string_view name) {
     }
     if (name == "Erase") {
         return App::Tool::Erase;
+    }
+    if (name == "Zoom") {
+        return App::Tool::Zoom;
     }
     return std::nullopt;
 }

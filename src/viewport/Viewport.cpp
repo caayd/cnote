@@ -520,7 +520,7 @@ std::optional<std::size_t> App::ViewedPageIndex(RECT clientRect) const {
     return hasBestPage ? std::optional<std::size_t>(bestPageIndex) : std::nullopt;
 }
 
-bool App::ApplyZoomPreset(std::size_t presetIndex) {
+bool App::ApplyZoomPreset(std::size_t presetIndex, std::optional<POINT> preferredAnchor) {
     if (presetIndex >= settings_.zoomPresets.size()) {
         return false;
     }
@@ -544,11 +544,17 @@ bool App::ApplyZoomPreset(std::size_t presetIndex) {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
 
-    POINT cursor {};
-    if (GetCursorPos(&cursor) != FALSE) {
-        ScreenToClient(window_, &cursor);
-        if (PtInRect(&clientRect, cursor) != 0) {
-            anchor = cursor;
+    if (preferredAnchor.has_value() && PtInRect(&clientRect, *preferredAnchor) != 0) {
+        anchor = *preferredAnchor;
+    }
+
+    if (!anchor.has_value()) {
+        POINT cursor {};
+        if (GetCursorPos(&cursor) != FALSE) {
+            ScreenToClient(window_, &cursor);
+            if (PtInRect(&clientRect, cursor) != 0) {
+                anchor = cursor;
+            }
         }
     }
 
