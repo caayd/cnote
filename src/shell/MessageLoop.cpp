@@ -338,6 +338,9 @@ void App::HandlePrecisionTouchpadInteractionOutput(const INTERACTION_CONTEXT_OUT
             static_cast<int>(std::lround(output.x)),
             static_cast<int>(std::lround(output.y)),
         };
+        if (window_ != nullptr) {
+            ScreenToClient(window_, &anchor);
+        }
         SetZoom(precisionTouchpadManipulationStartZoom_ * manipulation.cumulative.scale, anchor);
     }
 
