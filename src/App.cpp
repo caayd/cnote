@@ -30,10 +30,14 @@
 #include "NewPageSettingsWindow.h"
 #include "SettingsWindow.h"
 #include "ShortcutConfig.h"
+#include "selection/Geometry.h"
+#include "text/TextGeometry.h"
 #include "ui/UiUtil.h"
 
 namespace cnote {
 
+namespace geometry = cnote;
+namespace text = cnote::text;
 namespace ui = cnote::ui;
 
 void GraphicsPathDeleter::operator()(Gdiplus::GraphicsPath* path) const {
@@ -42,18 +46,54 @@ void GraphicsPathDeleter::operator()(Gdiplus::GraphicsPath* path) const {
 
 namespace {
 
+using geometry::BuildSmoothedPoints;
+using geometry::CrossProduct;
+using geometry::DistancePointToSegmentSquared;
+using geometry::DistanceSquared;
+using geometry::ImageCenter;
+using geometry::ImageCorners;
+using geometry::OnSegment;
+using geometry::PointInRectF;
+using geometry::RotatePointAround;
+using geometry::ScreenPointFromPagePoint;
+using geometry::SegmentIntersectsRectF;
+using geometry::SegmentsIntersect;
+using geometry::SelectionRotateOffsetPageUnits;
+using geometry::StrokeRenderPoints;
+using geometry::StrokeRenderSmoothing;
+using cnote::PageEqual;
+using cnote::PageImageEqual;
+using cnote::PageTextEqual;
+using cnote::StrokeEqual;
+using cnote::StrokeStyleEqual;
+using cnote::Vec2Equal;
+using text::CreatePageTextFont;
+using text::DrawTextAlignmentFlags;
+using text::LayoutPageText;
+using text::MeasurePageTextBounds;
+using text::MeasurePageTextPixels;
+using text::PageTextBoundsRect;
+using text::PageTextCachedBoundsRect;
+using text::PageTextFontFace;
+using text::PageTextFontWeight;
+using text::ResolvedPageTextWidth;
+using text::TrimTrailingLayoutWhitespace;
 using ui::FillRoundedRect;
+using ui::CaptionButtonReserve;
+using ui::FormatZoomPercentValue;
+using ui::HasRect;
+using ui::InflateRectCopy;
+using ui::MakeRect;
+using ui::MakeRectFromFloatBounds;
+using ui::MeasureToolbarTextWidth;
+using ui::RectsOverlap;
 using ui::StrokeRoundedRect;
+using ui::ToolbarHeight;
+using ui::ToolbarTopInset;
+using ui::UnionRectangles;
+using ui::WindowFrameThicknessX;
 
-template <typename T>
-void ReleaseCom(T*& instance) {
-    if (instance != nullptr) {
-        instance->Release();
-        instance = nullptr;
-    }
-}
-
-void HashToolbarBytes(std::uint64_t& hash, const void* data, std::size_t size) {
+void HashBytes(std::uint64_t& hash, const void* data, std::size_t size) {
     constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
     const auto* bytes = static_cast<const unsigned char*>(data);
     for (std::size_t index = 0; index < size; ++index) {
@@ -63,15 +103,24 @@ void HashToolbarBytes(std::uint64_t& hash, const void* data, std::size_t size) {
 }
 
 template <typename T>
+void HashValue(std::uint64_t& hash, const T& value) {
+    HashBytes(hash, &value, sizeof(value));
+}
+
+void HashToolbarBytes(std::uint64_t& hash, const void* data, std::size_t size) {
+    HashBytes(hash, data, size);
+}
+
+template <typename T>
 void HashToolbarValue(std::uint64_t& hash, const T& value) {
-    HashToolbarBytes(hash, &value, sizeof(value));
+    HashValue(hash, value);
 }
 
 void HashToolbarString(std::uint64_t& hash, const std::wstring& value) {
     const std::size_t size = value.size();
-    HashToolbarValue(hash, size);
+    HashValue(hash, size);
     if (!value.empty()) {
-        HashToolbarBytes(hash, value.data(), value.size() * sizeof(wchar_t));
+        HashBytes(hash, value.data(), value.size() * sizeof(wchar_t));
     }
 }
 
@@ -109,6 +158,7 @@ constexpr unsigned int kCommandFileOpen = 1002;
 constexpr unsigned int kCommandFileSaveCnote = 1003;
 constexpr unsigned int kCommandFileExportPdf = 1004;
 constexpr unsigned int kCommandFileExit = 1005;
+constexpr unsigned int kCommandFileNewWindow = 1006;
 constexpr unsigned int kCommandEditBrushSettings = 1103;
 constexpr unsigned int kCommandSelectLasso = 1111;
 constexpr unsigned int kCommandToolToggleQuickWheel = 1301;
@@ -193,21 +243,6 @@ struct PaletteWheelLayout {
     int hitOuterRadius = 0;
 };
 
-bool SegmentsIntersect(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2);
-
-RECT MakeRect(int left, int top, int right, int bottom) {
-    RECT rect { left, top, right, bottom };
-    return rect;
-}
-
-RECT MakeRectFromFloatBounds(float left, float top, float right, float bottom) {
-    return MakeRect(
-        static_cast<int>(std::floor(left)),
-        static_cast<int>(std::floor(top)),
-        static_cast<int>(std::ceil(right)),
-        static_cast<int>(std::ceil(bottom)));
-}
-
 void StretchBitmapToRect(
     HDC hdc,
     const RECT& destinationRect,
@@ -262,10 +297,6 @@ int SelectionHandleHalfSize(UINT dpi) {
     return std::max(1, ScaleForDpi(kSelectionHandleHalfDip, dpi));
 }
 
-float SelectionRotateOffsetPageUnits(float pageScale, UINT dpi) {
-    return ScaleForDpi(kSelectionRotateOffsetDip, dpi) / std::max(0.1f, pageScale);
-}
-
 int PaletteWheelShadowInset(UINT dpi) {
     return ScaleForDpi(kPaletteWheelShadowInsetDip, dpi);
 }
@@ -290,138 +321,30 @@ int QuickSizeThumbHalfSize(UINT dpi) {
     return std::max(1, ScaleForDpi(kQuickSizeThumbHalfDip, dpi));
 }
 
-bool HasRect(const RECT& rect) {
-    return rect.right > rect.left && rect.bottom > rect.top;
-}
-
-bool RectsOverlap(const RECT& a, const RECT& b) {
-    RECT overlap {};
-    return IntersectRect(&overlap, &a, &b) != 0;
-}
-
-bool Vec2Equal(const Vec2& a, const Vec2& b) {
-    return a.x == b.x && a.y == b.y;
-}
-
-bool StrokeStyleEqual(const StrokeStyle& a, const StrokeStyle& b) {
-    return a.color == b.color && a.width == b.width && a.dotted == b.dotted;
-}
-
-bool StrokeEqual(const Stroke& a, const Stroke& b) {
-    if (!StrokeStyleEqual(a.style, b.style) || a.smoothing != b.smoothing || a.points.size() != b.points.size()) {
-        return false;
-    }
-
-    for (std::size_t index = 0; index < a.points.size(); ++index) {
-        if (!Vec2Equal(a.points[index], b.points[index])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool PageImageEqual(const PageImage& a, const PageImage& b) {
-    return a.x == b.x
-        && a.y == b.y
-        && a.width == b.width
-        && a.height == b.height
-        && a.rotationDegrees == b.rotationDegrees
-        && a.pixelWidth == b.pixelWidth
-        && a.pixelHeight == b.pixelHeight
-        && a.stride == b.stride
-        && a.pixels == b.pixels;
-}
-
-bool PageTextEqual(const PageText& a, const PageText& b) {
-    return a.x == b.x
-        && a.y == b.y
-        && a.width == b.width
-        && a.height == b.height
-        && a.fontSize == b.fontSize
-        && a.color == b.color
-        && a.alignment == b.alignment
-        && a.fontFamily == b.fontFamily
-        && a.bold == b.bold
-        && a.italic == b.italic
-        && a.underline == b.underline
-        && a.content == b.content;
-}
-
-void HashPageSurfaceBytes(std::uint64_t& hash, const void* data, std::size_t size) {
-    constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
-    const auto* bytes = static_cast<const unsigned char*>(data);
-    for (std::size_t index = 0; index < size; ++index) {
-        hash ^= static_cast<std::uint64_t>(bytes[index]);
-        hash *= kFnvPrime;
-    }
-}
-
-template <typename T>
-void HashPageSurfaceValue(std::uint64_t& hash, const T& value) {
-    HashPageSurfaceBytes(hash, &value, sizeof(value));
-}
-
 std::uint64_t PageTextSurfaceSignature(const Page& page) {
     std::uint64_t hash = 14695981039346656037ULL;
-    HashPageSurfaceValue(hash, page.texts.size());
+    HashValue(hash, page.texts.size());
     for (const PageText& text : page.texts) {
-        HashPageSurfaceValue(hash, text.x);
-        HashPageSurfaceValue(hash, text.y);
-        HashPageSurfaceValue(hash, text.width);
-        HashPageSurfaceValue(hash, text.height);
-        HashPageSurfaceValue(hash, text.fontSize);
-        HashPageSurfaceValue(hash, text.color);
-        HashPageSurfaceValue(hash, text.alignment);
-        HashPageSurfaceValue(hash, text.fontFamily);
-        HashPageSurfaceValue(hash, text.bold);
-        HashPageSurfaceValue(hash, text.italic);
-        HashPageSurfaceValue(hash, text.underline);
-        HashPageSurfaceValue(hash, text.content.size());
+        HashValue(hash, text.x);
+        HashValue(hash, text.y);
+        HashValue(hash, text.width);
+        HashValue(hash, text.height);
+        HashValue(hash, text.fontSize);
+        HashValue(hash, text.color);
+        HashValue(hash, text.alignment);
+        HashValue(hash, text.fontFamily);
+        HashValue(hash, text.bold);
+        HashValue(hash, text.italic);
+        HashValue(hash, text.underline);
+        HashValue(hash, text.content.size());
         if (!text.content.empty()) {
-            HashPageSurfaceBytes(hash, text.content.data(), text.content.size() * sizeof(wchar_t));
+            HashBytes(hash, text.content.data(), text.content.size() * sizeof(wchar_t));
         }
     }
     return hash;
 }
 
-bool RasterImageEqual(const RasterImage& a, const RasterImage& b) {
-    return a.width == b.width
-        && a.height == b.height
-        && a.stride == b.stride
-        && a.scale == b.scale
-        && a.pixels == b.pixels;
-}
 
-bool PageEqual(const Page& a, const Page& b) {
-    if (a.width != b.width
-        || a.height != b.height
-        || a.sourcePdfSourceIndex != b.sourcePdfSourceIndex
-        || a.sourcePdfPageIndex != b.sourcePdfPageIndex
-        || a.paletteProfile != b.paletteProfile
-        || !RasterImageEqual(a.raster, b.raster)
-        || a.images.size() != b.images.size()
-        || a.texts.size() != b.texts.size()
-        || a.strokes.size() != b.strokes.size()) {
-        return false;
-    }
-
-    for (std::size_t index = 0; index < a.images.size(); ++index) {
-        if (!PageImageEqual(a.images[index], b.images[index])) {
-            return false;
-        }
-    }
-    for (std::size_t index = 0; index < a.texts.size(); ++index) {
-        if (!PageTextEqual(a.texts[index], b.texts[index])) {
-            return false;
-        }
-    }
-    for (std::size_t index = 0; index < a.strokes.size(); ++index) {
-        if (!StrokeEqual(a.strokes[index], b.strokes[index])) {
-            return false;
-        }
-    }
-    return true;
-}
 
 struct PageTextBounds {
     float left = 0.0f;
@@ -444,51 +367,9 @@ struct WrappedTextLayout {
 
 constexpr float kTextLayoutScale = 8.0f;
 
-const wchar_t* PageTextFontFace(TextFontFamily family) {
-    switch (family) {
-    case TextFontFamily::Serif:
-        return L"Times New Roman";
-    case TextFontFamily::Monospace:
-        return L"Consolas";
-    case TextFontFamily::Sans:
-    default:
-        return L"Segoe UI";
-    }
-}
 
-int PageTextFontWeight(const PageText& text) {
-    return text.bold ? FW_BOLD : FW_NORMAL;
-}
 
-UINT DrawTextAlignmentFlags(TextAlignment alignment) {
-    switch (alignment) {
-    case TextAlignment::Center:
-        return DT_CENTER;
-    case TextAlignment::Right:
-        return DT_RIGHT;
-    case TextAlignment::Left:
-    default:
-        return DT_LEFT;
-    }
-}
 
-HFONT CreatePageTextFont(const PageText& text, int pixelHeight, DWORD quality = CLEARTYPE_QUALITY) {
-    return CreateFontW(
-        -pixelHeight,
-        0,
-        0,
-        0,
-        PageTextFontWeight(text),
-        text.italic ? TRUE : FALSE,
-        text.underline ? TRUE : FALSE,
-        FALSE,
-        DEFAULT_CHARSET,
-        OUT_OUTLINE_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        quality,
-        DEFAULT_PITCH,
-        PageTextFontFace(text.fontFamily));
-}
 
 int PageTextFontPixelHeight(const PageText& text, float scale) {
     return std::max(1, static_cast<int>(std::lround(std::max(1.0f, text.fontSize) * std::max(0.1f, scale))));
@@ -498,46 +379,17 @@ int PageTextRenderPaddingPixels(const PageText& text, float scale) {
     return std::max(2, static_cast<int>(std::ceil(std::max(1.0f, text.fontSize) * std::max(0.1f, scale) * 0.12f)));
 }
 
-std::wstring TrimTrailingLayoutWhitespace(std::wstring value) {
-    while (!value.empty() && (value.back() == L' ' || value.back() == L'\t')) {
-        value.pop_back();
-    }
-    return value;
-}
-
-float ResolvedPageTextWidth(const PageText& text, float pageWidth) {
-    static_cast<void>(pageWidth);
-    if (text.width > 0.0f) {
-        return std::max(1.0f, text.width);
+std::optional<RECT> PageTextBoundsRect(const PageText& text, float pageWidth, float scale, int extraPadding = 0) {
+    if (scale <= 0.0f) {
+        return std::nullopt;
     }
 
-    const std::wstring measureText = TrimTrailingLayoutWhitespace(text.content);
-    const int fontHeight = PageTextFontPixelHeight(text, 1.0f);
-    HDC dc = GetDC(nullptr);
-    if (dc == nullptr) {
-        const float estimatedWidth = static_cast<float>(std::max(1, static_cast<int>(std::lround(static_cast<float>(measureText.size()) * static_cast<float>(fontHeight) * 0.56f))));
-        return estimatedWidth;
-    }
-
-    HFONT font = CreatePageTextFont(text, fontHeight);
-    HGDIOBJ previousFont = font != nullptr ? SelectObject(dc, font) : nullptr;
-    RECT measureRect = MakeRect(0, 0, 32767, 0);
-    if (!measureText.empty()) {
-        DrawTextW(dc, measureText.c_str(), -1, &measureRect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX);
-    }
-    if (previousFont != nullptr) {
-        SelectObject(dc, previousFont);
-    }
-    if (font != nullptr) {
-        DeleteObject(font);
-    }
-    ReleaseDC(nullptr, dc);
-    const float measuredWidth = std::max(1.0f, static_cast<float>(measureRect.right - measureRect.left));
-    return measuredWidth;
-}
-
-WrappedTextLayout LayoutPageText(const PageText& text, float pageWidth) {
-    WrappedTextLayout layout {};
+    const PageTextBounds bounds = MeasurePageTextBounds(text, pageWidth);
+    const float intrinsicPadding = static_cast<float>(PageTextRenderPaddingPixels(text, scale) + extraPadding);
+    return MakeRectFromFloatBounds(
+        (bounds.left * scale) - intrinsicPadding,
+        (bounds.top * scale) - intrinsicPadding,
+        (bounds.right * scale) + intrinsicPadding + 1.0f,
     layout.wrapWidth = std::max(1, static_cast<int>(std::ceil(ResolvedPageTextWidth(text, pageWidth) * kTextLayoutScale)));
     layout.lineHeight = PageTextFontPixelHeight(text, kTextLayoutScale);
 
@@ -681,32 +533,7 @@ PageTextBounds MeasurePageTextBounds(const PageText& text, float pageWidth) {
     };
 }
 
-std::optional<RECT> PageTextBoundsRect(const PageText& text, float pageWidth, float scale, int extraPadding = 0) {
-    if (scale <= 0.0f) {
-        return std::nullopt;
-    }
 
-    const PageTextBounds bounds = MeasurePageTextBounds(text, pageWidth);
-    const float intrinsicPadding = static_cast<float>(PageTextRenderPaddingPixels(text, scale) + extraPadding);
-    return MakeRectFromFloatBounds(
-        (bounds.left * scale) - intrinsicPadding,
-        (bounds.top * scale) - intrinsicPadding,
-        (bounds.right * scale) + intrinsicPadding + 1.0f,
-        (bounds.bottom * scale) + intrinsicPadding + 1.0f);
-}
-
-std::optional<RECT> PageTextCachedBoundsRect(const PageText& text, float boundsWidth, float boundsHeight, float scale, int extraPadding = 0) {
-    if (scale <= 0.0f) {
-        return std::nullopt;
-    }
-
-    const float intrinsicPadding = static_cast<float>(PageTextRenderPaddingPixels(text, scale) + extraPadding);
-    return MakeRectFromFloatBounds(
-        (text.x * scale) - intrinsicPadding,
-        (text.y * scale) - intrinsicPadding,
-        ((text.x + std::max(1.0f, boundsWidth)) * scale) + intrinsicPadding + 1.0f,
-        ((text.y + std::max(1.0f, boundsHeight)) * scale) + intrinsicPadding + 1.0f);
-}
 
 std::optional<RECT> StrokeBoundsRect(const Stroke& stroke, float scale, int extraPadding = 0) {
     if (stroke.points.empty() || scale <= 0.0f) {
@@ -733,50 +560,11 @@ std::optional<RECT> StrokeBoundsRect(const Stroke& stroke, float scale, int extr
         (maxY * scale) + padding + 1.0f);
 }
 
-RECT UnionRectangles(RECT a, RECT b) {
-    if (!HasRect(a)) {
-        return b;
-    }
-    if (!HasRect(b)) {
-        return a;
-    }
 
-    return MakeRect(
-        std::min(a.left, b.left),
-        std::min(a.top, b.top),
-        std::max(a.right, b.right),
-        std::max(a.bottom, b.bottom));
-}
 
-RECT InflateRectCopy(RECT rect, int amount) {
-    rect.left -= amount;
-    rect.top -= amount;
-    rect.right += amount;
-    rect.bottom += amount;
-    return rect;
-}
-
-int WindowFrameThicknessX(UINT dpi) {
-    return SystemMetricForDpi(SM_CXFRAME, dpi) + SystemMetricForDpi(SM_CXPADDEDBORDER, dpi);
-}
-
-int CaptionButtonReserve(UINT dpi) {
-    return ScaleForDpi((35 * 3) + 12, dpi);
-}
-
-constexpr int kBaseToolbarHeight = 34;
-constexpr int kMaximizedToolbarExtraHeight = 5;
 constexpr int kTitleBarButtonHeight = 34;
 constexpr DWORD kDwmWindowCornerPreferenceAttribute = 33;
 constexpr DWORD kDwmWindowCornerRound = 2;
-
-int ToolbarHeight(bool maximized, UINT dpi) {
-    return ScaleForDpi(kBaseToolbarHeight + (maximized ? kMaximizedToolbarExtraHeight : 0), dpi);
-}
-
-int ToolbarTopInset(bool maximized, UINT dpi) {
-    return maximized ? ScaleForDpi(kMaximizedToolbarExtraHeight, dpi) : 0;
-}
 
 HBITMAP CreateTopDown32BitDibSection(HDC dc, int width, int height, void** bits) {
     if (bits == nullptr || width <= 0 || height <= 0) {
@@ -1068,46 +856,10 @@ std::wstring RecentDocumentMenuLabel(const std::wstring& path) {
     return label;
 }
 
-float SnapBrushSize(float size) {
-    constexpr float kMinBrushSize = 0.5f;
-    constexpr float kMaxBrushSize = 20.0f;
-    constexpr float kBrushSizeStep = 0.25f;
+float App::SnapBrushSize(float size) {
     const float clamped = std::clamp(size, kMinBrushSize, kMaxBrushSize);
     const float steps = std::round((clamped - kMinBrushSize) / kBrushSizeStep);
     return kMinBrushSize + (steps * kBrushSizeStep);
-}
-
-std::wstring FormatZoomPercentValue(float zoom) {
-    wchar_t buffer[32] = {};
-    const float percent = zoom * 100.0f;
-    const bool wholePercent = std::abs(percent - std::round(percent)) < 0.05f;
-    if (wholePercent) {
-        std::swprintf(buffer, std::size(buffer), L"%.0f", percent);
-    } else {
-        std::swprintf(buffer, std::size(buffer), L"%.1f", percent);
-    }
-    std::wstring value = buffer;
-    if (!wholePercent) {
-        while (!value.empty() && value.back() == L'0') {
-            value.pop_back();
-        }
-        if (!value.empty() && value.back() == L'.') {
-            value.pop_back();
-        }
-    }
-    return value;
-}
-
-int MeasureToolbarTextWidth(HDC hdc, const std::wstring& text) {
-    if (text.empty()) {
-        return 0;
-    }
-
-    SIZE size {};
-    if (GetTextExtentPoint32W(hdc, text.c_str(), static_cast<int>(text.size()), &size) == FALSE) {
-        return 0;
-    }
-    return static_cast<int>(size.cx);
 }
 
 ToolbarTitleLayout ResolveToolbarTitleLayout(const ToolbarLayout& layout, HDC hdc, const std::wstring& title, const std::wstring& zoomLabel, UINT dpi) {
@@ -2321,12 +2073,6 @@ void PaintEraseToolIcon(HDC hdc, RECT rect, COLORREF color) {
     FillSolidRect(hdc, MakeRect(centerX - 1, centerY + 5, centerX + 7, centerY + 8), RGB(15, 18, 24));
 }
 
-float DistanceSquared(Vec2 a, Vec2 b) {
-    const float dx = a.x - b.x;
-    const float dy = a.y - b.y;
-    return (dx * dx) + (dy * dy);
-}
-
 Vec2 Lerp(Vec2 from, Vec2 to, float amount) {
     return {
         from.x + ((to.x - from.x) * amount),
@@ -2437,8 +2183,6 @@ float InputSpacingPageUnits(float pageSpacing, float pageScale) {
     return screenSpacing / scale;
 }
 
-std::array<Vec2, 4> ImageCorners(const PageImage& image);
-
 bool StrokeBounds(const Stroke& stroke, float* minX, float* minY, float* maxX, float* maxY) {
     if (stroke.points.empty() || minX == nullptr || minY == nullptr || maxX == nullptr || maxY == nullptr) {
         return false;
@@ -2458,38 +2202,7 @@ bool StrokeBounds(const Stroke& stroke, float* minX, float* minY, float* maxX, f
     return true;
 }
 
-std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float strength) {
-    if (points.size() <= 2U || strength <= 0.001f) {
-        return points;
-    }
 
-    std::vector<Vec2> smoothed;
-    smoothed.reserve(points.size());
-    smoothed.push_back(points.front());
-
-    const float sideWeight = 0.25f * std::clamp(strength, 0.0f, 1.0f);
-    const float centerWeight = 1.0f - (sideWeight * 2.0f);
-
-    for (std::size_t index = 1; index + 1 < points.size(); ++index) {
-        const Vec2 previous = points[index - 1];
-        const Vec2 current = points[index];
-        const Vec2 next = points[index + 1];
-        const Vec2 filtered {
-            (previous.x * sideWeight) + (current.x * centerWeight) + (next.x * sideWeight),
-            (previous.y * sideWeight) + (current.y * centerWeight) + (next.y * sideWeight),
-        };
-
-        if (DistanceSquared(filtered, smoothed.back()) >= 0.05f) {
-            smoothed.push_back(filtered);
-        }
-    }
-
-    if (DistanceSquared(points.back(), smoothed.back()) >= 0.01f) {
-        smoothed.push_back(points.back());
-    }
-
-    return smoothed;
-}
 
 void AppendSmoothedPointIncrementally(std::vector<Vec2>& smoothed, const std::vector<Vec2>& points, std::size_t appendedPointIndex, float strength) {
     if (appendedPointIndex >= points.size()) {
@@ -2524,14 +2237,7 @@ void AppendSmoothedPointIncrementally(std::vector<Vec2>& smoothed, const std::ve
     }
 }
 
-float StrokeRenderSmoothing(const Stroke& stroke, float fallbackSmoothing) {
-    const float smoothing = std::isfinite(stroke.smoothing) ? stroke.smoothing : fallbackSmoothing;
-    return std::clamp(smoothing, 0.0f, 1.0f);
-}
 
-std::vector<Vec2> StrokeRenderPoints(const Stroke& stroke, float fallbackSmoothing) {
-    return BuildSmoothedPoints(stroke.points, StrokeRenderSmoothing(stroke, fallbackSmoothing));
-}
 
 std::optional<RECT> StrokeRenderBoundsRect(
     const Stroke& stroke,
@@ -2568,27 +2274,6 @@ std::optional<RECT> StrokeRenderBoundsRect(
         (maxY * scale) + padding + 1.0f);
 }
 
-bool PointInRectF(Vec2 point, float left, float top, float right, float bottom) {
-    return point.x >= left && point.x <= right && point.y >= top && point.y <= bottom;
-}
-
-float DistancePointToSegmentSquared(Vec2 point, Vec2 a, Vec2 b) {
-    const float dx = b.x - a.x;
-    const float dy = b.y - a.y;
-    const float lengthSquared = (dx * dx) + (dy * dy);
-    if (lengthSquared <= 0.0001f) {
-        return DistanceSquared(point, a);
-    }
-
-    float t = ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared;
-    t = std::clamp(t, 0.0f, 1.0f);
-    const Vec2 projection {
-        a.x + (dx * t),
-        a.y + (dy * t),
-    };
-    return DistanceSquared(point, projection);
-}
-
 float DistanceSegmentToSegmentSquared(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2) {
     if (SegmentsIntersect(a1, a2, b1, b2)) {
         return 0.0f;
@@ -2602,98 +2287,12 @@ float DistanceSegmentToSegmentSquared(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2) {
     });
 }
 
-float CrossProduct(Vec2 a, Vec2 b, Vec2 c) {
-    return ((b.x - a.x) * (c.y - a.y)) - ((b.y - a.y) * (c.x - a.x));
-}
 
-bool OnSegment(Vec2 a, Vec2 b, Vec2 point) {
-    return point.x >= std::min(a.x, b.x) - 0.001f
-        && point.x <= std::max(a.x, b.x) + 0.001f
-        && point.y >= std::min(a.y, b.y) - 0.001f
-        && point.y <= std::max(a.y, b.y) + 0.001f;
-}
-
-bool SegmentsIntersect(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2) {
-    const float d1 = CrossProduct(a1, a2, b1);
-    const float d2 = CrossProduct(a1, a2, b2);
-    const float d3 = CrossProduct(b1, b2, a1);
-    const float d4 = CrossProduct(b1, b2, a2);
-
-    if (((d1 > 0.0f && d2 < 0.0f) || (d1 < 0.0f && d2 > 0.0f))
-        && ((d3 > 0.0f && d4 < 0.0f) || (d3 < 0.0f && d4 > 0.0f))) {
-        return true;
-    }
-
-    if (std::abs(d1) <= 0.001f && OnSegment(a1, a2, b1)) {
-        return true;
-    }
-    if (std::abs(d2) <= 0.001f && OnSegment(a1, a2, b2)) {
-        return true;
-    }
-    if (std::abs(d3) <= 0.001f && OnSegment(b1, b2, a1)) {
-        return true;
-    }
-    if (std::abs(d4) <= 0.001f && OnSegment(b1, b2, a2)) {
-        return true;
-    }
-    return false;
-}
-
-bool SegmentIntersectsRectF(Vec2 a, Vec2 b, float left, float top, float right, float bottom) {
-    if (PointInRectF(a, left, top, right, bottom) || PointInRectF(b, left, top, right, bottom)) {
-        return true;
-    }
-
-    return SegmentsIntersect(a, b, { left, top }, { right, top })
-        || SegmentsIntersect(a, b, { right, top }, { right, bottom })
-        || SegmentsIntersect(a, b, { right, bottom }, { left, bottom })
-        || SegmentsIntersect(a, b, { left, bottom }, { left, top });
-}
 
 constexpr float kPi = 3.14159265358979323846f;
 
 float DegreesToRadians(float degrees) {
     return degrees * (kPi / 180.0f);
-}
-
-Vec2 RotatePointAround(Vec2 point, Vec2 center, float degrees) {
-    const float radians = DegreesToRadians(degrees);
-    const float sine = std::sin(radians);
-    const float cosine = std::cos(radians);
-    const float translatedX = point.x - center.x;
-    const float translatedY = point.y - center.y;
-    return {
-        center.x + (translatedX * cosine) - (translatedY * sine),
-        center.y + (translatedX * sine) + (translatedY * cosine),
-    };
-}
-
-Vec2 ImageCenter(const PageImage& image) {
-    return {
-        image.x + (image.width * 0.5f),
-        image.y + (image.height * 0.5f),
-    };
-}
-
-std::array<Vec2, 4> ImageCorners(const PageImage& image) {
-    const Vec2 center = ImageCenter(image);
-    std::array<Vec2, 4> corners {
-        Vec2 { image.x, image.y },
-        Vec2 { image.x + image.width, image.y },
-        Vec2 { image.x + image.width, image.y + image.height },
-        Vec2 { image.x, image.y + image.height },
-    };
-    for (Vec2& corner : corners) {
-        corner = RotatePointAround(corner, center, image.rotationDegrees);
-    }
-    return corners;
-}
-
-Vec2 ScreenPointFromPagePoint(Vec2 point, RECT pageRect, float pageScale) {
-    return {
-        static_cast<float>(pageRect.left) + (point.x * pageScale),
-        static_cast<float>(pageRect.top) + (point.y * pageScale),
-    };
 }
 
 Vec2 ToImageLocalPoint(const PageImage& image, Vec2 point) {
@@ -6105,6 +5704,9 @@ void App::ExecuteCommand(unsigned int commandId) {
     case kCommandFileNew:
         CreateBlankDocument();
         break;
+    case kCommandFileNewWindow:
+        static_cast<void>(OpenNewWindow());
+        break;
     case kCommandFileOpen:
         OpenDocument();
         break;
@@ -6181,6 +5783,7 @@ bool App::HandleToolbarClick(POINT cursor) {
             AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(openMenu), L"Open");
         }
         AppendMenuW(menu, MF_STRING, kCommandFileNew, L"New");
+        AppendMenuW(menu, MF_STRING, kCommandFileNewWindow, L"New window");
         AppendMenuW(menu, MF_STRING, kCommandFileSaveCnote, HasSavedCnotePath() ? L"Save Cnote" : L"Save as Cnote...");
         AppendMenuW(menu, MF_STRING, kCommandFileExportPdf, L"Export as PDF...");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);

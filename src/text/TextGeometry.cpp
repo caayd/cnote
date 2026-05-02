@@ -5,44 +5,19 @@
 #include <cmath>
 #include <cwctype>
 
+#include "selection/Geometry.h"
+#include "ui/UiUtil.h"
+
 namespace cnote::text {
 
 namespace {
 
 constexpr float kTextLayoutScale = 8.0f;
 
-RECT MakeRect(int left, int top, int right, int bottom) {
-    RECT rect { left, top, right, bottom };
-    return rect;
-}
-
-RECT MakeRectFromFloatBounds(float left, float top, float right, float bottom) {
-    return MakeRect(
-        static_cast<int>(std::floor(left)),
-        static_cast<int>(std::floor(top)),
-        static_cast<int>(std::ceil(right)),
-        static_cast<int>(std::ceil(bottom)));
-}
-
-float CrossProduct(Vec2 a, Vec2 b, Vec2 c) {
-    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-}
-
-bool SegmentsIntersect(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2) {
-    const float d1 = CrossProduct(a1, a2, b1);
-    const float d2 = CrossProduct(a1, a2, b2);
-    const float d3 = CrossProduct(b1, b2, a1);
-    const float d4 = CrossProduct(b1, b2, a2);
-
-    if (((d1 > 0.0f && d2 < 0.0f) || (d1 < 0.0f && d2 > 0.0f))
-        && ((d3 > 0.0f && d4 < 0.0f) || (d3 < 0.0f && d4 > 0.0f))) {
-        return true;
-    }
-
-    return false;
-}
-
-bool PointInPolygon(Vec2 point, const std::vector<Vec2>& polygon) {
+using geometry::PointInPolygon;
+using geometry::SegmentsIntersect;
+using ui::MakeRect;
+using ui::MakeRectFromFloatBounds;
     bool inside = false;
     for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
         const Vec2& pi = polygon[i];

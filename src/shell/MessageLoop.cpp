@@ -7,13 +7,18 @@
 #include <windowsx.h>
 
 #include "ui/Layout.h"
+#include "ui/UiUtil.h"
 #include "DpiUtil.h"
 
 namespace cnote {
 
 namespace appui = cnote::appui;
+namespace ui = cnote::ui;
 
 namespace {
+
+using ui::HasRect;
+using ui::WindowFrameThicknessX;
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -119,14 +124,6 @@ int ConsumeWholePixels(float& remainder) {
     const int wholePixels = static_cast<int>(std::trunc(remainder));
     remainder -= static_cast<float>(wholePixels);
     return wholePixels;
-}
-
-bool HasRect(const RECT& rect) {
-    return rect.right > rect.left && rect.bottom > rect.top;
-}
-
-int WindowFrameThicknessX(UINT dpi) {
-    return SystemMetricForDpi(SM_CXFRAME, dpi) + SystemMetricForDpi(SM_CXPADDEDBORDER, dpi);
 }
 
 int WindowFrameThicknessY(UINT dpi) {

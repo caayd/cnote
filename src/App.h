@@ -414,6 +414,7 @@ private:
         std::uint32_t backgroundColor,
         const std::vector<std::uint32_t>& paletteProfile,
         bool applyPaletteProfileToExistingStrokes);
+    [[nodiscard]] bool OpenNewWindow();
     [[nodiscard]] bool AppendPagesFromFile();
     [[nodiscard]] bool AppendPagesFromDocumentPath(const std::wstring& filePath);
     void PanBy(float dx, float dy);
@@ -891,6 +892,7 @@ private:
     static constexpr float kMinBrushSize = 0.5f;
     static constexpr float kMaxBrushSize = 20.0f;
     static constexpr float kBrushSizeStep = 0.25f;
+    [[nodiscard]] static float SnapBrushSize(float size);
     static constexpr float kWheelScrollPixels = 72.0f;
     static constexpr float kMinZoom = 0.35f;
     static constexpr float kMaxZoom = 4.0f;

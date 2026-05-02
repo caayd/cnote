@@ -72,6 +72,7 @@ target_compile_options(cnote PRIVATE
 )
 
 target_link_libraries(cnote PRIVATE
+    cabinet
     comdlg32
     comctl32
     d3d11

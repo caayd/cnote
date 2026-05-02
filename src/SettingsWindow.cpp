@@ -63,6 +63,7 @@ using ui::SetControlText;
 using ui::SliderThumbCenterX;
 using ui::SliderTrackRect;
 using ui::StrokeRoundedRect;
+using ui::TrimWide;
 
 constexpr int kIdCategoryPalette = 20;
 constexpr int kIdCategoryDrawing = 21;
@@ -307,19 +308,7 @@ std::wstring FormatZoomPresetValue(float zoom) {
     return value;
 }
 
-std::wstring TrimWide(std::wstring_view value) {
-    std::size_t start = 0;
-    while (start < value.size() && std::iswspace(value[start]) != 0) {
-        ++start;
-    }
 
-    std::size_t end = value.size();
-    while (end > start && std::iswspace(value[end - 1U]) != 0) {
-        --end;
-    }
-
-    return std::wstring(value.substr(start, end - start));
-}
 
 RECT UnionRectCopy(const RECT& a, const RECT& b) {
     RECT out {};

@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <compressapi.h>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <windows.h>
@@ -16,30 +19,32 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 11;
+constexpr std::uint32_t kProjectVersion = 12;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
 constexpr std::uint8_t kStrokeStyleFlagDotted = 1U << 0U;
 constexpr std::uint8_t kTextStyleFlagBold = 1U << 0U;
 constexpr std::uint8_t kTextStyleFlagItalic = 1U << 1U;
 constexpr std::uint8_t kTextStyleFlagUnderline = 1U << 2U;
+constexpr std::uint32_t kPayloadEncodingRaw = 0U;
+constexpr std::uint32_t kPayloadEncodingXpressHuff = 1U;
 
-std::string WideToUtf8(const std::wstring& value) {
+std::string WideToUtf8(std::wstring_view value) {
     if (value.empty()) {
         return {};
     }
 
-    const int size = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
     if (size <= 0) {
         return {};
     }
 
-    std::string utf8(static_cast<std::size_t>(size - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, utf8.data(), size, nullptr, nullptr);
+    std::string utf8(static_cast<std::size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), utf8.data(), size, nullptr, nullptr);
     return utf8;
 }
 
-std::wstring Utf8ToWide(const std::string& value) {
+std::wstring Utf8ToWide(std::string_view value) {
     if (value.empty()) {
         return {};
     }
@@ -91,6 +96,11 @@ bool WriteAllBytes(const std::wstring& filePath, const std::vector<std::uint8_t>
     return static_cast<bool>(output);
 }
 
+bool HasExtension(const std::wstring& path, const wchar_t* extension) {
+    const std::filesystem::path filePath(path);
+    return filePath.has_extension() && _wcsicmp(filePath.extension().c_str(), extension) == 0;
+}
+
 struct ByteReader {
     const std::vector<std::uint8_t>& bytes;
     std::size_t offset = 0;
@@ -138,6 +148,22 @@ struct ByteReader {
         }
         offset += value.size();
         return true;
+    }
+};
+
+struct CompressorCloser {
+    void operator()(void* handle) const noexcept {
+        if (handle != nullptr) {
+            CloseCompressor(static_cast<COMPRESSOR_HANDLE>(handle));
+        }
+    }
+};
+
+struct DecompressorCloser {
+    void operator()(void* handle) const noexcept {
+        if (handle != nullptr) {
+            CloseDecompressor(static_cast<DECOMPRESSOR_HANDLE>(handle));
+        }
     }
 };
 
@@ -354,62 +380,91 @@ bool ReadRaster(ByteReader& reader, RasterImage& raster) {
     return reader.ReadBlob(raster.pixels);
 }
 
-RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderScale, std::uint32_t argb) {
-    const int bitmapWidth = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageWidth) * renderScale)));
-    const int bitmapHeight = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageHeight) * renderScale)));
-    const int stride = bitmapWidth * 4;
 
-    RasterImage raster {};
-    raster.width = bitmapWidth;
-    raster.height = bitmapHeight;
-    raster.stride = stride;
-    raster.scale = renderScale;
-    raster.pixels.resize(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight));
 
-    const auto alpha = static_cast<std::uint8_t>((argb >> 24U) & 0xFFU);
-    const auto red = static_cast<std::uint8_t>((argb >> 16U) & 0xFFU);
-    const auto green = static_cast<std::uint8_t>((argb >> 8U) & 0xFFU);
-    const auto blue = static_cast<std::uint8_t>(argb & 0xFFU);
-    for (std::size_t offset = 0; offset + 3U < raster.pixels.size(); offset += 4U) {
-        raster.pixels[offset] = blue;
-        raster.pixels[offset + 1U] = green;
-        raster.pixels[offset + 2U] = red;
-        raster.pixels[offset + 3U] = alpha;
+std::optional<std::vector<std::uint8_t>> CompressPayload(const std::vector<std::uint8_t>& payload) {
+    if (payload.empty()) {
+        return std::vector<std::uint8_t> {};
     }
 
-    return raster;
-}
-
-}  // namespace
-
-std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBackend& pdfBackend) {
-    const auto bytes = ReadAllBytes(filePath);
-    if (!bytes.has_value()) {
+    COMPRESSOR_HANDLE compressorHandle = nullptr;
+    if (CreateCompressor(COMPRESS_ALGORITHM_XPRESS_HUFF, nullptr, &compressorHandle) == FALSE) {
         return std::nullopt;
     }
 
-    return LoadFromBytes(*bytes, filePath, pdfBackend);
+    std::unique_ptr<void, CompressorCloser> compressor(compressorHandle);
+    SIZE_T compressedSize = 0;
+    if (Compress(
+            compressorHandle,
+            const_cast<std::uint8_t*>(payload.data()),
+            payload.size(),
+            nullptr,
+            0,
+            &compressedSize) == FALSE
+        && GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+        return std::nullopt;
+    }
+
+    std::vector<std::uint8_t> compressed(compressedSize);
+    if (Compress(
+            compressorHandle,
+            const_cast<std::uint8_t*>(payload.data()),
+            payload.size(),
+            compressed.data(),
+            compressed.size(),
+            &compressedSize) == FALSE) {
+        return std::nullopt;
+    }
+
+    compressed.resize(compressedSize);
+    return compressed;
 }
 
-std::optional<Document> ProjectFile::LoadFromBytes(
-    const std::vector<std::uint8_t>& bytes,
+std::optional<std::vector<std::uint8_t>> DecompressPayload(
+    const std::vector<std::uint8_t>& payload,
+    std::uint64_t expectedSize) {
+    if (expectedSize > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        return std::nullopt;
+    }
+
+    if (expectedSize == 0U) {
+        return std::vector<std::uint8_t> {};
+    }
+
+    DECOMPRESSOR_HANDLE decompressorHandle = nullptr;
+    if (CreateDecompressor(COMPRESS_ALGORITHM_XPRESS_HUFF, nullptr, &decompressorHandle) == FALSE) {
+        return std::nullopt;
+    }
+
+    std::unique_ptr<void, DecompressorCloser> decompressor(decompressorHandle);
+    std::vector<std::uint8_t> decompressed(static_cast<std::size_t>(expectedSize));
+    SIZE_T decompressedSize = 0;
+    if (Decompress(
+            decompressorHandle,
+            const_cast<std::uint8_t*>(payload.data()),
+            payload.size(),
+            decompressed.data(),
+            decompressed.size(),
+            &decompressedSize) == FALSE
+        || decompressedSize != decompressed.size()) {
+        return std::nullopt;
+    }
+
+    return decompressed;
+}
+
+std::optional<Document> LoadProjectPayload(
+    ByteReader& reader,
+    std::uint32_t version,
     const std::wstring& filePath,
     PdfiumBackend& pdfBackend) {
-    ByteReader reader { bytes };
-    char magic[sizeof(kCnoteMagic)] {};
-    std::uint32_t version = 0;
     std::uint32_t flags = 0;
     std::uint32_t currentPageIndex = 0;
     std::uint32_t pageCount = 0;
     Document::PageDefaults pageDefaults {};
     std::vector<Document::PdfSource> pdfSources;
 
-    const bool validMagic = reader.ReadExact(magic, sizeof(magic))
-        && (std::memcmp(magic, kCnoteMagic, sizeof(kCnoteMagic)) == 0
-            || std::memcmp(magic, kLegacyProjectMagic, sizeof(kLegacyProjectMagic)) == 0);
-    if (!validMagic
-        || !reader.Read(version) || (version < 1U || version > kProjectVersion) || !reader.Read(flags)
-        || !reader.Read(currentPageIndex) || !reader.Read(pageCount)) {
+    if (!reader.Read(flags) || !reader.Read(currentPageIndex) || !reader.Read(pageCount)) {
         return std::nullopt;
     }
 
@@ -607,15 +662,13 @@ std::optional<Document> ProjectFile::LoadFromBytes(
     return Document::CreateProjectDocument(filePath, std::move(pdfSources), std::move(savedPages), currentPageIndex, pageDefaults);
 }
 
-std::vector<std::uint8_t> ProjectFile::Serialize(const Document& document) {
+std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
     std::vector<std::uint8_t> bytes;
     const std::uint32_t flags = document.HasPdfData() ? kProjectFlagHasPdf : 0U;
     const std::uint32_t currentPageIndex = static_cast<std::uint32_t>(document.CurrentPageIndex());
     const std::uint32_t pageCount = static_cast<std::uint32_t>(document.PageCount());
     const std::uint32_t sourceCount = static_cast<std::uint32_t>(document.PdfSourceCount());
 
-    AppendBytes(bytes, kCnoteMagic, sizeof(kCnoteMagic));
-    AppendValue(bytes, kProjectVersion);
     AppendValue(bytes, flags);
     AppendValue(bytes, currentPageIndex);
     AppendValue(bytes, pageCount);
@@ -657,6 +710,85 @@ std::vector<std::uint8_t> ProjectFile::Serialize(const Document& document) {
         for (const PageImage& image : page.images) {
             AppendImage(bytes, image);
         }
+    }
+
+    return bytes;
+}
+
+}  // namespace
+
+std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBackend& pdfBackend) {
+    const auto bytes = ReadAllBytes(filePath);
+    if (!bytes.has_value()) {
+        return std::nullopt;
+    }
+
+    return LoadFromBytes(*bytes, filePath, pdfBackend);
+}
+
+std::optional<Document> ProjectFile::LoadFromBytes(
+    const std::vector<std::uint8_t>& bytes,
+    const std::wstring& filePath,
+    PdfiumBackend& pdfBackend) {
+    ByteReader reader { bytes };
+    char magic[sizeof(kCnoteMagic)] {};
+    std::uint32_t version = 0;
+
+    const bool validMagic = reader.ReadExact(magic, sizeof(magic))
+        && (std::memcmp(magic, kCnoteMagic, sizeof(kCnoteMagic)) == 0
+            || std::memcmp(magic, kLegacyProjectMagic, sizeof(kLegacyProjectMagic)) == 0);
+    if (!validMagic || !reader.Read(version) || (version < 1U || version > kProjectVersion)) {
+        return std::nullopt;
+    }
+
+    if (version >= 12U) {
+        std::uint32_t payloadEncoding = kPayloadEncodingRaw;
+        std::uint64_t uncompressedPayloadSize = 0;
+        if (!reader.Read(payloadEncoding) || !reader.Read(uncompressedPayloadSize)) {
+            return std::nullopt;
+        }
+        const std::vector<std::uint8_t> storedPayload(bytes.begin() + static_cast<std::ptrdiff_t>(reader.offset), bytes.end());
+        std::vector<std::uint8_t> payload;
+        if (payloadEncoding == kPayloadEncodingRaw) {
+            payload = storedPayload;
+            if (payload.size() != uncompressedPayloadSize) {
+                return std::nullopt;
+            }
+        } else if (payloadEncoding == kPayloadEncodingXpressHuff) {
+            const auto decompressedPayload = DecompressPayload(storedPayload, uncompressedPayloadSize);
+            if (!decompressedPayload.has_value()) {
+                return std::nullopt;
+            }
+            payload = std::move(*decompressedPayload);
+        } else {
+            return std::nullopt;
+        }
+
+        ByteReader payloadReader { payload };
+        return LoadProjectPayload(payloadReader, version, filePath, pdfBackend);
+    }
+
+    return LoadProjectPayload(reader, version, filePath, pdfBackend);
+}
+
+std::vector<std::uint8_t> ProjectFile::Serialize(const Document& document) {
+    std::vector<std::uint8_t> bytes;
+    std::vector<std::uint8_t> payload = SerializeProjectPayload(document);
+    std::vector<std::uint8_t> storedPayload = payload;
+    std::uint32_t payloadEncoding = kPayloadEncodingRaw;
+
+    if (const auto compressedPayload = CompressPayload(payload);
+        compressedPayload.has_value() && compressedPayload->size() < payload.size()) {
+        storedPayload = std::move(*compressedPayload);
+        payloadEncoding = kPayloadEncodingXpressHuff;
+    }
+
+    AppendBytes(bytes, kCnoteMagic, sizeof(kCnoteMagic));
+    AppendValue(bytes, kProjectVersion);
+    AppendValue(bytes, payloadEncoding);
+    AppendValue(bytes, static_cast<std::uint64_t>(payload.size()));
+    if (!storedPayload.empty()) {
+        AppendBytes(bytes, storedPayload.data(), storedPayload.size());
     }
 
     return bytes;

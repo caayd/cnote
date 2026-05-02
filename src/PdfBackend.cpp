@@ -21,49 +21,32 @@
 #include "fpdfview.h"
 
 #include "ProjectFile.h"
+#include "selection/Geometry.h"
+#include "text/TextGeometry.h"
 
 namespace cnote {
 
+namespace geometry = cnote;
+namespace text = cnote::text;
+
 namespace {
+
+using geometry::BuildSmoothedPoints;
+using geometry::DistanceSquared;
+using geometry::StrokeRenderSmoothing;
+using text::CreatePageTextFont;
+using text::LayoutPageText;
+using text::PageTextFontFace;
+using text::PageTextFontWeight;
+using text::ResolvedPageTextWidth;
+using text::TrimTrailingLayoutWhitespace;
 
 constexpr float kMinimumStrokeRenderWidth = 1.25f;
 constexpr float kStrokeRenderWidthDivisor = 2.15f;
 constexpr float kTextLayoutScale = 8.0f;
 constexpr wchar_t kEmbeddedCnoteAttachmentName[] = L"cnote-edit-data.cnote";
 
-const wchar_t* PageTextFontFace(TextFontFamily family) {
-    switch (family) {
-    case TextFontFamily::Serif:
-        return L"Times New Roman";
-    case TextFontFamily::Monospace:
-        return L"Consolas";
-    case TextFontFamily::Sans:
-    default:
-        return L"Segoe UI";
-    }
-}
 
-int PageTextFontWeight(const PageText& text) {
-    return text.bold ? FW_BOLD : FW_NORMAL;
-}
-
-HFONT CreatePageTextFont(const PageText& text, int pixelHeight) {
-    return CreateFontW(
-        -pixelHeight,
-        0,
-        0,
-        0,
-        PageTextFontWeight(text),
-        text.italic ? TRUE : FALSE,
-        text.underline ? TRUE : FALSE,
-        FALSE,
-        DEFAULT_CHARSET,
-        OUT_OUTLINE_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY,
-        DEFAULT_PITCH,
-        PageTextFontFace(text.fontFamily));
-}
 
 Gdiplus::StringAlignment GdiplusAlignmentForText(TextAlignment alignment) {
     switch (alignment) {
@@ -251,193 +234,14 @@ std::optional<RasterImage> RenderPageBitmap(FPDF_PAGE pageHandle, float renderSc
     return raster;
 }
 
-float DistanceSquared(Vec2 a, Vec2 b) {
-    const float dx = a.x - b.x;
-    const float dy = a.y - b.y;
-    return (dx * dx) + (dy * dy);
-}
 
-std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float strength) {
-    if (points.size() <= 2U || strength <= 0.001f) {
-        return points;
-    }
-
-    std::vector<Vec2> smoothed;
-    smoothed.reserve(points.size());
-    smoothed.push_back(points.front());
-
-    const float sideWeight = 0.25f * std::clamp(strength, 0.0f, 1.0f);
-    const float centerWeight = 1.0f - (sideWeight * 2.0f);
-
-    for (std::size_t index = 1; index + 1 < points.size(); ++index) {
-        const Vec2 previous = points[index - 1];
-        const Vec2 current = points[index];
-        const Vec2 next = points[index + 1];
-        const Vec2 filtered {
-            (previous.x * sideWeight) + (current.x * centerWeight) + (next.x * sideWeight),
-            (previous.y * sideWeight) + (current.y * centerWeight) + (next.y * sideWeight),
-        };
-
-        if (DistanceSquared(filtered, smoothed.back()) >= 0.05f) {
-            smoothed.push_back(filtered);
-        }
-    }
-
-    if (DistanceSquared(points.back(), smoothed.back()) >= 0.01f) {
-        smoothed.push_back(points.back());
-    }
-
-    return smoothed;
-}
-
-float StrokeRenderSmoothing(const Stroke& stroke, float fallbackSmoothing) {
-    const float smoothing = std::isfinite(stroke.smoothing) ? stroke.smoothing : fallbackSmoothing;
-    return std::clamp(smoothing, 0.0f, 1.0f);
-}
 
 int PageTextFontPixelHeight(const PageText& text, float scale) {
     return std::max(1, static_cast<int>(std::lround(std::max(1.0f, text.fontSize) * std::max(0.1f, scale))));
 }
 
-std::wstring TrimTrailingLayoutWhitespace(std::wstring value) {
-    while (!value.empty() && (value.back() == L' ' || value.back() == L'\t')) {
-        value.pop_back();
-    }
-    return value;
-}
-
-float ResolvedPageTextWidth(const PageText& text, float pageWidth) {
-    static_cast<void>(pageWidth);
-    if (text.width > 0.0f) {
-        return std::max(1.0f, text.width);
-    }
-
-    const std::wstring measureText = TrimTrailingLayoutWhitespace(text.content);
-    const int fontHeight = PageTextFontPixelHeight(text, 1.0f);
-    HDC dc = GetDC(nullptr);
-    if (dc == nullptr) {
-        const float estimatedWidth = static_cast<float>(std::max(
-            1,
-            static_cast<int>(std::lround(static_cast<float>(measureText.size()) * static_cast<float>(fontHeight) * 0.56f))));
-        return estimatedWidth;
-    }
-
-    HFONT font = CreatePageTextFont(text, fontHeight);
-    HGDIOBJ previousFont = font != nullptr ? SelectObject(dc, font) : nullptr;
-    RECT measureRect { 0, 0, 32767, 0 };
-    if (!measureText.empty()) {
-        DrawTextW(dc, measureText.c_str(), -1, &measureRect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX);
-    }
-    if (previousFont != nullptr) {
-        SelectObject(dc, previousFont);
-    }
-    if (font != nullptr) {
-        DeleteObject(font);
-    }
-    ReleaseDC(nullptr, dc);
-    return std::max(1.0f, static_cast<float>(measureRect.right - measureRect.left));
-}
-
-WrappedTextLayout LayoutPageText(const PageText& text, float pageWidth) {
-    WrappedTextLayout layout {};
-    layout.wrapWidth = std::max(1, static_cast<int>(std::ceil(ResolvedPageTextWidth(text, pageWidth) * kTextLayoutScale)));
-    layout.lineHeight = PageTextFontPixelHeight(text, kTextLayoutScale);
-
-    HDC dc = GetDC(nullptr);
-    if (dc == nullptr) {
-        layout.lines.push_back(TrimTrailingLayoutWhitespace(text.content));
-        if (layout.lines.back().empty()) {
-            layout.lines.back().clear();
-        }
-        layout.height = std::max(layout.lineHeight, static_cast<int>(layout.lines.size()) * layout.lineHeight);
-        return layout;
-    }
-
-    HFONT font = CreatePageTextFont(text, layout.lineHeight);
-    HGDIOBJ previousFont = font != nullptr ? SelectObject(dc, font) : nullptr;
-
-    TEXTMETRICW textMetrics {};
-    if (GetTextMetricsW(dc, &textMetrics) != 0) {
-        layout.lineHeight = std::max(layout.lineHeight, static_cast<int>(textMetrics.tmHeight));
-    }
-
-    auto appendParagraph = [&](const std::wstring& paragraph) {
-        if (paragraph.empty()) {
-            layout.lines.push_back(L"");
-            return;
-        }
-
-        std::size_t index = 0;
-        while (index < paragraph.size()) {
-            const int remaining = static_cast<int>(paragraph.size() - index);
-            int fit = 0;
-            SIZE fitSize {};
-            if (GetTextExtentExPointW(
-                    dc,
-                    paragraph.c_str() + index,
-                    remaining,
-                    layout.wrapWidth,
-                    &fit,
-                    nullptr,
-                    &fitSize) == 0) {
-                fit = 0;
-            }
-            fit = std::clamp(fit, 1, remaining);
-
-            int take = fit;
-            bool brokeAtWhitespace = false;
-            if (fit < remaining) {
-                int whitespaceTake = fit;
-                while (whitespaceTake > 0 && !std::iswspace(paragraph[index + whitespaceTake - 1])) {
-                    --whitespaceTake;
-                }
-                if (whitespaceTake > 0) {
-                    take = whitespaceTake;
-                    brokeAtWhitespace = true;
-                }
-            }
-
-            take = std::max(1, take);
-            std::wstring line = paragraph.substr(index, static_cast<std::size_t>(take));
-            layout.lines.push_back(TrimTrailingLayoutWhitespace(std::move(line)));
-            index += static_cast<std::size_t>(take);
-
-            if (brokeAtWhitespace) {
-                while (index < paragraph.size() && (paragraph[index] == L' ' || paragraph[index] == L'\t')) {
-                    ++index;
-                }
-            }
-        }
-    };
-
-    std::wstring paragraph;
-    for (std::size_t index = 0; index < text.content.size(); ++index) {
-        const wchar_t ch = text.content[index];
-        if (ch == L'\r' || ch == L'\n') {
-            appendParagraph(paragraph);
-            paragraph.clear();
-            if (ch == L'\r' && (index + 1U) < text.content.size() && text.content[index + 1U] == L'\n') {
-                ++index;
-            }
-        } else {
-            paragraph.push_back(ch);
-        }
-    }
-    appendParagraph(paragraph);
-
-    if (previousFont != nullptr) {
-        SelectObject(dc, previousFont);
-    }
-    if (font != nullptr) {
-        DeleteObject(font);
-    }
-    ReleaseDC(nullptr, dc);
-
-    if (layout.lines.empty()) {
-        layout.lines.push_back(L"");
-    }
-    layout.height = std::max(layout.lineHeight, static_cast<int>(layout.lines.size()) * layout.lineHeight);
-    return layout;
+WrappedTextLayout LayoutPageTextFwd(const PageText& text, float pageWidth) {
+    return LayoutPageText(text, pageWidth);
 }
 
 void DrawPageImage(Gdiplus::Graphics& graphics, const PageImage& image, float renderScale) {

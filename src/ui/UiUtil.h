@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include <windows.h>
 
@@ -33,12 +34,17 @@ struct HslColor {
 };
 
 RECT MakeRect(int left, int top, int right, int bottom);
+RECT MakeRectFromFloatBounds(float left, float top, float right, float bottom);
+bool HasRect(const RECT& rect);
+std::wstring TrimWide(std::wstring_view value);
+std::string TrimAscii(std::string_view value);
 std::wstring FormatHexColor(std::uint32_t color);
 std::optional<std::uint32_t> ParseHexColor(std::wstring value);
 HslColor RgbToHsl(std::uint32_t color);
 std::uint32_t HslToColor(float hueDegrees, float saturation, float lightness);
 std::wstring FormatHueLabel(int hue);
 std::wstring FormatPercentLabel(const wchar_t* prefix, int value);
+std::wstring FormatZoomPercentValue(float zoom);
 void SetControlText(HWND control, const std::wstring& text);
 LRESULT CALLBACK EditReturnToParentSubclassProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR);
 void FillRoundedRect(HDC hdc, RECT rect, COLORREF color);
@@ -48,6 +54,8 @@ int SliderThumbCenterX(const RECT& trackRect, int value, int minimum, int maximu
 void FillHuePreviewTrack(HDC hdc, const RECT& trackRect, float saturation, float lightness);
 void FillSaturationPreviewTrack(HDC hdc, const RECT& trackRect, float hue, float lightness);
 void FillLightnessPreviewTrack(HDC hdc, const RECT& trackRect, float hue, float saturation);
+RECT UnionRectangles(RECT a, RECT b);
+RECT InflateRectCopy(RECT rect, int amount);
 void DeferMoveControl(HDWP& deferred, HWND control, const RECT& rect, UINT flags = SWP_NOZORDER | SWP_NOACTIVATE);
 
 }  // namespace cnote::ui

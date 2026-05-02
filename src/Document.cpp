@@ -1,6 +1,7 @@
 #include "Document.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace cnote {
 
@@ -231,6 +232,117 @@ void Document::ReplaceWithProject(
     }
     currentPageIndex_ = pages_.empty() ? 0 : std::min(currentPageIndex, pages_.size() - 1U);
     newPageDefaults_ = pageDefaults;
+}
+
+bool RasterImageEqual(const RasterImage& a, const RasterImage& b) {
+    return a.width == b.width
+        && a.height == b.height
+        && a.stride == b.stride
+        && a.scale == b.scale
+        && a.pixels == b.pixels;
+}
+
+RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderScale, std::uint32_t argb) {
+    const int bitmapWidth = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageWidth) * renderScale)));
+    const int bitmapHeight = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageHeight) * renderScale)));
+    const int stride = bitmapWidth * 4;
+
+    RasterImage raster {};
+    raster.width = bitmapWidth;
+    raster.height = bitmapHeight;
+    raster.stride = stride;
+    raster.scale = renderScale;
+    raster.pixels.resize(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight));
+
+    const auto alpha = static_cast<std::uint8_t>((argb >> 24U) & 0xFFU);
+    const auto red = static_cast<std::uint8_t>((argb >> 16U) & 0xFFU);
+    const auto green = static_cast<std::uint8_t>((argb >> 8U) & 0xFFU);
+    const auto blue = static_cast<std::uint8_t>(argb & 0xFFU);
+    for (std::size_t offset = 0; offset + 3U < raster.pixels.size(); offset += 4U) {
+        raster.pixels[offset] = blue;
+        raster.pixels[offset + 1U] = green;
+        raster.pixels[offset + 2U] = red;
+        raster.pixels[offset + 3U] = alpha;
+    }
+
+    return raster;
+}
+
+bool Vec2Equal(const Vec2& a, const Vec2& b) {
+    return a.x == b.x && a.y == b.y;
+}
+
+bool StrokeStyleEqual(const StrokeStyle& a, const StrokeStyle& b) {
+    return a.color == b.color && a.width == b.width && a.dotted == b.dotted;
+}
+
+bool StrokeEqual(const Stroke& a, const Stroke& b) {
+    if (!StrokeStyleEqual(a.style, b.style) || a.smoothing != b.smoothing || a.points.size() != b.points.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < a.points.size(); ++index) {
+        if (!Vec2Equal(a.points[index], b.points[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool PageImageEqual(const PageImage& a, const PageImage& b) {
+    return a.x == b.x
+        && a.y == b.y
+        && a.width == b.width
+        && a.height == b.height
+        && a.rotationDegrees == b.rotationDegrees
+        && a.pixelWidth == b.pixelWidth
+        && a.pixelHeight == b.pixelHeight
+        && a.stride == b.stride
+        && a.pixels == b.pixels;
+}
+
+bool PageTextEqual(const PageText& a, const PageText& b) {
+    return a.x == b.x
+        && a.y == b.y
+        && a.width == b.width
+        && a.height == b.height
+        && a.fontSize == b.fontSize
+        && a.color == b.color
+        && a.alignment == b.alignment
+        && a.fontFamily == b.fontFamily
+        && a.bold == b.bold
+        && a.italic == b.italic
+        && a.underline == b.underline
+        && a.content == b.content;
+}
+
+bool PageEqual(const Page& a, const Page& b) {
+    if (a.width != b.width
+        || a.height != b.height
+        || a.sourcePdfSourceIndex != b.sourcePdfSourceIndex
+        || a.sourcePdfPageIndex != b.sourcePdfPageIndex
+        || a.paletteProfile != b.paletteProfile
+        || !RasterImageEqual(a.raster, b.raster)
+        || a.images.size() != b.images.size()
+        || a.texts.size() != b.texts.size()
+        || a.strokes.size() != b.strokes.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < a.images.size(); ++index) {
+        if (!PageImageEqual(a.images[index], b.images[index])) {
+            return false;
+        }
+    }
+    for (std::size_t index = 0; index < a.texts.size(); ++index) {
+        if (!PageTextEqual(a.texts[index], b.texts[index])) {
+            return false;
+        }
+    }
+    for (std::size_t index = 0; index < a.strokes.size(); ++index) {
+        if (!StrokeEqual(a.strokes[index], b.strokes[index])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace cnote

@@ -33,6 +33,47 @@ int App::Run(int showCommand, std::optional<std::wstring> startupPath) {
     return static_cast<int>(message.wParam);
 }
 
+bool App::OpenNewWindow() {
+    std::wstring executablePath(MAX_PATH, L'\0');
+    DWORD pathLength = GetModuleFileNameW(nullptr, executablePath.data(), static_cast<DWORD>(executablePath.size()));
+    while (pathLength >= executablePath.size()) {
+        executablePath.resize(executablePath.size() * 2, L'\0');
+        pathLength = GetModuleFileNameW(nullptr, executablePath.data(), static_cast<DWORD>(executablePath.size()));
+    }
+
+    if (pathLength == 0) {
+        MessageBoxW(window_, L"Failed to locate the cnote executable.", L"New window", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    executablePath.resize(pathLength);
+    std::wstring commandLine = L"\"" + executablePath + L"\"";
+
+    STARTUPINFOW startupInfo {};
+    startupInfo.cb = sizeof(startupInfo);
+    PROCESS_INFORMATION processInfo {};
+    std::wstring mutableCommandLine = commandLine;
+    const BOOL created = CreateProcessW(
+        executablePath.c_str(),
+        mutableCommandLine.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        0,
+        nullptr,
+        nullptr,
+        &startupInfo,
+        &processInfo);
+    if (created == FALSE) {
+        MessageBoxW(window_, L"Failed to open a new window.", L"New window", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    CloseHandle(processInfo.hThread);
+    CloseHandle(processInfo.hProcess);
+    return true;
+}
+
 bool App::CreateMainWindow(int showCommand) {
     WNDCLASSEXW windowClass {};
     windowClass.cbSize = sizeof(windowClass);

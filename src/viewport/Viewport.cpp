@@ -6,26 +6,16 @@
 #include <dcomp.h>
 
 #include "DpiUtil.h"
+#include "ui/UiUtil.h"
 
 namespace cnote {
 
 namespace {
 
-RECT MakeRect(int left, int top, int right, int bottom) {
-    RECT rect { left, top, right, bottom };
-    return rect;
-}
+using ui::MakeRect;
 
-int WindowFrameThicknessX(UINT dpi) {
+int ViewportFrameThicknessX(UINT dpi) {
     return ScaleForDpi(8, dpi);
-}
-
-template <typename T>
-void ReleaseCom(T*& instance) {
-    if (instance != nullptr) {
-        instance->Release();
-        instance = nullptr;
-    }
 }
 
 float DistanceSquaredToRect(const RECT& rect, POINT point) {
@@ -49,7 +39,7 @@ int MaximizedCanvasWidthForZoom(HWND window, int fallbackCanvasWidth, int sideba
     }
 
     const int workAreaWidth = std::max(1, static_cast<int>(monitorInfo.rcWork.right - monitorInfo.rcWork.left));
-    const int maximizedHorizontalInset = WindowFrameThicknessX(dpi) * 2;
+    const int maximizedHorizontalInset = ViewportFrameThicknessX(dpi) * 2;
     return std::max(1, workAreaWidth - maximizedHorizontalInset - std::max(0, sidebarWidth));
 }
 
@@ -107,7 +97,7 @@ void App::FocusPage(std::size_t index) {
 RECT App::CanvasRect(RECT clientRect) const {
     RECT rect = clientRect;
     const UINT dpi = WindowDpi(window_);
-    const int horizontalInset = IsZoomed(window_) ? WindowFrameThicknessX(dpi) : 0;
+    const int horizontalInset = IsZoomed(window_) ? ViewportFrameThicknessX(dpi) : 0;
     rect.top = ReservedToolbarHeight();
     rect.left += horizontalInset;
     rect.right -= horizontalInset;
