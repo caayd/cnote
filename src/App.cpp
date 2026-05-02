@@ -101,10 +101,6 @@ void HashValue(std::uint64_t& hash, const T& value) {
     HashBytes(hash, &value, sizeof(value));
 }
 
-void HashToolbarBytes(std::uint64_t& hash, const void* data, std::size_t size) {
-    HashBytes(hash, data, size);
-}
-
 template <typename T>
 void HashToolbarValue(std::uint64_t& hash, const T& value) {
     HashValue(hash, value);
@@ -2024,25 +2020,6 @@ float InputSpacingPageUnits(float pageSpacing, float pageScale) {
     return screenSpacing / scale;
 }
 
-bool StrokeBounds(const Stroke& stroke, float* minX, float* minY, float* maxX, float* maxY) {
-    if (stroke.points.empty() || minX == nullptr || minY == nullptr || maxX == nullptr || maxY == nullptr) {
-        return false;
-    }
-
-    *minX = stroke.points.front().x;
-    *minY = stroke.points.front().y;
-    *maxX = stroke.points.front().x;
-    *maxY = stroke.points.front().y;
-    for (const Vec2& point : stroke.points) {
-        *minX = std::min(*minX, point.x);
-        *minY = std::min(*minY, point.y);
-        *maxX = std::max(*maxX, point.x);
-        *maxY = std::max(*maxY, point.y);
-    }
-
-    return true;
-}
-
 bool PointInRectF(Vec2 point, float left, float top, float right, float bottom) {
     return point.x >= left && point.x <= right && point.y >= top && point.y <= bottom;
 }
@@ -2146,10 +2123,6 @@ float DistanceSegmentToSegmentSquared(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2) {
 
 
 constexpr float kPi = 3.14159265358979323846f;
-
-float DegreesToRadians(float degrees) {
-    return degrees * (kPi / 180.0f);
-}
 
 Vec2 ToImageLocalPoint(const PageImage& image, Vec2 point) {
     const Vec2 center = ImageCenter(image);
