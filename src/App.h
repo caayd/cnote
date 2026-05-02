@@ -414,6 +414,7 @@ private:
         std::uint32_t backgroundColor,
         const std::vector<std::uint32_t>& paletteProfile,
         bool applyPaletteProfileToExistingStrokes);
+    [[nodiscard]] bool OpenNewWindow();
     [[nodiscard]] bool AppendPagesFromFile();
     [[nodiscard]] bool AppendPagesFromDocumentPath(const std::wstring& filePath);
     void PanBy(float dx, float dy);

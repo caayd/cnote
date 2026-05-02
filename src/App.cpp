@@ -109,6 +109,7 @@ constexpr unsigned int kCommandFileOpen = 1002;
 constexpr unsigned int kCommandFileSaveCnote = 1003;
 constexpr unsigned int kCommandFileExportPdf = 1004;
 constexpr unsigned int kCommandFileExit = 1005;
+constexpr unsigned int kCommandFileNewWindow = 1006;
 constexpr unsigned int kCommandEditBrushSettings = 1103;
 constexpr unsigned int kCommandSelectLasso = 1111;
 constexpr unsigned int kCommandToolToggleQuickWheel = 1301;
@@ -6105,6 +6106,9 @@ void App::ExecuteCommand(unsigned int commandId) {
     case kCommandFileNew:
         CreateBlankDocument();
         break;
+    case kCommandFileNewWindow:
+        static_cast<void>(OpenNewWindow());
+        break;
     case kCommandFileOpen:
         OpenDocument();
         break;
@@ -6181,6 +6185,7 @@ bool App::HandleToolbarClick(POINT cursor) {
             AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(openMenu), L"Open");
         }
         AppendMenuW(menu, MF_STRING, kCommandFileNew, L"New");
+        AppendMenuW(menu, MF_STRING, kCommandFileNewWindow, L"New window");
         AppendMenuW(menu, MF_STRING, kCommandFileSaveCnote, HasSavedCnotePath() ? L"Save Cnote" : L"Save as Cnote...");
         AppendMenuW(menu, MF_STRING, kCommandFileExportPdf, L"Export as PDF...");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
