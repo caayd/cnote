@@ -5,19 +5,16 @@
 
 #include "DpiUtil.h"
 #include "text/TextGeometry.h"
+#include "ui/UiUtil.h"
 
 namespace cnote {
-
-namespace {
 
 constexpr int kSelectionHandleHalfDip = 4;
 constexpr float kSelectionHandleHitRadiusDip = 11.0f;
 constexpr float kSelectionRotateOffsetDip = 18.0f;
 constexpr float kPi = 3.14159265358979323846f;
 
-bool HasRect(const RECT& rect) {
-    return rect.right > rect.left && rect.bottom > rect.top;
-}
+using cnote::ui::HasRect;
 
 std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float strength) {
     if (points.size() <= 2U || strength <= 0.001f) {
@@ -152,8 +149,6 @@ Vec2 ToImageLocalPoint(const PageImage& image, Vec2 point) {
     const Vec2 center = ImageCenter(image);
     return RotatePointAround(point, center, -image.rotationDegrees);
 }
-
-}  // namespace
 
 float DistanceSquared(Vec2 a, Vec2 b) {
     const float dx = a.x - b.x;

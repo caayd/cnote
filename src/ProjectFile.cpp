@@ -8,11 +8,47 @@
 #include <fstream>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <windows.h>
 
 namespace cnote {
+
+std::string WideToUtf8(std::wstring_view value) {
+    if (value.empty()) {
+        return {};
+    }
+
+    const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) {
+        return {};
+    }
+
+    std::string utf8(static_cast<std::size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), utf8.data(), size, nullptr, nullptr);
+    return utf8;
+}
+
+std::wstring Utf8ToWide(std::string_view value) {
+    if (value.empty()) {
+        return {};
+    }
+
+    const int size = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (size <= 0) {
+        return {};
+    }
+
+    std::wstring wide(static_cast<std::size_t>(size), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), wide.data(), size);
+    return wide;
+}
+
+bool HasExtension(const std::wstring& path, const wchar_t* extension) {
+    const std::filesystem::path filePath(path);
+    return filePath.has_extension() && _wcsicmp(filePath.extension().c_str(), extension) == 0;
+}
 
 namespace {
 
@@ -27,36 +63,6 @@ constexpr std::uint8_t kTextStyleFlagItalic = 1U << 1U;
 constexpr std::uint8_t kTextStyleFlagUnderline = 1U << 2U;
 constexpr std::uint32_t kPayloadEncodingRaw = 0U;
 constexpr std::uint32_t kPayloadEncodingXpressHuff = 1U;
-
-std::string WideToUtf8(const std::wstring& value) {
-    if (value.empty()) {
-        return {};
-    }
-
-    const int size = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (size <= 0) {
-        return {};
-    }
-
-    std::string utf8(static_cast<std::size_t>(size - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, utf8.data(), size, nullptr, nullptr);
-    return utf8;
-}
-
-std::wstring Utf8ToWide(const std::string& value) {
-    if (value.empty()) {
-        return {};
-    }
-
-    const int size = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
-    if (size <= 0) {
-        return {};
-    }
-
-    std::wstring wide(static_cast<std::size_t>(size), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), wide.data(), size);
-    return wide;
-}
 
 std::optional<std::vector<std::uint8_t>> ReadAllBytes(const std::wstring& filePath) {
     std::ifstream input(std::filesystem::path(filePath), std::ios::binary);
@@ -372,32 +378,6 @@ bool ReadRaster(ByteReader& reader, RasterImage& raster) {
         return false;
     }
     return reader.ReadBlob(raster.pixels);
-}
-
-RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderScale, std::uint32_t argb) {
-    const int bitmapWidth = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageWidth) * renderScale)));
-    const int bitmapHeight = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageHeight) * renderScale)));
-    const int stride = bitmapWidth * 4;
-
-    RasterImage raster {};
-    raster.width = bitmapWidth;
-    raster.height = bitmapHeight;
-    raster.stride = stride;
-    raster.scale = renderScale;
-    raster.pixels.resize(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight));
-
-    const auto alpha = static_cast<std::uint8_t>((argb >> 24U) & 0xFFU);
-    const auto red = static_cast<std::uint8_t>((argb >> 16U) & 0xFFU);
-    const auto green = static_cast<std::uint8_t>((argb >> 8U) & 0xFFU);
-    const auto blue = static_cast<std::uint8_t>(argb & 0xFFU);
-    for (std::size_t offset = 0; offset + 3U < raster.pixels.size(); offset += 4U) {
-        raster.pixels[offset] = blue;
-        raster.pixels[offset + 1U] = green;
-        raster.pixels[offset + 2U] = red;
-        raster.pixels[offset + 3U] = alpha;
-    }
-
-    return raster;
 }
 
 std::optional<std::vector<std::uint8_t>> CompressPayload(const std::vector<std::uint8_t>& payload) {

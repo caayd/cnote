@@ -42,6 +42,7 @@ public:
     ~App();
 
     int Run(int showCommand, std::optional<std::wstring> startupPath = std::nullopt);
+    [[nodiscard]] static float SnapBrushSize(float size);
     enum class Tool {
         Select,
         Move,

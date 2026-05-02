@@ -71,6 +71,17 @@ struct RasterImage {
     std::vector<std::uint8_t> pixels;
 };
 
+struct Page;
+
+[[nodiscard]] bool RasterImageEqual(const RasterImage& a, const RasterImage& b);
+[[nodiscard]] RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderScale, std::uint32_t argb);
+[[nodiscard]] bool Vec2Equal(const Vec2& a, const Vec2& b);
+[[nodiscard]] bool StrokeStyleEqual(const StrokeStyle& a, const StrokeStyle& b);
+[[nodiscard]] bool StrokeEqual(const Stroke& a, const Stroke& b);
+[[nodiscard]] bool PageImageEqual(const PageImage& a, const PageImage& b);
+[[nodiscard]] bool PageTextEqual(const PageText& a, const PageText& b);
+[[nodiscard]] bool PageEqual(const Page& a, const Page& b);
+
 struct Page {
     float width = 612.0f;
     float height = 792.0f;

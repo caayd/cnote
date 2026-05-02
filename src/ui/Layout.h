@@ -90,6 +90,9 @@ struct PaletteWheelLayout {
 
 int ToolbarHeight(bool maximized, UINT dpi);
 int ToolbarTopInset(bool maximized, UINT dpi);
+int WindowFrameThicknessX(UINT dpi);
+int CaptionButtonReserve(UINT dpi);
+int MeasureToolbarTextWidth(HDC hdc, const std::wstring& text);
 SidebarMetrics BuildSidebarMetrics(UINT dpi);
 ToolbarTitleLayout ResolveToolbarTitleLayout(const ToolbarLayout& layout, HDC hdc, const std::wstring& title, const std::wstring& zoomLabel, UINT dpi);
 ToolbarLayout BuildToolbarLayout(RECT clientRect, std::size_t colorCount, bool maximized, App::Tool activeTool, UINT dpi);

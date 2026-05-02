@@ -7,10 +7,13 @@
 
 #include "DpiUtil.h"
 #include "ui/Layout.h"
+#include "ui/UiUtil.h"
 
 namespace cnote {
 
 namespace appui = cnote::appui;
+
+using ui::FormatZoomPercentValue;
 
 namespace {
 
@@ -22,15 +25,11 @@ constexpr int kPaletteWheelShadowInsetDip = 6;
 constexpr int kPaletteWheelHoverOffsetDip = 10;
 constexpr int kPaletteWheelBoundsPaddingDip = 6;
 
-float SnapBrushSize(float size) {
-    const float clamped = std::clamp(size, kMinBrushSize, kMaxBrushSize);
-    const float steps = std::round((clamped - kMinBrushSize) / kBrushSizeStep);
-    return kMinBrushSize + (steps * kBrushSizeStep);
-}
+
 
 std::wstring FormatBrushSizeValue(float size) {
     wchar_t buffer[16] = {};
-    std::swprintf(buffer, std::size(buffer), L"%.2f", SnapBrushSize(size));
+    std::swprintf(buffer, std::size(buffer), L"%.2f", App::SnapBrushSize(size));
     std::wstring value = buffer;
     while (!value.empty() && value.back() == L'0') {
         value.pop_back();
@@ -39,12 +38,6 @@ std::wstring FormatBrushSizeValue(float size) {
         value.pop_back();
     }
     return value;
-}
-
-std::wstring FormatZoomPercentValue(float zoom) {
-    wchar_t buffer[16] = {};
-    std::swprintf(buffer, std::size(buffer), L"%.0f", std::round(std::max(0.0f, zoom) * 100.0f));
-    return buffer;
 }
 
 bool IsToolbarBrushTool(App::Tool tool) {
@@ -444,7 +437,7 @@ void App::ChangeBrushSize(float delta) {
 }
 
 float App::SnapBrushSizeValue(float size) const {
-    return std::min(SnapBrushSize(size), QuickSizeSliderMax());
+    return std::min(App::SnapBrushSize(size), QuickSizeSliderMax());
 }
 
 float App::QuickSizeSliderMax() const {

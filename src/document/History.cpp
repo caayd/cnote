@@ -6,6 +6,13 @@
 
 namespace cnote {
 
+using cnote::PageEqual;
+using cnote::PageImageEqual;
+using cnote::PageTextEqual;
+using cnote::StrokeEqual;
+using cnote::StrokeStyleEqual;
+using cnote::Vec2Equal;
+
 namespace {
 
 int ShowUnsavedCloseDialog(HWND owner, HINSTANCE instance) {
@@ -56,93 +63,6 @@ int ShowUnsavedCloseDialog(HWND owner, HINSTANCE instance) {
         L"This cnote has unsaved changes. Save it before closing?",
         L"Unsaved Cnote",
         MB_YESNOCANCEL | MB_ICONWARNING);
-}
-
-bool Vec2Equal(const Vec2& a, const Vec2& b) {
-    return a.x == b.x && a.y == b.y;
-}
-
-bool StrokeStyleEqual(const StrokeStyle& a, const StrokeStyle& b) {
-    return a.color == b.color && a.width == b.width && a.dotted == b.dotted;
-}
-
-bool StrokeEqual(const Stroke& a, const Stroke& b) {
-    if (!StrokeStyleEqual(a.style, b.style) || a.smoothing != b.smoothing || a.points.size() != b.points.size()) {
-        return false;
-    }
-
-    for (std::size_t index = 0; index < a.points.size(); ++index) {
-        if (!Vec2Equal(a.points[index], b.points[index])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool PageImageEqual(const PageImage& a, const PageImage& b) {
-    return a.x == b.x
-        && a.y == b.y
-        && a.width == b.width
-        && a.height == b.height
-        && a.rotationDegrees == b.rotationDegrees
-        && a.pixelWidth == b.pixelWidth
-        && a.pixelHeight == b.pixelHeight
-        && a.stride == b.stride
-        && a.pixels == b.pixels;
-}
-
-bool PageTextEqual(const PageText& a, const PageText& b) {
-    return a.x == b.x
-        && a.y == b.y
-        && a.width == b.width
-        && a.height == b.height
-        && a.fontSize == b.fontSize
-        && a.color == b.color
-        && a.alignment == b.alignment
-        && a.fontFamily == b.fontFamily
-        && a.bold == b.bold
-        && a.italic == b.italic
-        && a.underline == b.underline
-        && a.content == b.content;
-}
-
-bool RasterImageEqual(const RasterImage& a, const RasterImage& b) {
-    return a.width == b.width
-        && a.height == b.height
-        && a.stride == b.stride
-        && a.scale == b.scale
-        && a.pixels == b.pixels;
-}
-
-bool PageEqual(const Page& a, const Page& b) {
-    if (a.width != b.width
-        || a.height != b.height
-        || a.sourcePdfSourceIndex != b.sourcePdfSourceIndex
-        || a.sourcePdfPageIndex != b.sourcePdfPageIndex
-        || a.paletteProfile != b.paletteProfile
-        || !RasterImageEqual(a.raster, b.raster)
-        || a.images.size() != b.images.size()
-        || a.texts.size() != b.texts.size()
-        || a.strokes.size() != b.strokes.size()) {
-        return false;
-    }
-
-    for (std::size_t index = 0; index < a.images.size(); ++index) {
-        if (!PageImageEqual(a.images[index], b.images[index])) {
-            return false;
-        }
-    }
-    for (std::size_t index = 0; index < a.texts.size(); ++index) {
-        if (!PageTextEqual(a.texts[index], b.texts[index])) {
-            return false;
-        }
-    }
-    for (std::size_t index = 0; index < a.strokes.size(); ++index) {
-        if (!StrokeEqual(a.strokes[index], b.strokes[index])) {
-            return false;
-        }
-    }
-    return true;
 }
 
 }  // namespace

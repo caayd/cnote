@@ -8,6 +8,14 @@
 namespace cnote {
 
 float DistanceSquared(Vec2 a, Vec2 b);
+float DistancePointToSegmentSquared(Vec2 point, Vec2 a, Vec2 b);
+float CrossProduct(Vec2 a, Vec2 b, Vec2 c);
+bool OnSegment(Vec2 a, Vec2 b, Vec2 point);
+bool SegmentsIntersect(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2);
+bool PointInPolygon(Vec2 point, const std::vector<Vec2>& polygon);
+std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float strength);
+float StrokeRenderSmoothing(const Stroke& stroke, float fallbackSmoothing);
+std::vector<Vec2> StrokeRenderPoints(const Stroke& stroke, float fallbackSmoothing);
 Vec2 PointToVec2(POINT point);
 Vec2 RemapPagePointBetweenViews(const App::PageView& fromView, const App::PageView& toView, Vec2 point);
 

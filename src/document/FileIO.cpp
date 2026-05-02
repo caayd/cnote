@@ -6,7 +6,11 @@
 #include <cwctype>
 #include <filesystem>
 
+#include "ProjectFile.h"
+
 namespace cnote {
+
+using cnote::HasExtension;
 
 namespace {
 
@@ -19,15 +23,6 @@ std::wstring Lowercase(std::wstring value) {
             return static_cast<wchar_t>(std::towlower(ch));
         });
     return value;
-}
-
-bool HasExtension(const std::wstring& path, const wchar_t* extension) {
-    const std::wstring normalizedPath = Lowercase(path);
-    const std::wstring normalizedExtension = Lowercase(extension == nullptr ? L"" : extension);
-    if (normalizedExtension.empty() || normalizedPath.size() < normalizedExtension.size()) {
-        return false;
-    }
-    return normalizedPath.ends_with(normalizedExtension);
 }
 
 bool PathsEqualIgnoreCase(const std::wstring& a, const std::wstring& b) {

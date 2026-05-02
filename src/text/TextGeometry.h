@@ -30,6 +30,8 @@ struct WrappedTextLayout {
 };
 
 UINT DrawTextAlignmentFlags(TextAlignment alignment);
+const wchar_t* PageTextFontFace(TextFontFamily family);
+int PageTextFontWeight(const PageText& text);
 HFONT CreatePageTextFont(const PageText& text, int pixelHeight, DWORD quality = CLEARTYPE_QUALITY);
 int PageTextFontPixelHeight(const PageText& text, float scale);
 float DefaultPageTextBoxWidth(const Page& page, const PageText& text);
@@ -42,5 +44,6 @@ std::optional<RECT> PageTextCachedBoundsRect(const PageText& text, float boundsW
 bool TextHitsPoint(const PageText& text, float pageWidth, Vec2 point);
 bool TextIntersectsRectSelection(const PageText& text, float pageWidth, Vec2 anchor, Vec2 current);
 bool TextIntersectsPolygonSelection(const PageText& text, float pageWidth, const std::vector<Vec2>& polygon);
+std::wstring TrimTrailingLayoutWhitespace(std::wstring value);
 
 }  // namespace cnote::text

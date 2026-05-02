@@ -5,6 +5,7 @@
 #include <cwchar>
 
 #include "ui/Layout.h"
+#include "ui/UiUtil.h"
 #include "DpiUtil.h"
 #include "text/TextGeometry.h"
 
@@ -12,17 +13,19 @@ namespace cnote {
 
 namespace appui = cnote::appui;
 namespace textgeom = cnote::text;
+namespace ui = cnote::ui;
 
 namespace {
 
-bool HasRect(const RECT& rect) {
-    return rect.right > rect.left && rect.bottom > rect.top;
-}
-
-RECT MakeRect(int left, int top, int right, int bottom) {
-    RECT rect { left, top, right, bottom };
-    return rect;
-}
+using cnote::PageEqual;
+using cnote::PageImageEqual;
+using cnote::PageTextEqual;
+using cnote::StrokeEqual;
+using cnote::StrokeStyleEqual;
+using cnote::Vec2Equal;
+using ui::HasRect;
+using ui::MakeRect;
+using ui::UnionRectangles;
 
 HBITMAP CreateTopDown32BitDibSection(HDC dc, int width, int height, void** bits) {
     if (bits == nullptr || width <= 0 || height <= 0) {
@@ -39,93 +42,6 @@ HBITMAP CreateTopDown32BitDibSection(HDC dc, int width, int height, void** bits)
     return CreateDIBSection(dc, &bitmapInfo, DIB_RGB_COLORS, bits, nullptr, 0);
 }
 
-bool Vec2Equal(const Vec2& a, const Vec2& b) {
-    return a.x == b.x && a.y == b.y;
-}
-
-bool StrokeStyleEqual(const StrokeStyle& a, const StrokeStyle& b) {
-    return a.color == b.color && a.width == b.width && a.dotted == b.dotted;
-}
-
-bool StrokeEqual(const Stroke& a, const Stroke& b) {
-    if (!StrokeStyleEqual(a.style, b.style) || a.smoothing != b.smoothing || a.points.size() != b.points.size()) {
-        return false;
-    }
-
-    for (std::size_t index = 0; index < a.points.size(); ++index) {
-        if (!Vec2Equal(a.points[index], b.points[index])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool PageImageEqual(const PageImage& a, const PageImage& b) {
-    return a.x == b.x
-        && a.y == b.y
-        && a.width == b.width
-        && a.height == b.height
-        && a.rotationDegrees == b.rotationDegrees
-        && a.pixelWidth == b.pixelWidth
-        && a.pixelHeight == b.pixelHeight
-        && a.stride == b.stride
-        && a.pixels == b.pixels;
-}
-
-bool PageTextEqual(const PageText& a, const PageText& b) {
-    return a.x == b.x
-        && a.y == b.y
-        && a.width == b.width
-        && a.height == b.height
-        && a.fontSize == b.fontSize
-        && a.color == b.color
-        && a.alignment == b.alignment
-        && a.fontFamily == b.fontFamily
-        && a.bold == b.bold
-        && a.italic == b.italic
-        && a.underline == b.underline
-        && a.content == b.content;
-}
-
-bool RasterImageEqual(const RasterImage& a, const RasterImage& b) {
-    return a.width == b.width
-        && a.height == b.height
-        && a.stride == b.stride
-        && a.scale == b.scale
-        && a.pixels == b.pixels;
-}
-
-bool PageEqual(const Page& a, const Page& b) {
-    if (a.width != b.width
-        || a.height != b.height
-        || a.sourcePdfSourceIndex != b.sourcePdfSourceIndex
-        || a.sourcePdfPageIndex != b.sourcePdfPageIndex
-        || a.paletteProfile != b.paletteProfile
-        || !RasterImageEqual(a.raster, b.raster)
-        || a.images.size() != b.images.size()
-        || a.texts.size() != b.texts.size()
-        || a.strokes.size() != b.strokes.size()) {
-        return false;
-    }
-
-    for (std::size_t index = 0; index < a.images.size(); ++index) {
-        if (!PageImageEqual(a.images[index], b.images[index])) {
-            return false;
-        }
-    }
-    for (std::size_t index = 0; index < a.texts.size(); ++index) {
-        if (!PageTextEqual(a.texts[index], b.texts[index])) {
-            return false;
-        }
-    }
-    for (std::size_t index = 0; index < a.strokes.size(); ++index) {
-        if (!StrokeEqual(a.strokes[index], b.strokes[index])) {
-            return false;
-        }
-    }
-    return true;
-}
-
 std::wstring FormatTextFontSizeValue(float size) {
     wchar_t buffer[32] = {};
     std::swprintf(buffer, std::size(buffer), L"%.2f", std::max(1.0f, size));
@@ -137,21 +53,6 @@ std::wstring FormatTextFontSizeValue(float size) {
         value.pop_back();
     }
     return value;
-}
-
-RECT UnionRectangles(RECT a, RECT b) {
-    if (!HasRect(a)) {
-        return b;
-    }
-    if (!HasRect(b)) {
-        return a;
-    }
-
-    return MakeRect(
-        std::min(a.left, b.left),
-        std::min(a.top, b.top),
-        std::max(a.right, b.right),
-        std::max(a.bottom, b.bottom));
 }
 
 float DefaultNewTextZoomScale(float zoom) {

@@ -4,7 +4,14 @@
 #include <array>
 #include <cmath>
 
+#include "App.h"
 #include "DpiUtil.h"
+#include "ui/UiUtil.h"
+
+using cnote::ui::HasRect;
+using cnote::ui::InflateRectCopy;
+using cnote::ui::MakeRect;
+using cnote::ui::UnionRectangles;
 
 namespace cnote::appui {
 
@@ -19,42 +26,12 @@ constexpr int kPaletteWheelShadowInsetDip = 6;
 constexpr int kPaletteWheelHoverGrowDip = 8;
 constexpr float kPaletteWheelSelectedStrokeDip = 3.0f;
 
-RECT MakeRect(int left, int top, int right, int bottom) {
-    RECT rect { left, top, right, bottom };
-    return rect;
-}
-
-bool HasRect(const RECT& rect) {
-    return rect.right > rect.left && rect.bottom > rect.top;
-}
-
 bool RectsOverlap(const RECT& a, const RECT& b) {
     RECT overlap {};
     return IntersectRect(&overlap, &a, &b) != 0;
 }
 
-RECT UnionRectangles(RECT a, RECT b) {
-    if (!HasRect(a)) {
-        return b;
-    }
-    if (!HasRect(b)) {
-        return a;
-    }
-
-    return MakeRect(
-        std::min(a.left, b.left),
-        std::min(a.top, b.top),
-        std::max(a.right, b.right),
-        std::max(a.bottom, b.bottom));
-}
-
-RECT InflateRectCopy(RECT rect, int amount) {
-    rect.left -= amount;
-    rect.top -= amount;
-    rect.right += amount;
-    rect.bottom += amount;
-    return rect;
-}
+}  // namespace
 
 int WindowFrameThicknessX(UINT dpi) {
     return SystemMetricForDpi(SM_CXFRAME, dpi) + SystemMetricForDpi(SM_CXPADDEDBORDER, dpi);
@@ -62,15 +39,6 @@ int WindowFrameThicknessX(UINT dpi) {
 
 int CaptionButtonReserve(UINT dpi) {
     return ScaleForDpi((35 * 3) + 12, dpi);
-}
-
-float SnapBrushSize(float size) {
-    constexpr float kMinBrushSize = 0.5f;
-    constexpr float kMaxBrushSize = 20.0f;
-    constexpr float kBrushSizeStep = 0.25f;
-    const float clamped = std::clamp(size, kMinBrushSize, kMaxBrushSize);
-    const float steps = std::round((clamped - kMinBrushSize) / kBrushSizeStep);
-    return kMinBrushSize + (steps * kBrushSizeStep);
 }
 
 int MeasureToolbarTextWidth(HDC hdc, const std::wstring& text) {
@@ -84,8 +52,6 @@ int MeasureToolbarTextWidth(HDC hdc, const std::wstring& text) {
     }
     return static_cast<int>(size.cx);
 }
-
-}  // namespace
 
 int ToolbarHeight(bool maximized, UINT dpi) {
     return ScaleForDpi(kBaseToolbarHeight + (maximized ? kMaximizedToolbarExtraHeight : 0), dpi);
@@ -490,7 +456,7 @@ int ToolbarBrushThumbCenterX(const RECT& sliderRect, float brushSize, float maxB
     const int width = std::max(1, static_cast<int>(sliderRect.right - sliderRect.left));
     const float sliderMax = std::max(1.0f, maxBrushSize);
     const float span = std::max(0.001f, sliderMax - 0.5f);
-    const float normalized = std::clamp((std::min(SnapBrushSize(brushSize), sliderMax) - 0.5f) / span, 0.0f, 1.0f);
+    const float normalized = std::clamp((std::min(App::SnapBrushSize(brushSize), sliderMax) - 0.5f) / span, 0.0f, 1.0f);
     return sliderRect.left + static_cast<int>(std::lround(normalized * static_cast<float>(width - 1)));
 }
 

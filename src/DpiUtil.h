@@ -4,6 +4,14 @@
 
 namespace cnote {
 
+template <typename T>
+void ReleaseCom(T*& instance) {
+    if (instance != nullptr) {
+        instance->Release();
+        instance = nullptr;
+    }
+}
+
 [[nodiscard]] UINT SystemDpi();
 [[nodiscard]] UINT WindowDpi(HWND window);
 [[nodiscard]] int ScaleForDpi(int value, UINT dpi);

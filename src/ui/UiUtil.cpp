@@ -68,6 +68,46 @@ RECT MakeRect(int left, int top, int right, int bottom) {
     return rect;
 }
 
+RECT MakeRectFromFloatBounds(float left, float top, float right, float bottom) {
+    return MakeRect(
+        static_cast<int>(std::floor(left)),
+        static_cast<int>(std::floor(top)),
+        static_cast<int>(std::ceil(right)),
+        static_cast<int>(std::ceil(bottom)));
+}
+
+bool HasRect(const RECT& rect) {
+    return rect.right > rect.left && rect.bottom > rect.top;
+}
+
+std::wstring TrimWide(std::wstring_view value) {
+    std::size_t start = 0;
+    while (start < value.size() && std::iswspace(value[start]) != 0) {
+        ++start;
+    }
+
+    std::size_t end = value.size();
+    while (end > start && std::iswspace(value[end - 1U]) != 0) {
+        --end;
+    }
+
+    return std::wstring(value.substr(start, end - start));
+}
+
+std::string TrimAscii(std::string_view value) {
+    std::size_t start = 0;
+    while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])) != 0) {
+        ++start;
+    }
+
+    std::size_t end = value.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1U])) != 0) {
+        --end;
+    }
+
+    return std::string(value.substr(start, end - start));
+}
+
 std::wstring FormatHexColor(std::uint32_t color) {
     wchar_t buffer[16] = {};
     std::swprintf(buffer, std::size(buffer), L"#%06X", color & 0xFFFFFFU);
@@ -179,6 +219,27 @@ std::wstring FormatPercentLabel(const wchar_t* prefix, int value) {
     return buffer;
 }
 
+std::wstring FormatZoomPercentValue(float zoom) {
+    wchar_t buffer[32] = {};
+    const float percent = zoom * 100.0f;
+    const bool wholePercent = std::abs(percent - std::round(percent)) < 0.05f;
+    if (wholePercent) {
+        std::swprintf(buffer, std::size(buffer), L"%.0f", percent);
+    } else {
+        std::swprintf(buffer, std::size(buffer), L"%.1f", percent);
+    }
+    std::wstring value = buffer;
+    if (!wholePercent) {
+        while (!value.empty() && value.back() == L'0') {
+            value.pop_back();
+        }
+        if (!value.empty() && value.back() == L'.') {
+            value.pop_back();
+        }
+    }
+    return value;
+}
+
 void SetControlText(HWND control, const std::wstring& text) {
     if (control != nullptr) {
         SetWindowTextW(control, text.c_str());
@@ -244,6 +305,28 @@ void FillLightnessPreviewTrack(HDC hdc, const RECT& trackRect, float hue, float 
     FillTrackWithColorFunction(hdc, trackRect, [=](float normalized) {
         return HslToColor(hue, saturation, normalized);
     });
+}
+
+RECT UnionRectangles(RECT a, RECT b) {
+    if (!HasRect(a)) {
+        return b;
+    }
+    if (!HasRect(b)) {
+        return a;
+    }
+    return MakeRect(
+        std::min(a.left, b.left),
+        std::min(a.top, b.top),
+        std::max(a.right, b.right),
+        std::max(a.bottom, b.bottom));
+}
+
+RECT InflateRectCopy(RECT rect, int amount) {
+    rect.left -= amount;
+    rect.top -= amount;
+    rect.right += amount;
+    rect.bottom += amount;
+    return rect;
 }
 
 void DeferMoveControl(HDWP& deferred, HWND control, const RECT& rect, UINT flags) {

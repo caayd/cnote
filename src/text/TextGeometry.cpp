@@ -7,8 +7,6 @@
 
 namespace cnote::text {
 
-namespace {
-
 constexpr float kTextLayoutScale = 8.0f;
 
 RECT MakeRect(int left, int top, int right, int bottom) {
@@ -82,8 +80,6 @@ std::wstring TrimTrailingLayoutWhitespace(std::wstring value) {
     }
     return value;
 }
-
-}  // namespace
 
 UINT DrawTextAlignmentFlags(TextAlignment alignment) {
     switch (alignment) {

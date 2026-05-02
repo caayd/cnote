@@ -18,8 +18,15 @@
 #include <commdlg.h>
 
 #include "NewPageSettingsWindow.h"
+#include "ProjectFile.h"
 #include "SettingsWindow.h"
 #include "ShortcutConfig.h"
+#include "ui/UiUtil.h"
+
+using cnote::HasExtension;
+using cnote::ui::ParseHexColor;
+using cnote::ui::TrimAscii;
+using cnote::ui::TrimWide;
 
 namespace cnote {
 
@@ -55,15 +62,9 @@ const std::vector<std::uint32_t>& LegacyDefaultPalette() {
     return palette;
 }
 
-RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderScale, std::uint32_t argb);
 
-bool RasterImageEqual(const RasterImage& a, const RasterImage& b) {
-    return a.width == b.width
-        && a.height == b.height
-        && a.stride == b.stride
-        && a.scale == b.scale
-        && a.pixels == b.pixels;
-}
+
+
 
 std::uint32_t RemapPaletteColor(
     std::uint32_t color,
@@ -127,63 +128,9 @@ bool ApplyConfiguredSettingsToPage(
     return changed;
 }
 
-std::wstring TrimWide(std::wstring_view value) {
-    std::size_t start = 0;
-    while (start < value.size() && std::iswspace(value[start]) != 0) {
-        ++start;
-    }
 
-    std::size_t end = value.size();
-    while (end > start && std::iswspace(value[end - 1U]) != 0) {
-        --end;
-    }
 
-    return std::wstring(value.substr(start, end - start));
-}
 
-std::string TrimAscii(std::string_view value) {
-    std::size_t start = 0;
-    while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])) != 0) {
-        ++start;
-    }
-
-    std::size_t end = value.size();
-    while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1U])) != 0) {
-        --end;
-    }
-
-    return std::string(value.substr(start, end - start));
-}
-
-std::string WideToUtf8(std::wstring_view value) {
-    if (value.empty()) {
-        return {};
-    }
-
-    const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
-    if (size <= 0) {
-        return {};
-    }
-
-    std::string converted(static_cast<std::size_t>(size), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), converted.data(), size, nullptr, nullptr);
-    return converted;
-}
-
-std::wstring Utf8ToWide(std::string_view value) {
-    if (value.empty()) {
-        return {};
-    }
-
-    const int size = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
-    if (size <= 0) {
-        return {};
-    }
-
-    std::wstring converted(static_cast<std::size_t>(size), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), converted.data(), size);
-    return converted;
-}
 
 std::vector<std::string> SplitAscii(std::string_view value, char delimiter) {
     std::vector<std::string> parts;
@@ -261,35 +208,7 @@ bool EqualPaletteNames(std::wstring_view left, std::wstring_view right) {
         TRUE) == CSTR_EQUAL;
 }
 
-std::optional<std::uint32_t> ParseHexColor(std::wstring value) {
-    value.erase(std::remove_if(value.begin(), value.end(), [](wchar_t ch) {
-        return std::iswspace(ch) != 0;
-    }), value.end());
 
-    if (!value.empty() && value.front() == L'#') {
-        value.erase(value.begin());
-    }
-    if (value.rfind(L"0x", 0) == 0 || value.rfind(L"0X", 0) == 0) {
-        value.erase(0, 2);
-    }
-
-    if (value.size() != 6U && value.size() != 8U) {
-        return std::nullopt;
-    }
-    if (!std::all_of(value.begin(), value.end(), [](wchar_t ch) { return std::iswxdigit(ch) != 0; })) {
-        return std::nullopt;
-    }
-
-    try {
-        const std::uint32_t parsed = static_cast<std::uint32_t>(std::stoul(value, nullptr, 16));
-        if (value.size() == 6U) {
-            return 0xFF000000U | parsed;
-        }
-        return parsed;
-    } catch (...) {
-        return std::nullopt;
-    }
-}
 
 std::optional<unsigned int> ParseUnsignedInt(std::string_view value, int base) {
     const std::string trimmed = TrimAscii(value);
@@ -327,18 +246,11 @@ std::optional<float> ParseFloat(std::string_view value) {
     }
 }
 
-float SnapBrushSizeValue(float size) {
-    constexpr float kMinBrushSize = 0.5f;
-    constexpr float kMaxBrushSize = 20.0f;
-    constexpr float kBrushSizeStep = 0.25f;
-    const float clamped = std::clamp(size, kMinBrushSize, kMaxBrushSize);
-    const float steps = std::round((clamped - kMinBrushSize) / kBrushSizeStep);
-    return kMinBrushSize + (steps * kBrushSizeStep);
-}
+
 
 std::wstring FormatBrushSizePresetValue(float size) {
     wchar_t buffer[16] = {};
-    std::swprintf(buffer, std::size(buffer), L"%.2f", SnapBrushSizeValue(size));
+    std::swprintf(buffer, std::size(buffer), L"%.2f", App::SnapBrushSize(size));
     std::wstring value = buffer;
     while (!value.empty() && value.back() == L'0') {
         value.pop_back();
@@ -351,7 +263,7 @@ std::wstring FormatBrushSizePresetValue(float size) {
 
 std::vector<float> NormalizeBrushSizePresets(std::vector<float> presets) {
     for (float& preset : presets) {
-        preset = SnapBrushSizeValue(preset);
+        preset = App::SnapBrushSize(preset);
     }
 
     std::sort(presets.begin(), presets.end());
@@ -408,37 +320,6 @@ std::optional<App::Tool> ParseToolConfigName(std::string_view name) {
         return App::Tool::Zoom;
     }
     return std::nullopt;
-}
-
-bool HasExtension(const std::wstring& path, const wchar_t* extension) {
-    const std::filesystem::path filePath(path);
-    return filePath.has_extension() && _wcsicmp(filePath.extension().c_str(), extension) == 0;
-}
-
-RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderScale, std::uint32_t argb) {
-    const int bitmapWidth = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageWidth) * renderScale)));
-    const int bitmapHeight = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageHeight) * renderScale)));
-    const int stride = bitmapWidth * 4;
-
-    RasterImage raster {};
-    raster.width = bitmapWidth;
-    raster.height = bitmapHeight;
-    raster.stride = stride;
-    raster.scale = renderScale;
-    raster.pixels.resize(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight));
-
-    const auto alpha = static_cast<std::uint8_t>((argb >> 24U) & 0xFFU);
-    const auto red = static_cast<std::uint8_t>((argb >> 16U) & 0xFFU);
-    const auto green = static_cast<std::uint8_t>((argb >> 8U) & 0xFFU);
-    const auto blue = static_cast<std::uint8_t>(argb & 0xFFU);
-    for (std::size_t offset = 0; offset + 3U < raster.pixels.size(); offset += 4U) {
-        raster.pixels[offset] = blue;
-        raster.pixels[offset + 1U] = green;
-        raster.pixels[offset + 2U] = red;
-        raster.pixels[offset + 3U] = alpha;
-    }
-
-    return raster;
 }
 
 void FlattenImportedPage(Page& page) {
