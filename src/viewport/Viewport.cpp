@@ -14,6 +14,13 @@ namespace {
 
 using ui::MakeRect;
 
+struct DocumentViewportBounds {
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+};
+
 int ViewportFrameThicknessX(UINT dpi) {
     return ScaleForDpi(8, dpi);
 }
@@ -91,6 +98,7 @@ void App::FocusPage(std::size_t index) {
     const int pageCenterY = (pageView.rect.top + pageView.rect.bottom) / 2;
     const int desiredCenterY = canvasTop + (canvasHeight / 2);
     panY_ += static_cast<float>(desiredCenterY - pageCenterY);
+    ClampViewportPan(clientRect, &panX_, &panY_);
     InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -112,7 +120,63 @@ void App::PanBy(float dx, float dy) {
 void App::ApplyPanDelta(float dx, float dy) {
     panX_ += dx;
     panY_ += dy;
+    if (window_ != nullptr) {
+        RECT clientRect {};
+        GetClientRect(window_, &clientRect);
+        ClampViewportPan(clientRect, &panX_, &panY_);
+    }
     InvalidateViewport();
+}
+
+void App::ClampViewportPan(RECT clientRect, float* panX, float* panY) const {
+    if (panX == nullptr || panY == nullptr || document_.PageCount() == 0U) {
+        return;
+    }
+
+    const UINT dpi = WindowDpi(window_);
+    const RECT canvasRect = CanvasRect(clientRect);
+    const int canvasWidth = std::max(1, static_cast<int>(canvasRect.right - canvasRect.left));
+    const int canvasHeight = std::max(1, static_cast<int>(canvasRect.bottom - canvasRect.top));
+    const int zoomReferenceCanvasWidth = MaximizedCanvasWidthForZoom(window_, canvasWidth, 0, dpi);
+
+    float widestPage = 1.0f;
+    float totalPageHeight = 0.0f;
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        const Page& page = document_.PageAt(pageIndex);
+        widestPage = std::max(widestPage, page.width);
+        totalPageHeight += page.height;
+    }
+
+    const float fitScale = static_cast<float>(zoomReferenceCanvasWidth - ScaleForDpi(120, dpi)) / widestPage;
+    const float scale = std::max(0.1f, fitScale * zoom_);
+    const float scaledDocumentWidth = widestPage * scale;
+    const float scaledDocumentHeight = (totalPageHeight * scale)
+        + static_cast<float>(std::max<std::size_t>(document_.PageCount() - 1U, 0U) * ScaleForDpi(kPageGap, dpi));
+    const float canvasCenterX = static_cast<float>(canvasRect.left + (canvasWidth / 2));
+
+    const DocumentViewportBounds documentBounds {
+        canvasCenterX - (scaledDocumentWidth * 0.5f),
+        static_cast<float>(canvasRect.top + ScaleForDpi(40, dpi)),
+        canvasCenterX + (scaledDocumentWidth * 0.5f),
+        static_cast<float>(canvasRect.top + ScaleForDpi(40, dpi)) + scaledDocumentHeight,
+    };
+
+    const float horizontalSlack = std::clamp(
+        static_cast<float>(canvasWidth) * 0.2f,
+        static_cast<float>(ScaleForDpi(96, dpi)),
+        static_cast<float>(ScaleForDpi(260, dpi)));
+    const float verticalSlack = std::clamp(
+        static_cast<float>(canvasHeight) * 0.2f,
+        static_cast<float>(ScaleForDpi(96, dpi)),
+        static_cast<float>(ScaleForDpi(320, dpi)));
+
+    const float minPanX = (static_cast<float>(canvasRect.left) - horizontalSlack) - documentBounds.right;
+    const float maxPanX = (static_cast<float>(canvasRect.right) + horizontalSlack) - documentBounds.left;
+    const float minPanY = (static_cast<float>(canvasRect.top) - verticalSlack) - documentBounds.bottom;
+    const float maxPanY = (static_cast<float>(canvasRect.bottom) + verticalSlack) - documentBounds.top;
+
+    *panX = std::clamp(*panX, minPanX, maxPanX);
+    *panY = std::clamp(*panY, minPanY, maxPanY);
 }
 
 void App::SmoothPanBy(float dx, float dy) {
@@ -148,8 +212,16 @@ void App::SmoothPanBy(float dx, float dy) {
         }
     }
 
-    const float targetOffsetX = startOffsetX + dx;
-    const float targetOffsetY = startOffsetY + dy;
+    float targetPanX = panX_ + startOffsetX + dx;
+    float targetPanY = panY_ + startOffsetY + dy;
+    ClampViewportPan(clientRect, &targetPanX, &targetPanY);
+
+    const float targetOffsetX = targetPanX - panX_;
+    const float targetOffsetY = targetPanY - panY_;
+    if (std::abs(targetOffsetX - startOffsetX) < 0.001f && std::abs(targetOffsetY - startOffsetY) < 0.001f) {
+        return;
+    }
+
     if (!StartSmoothScrollCompositionAnimation(startOffsetX, startOffsetY, targetOffsetX, targetOffsetY)) {
         StopSmoothScroll();
         ApplyPanDelta(dx, dy);
@@ -194,14 +266,14 @@ void App::StopSmoothScroll() {
 
     panX_ += offsetX;
     panY_ += offsetY;
-    contentCompositionDirty_ = true;
-
     if (window_ == nullptr) {
         return;
     }
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
+    ClampViewportPan(clientRect, &panX_, &panY_);
+    contentCompositionDirty_ = true;
     if (!UpdateContentComposition(clientRect, clientRect)) {
         InvalidateViewport();
     }
@@ -338,6 +410,7 @@ void App::SetZoom(float zoom, std::optional<POINT> anchor) {
         panX_ += static_cast<float>(zoomAnchorCursor_.x - anchoredScreen.x);
         panY_ += static_cast<float>(zoomAnchorCursor_.y - anchoredScreen.y);
     }
+    ClampViewportPan(clientRect, &panX_, &panY_);
 
     InvalidateViewport();
     RECT toolbarRect = clientRect;
@@ -568,6 +641,7 @@ bool App::ApplyZoomPreset(std::size_t presetIndex, std::optional<POINT> preferre
         panX_ += static_cast<float>(zoomAnchorCursor_.x - anchoredScreen.x);
         panY_ += static_cast<float>(zoomAnchorCursor_.y - anchoredScreen.y);
     }
+    ClampViewportPan(clientRect, &panX_, &panY_);
 
     InvalidateViewport();
     RECT toolbarRect = clientRect;
@@ -612,16 +686,17 @@ void App::ZoomAt(int delta, POINT cursor) {
     BeginZoomSession(cursor);
     zoom_ = newZoom;
     targetZoom_ = newZoom;
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
 
     if (zoomAnchorValid_) {
         const POINT anchoredScreen = PageToScreen(zoomAnchorPageIndex_, zoomAnchorPage_);
         panX_ += static_cast<float>(zoomAnchorCursor_.x - anchoredScreen.x);
         panY_ += static_cast<float>(zoomAnchorCursor_.y - anchoredScreen.y);
     }
+    ClampViewportPan(clientRect, &panX_, &panY_);
 
     InvalidateViewport();
-    RECT clientRect {};
-    GetClientRect(window_, &clientRect);
     RECT toolbarRect = clientRect;
     toolbarRect.bottom = FullToolbarHeight();
     InvalidateRect(window_, &toolbarRect, FALSE);

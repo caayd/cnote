@@ -421,6 +421,7 @@ private:
     void PanBy(float dx, float dy);
     void SmoothPanBy(float dx, float dy);
     void ApplyPanDelta(float dx, float dy);
+    void ClampViewportPan(RECT clientRect, float* panX, float* panY) const;
     void InitializePrecisionTouchpadSupport();
     void ShutdownPrecisionTouchpadSupport();
     [[nodiscard]] bool HandlePrecisionTouchpadPointerMessage(UINT message, WPARAM wParam, LPARAM lParam);
