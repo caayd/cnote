@@ -389,7 +389,7 @@ void App::RefreshNewPageSettingsWindow() {
 void App::ResetNewPageSettings() {
     newPageSettings_.width = 612.0f;
     newPageSettings_.height = 792.0f;
-    newPageSettings_.backgroundColor = 0xFFFFFFFFU;
+    newPageSettings_.backgroundColor = settings_.defaultPageColor;
     newPageSettings_.paletteProfile = ResolvedPaletteProfile({});
     newPageSettings_.applyPaletteProfileToExistingStrokes = false;
     RefreshNewPageSettingsWindow();
@@ -770,6 +770,13 @@ void App::LoadAppSettings() {
             continue;
         }
 
+        if (key == "default_page_color") {
+            if (const auto parsed = ParseUnsignedInt(value, 16); parsed.has_value()) {
+                settings_.defaultPageColor = *parsed;
+            }
+            continue;
+        }
+
         if (key.starts_with("recent_document_")) {
             if (const auto index = ParseUnsignedInt(std::string_view(key).substr(16)); index.has_value()
                 && *index >= 1U
@@ -991,6 +998,7 @@ void App::LoadAppSettings() {
     settings_.eraseBrushSize = std::min(settings_.eraseBrushSize, settings_.quickSizeSliderMax);
     colorIndex_ = std::min(loadedColorIndex.value_or(colorIndex_), palette_.size() - 1U);
     settings_.paletteIndex = std::min(loadedSettingsPaletteIndex.value_or(settings_.paletteIndex), palette_.size() - 1U);
+    newPageSettings_.backgroundColor = settings_.defaultPageColor;
     newPageSettings_.paletteProfile = ResolvedPaletteProfile(newPageSettings_.paletteProfile);
     SyncBrushWidthFromActiveTool();
 }
@@ -1024,6 +1032,7 @@ void App::SaveAppSettings() const {
     }
     output << "active_color=" << colorIndex_ << '\n';
     output << "settings_palette_index=" << settings_.paletteIndex << '\n';
+    output << "default_page_color=" << std::hex << std::uppercase << settings_.defaultPageColor << std::dec << std::nouppercase << '\n';
     for (std::size_t index = 0; index < recentDocumentPaths_.size(); ++index) {
         output << "recent_document_" << (index + 1U) << '=' << WideToUtf8(recentDocumentPaths_[index]) << '\n';
     }

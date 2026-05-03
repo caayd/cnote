@@ -21,8 +21,15 @@ int App::Run(int showCommand, std::optional<std::wstring> startupPath) {
     }
 
     if (startupPath.has_value() && !startupPath->empty()) {
-        static_cast<void>(OpenDocumentPath(*startupPath));
+        if (!OpenDocumentPath(*startupPath)) {
+            CreateBlankDocument();
+        }
+    } else {
+        CreateBlankDocument();
     }
+
+    ShowWindow(window_, showCommand);
+    UpdateWindow(window_);
 
     MSG message {};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
@@ -75,6 +82,8 @@ bool App::OpenNewWindow() {
 }
 
 bool App::CreateMainWindow(int showCommand) {
+    static_cast<void>(showCommand);
+
     WNDCLASSEXW windowClass {};
     windowClass.cbSize = sizeof(windowClass);
     windowClass.style = CS_HREDRAW | CS_VREDRAW;
@@ -83,7 +92,7 @@ bool App::CreateMainWindow(int showCommand) {
     windowClass.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
     windowClass.hIconSm = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    windowClass.hbrBackground = nullptr;
     windowClass.lpszClassName = kWindowClassName;
 
     if (RegisterClassExW(&windowClass) == 0) {
@@ -129,9 +138,6 @@ bool App::CreateMainWindow(int showCommand) {
     UpdateWindowTitle();
     UpdateAutoSaveTimer();
     InitializePrecisionTouchpadSupport();
-
-    ShowWindow(window_, showCommand);
-    UpdateWindow(window_);
     return true;
 }
 

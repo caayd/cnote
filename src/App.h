@@ -37,6 +37,18 @@ struct GraphicsPathDeleter {
 class App {
 public:
     static constexpr std::size_t kZoomPresetCount = 5;
+    static constexpr std::array<std::uint32_t, 10> kDefaultPageColors {
+        0xFFFFFFFFU,
+        0xFFFFFBF5U,
+        0xFFF4F0E6U,
+        0xFFE3E7EFU,
+        0xFFBFC7D4U,
+        0xFF1C2430U,
+        0xFF161C26U,
+        0xFF12171FU,
+        0xFF10161FU,
+        0xFF090D12U,
+    };
 
     explicit App(HINSTANCE instance);
     ~App();
@@ -232,6 +244,7 @@ public:
     struct SettingsState {
         SettingsWindow* window = nullptr;
         std::size_t paletteIndex = 0;
+        std::uint32_t defaultPageColor = kDefaultPageColors.front();
         float drawBrushSize = 3.0f;
         float eraseBrushSize = 3.0f;
         float quickSizeSliderMax = 20.0f;
@@ -258,7 +271,7 @@ public:
         NewPageSettingsWindow* window = nullptr;
         float width = 612.0f;
         float height = 792.0f;
-        std::uint32_t backgroundColor = 0xFFFFFFFFU;
+        std::uint32_t backgroundColor = kDefaultPageColors.front();
         std::vector<std::uint32_t> paletteProfile {};
         std::vector<std::uint32_t> recentColors {};
         bool applyPaletteProfileToExistingStrokes = false;

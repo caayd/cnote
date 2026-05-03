@@ -4,13 +4,18 @@ namespace cnote {
 
 void App::CreateBlankDocument() {
     PrepareForDocumentSwitch();
-    ApplyDocument(Document::CreateBlank(), true);
-    document_.SetNewPageDefaults({
+    newPageSettings_.backgroundColor = settings_.defaultPageColor;
+    const std::vector<std::uint32_t> resolvedPaletteProfile = ResolvedPaletteProfile(newPageSettings_.paletteProfile);
+    Document blankDocument = Document::CreateBlank({
         newPageSettings_.width,
         newPageSettings_.height,
         newPageSettings_.backgroundColor,
-        ResolvedPaletteProfile(newPageSettings_.paletteProfile),
+        resolvedPaletteProfile,
     });
+    if (blankDocument.PageCount() > 0U) {
+        blankDocument.PageAt(0) = BuildConfiguredNewPage();
+    }
+    ApplyDocument(std::move(blankDocument), true);
 }
 
 void App::PrepareForDocumentSwitch() {
