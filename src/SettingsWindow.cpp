@@ -146,6 +146,9 @@ struct SettingsWindowLayout {
     RECT autoSaveSliderRect {};
     RECT autoHideToolbarSwitchRect {};
     RECT embedProjectInPdfSwitchRect {};
+    RECT defaultPageColorLabelRect {};
+    std::array<RECT, App::kDefaultPageColors.size()> defaultPageColorSwatches {};
+    RECT defaultPageColorHintRect {};
     std::array<RECT, App::kZoomPresetCount> zoomPresetLabelRects {};
     std::array<RECT, App::kZoomPresetCount> zoomPresetEditRects {};
     RECT zoomPresetHintRect {};
@@ -484,9 +487,25 @@ SettingsWindowLayout BuildSettingsWindowLayout(RECT clientRect, UINT dpi, bool s
     layout.autoSaveSliderRect = MakeRect(metaLeft, layout.autoSaveLabelRect.bottom + px(4), metaRight, layout.autoSaveLabelRect.bottom + px(32));
     layout.autoHideToolbarSwitchRect = MakeRect(metaLeft, layout.autoSaveSliderRect.bottom + px(16), metaRight, layout.autoSaveSliderRect.bottom + px(42));
     layout.embedProjectInPdfSwitchRect = MakeRect(metaLeft, layout.autoHideToolbarSwitchRect.bottom + px(10), metaRight, layout.autoHideToolbarSwitchRect.bottom + px(36));
+    layout.defaultPageColorLabelRect = MakeRect(metaLeft, layout.embedProjectInPdfSwitchRect.bottom + px(18), metaRight, layout.embedProjectInPdfSwitchRect.bottom + px(36));
+    const int defaultPageColorSwatchTop = layout.defaultPageColorLabelRect.bottom + px(8);
+    const int defaultPageColorSwatchSize = px(24);
+    const int defaultPageColorSwatchGap = px(8);
+    for (std::size_t index = 0; index < layout.defaultPageColorSwatches.size(); ++index) {
+        const int column = static_cast<int>(index % 5U);
+        const int row = static_cast<int>(index / 5U);
+        const int left = metaLeft + (column * (defaultPageColorSwatchSize + defaultPageColorSwatchGap));
+        const int top = defaultPageColorSwatchTop + (row * (defaultPageColorSwatchSize + defaultPageColorSwatchGap));
+        layout.defaultPageColorSwatches[index] = MakeRect(left, top, left + defaultPageColorSwatchSize, top + defaultPageColorSwatchSize);
+    }
+    layout.defaultPageColorHintRect = MakeRect(
+        metaLeft,
+        defaultPageColorSwatchTop + (defaultPageColorSwatchSize * 2) + defaultPageColorSwatchGap + px(8),
+        metaRight,
+        defaultPageColorSwatchTop + (defaultPageColorSwatchSize * 2) + defaultPageColorSwatchGap + px(26));
     const int zoomLabelWidth = px(74);
     const int zoomEditWidth = px(90);
-    const int zoomRowTop = layout.embedProjectInPdfSwitchRect.bottom + px(20);
+    const int zoomRowTop = layout.defaultPageColorHintRect.bottom + px(16);
     const int zoomRowHeight = px(26);
     const int zoomRowGap = px(10);
     for (std::size_t index = 0; index < layout.zoomPresetLabelRects.size(); ++index) {
@@ -1739,7 +1758,7 @@ void SettingsWindow::PaintWindow() {
         TextOutW(memoryDc, layout.drawingMetaSection.left + Scale(14), layout.drawingMetaSection.top + Scale(14), L"Persistence", 11);
         SetTextColor(memoryDc, kTextMuted);
         paintWrappedDescription(layout.drawingSection, L"Tune input filtering and smoothing.");
-        paintWrappedDescription(layout.drawingMetaSection, L"Configure auto save, quick zoom presets, and quick popup brush snaps.");
+        paintWrappedDescription(layout.drawingMetaSection, L"Configure auto save, the default color for new blank projects, quick zoom presets, and quick popup brush snaps.");
         break;
     case Category::Shortcuts:
         SetTextColor(memoryDc, kTextPrimary);
@@ -1851,6 +1870,23 @@ void SettingsWindow::PaintWindow() {
         SelectObject(memoryDc, previousDashPen);
         SelectObject(memoryDc, previousDashBrush);
         DeleteObject(dashBrush);
+        RECT defaultPageColorLabelRect = layout.defaultPageColorLabelRect;
+        SetTextColor(memoryDc, kTextPrimary);
+        DrawTextW(memoryDc, L"Default Page Color", -1, &defaultPageColorLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        for (std::size_t index = 0; index < layout.defaultPageColorSwatches.size(); ++index) {
+            const RECT swatchRect = layout.defaultPageColorSwatches[index];
+            const std::uint32_t color = App::kDefaultPageColors[index];
+            FillRoundedRect(memoryDc, swatchRect, app_.ToColorRef(color));
+            StrokeRoundedRect(
+                memoryDc,
+                swatchRect,
+                color == app_.settings_.defaultPageColor ? kSelectionBorder : kPanelBorder,
+                color == app_.settings_.defaultPageColor ? 2 : 1);
+        }
+        RECT defaultPageColorHintRect = layout.defaultPageColorHintRect;
+        SetTextColor(memoryDc, kTextMuted);
+        const std::wstring defaultPageColorHint = L"Used for new blank projects. Current: " + FormatHexColor(app_.settings_.defaultPageColor);
+        DrawTextW(memoryDc, defaultPageColorHint.c_str(), -1, &defaultPageColorHintRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         paintSlider(SliderKind::Stabilization, layout.stabilizationSliderRect, 5, 95);
         paintSlider(SliderKind::Spacing, layout.spacingSliderRect, 5, 405);
         paintSlider(SliderKind::StrokeSmoothing, layout.strokeSmoothingSliderRect, 0, 100);
@@ -2705,9 +2741,23 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
             BeginHexColorEdit();
             return 0;
         }
-        if (activeCategory_ == Category::Drawing && PtInRect(&layout.drawCursorKindComboRect, cursor) != 0) {
-            OpenDrawCursorKindMenu();
-            return 0;
+        if (activeCategory_ == Category::Drawing) {
+            if (PtInRect(&layout.drawCursorKindComboRect, cursor) != 0) {
+                OpenDrawCursorKindMenu();
+                return 0;
+            }
+            for (std::size_t index = 0; index < layout.defaultPageColorSwatches.size(); ++index) {
+                if (PtInRect(&layout.defaultPageColorSwatches[index], cursor) == 0) {
+                    continue;
+                }
+                const std::uint32_t selectedColor = App::kDefaultPageColors[index];
+                if (app_.settings_.defaultPageColor != selectedColor) {
+                    app_.settings_.defaultPageColor = selectedColor;
+                    app_.SaveAppSettings();
+                }
+                InvalidateWindowRegion(layout.drawingMetaSection);
+                return 0;
+            }
         }
         if (const auto slider = HitTestSlider(cursor); slider.has_value()) {
             draggingSlider_ = slider;

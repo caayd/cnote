@@ -41,19 +41,6 @@ constexpr int kIdApplyAll = 108;
 constexpr UINT kDimensionPresetMenuBase = 400;
 constexpr UINT kPaletteProfileMenuBase = 500;
 
-constexpr std::array<std::uint32_t, 10> kDefaultPageColors {
-    0xFFFFFFFFU,
-    0xFFFFFBF5U,
-    0xFFF4F0E6U,
-    0xFFE3E7EFU,
-    0xFFBFC7D4U,
-    0xFF1C2430U,
-    0xFF161C26U,
-    0xFF12171FU,
-    0xFF10161FU,
-    0xFF090D12U,
-};
-
 struct DimensionPreset {
     const wchar_t* label = L"";
     float width = 612.0f;
@@ -269,7 +256,7 @@ NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount,
         layout.colorPreviewRect.top + px(34));
 
     layout.defaultColorsLabelRect = MakeRect(contentLeft, layout.colorPreviewRect.bottom + px(12), contentRight, layout.colorPreviewRect.bottom + px(30));
-    const int defaultColumns = std::max(1, std::min(5, static_cast<int>(kDefaultPageColors.size())));
+    const int defaultColumns = std::max(1, std::min(5, static_cast<int>(App::kDefaultPageColors.size())));
     const int defaultGap = px(10);
     const int defaultSwatchSize = std::clamp(
         (contentRight - contentLeft - (defaultGap * (defaultColumns - 1))) / defaultColumns,
@@ -277,7 +264,7 @@ NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount,
         px(62));
     const int defaultSwatchHeight = px(38);
     const int defaultSwatchTop = layout.defaultColorsLabelRect.bottom + px(8);
-    for (std::size_t index = 0; index < kDefaultPageColors.size(); ++index) {
+    for (std::size_t index = 0; index < App::kDefaultPageColors.size(); ++index) {
         const int column = static_cast<int>(index % static_cast<std::size_t>(defaultColumns));
         const int row = static_cast<int>(index / static_cast<std::size_t>(defaultColumns));
         const int left = contentLeft + (column * (defaultSwatchSize + defaultGap));
@@ -285,7 +272,7 @@ NewPageSettingsLayout BuildLayout(RECT clientRect, std::size_t recentColorCount,
         layout.defaultColorSwatches.push_back(MakeRect(left, topPos, left + defaultSwatchSize, topPos + defaultSwatchHeight));
     }
     const int defaultRows = std::max(1, static_cast<int>(
-        (kDefaultPageColors.size() + static_cast<std::size_t>(defaultColumns) - 1U) / static_cast<std::size_t>(defaultColumns)));
+        (App::kDefaultPageColors.size() + static_cast<std::size_t>(defaultColumns) - 1U) / static_cast<std::size_t>(defaultColumns)));
     const int defaultGridBottom = defaultSwatchTop
         + (defaultRows * defaultSwatchHeight)
         + (std::max(0, defaultRows - 1) * defaultGap);
@@ -888,7 +875,7 @@ void NewPageSettingsWindow::PaintWindow() {
     DrawTextW(memoryDc, L"Default Colors", -1, &defaultColorsLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     for (std::size_t index = 0; index < layout.defaultColorSwatches.size(); ++index) {
         const RECT swatchRect = layout.defaultColorSwatches[index];
-        const std::uint32_t color = kDefaultPageColors[index];
+        const std::uint32_t color = App::kDefaultPageColors[index];
         FillRoundedRect(memoryDc, swatchRect, app_.ToColorRef(color));
         StrokeRoundedRect(memoryDc, swatchRect, color == draftBackgroundColor_ ? kSelectionBorder : kPanelBorder, color == draftBackgroundColor_ ? 2 : 1);
     }
@@ -1185,7 +1172,7 @@ void NewPageSettingsWindow::ApplyDraftToFuturePages() {
 void NewPageSettingsWindow::ResetDraftToDefaults() {
     draftWidth_ = 612.0f;
     draftHeight_ = 792.0f;
-    draftBackgroundColor_ = 0xFFFFFFFFU;
+    draftBackgroundColor_ = app_.settings_.defaultPageColor;
     draftPaletteProfile_ = app_.ResolvedPaletteProfile({});
     draftApplyPaletteProfileToExistingStrokes_ = false;
     UpdateEditValues();
@@ -1538,7 +1525,7 @@ LRESULT NewPageSettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM
 
         for (std::size_t index = 0; index < layout.defaultColorSwatches.size(); ++index) {
             if (PtInRect(&layout.defaultColorSwatches[index], cursor) != 0) {
-                draftBackgroundColor_ = kDefaultPageColors[index];
+                draftBackgroundColor_ = App::kDefaultPageColors[index];
                 UpdateEditValues();
                 InvalidateRect(window_, nullptr, FALSE);
                 return 0;
