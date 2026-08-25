@@ -1336,6 +1336,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         zoomAnchorValid_ = false;
         ClearZoomSessionSnapshots();
         ReleasePaintBackbuffer();
+        ReleaseCompositionResources();
+        textEditWindowNeedsLayout_ = textEditWindow_ != nullptr;
+        ReleaseTextEditBackgroundBrush();
         targetZoom_ = zoom_;
         InvalidateAllPageSurfaceCaches();
         InvalidateRect(window_, nullptr, FALSE);

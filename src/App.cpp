@@ -287,18 +287,28 @@ void StretchBitmapToRect(
         return;
     }
 
-    RECT clipRect {};
-    if (GetClipBox(hdc, &clipRect) == ERROR) {
-        clipRect = destinationRect;
-    }
-
-    RECT visibleRect {};
-    if (IntersectRect(&visibleRect, &destinationRect, &clipRect) == 0) {
+    const int destinationWidth = destinationRect.right - destinationRect.left;
+    const int destinationHeight = destinationRect.bottom - destinationRect.top;
+    if (destinationWidth == sourceWidth && destinationHeight == sourceHeight) {
+        SetDIBitsToDevice(
+            hdc,
+            destinationRect.left,
+            destinationRect.top,
+            static_cast<DWORD>(sourceWidth),
+            static_cast<DWORD>(sourceHeight),
+            0,
+            0,
+            0,
+            static_cast<UINT>(sourceHeight),
+            pixels,
+            &bitmapInfo,
+            DIB_RGB_COLORS);
         return;
     }
 
-    const bool fullDestinationBlit = EqualRect(&visibleRect, &destinationRect) != 0;
-    const int stretchMode = (highQuality && fullDestinationBlit) ? HALFTONE : COLORONCOLOR;
+    // Partial redraws must produce the same pixels as full-page redraws or
+    // their rectangular update boundary becomes visible at fractional scales.
+    const int stretchMode = highQuality ? HALFTONE : COLORONCOLOR;
     SetStretchBltMode(hdc, stretchMode);
     if (stretchMode == HALFTONE) {
         SetBrushOrgEx(hdc, 0, 0, nullptr);
@@ -308,8 +318,8 @@ void StretchBitmapToRect(
         hdc,
         destinationRect.left,
         destinationRect.top,
-        destinationRect.right - destinationRect.left,
-        destinationRect.bottom - destinationRect.top,
+        destinationWidth,
+        destinationHeight,
         0,
         0,
         sourceWidth,
@@ -322,6 +332,10 @@ void StretchBitmapToRect(
 
 int SelectionHandleHalfSize(UINT dpi) {
     return std::max(1, ScaleForDpi(kSelectionHandleHalfDip, dpi));
+}
+
+int InteractionDamagePadding(UINT dpi) {
+    return std::max(SelectionHandleHalfSize(dpi) + ScaleForDpi(2, dpi), ScaleForDpi(20, dpi));
 }
 
 int PaletteWheelShadowInset(UINT dpi) {
@@ -3013,6 +3027,7 @@ bool App::UpdateContentComposition(RECT clientRect, RECT dirtyRect) {
     const int surfaceWidth = width + (paddingX * 2);
     const int surfaceHeight = height + (paddingY * 2);
     const RECT surfaceRect { 0, 0, surfaceWidth, surfaceHeight };
+    const RECT fullLogicalPaintRect { -paddingX, -paddingY, width + paddingX, height + paddingY };
     RECT activePageCompositionRect {};
     bool repaintActivePageDuringStroke = false;
     const bool repaintFullViewportDuringStrokeZoom = !useSmoothScrollPadding && isDrawing_ && zoomSessionActive_;
@@ -3023,23 +3038,23 @@ bool App::UpdateContentComposition(RECT clientRect, RECT dirtyRect) {
             repaintActivePageDuringStroke = IntersectRect(&activePageCompositionRect, &activePageCompositionRect, &surfaceRect) != 0;
         }
     }
-    RECT updateRect {};
+    RECT logicalPaintRect {};
     if (repaintFullViewportDuringStrokeZoom) {
-        updateRect = surfaceRect;
+        logicalPaintRect = MakeRect(0, 0, width, height);
     } else if (repaintActivePageDuringStroke) {
-        updateRect = activePageCompositionRect;
+        logicalPaintRect = activePageCompositionRect;
     } else if (useSmoothScrollPadding) {
-        updateRect = surfaceRect;
-    } else if (IntersectRect(&updateRect, &dirtyRect, &surfaceRect) == 0) {
+        logicalPaintRect = fullLogicalPaintRect;
+    } else if (IntersectRect(&logicalPaintRect, &dirtyRect, &clientRect) == 0) {
         return true;
     } else {
         // Partial composition updates can leave stale edge pixels when cached page
         // surfaces and anti-aliased strokes are redrawn at fractional scales.
         const int updateBleed = std::max(2, ScaleForDpi(12, dpi));
-        updateRect.left = std::max(surfaceRect.left, updateRect.left - updateBleed);
-        updateRect.top = std::max(surfaceRect.top, updateRect.top - updateBleed);
-        updateRect.right = std::min(surfaceRect.right, updateRect.right + updateBleed);
-        updateRect.bottom = std::min(surfaceRect.bottom, updateRect.bottom + updateBleed);
+        logicalPaintRect.left = std::max<LONG>(clientRect.left, logicalPaintRect.left - updateBleed);
+        logicalPaintRect.top = std::max<LONG>(clientRect.top, logicalPaintRect.top - updateBleed);
+        logicalPaintRect.right = std::min<LONG>(clientRect.right, logicalPaintRect.right + updateBleed);
+        logicalPaintRect.bottom = std::min<LONG>(clientRect.bottom, logicalPaintRect.bottom + updateBleed);
     }
 
     bool createdSurface = false;
@@ -3070,15 +3085,15 @@ bool App::UpdateContentComposition(RECT clientRect, RECT dirtyRect) {
         createdSurface = true;
     }
     if (createdSurface || contentCompositionDirty_) {
-        updateRect = surfaceRect;
-    } else {
-        OffsetRect(&updateRect, paddingX, paddingY);
+        logicalPaintRect = fullLogicalPaintRect;
     }
+    RECT surfaceUpdateRect = logicalPaintRect;
+    OffsetRect(&surfaceUpdateRect, paddingX, paddingY);
 
     IDXGISurface* dxgiSurface = nullptr;
     POINT updateOffset {};
     HRESULT hr = contentCompositionSurface_->BeginDraw(
-        &updateRect,
+        &surfaceUpdateRect,
         __uuidof(IDXGISurface),
         reinterpret_cast<void**>(&dxgiSurface),
         &updateOffset);
@@ -3105,10 +3120,14 @@ bool App::UpdateContentComposition(RECT clientRect, RECT dirtyRect) {
     }
 
     const int savedDc = SaveDC(contentDc);
-    SetViewportOrgEx(contentDc, updateOffset.x - updateRect.left + paddingX, updateOffset.y - updateRect.top + paddingY, nullptr);
-    IntersectClipRect(contentDc, updateRect.left, updateRect.top, updateRect.right, updateRect.bottom);
+    SetViewportOrgEx(
+        contentDc,
+        updateOffset.x - surfaceUpdateRect.left + paddingX,
+        updateOffset.y - surfaceUpdateRect.top + paddingY,
+        nullptr);
+    IntersectClipRect(contentDc, logicalPaintRect.left, logicalPaintRect.top, logicalPaintRect.right, logicalPaintRect.bottom);
     HBRUSH backgroundBrush = CreateSolidBrush(RGB(18, 22, 29));
-    FillRect(contentDc, &updateRect, backgroundBrush);
+    FillRect(contentDc, &logicalPaintRect, backgroundBrush);
     DeleteObject(backgroundBrush);
     PaintCanvas(contentDc, clientRect);
     if (savedDc != 0) {
@@ -7596,6 +7615,7 @@ bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect
         pageBitmapInfo.bmiHeader.biCompression = BI_RGB;
 
         SetStretchBltMode(cacheDc, HALFTONE);
+        SetBrushOrgEx(cacheDc, 0, 0, nullptr);
         StretchDIBits(
             cacheDc,
             0,
@@ -7775,6 +7795,7 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
         pageBitmapInfo.bmiHeader.biCompression = BI_RGB;
 
         SetStretchBltMode(cacheDc, HALFTONE);
+        SetBrushOrgEx(cacheDc, 0, 0, nullptr);
         StretchDIBits(
             cacheDc,
             0,
@@ -8000,6 +8021,7 @@ void App::BuildInteractionPageSnapshot(const PageView& pageView) {
         pageBitmapInfo.bmiHeader.biCompression = BI_RGB;
 
         SetStretchBltMode(cacheDc, HALFTONE);
+        SetBrushOrgEx(cacheDc, 0, 0, nullptr);
         StretchDIBits(
             cacheDc,
             0,
@@ -8104,6 +8126,7 @@ std::optional<RECT> App::InteractionPreviewBoundsForPage(std::size_t pageIndex) 
 
     RECT bounds {};
     bool hasBounds = false;
+    const int damagePadding = InteractionDamagePadding(WindowDpi(window_));
     const auto includeRect = [&](RECT rect) {
         bounds = hasBounds ? UnionRectangles(bounds, rect) : rect;
         hasBounds = true;
@@ -8111,7 +8134,7 @@ std::optional<RECT> App::InteractionPreviewBoundsForPage(std::size_t pageIndex) 
 
     if (pageIndex < interactionPreviewStrokes_.size()) {
         for (const InteractionPreviewStroke& entry : interactionPreviewStrokes_[pageIndex]) {
-            const auto rect = StrokeBoundsRect(entry.stroke, pageView.scale, 16);
+            const auto rect = StrokeBoundsRect(entry.stroke, pageView.scale, damagePadding);
             if (!rect.has_value()) {
                 continue;
             }
@@ -8135,17 +8158,17 @@ std::optional<RECT> App::InteractionPreviewBoundsForPage(std::size_t pageIndex) 
                 maxY = std::max(maxY, corner.y);
             }
             RECT windowRect = MakeRect(
-                pageView.rect.left + static_cast<int>(std::floor(minX * pageView.scale)) - 20,
-                pageView.rect.top + static_cast<int>(std::floor(minY * pageView.scale)) - 20,
-                pageView.rect.left + static_cast<int>(std::ceil(maxX * pageView.scale)) + 21,
-                pageView.rect.top + static_cast<int>(std::ceil(maxY * pageView.scale)) + 21);
+                pageView.rect.left + static_cast<int>(std::floor(minX * pageView.scale)) - damagePadding,
+                pageView.rect.top + static_cast<int>(std::floor(minY * pageView.scale)) - damagePadding,
+                pageView.rect.left + static_cast<int>(std::ceil(maxX * pageView.scale)) + damagePadding + 1,
+                pageView.rect.top + static_cast<int>(std::ceil(maxY * pageView.scale)) + damagePadding + 1);
             includeRect(windowRect);
         }
     }
 
     if (pageIndex < interactionPreviewTexts_.size()) {
         for (const InteractionPreviewText& entry : interactionPreviewTexts_[pageIndex]) {
-            const auto rect = PageTextCachedBoundsRect(entry.text, entry.boundsWidth, entry.boundsHeight, pageView.scale, 16);
+            const auto rect = PageTextCachedBoundsRect(entry.text, entry.boundsWidth, entry.boundsHeight, pageView.scale, damagePadding);
             if (!rect.has_value()) {
                 continue;
             }
@@ -8799,6 +8822,7 @@ void App::CaptureZoomPageSnapshot(const PageView& pageView) {
     bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
     SetStretchBltMode(snapshotDc, HALFTONE);
+    SetBrushOrgEx(snapshotDc, 0, 0, nullptr);
     StretchDIBits(
         snapshotDc,
         0,

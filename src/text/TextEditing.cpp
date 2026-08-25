@@ -448,7 +448,12 @@ bool App::EnsureTextEditWindow(TextAlignment alignment) {
         SetWindowLongPtrW(textEditWindow_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
         textEditOriginalProc_ = reinterpret_cast<WNDPROC>(
             SetWindowLongPtrW(textEditWindow_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&App::TextEditProc)));
-        SendMessageW(textEditWindow_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 6));
+        const int editMargin = std::max(1, ScaleForDpi(6, WindowDpi(window_)));
+        SendMessageW(
+            textEditWindow_,
+            EM_SETMARGINS,
+            EC_LEFTMARGIN | EC_RIGHTMARGIN,
+            MAKELPARAM(editMargin, editMargin));
         SendMessageW(textEditWindow_, EM_SETSEL, selectionStart, selectionEnd);
         if (textEditFont_ != nullptr) {
             SendMessageW(textEditWindow_, WM_SETFONT, reinterpret_cast<WPARAM>(textEditFont_), TRUE);
@@ -642,12 +647,15 @@ void App::RefreshTextEditControl() {
     const textgeom::TextPixelMetrics metrics = textgeom::MeasurePageTextPixels(layoutText, page.width, editScale);
     const int fontHeight = textgeom::PageTextFontPixelHeight(layoutText, editScale);
     const int minimumAutoWidth = std::max(ScaleForDpi(80, dpi), fontHeight * 3);
+    const int editInset = ScaleForDpi(3, dpi);
+    const int editPadding = ScaleForDpi(10, dpi);
+    const int editMargin = std::max(1, ScaleForDpi(6, dpi));
     const int contentWidth = (text.width > 0.0f) ? metrics.width : std::max(metrics.width, minimumAutoWidth);
-    const int width = std::max(contentWidth + 10, ScaleForDpi(24, dpi));
+    const int width = std::max(contentWidth + editPadding, ScaleForDpi(24, dpi));
     const int explicitHeight = std::max(0, static_cast<int>(std::ceil(text.height * editScale)));
-    const int height = std::max(std::max(metrics.height, explicitHeight) + 10, fontHeight + 10);
-    const int left = pageView.rect.left + static_cast<int>(std::lround(text.x * pageView.scale)) - 3;
-    const int top = pageView.rect.top + static_cast<int>(std::lround(text.y * pageView.scale)) - 3;
+    const int height = std::max(std::max(metrics.height, explicitHeight) + editPadding, fontHeight + editPadding);
+    const int left = pageView.rect.left + static_cast<int>(std::lround(text.x * pageView.scale)) - editInset;
+    const int top = pageView.rect.top + static_cast<int>(std::lround(text.y * pageView.scale)) - editInset;
     const RECT editRect = MakeRect(left, top, left + width, top + height);
 
     const int editFontHeight = std::max(1, fontHeight);
@@ -694,6 +702,11 @@ void App::RefreshTextEditControl() {
         }
     }
     if (boundsChanged || needsLayout) {
+        SendMessageW(
+            textEditWindow_,
+            EM_SETMARGINS,
+            EC_LEFTMARGIN | EC_RIGHTMARGIN,
+            MAKELPARAM(editMargin, editMargin));
         UINT setWindowFlags = SWP_NOACTIVATE | SWP_NOCOPYBITS;
         if (wasVisible) {
             setWindowFlags |= SWP_SHOWWINDOW;
