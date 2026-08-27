@@ -362,7 +362,6 @@ private:
     void EndTextEditControl();
     bool EnsureTextEditWindow(TextAlignment alignment);
     void RefreshTextEditControl();
-    void InvalidateEditingTextRegion();
     void ReleaseTextEditBackgroundBrush();
     void RefreshTextEditBackgroundBrush(const RECT& editRect);
     [[nodiscard]] COLORREF EditingTextBackgroundColor() const;
@@ -842,6 +841,7 @@ private:
     HBITMAP textEditBackgroundBitmap_ = nullptr;
     HBRUSH textEditBackgroundBrush_ = nullptr;
     HBRUSH textEditSolidBackgroundBrush_ = nullptr;
+    RECT textEditBackgroundRect_ {};
     COLORREF textEditBackgroundColor_ = RGB(255, 255, 255);
     bool textEditWindowNeedsLayout_ = false;
     bool textEditSyncSuppressed_ = false;

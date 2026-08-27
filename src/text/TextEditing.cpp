@@ -183,13 +183,6 @@ void App::SyncTextEditModel() {
     }
 
     page.texts[*editingTextIndex_].content = std::move(content);
-    RECT clientRect {};
-    GetClientRect(window_, &clientRect);
-    const PageView pageView = CalculatePageView(clientRect, *editingTextPageIndex_);
-    if (pageView.valid) {
-        textgeom::CapturePageTextFormatting(textEditWindow_, page.texts[*editingTextIndex_], pageView.scale);
-    }
-    InvalidatePageSurfaceCache(*editingTextPageIndex_);
 }
 
 void App::ToggleTextFormatPopup() {
@@ -654,6 +647,21 @@ bool App::EnsureTextEditWindow(TextAlignment alignment) {
     CHARRANGE selection {};
     SendMessageW(textEditWindow_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
 
+    if (!text.empty()
+        && editingTextPageIndex_.has_value()
+        && editingTextIndex_.has_value()
+        && *editingTextPageIndex_ < document_.PageCount()) {
+        Page& page = document_.PageAt(*editingTextPageIndex_);
+        if (*editingTextIndex_ < page.texts.size()) {
+            page.texts[*editingTextIndex_].content = text;
+            RECT clientRect {};
+            GetClientRect(window_, &clientRect);
+            const PageView pageView = CalculatePageView(clientRect, *editingTextPageIndex_);
+            if (pageView.valid) {
+                textgeom::CapturePageTextFormatting(textEditWindow_, page.texts[*editingTextIndex_], pageView.scale);
+            }
+        }
+    }
     if (textEditOriginalProc_ != nullptr) {
         SetWindowLongPtrW(textEditWindow_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(textEditOriginalProc_));
     }
@@ -699,21 +707,6 @@ void App::EndTextEditControl() {
     }
 }
 
-void App::InvalidateEditingTextRegion() {
-    if (window_ == nullptr || !editingTextPageIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
-        return;
-    }
-
-    RECT clientRect {};
-    GetClientRect(window_, &clientRect);
-    const PageView pageView = CalculatePageView(clientRect, *editingTextPageIndex_);
-    if (!pageView.valid) {
-        InvalidateCanvas();
-        return;
-    }
-    InvalidateRect(window_, &pageView.rect, FALSE);
-}
-
 COLORREF App::EditingTextBackgroundColor() const {
     if (!editingTextPageIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
         return RGB(255, 255, 255);
@@ -738,9 +731,17 @@ void App::ReleaseTextEditBackgroundBrush() {
         DeleteObject(textEditBackgroundBitmap_);
         textEditBackgroundBitmap_ = nullptr;
     }
+    textEditBackgroundRect_ = RECT {};
 }
 
 void App::RefreshTextEditBackgroundBrush(const RECT& editRect) {
+    if (textEditBackgroundBrush_ != nullptr
+        && editRect.left >= textEditBackgroundRect_.left
+        && editRect.top >= textEditBackgroundRect_.top
+        && editRect.right <= textEditBackgroundRect_.right
+        && editRect.bottom <= textEditBackgroundRect_.bottom) {
+        return;
+    }
     ReleaseTextEditBackgroundBrush();
     if (window_ == nullptr
         || !editingTextPageIndex_.has_value()
@@ -761,8 +762,13 @@ void App::RefreshTextEditBackgroundBrush(const RECT& editRect) {
         return;
     }
 
-    const int width = editRect.right - editRect.left;
-    const int height = editRect.bottom - editRect.top;
+    const int editWidth = editRect.right - editRect.left;
+    const int editHeight = editRect.bottom - editRect.top;
+    const UINT captureDpi = WindowDpi(window_);
+    RECT captureRect = editRect;
+    InflateRect(&captureRect, std::max(ScaleForDpi(96, captureDpi), editWidth / 2), std::max(ScaleForDpi(48, captureDpi), editHeight / 2));
+    const int width = captureRect.right - captureRect.left;
+    const int height = captureRect.bottom - captureRect.top;
     void* bits = nullptr;
     HBITMAP bitmap = CreateTopDown32BitDibSection(backgroundDc, width, height, &bits);
     if (bitmap == nullptr || bits == nullptr) {
@@ -783,7 +789,7 @@ void App::RefreshTextEditBackgroundBrush(const RECT& editRect) {
     DeleteObject(canvasBrush);
 
     const PageView pageView = CalculatePageView(clientRect, *editingTextPageIndex_);
-    SetViewportOrgEx(backgroundDc, -editRect.left, -editRect.top, nullptr);
+    SetViewportOrgEx(backgroundDc, -captureRect.left, -captureRect.top, nullptr);
     if (pageView.valid) {
         PaintPage(backgroundDc, pageView);
     }
@@ -801,6 +807,7 @@ void App::RefreshTextEditBackgroundBrush(const RECT& editRect) {
 
     textEditBackgroundBitmap_ = bitmap;
     textEditBackgroundBrush_ = brush;
+    textEditBackgroundRect_ = captureRect;
 }
 
 void App::RefreshTextEditControl() {
@@ -827,10 +834,12 @@ void App::RefreshTextEditControl() {
 
     const UINT dpi = WindowDpi(window_);
     const PageText& text = page.texts[*editingTextIndex_];
-    const PageText layoutText = CurrentEditingTextLayout().value_or(text);
-    if (!EnsureTextEditWindow(layoutText.alignment)) {
+    HWND previousTextEditWindow = textEditWindow_;
+    if (!EnsureTextEditWindow(text.alignment)) {
         return;
     }
+    const bool editWindowRecreated = textEditWindow_ != previousTextEditWindow;
+    PageText layoutText = CurrentEditingTextLayout().value_or(text);
     const COLORREF backgroundColor = EditingTextBackgroundColor();
     if (backgroundColor != textEditBackgroundColor_) {
         textEditBackgroundColor_ = backgroundColor;
@@ -879,6 +888,9 @@ void App::RefreshTextEditControl() {
     textEditAlignment_ = layoutText.alignment;
     if (fontChanged || textEditWindowNeedsLayout_) {
         textEditSyncSuppressed_ = true;
+        if (!fontChanged && !editWindowRecreated) {
+            textgeom::CapturePageTextFormatting(textEditWindow_, layoutText, editScale);
+        }
         textgeom::ApplyPageTextFormatting(textEditWindow_, layoutText, editScale);
         textEditSyncSuppressed_ = false;
     }
@@ -962,6 +974,12 @@ void App::CommitTextEdit() {
         if (page.texts[textIndex].content.empty()) {
             page.texts.erase(page.texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
         } else {
+            RECT clientRect {};
+            GetClientRect(window_, &clientRect);
+            const PageView pageView = CalculatePageView(clientRect, pageIndex);
+            if (pageView.valid) {
+                textgeom::CapturePageTextFormatting(textEditWindow_, page.texts[textIndex], pageView.scale);
+            }
             committedText = page.texts[textIndex];
         }
     }

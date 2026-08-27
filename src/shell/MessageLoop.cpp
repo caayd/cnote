@@ -487,7 +487,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             && !textEditSyncSuppressed_) {
             SyncTextEditModel();
             RefreshTextEditControl();
-            InvalidateEditingTextRegion();
             return 0;
         }
         break;
@@ -1302,7 +1301,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 }
             }
             if (textEditBackgroundBrush_ != nullptr) {
-                SetBrushOrgEx(editDc, 0, 0, nullptr);
+                SetBrushOrgEx(editDc, textEditBackgroundRect_.left - textEditBounds_.left, textEditBackgroundRect_.top - textEditBounds_.top, nullptr);
                 return reinterpret_cast<INT_PTR>(textEditBackgroundBrush_);
             }
             SetBkColor(editDc, textEditBackgroundColor_);
@@ -1415,7 +1414,7 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
         RECT clientRect {};
         GetClientRect(window, &clientRect);
         if (app->textEditBackgroundBrush_ != nullptr) {
-            SetBrushOrgEx(editDc, 0, 0, nullptr);
+            SetBrushOrgEx(editDc, app->textEditBackgroundRect_.left - app->textEditBounds_.left, app->textEditBackgroundRect_.top - app->textEditBounds_.top, nullptr);
             FillRect(editDc, &clientRect, app->textEditBackgroundBrush_);
         } else {
             HBRUSH fallbackBrush = CreateSolidBrush(app->textEditBackgroundColor_);
