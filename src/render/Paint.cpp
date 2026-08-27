@@ -102,7 +102,7 @@ void App::Paint() {
     FillRect(memoryDc, &fallbackPaintRect, backgroundBrush);
     DeleteObject(backgroundBrush);
 
-    PaintCanvas(memoryDc, clientRect);
+    PaintCanvas(memoryDc, clientRect, CanvasRect(clientRect));
     if (!UpdatePdfSidebarComposition(clientRect)) {
         PaintPdfSidebar(memoryDc, clientRect);
     }

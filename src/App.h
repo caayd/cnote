@@ -616,7 +616,7 @@ private:
     void PaintPaletteMenu(HDC hdc, RECT clientRect) const;
     void PaintPaletteWheel(HDC hdc, RECT clientRect) const;
     void PaintPaletteWheel(HDC hdc, RECT clientRect, std::optional<std::size_t> hoverIndex) const;
-    void PaintCanvas(HDC hdc, RECT clientRect);
+    void PaintCanvas(HDC hdc, RECT clientRect, RECT paintBounds);
     void PaintPage(HDC hdc, const PageView& pageView);
     [[nodiscard]] bool PaintNativePdfBackground(HDC hdc, const Page& page, const RECT& destinationRect) const;
     void PaintSelectionOverlay(HDC hdc, RECT canvasRect) const;
@@ -901,7 +901,7 @@ private:
     static constexpr UINT kToolbarHideDetachDelayMs = 72;
     static constexpr UINT kPdfSidebarSlideFrameMs = 1;
     static constexpr UINT kPdfSidebarSlideDurationMs = 150;
-    static constexpr UINT kSmoothScrollAnimationDurationMs = 140;
+    static constexpr UINT kSmoothScrollAnimationDurationMs = 90;
     static constexpr float kSmoothScrollPaddingRatio = 0.5f;
     static constexpr int kSmoothScrollPaddingFloor = 240;
     static constexpr float kMinBrushSize = 0.5f;

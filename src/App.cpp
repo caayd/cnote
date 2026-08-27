@@ -3129,7 +3129,14 @@ bool App::UpdateContentComposition(RECT clientRect, RECT dirtyRect) {
     HBRUSH backgroundBrush = CreateSolidBrush(RGB(18, 22, 29));
     FillRect(contentDc, &logicalPaintRect, backgroundBrush);
     DeleteObject(backgroundBrush);
-    PaintCanvas(contentDc, clientRect);
+    RECT canvasPaintBounds = CanvasRect(clientRect);
+    if (useSmoothScrollPadding) {
+        canvasPaintBounds.left -= paddingX;
+        canvasPaintBounds.top -= paddingY;
+        canvasPaintBounds.right += paddingX;
+        canvasPaintBounds.bottom += paddingY;
+    }
+    PaintCanvas(contentDc, clientRect, canvasPaintBounds);
     if (savedDc != 0) {
         RestoreDC(contentDc, savedDc);
     }
@@ -7403,24 +7410,23 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
     }
 }
 
-void App::PaintCanvas(HDC hdc, RECT clientRect) {
-    const RECT canvasRect = CanvasRect(clientRect);
+void App::PaintCanvas(HDC hdc, RECT clientRect, RECT paintBounds) {
     RECT clipRect {};
     GetClipBox(hdc, &clipRect);
 
     HBRUSH canvasBrush = CreateSolidBrush(RGB(22, 26, 33));
-    FillRect(hdc, &canvasRect, canvasBrush);
+    FillRect(hdc, &paintBounds, canvasBrush);
     DeleteObject(canvasBrush);
 
     SaveDC(hdc);
-    IntersectClipRect(hdc, canvasRect.left, canvasRect.top, canvasRect.right, canvasRect.bottom);
+    IntersectClipRect(hdc, paintBounds.left, paintBounds.top, paintBounds.right, paintBounds.bottom);
     GetClipBox(hdc, &clipRect);
     for (const PageView& pageView : CalculatePageViews(clientRect)) {
         if (!pageView.valid) {
             continue;
         }
         const int paintPadding = zoomSessionActive_ ? 0 : 20;
-        if (pageView.rect.bottom < canvasRect.top - paintPadding || pageView.rect.top > canvasRect.bottom + paintPadding) {
+        if (pageView.rect.bottom < paintBounds.top - paintPadding || pageView.rect.top > paintBounds.bottom + paintPadding) {
             continue;
         }
         RECT visibleRect {};
@@ -7430,7 +7436,7 @@ void App::PaintCanvas(HDC hdc, RECT clientRect) {
         PaintPage(hdc, pageView);
     }
     RestoreDC(hdc, -1);
-    PaintSelectionOverlay(hdc, canvasRect);
+    PaintSelectionOverlay(hdc, paintBounds);
 }
 
 bool App::PaintNativePdfBackground(HDC hdc, const Page& page, const RECT& destinationRect) const {

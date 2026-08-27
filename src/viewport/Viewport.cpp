@@ -52,7 +52,8 @@ int MaximizedCanvasWidthForZoom(HWND window, int fallbackCanvasWidth, int sideba
 
 float SmoothScrollInterpolation(float start, float target, double progress) {
     const double clampedProgress = std::clamp(progress, 0.0, 1.0);
-    const double eased = (3.0 * clampedProgress * clampedProgress) - (2.0 * clampedProgress * clampedProgress * clampedProgress);
+    const double remaining = 1.0 - clampedProgress;
+    const double eased = 1.0 - (remaining * remaining * remaining);
     return start + static_cast<float>((target - start) * eased);
 }
 
@@ -354,9 +355,9 @@ bool App::StartSmoothScrollCompositionAnimation(float startOffsetX, float startO
             hr = animation->AddCubic(
                 0.0,
                 startValue,
-                0.0f,
-                delta * static_cast<float>(3.0 / (durationSeconds * durationSeconds)),
-                delta * static_cast<float>(-2.0 / (durationSeconds * durationSeconds * durationSeconds)));
+                delta * static_cast<float>(3.0 / durationSeconds),
+                delta * static_cast<float>(-3.0 / (durationSeconds * durationSeconds)),
+                delta * static_cast<float>(1.0 / (durationSeconds * durationSeconds * durationSeconds)));
         }
         if (SUCCEEDED(hr)) {
             hr = animation->End(durationSeconds, targetValue);
