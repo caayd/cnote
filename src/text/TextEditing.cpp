@@ -273,7 +273,6 @@ void App::SetEditingTextAlignment(TextAlignment alignment) {
 
     page.texts[*editingTextIndex_].alignment = alignment;
     textFormatFontMenuOpen_ = false;
-    InvalidatePageSurfaceCache(*editingTextPageIndex_);
     RefreshTextEditControl();
     if (textEditWindow_ != nullptr) {
         SetFocus(textEditWindow_);
@@ -356,7 +355,6 @@ void App::ApplyEditingTextCharacterFormat(
         textgeom::CapturePageTextFormatting(textEditWindow_, page.texts[*editingTextIndex_], pageView.scale);
     }
     textEditSyncSuppressed_ = false;
-    InvalidatePageSurfaceCache(*editingTextPageIndex_);
 }
 
 void App::SetEditingTextFontSize(float fontSize) {
@@ -375,7 +373,6 @@ void App::SetEditingTextFontSize(float fontSize) {
     }
     ApplyEditingTextCharacterFormat(CFM_SIZE, 0, clampedSize);
     textFormatFontMenuOpen_ = false;
-    InvalidatePageSurfaceCache(*editingTextPageIndex_);
     RefreshTextEditControl();
     if (textFormatPopupOpen_ && window_ != nullptr) {
         InvalidateRect(window_, nullptr, FALSE);
@@ -397,7 +394,6 @@ void App::SetEditingTextFontFamily(TextFontFamily family) {
     }
     ApplyEditingTextCharacterFormat(CFM_FACE, 0, std::nullopt, family);
     textFormatFontMenuOpen_ = false;
-    InvalidatePageSurfaceCache(*editingTextPageIndex_);
     RefreshTextEditControl();
     if (textEditWindow_ != nullptr) {
         SetFocus(textEditWindow_);
@@ -426,7 +422,6 @@ void App::ToggleEditingTextBold() {
     }
     ApplyEditingTextCharacterFormat(CFM_BOLD, enable ? CFE_BOLD : 0U);
     textFormatFontMenuOpen_ = false;
-    InvalidatePageSurfaceCache(*editingTextPageIndex_);
     RefreshTextEditControl();
     if (textEditWindow_ != nullptr) {
         SetFocus(textEditWindow_);
@@ -455,7 +450,6 @@ void App::ToggleEditingTextItalic() {
     }
     ApplyEditingTextCharacterFormat(CFM_ITALIC, enable ? CFE_ITALIC : 0U);
     textFormatFontMenuOpen_ = false;
-    InvalidatePageSurfaceCache(*editingTextPageIndex_);
     RefreshTextEditControl();
     if (textEditWindow_ != nullptr) {
         SetFocus(textEditWindow_);
@@ -484,7 +478,6 @@ void App::ToggleEditingTextUnderline() {
     }
     ApplyEditingTextCharacterFormat(CFM_UNDERLINE, enable ? CFE_UNDERLINE : 0U);
     textFormatFontMenuOpen_ = false;
-    InvalidatePageSurfaceCache(*editingTextPageIndex_);
     RefreshTextEditControl();
     if (textEditWindow_ != nullptr) {
         SetFocus(textEditWindow_);
@@ -984,11 +977,20 @@ void App::CommitTextEdit() {
         }
     }
 
+    const RECT editFrameRect = (window_ != nullptr && HasRect(textEditBounds_))
+        ? LiveTextEditFrameRect(textEditBounds_, WindowDpi(window_))
+        : RECT {};
+    if (pageIndex < document_.PageCount()) {
+        InvalidatePageSurfaceCache(pageIndex);
+    }
     EndTextEditControl();
     editingTextPageIndex_.reset();
     editingTextIndex_.reset();
     editingTextBefore_.reset();
     editingTextCreatesText_ = false;
+    if (window_ != nullptr && HasRect(editFrameRect)) {
+        RedrawWindow(window_, &editFrameRect, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    }
     ClearSelection();
     if (pageIndex < document_.PageCount() && textIndex < document_.PageAt(pageIndex).texts.size()) {
         selectedTextIndices_[pageIndex].push_back(textIndex);
@@ -1012,7 +1014,6 @@ void App::CommitTextEdit() {
         if (changed) {
             NotifyDocumentMutated();
         }
-        InvalidatePageSurfaceCache(pageIndex);
     }
     UpdateCaptureState();
     InvalidateCanvas();
@@ -1074,11 +1075,17 @@ void App::CancelTextEdit() {
         InvalidatePageSurfaceCache(pageIndex);
     }
 
+    const RECT editFrameRect = (window_ != nullptr && HasRect(textEditBounds_))
+        ? LiveTextEditFrameRect(textEditBounds_, WindowDpi(window_))
+        : RECT {};
     EndTextEditControl();
     editingTextPageIndex_.reset();
     editingTextIndex_.reset();
     editingTextBefore_.reset();
     editingTextCreatesText_ = false;
+    if (window_ != nullptr && HasRect(editFrameRect)) {
+        RedrawWindow(window_, &editFrameRect, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    }
     ClearSelection();
     if (pageIndex < document_.PageCount() && textIndex < document_.PageAt(pageIndex).texts.size()) {
         selectedTextIndices_[pageIndex].push_back(textIndex);

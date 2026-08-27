@@ -194,6 +194,7 @@ void ApplyPageTextFormatting(HWND editWindow, const PageText& text, float scale,
         SendMessageW(editWindow, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&format));
     };
 
+    SendMessageW(editWindow, WM_SETREDRAW, FALSE, 0);
     CHARRANGE originalSelection {};
     SendMessageW(editWindow, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&originalSelection));
     applyRange(0, -1, DefaultPageTextStyle(text));
@@ -205,6 +206,8 @@ void ApplyPageTextFormatting(HWND editWindow, const PageText& text, float scale,
         }
     }
     SendMessageW(editWindow, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&originalSelection));
+    SendMessageW(editWindow, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(editWindow, nullptr, TRUE);
 }
 
 void CapturePageTextFormatting(HWND editWindow, PageText& text, float scale) {
@@ -240,6 +243,7 @@ void CapturePageTextFormatting(HWND editWindow, PageText& text, float scale) {
         }
         return style;
     };
+    SendMessageW(editWindow, WM_SETREDRAW, FALSE, 0);
     CHARRANGE originalSelection {};
     SendMessageW(editWindow, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&originalSelection));
 
@@ -298,6 +302,7 @@ void CapturePageTextFormatting(HWND editWindow, PageText& text, float scale) {
         text.styleSpans.push_back(*activeSpan);
     }
     SendMessageW(editWindow, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&originalSelection));
+    SendMessageW(editWindow, WM_SETREDRAW, TRUE, 0);
 }
 
 UINT DrawTextAlignmentFlags(TextAlignment alignment) {
