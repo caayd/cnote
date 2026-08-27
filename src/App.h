@@ -365,6 +365,7 @@ private:
     void InvalidateEditingTextRegion();
     void ReleaseTextEditBackgroundBrush();
     void RefreshTextEditBackgroundBrush(const RECT& editRect);
+    [[nodiscard]] COLORREF EditingTextBackgroundColor() const;
     [[nodiscard]] std::uint64_t AllocateTextId() const;
     void PushTextHistoryAction(HistoryActionType type, std::size_t pageIndex, std::size_t index, PageText text, PageText replacementText = {});
     void BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, ImageTransformHandle handle, POINT cursor);
@@ -840,6 +841,8 @@ private:
     WNDPROC textEditOriginalProc_ = nullptr;
     HBITMAP textEditBackgroundBitmap_ = nullptr;
     HBRUSH textEditBackgroundBrush_ = nullptr;
+    HBRUSH textEditSolidBackgroundBrush_ = nullptr;
+    COLORREF textEditBackgroundColor_ = RGB(255, 255, 255);
     bool textEditWindowNeedsLayout_ = false;
     bool textEditSyncSuppressed_ = false;
     bool textEditWindowAutoShowSuppressed_ = false;

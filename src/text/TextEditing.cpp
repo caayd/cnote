@@ -608,6 +608,12 @@ bool App::EnsureTextEditWindow(TextAlignment alignment) {
         }
 
         textEditWindowNeedsLayout_ = true;
+        textEditBackgroundColor_ = EditingTextBackgroundColor();
+        if (textEditSolidBackgroundBrush_ != nullptr) {
+            DeleteObject(textEditSolidBackgroundBrush_);
+        }
+        textEditSolidBackgroundBrush_ = CreateSolidBrush(textEditBackgroundColor_);
+        SendMessageW(textEditWindow_, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(textEditBackgroundColor_));
         SetWindowLongPtrW(textEditWindow_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
         textEditOriginalProc_ = reinterpret_cast<WNDPROC>(
             SetWindowLongPtrW(textEditWindow_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&App::TextEditProc)));
@@ -681,6 +687,11 @@ void App::EndTextEditControl() {
     textEditWindowAutoShowSuppressed_ = false;
     CancelTextFormatPopup();
     ReleaseTextEditBackgroundBrush();
+    if (textEditSolidBackgroundBrush_ != nullptr) {
+        DeleteObject(textEditSolidBackgroundBrush_);
+        textEditSolidBackgroundBrush_ = nullptr;
+    }
+    textEditBackgroundColor_ = RGB(255, 255, 255);
     textEditBounds_ = RECT {};
     if (window_ != nullptr && HasRect(previousBounds)) {
         const RECT frameRect = LiveTextEditFrameRect(previousBounds, WindowDpi(window_));
@@ -701,6 +712,21 @@ void App::InvalidateEditingTextRegion() {
         return;
     }
     InvalidateRect(window_, &pageView.rect, FALSE);
+}
+
+COLORREF App::EditingTextBackgroundColor() const {
+    if (!editingTextPageIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+        return RGB(255, 255, 255);
+    }
+    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    if (page.sourcePdfSourceIndex != -1 || page.sourcePdfPageIndex != -1) {
+        return RGB(255, 255, 255);
+    }
+    if (page.raster.pixels.size() >= 3U) {
+        // Raster pixels are stored as BGRA; the page background is the first pixel.
+        return RGB(page.raster.pixels[2], page.raster.pixels[1], page.raster.pixels[0]);
+    }
+    return RGB(255, 255, 255);
 }
 
 void App::ReleaseTextEditBackgroundBrush() {
@@ -804,6 +830,15 @@ void App::RefreshTextEditControl() {
     const PageText layoutText = CurrentEditingTextLayout().value_or(text);
     if (!EnsureTextEditWindow(layoutText.alignment)) {
         return;
+    }
+    const COLORREF backgroundColor = EditingTextBackgroundColor();
+    if (backgroundColor != textEditBackgroundColor_) {
+        textEditBackgroundColor_ = backgroundColor;
+        if (textEditSolidBackgroundBrush_ != nullptr) {
+            DeleteObject(textEditSolidBackgroundBrush_);
+        }
+        textEditSolidBackgroundBrush_ = CreateSolidBrush(backgroundColor);
+        SendMessageW(textEditWindow_, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(backgroundColor));
     }
     const float editScale = pageView.scale;
     const textgeom::TextPixelMetrics metrics = textgeom::MeasurePageTextPixels(layoutText, page.width, editScale);

@@ -1305,7 +1305,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 SetBrushOrgEx(editDc, 0, 0, nullptr);
                 return reinterpret_cast<INT_PTR>(textEditBackgroundBrush_);
             }
-            SetBkColor(editDc, RGB(255, 255, 255));
+            SetBkColor(editDc, textEditBackgroundColor_);
+            if (textEditSolidBackgroundBrush_ != nullptr) {
+                return reinterpret_cast<INT_PTR>(textEditSolidBackgroundBrush_);
+            }
             return reinterpret_cast<INT_PTR>(GetStockObject(WHITE_BRUSH));
         }
         break;
@@ -1415,7 +1418,7 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
             SetBrushOrgEx(editDc, 0, 0, nullptr);
             FillRect(editDc, &clientRect, app->textEditBackgroundBrush_);
         } else {
-            HBRUSH fallbackBrush = CreateSolidBrush(RGB(255, 255, 255));
+            HBRUSH fallbackBrush = CreateSolidBrush(app->textEditBackgroundColor_);
             FillRect(editDc, &clientRect, fallbackBrush);
             DeleteObject(fallbackBrush);
         }
