@@ -9,6 +9,7 @@
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -65,19 +66,10 @@ using cnote::PageTextEqual;
 using cnote::StrokeEqual;
 using cnote::StrokeStyleEqual;
 using cnote::Vec2Equal;
-using text::CreatePageTextFont;
-using text::DrawTextAlignmentFlags;
-using text::LayoutPageText;
 using text::MeasurePageTextBounds;
 using text::PageTextBounds;
 using text::PageTextCachedBoundsRect;
 using text::PageTextBoundsRect;
-using text::PageTextFontFace;
-using text::PageTextFontPixelHeight;
-using text::PageTextFontWeight;
-using text::ResolvedPageTextWidth;
-using text::TrimTrailingLayoutWhitespace;
-using text::WrappedTextLayout;
 using ui::FillRoundedRect;
 using ui::FormatZoomPercentValue;
 using ui::HasRect;
@@ -366,6 +358,7 @@ std::uint64_t PageTextSurfaceSignature(const Page& page) {
     std::uint64_t hash = 14695981039346656037ULL;
     HashValue(hash, page.texts.size());
     for (const PageText& text : page.texts) {
+        HashValue(hash, text.id);
         HashValue(hash, text.x);
         HashValue(hash, text.y);
         HashValue(hash, text.width);
@@ -380,6 +373,17 @@ std::uint64_t PageTextSurfaceSignature(const Page& page) {
         HashValue(hash, text.content.size());
         if (!text.content.empty()) {
             HashBytes(hash, text.content.data(), text.content.size() * sizeof(wchar_t));
+        }
+        HashValue(hash, text.styleSpans.size());
+        for (const PageTextStyleSpan& span : text.styleSpans) {
+            HashValue(hash, span.start);
+            HashValue(hash, span.length);
+            HashValue(hash, span.style.fontSize);
+            HashValue(hash, span.style.color);
+            HashValue(hash, span.style.fontFamily);
+            HashValue(hash, span.style.bold);
+            HashValue(hash, span.style.italic);
+            HashValue(hash, span.style.underline);
         }
     }
     return hash;
@@ -4856,7 +4860,7 @@ void App::BeginTextTransform(std::size_t pageIndex, std::size_t textIndex, Image
     transformingTextIndex_ = textIndex;
     textTransformHandle_ = handle;
     textTransformInitial_ = document_.PageAt(pageIndex).texts[textIndex];
-    textTransformBeforePage_ = document_.PageAt(pageIndex);
+    textTransformBefore_ = document_.PageAt(pageIndex).texts[textIndex];
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
@@ -4979,6 +4983,9 @@ void App::UpdateTextTransform(POINT cursor) {
         }
 
         updated.fontSize = std::max(kMinTextFontSize, textTransformInitial_.fontSize * scale);
+        for (PageTextStyleSpan& span : updated.styleSpans) {
+            span.style.fontSize = std::max(kMinTextFontSize, span.style.fontSize * scale);
+        }
         if (textTransformInitial_.width > 0.0f) {
             updated.width = std::max(minTextBoxWidth, textTransformInitial_.width * scale);
         }
@@ -5078,6 +5085,11 @@ void App::UpdateTextTransform(POINT cursor) {
     const PageTextBounds updatedBounds = MeasurePageTextBounds(updated, page.width);
     float deltaX = 0.0f;
     float deltaY = 0.0f;
+    if (updatedBounds.left < 0.0f) {
+        deltaX = -updatedBounds.left;
+    } else if (updatedBounds.right > page.width) {
+        deltaX = page.width - updatedBounds.right;
+    }
     if (updatedBounds.top < 0.0f) {
         deltaY = -updatedBounds.top;
     } else if (updatedBounds.bottom > page.height) {
@@ -5113,18 +5125,20 @@ void App::EndTextTransform() {
     }
 
     const std::size_t pageIndex = *transformingTextPageIndex_;
+    const std::size_t textIndex = transformingTextIndex_.value_or(std::numeric_limits<std::size_t>::max());
     if (pageIndex < document_.PageCount()
-        && transformingTextIndex_.has_value()
-        && *transformingTextIndex_ < document_.PageAt(pageIndex).texts.size()
+        && textIndex < document_.PageAt(pageIndex).texts.size()
         && pageIndex < interactionPreviewTexts_.size()) {
         for (const InteractionPreviewText& preview : interactionPreviewTexts_[pageIndex]) {
-            if (preview.sourcePageIndex == pageIndex && preview.sourceIndex == *transformingTextIndex_) {
-                document_.PageAt(pageIndex).texts[*transformingTextIndex_] = preview.text;
+            if (preview.sourcePageIndex == pageIndex && preview.sourceIndex == textIndex) {
+                document_.PageAt(pageIndex).texts[textIndex] = preview.text;
                 break;
             }
         }
     }
-    const bool changed = pageIndex < document_.PageCount() && !PageEqual(textTransformBeforePage_, document_.PageAt(pageIndex));
+    const bool changed = pageIndex < document_.PageCount()
+        && textIndex < document_.PageAt(pageIndex).texts.size()
+        && !PageTextEqual(textTransformBefore_, document_.PageAt(pageIndex).texts[textIndex]);
 
     isTransformingText_ = false;
     transformingTextPageIndex_.reset();
@@ -5134,7 +5148,14 @@ void App::EndTextTransform() {
     UpdateCaptureState();
 
     if (pageIndex < document_.PageCount()) {
-        PushReplacePagesHistoryAction({ pageIndex }, { textTransformBeforePage_ }, document_.CurrentPageIndex());
+        if (changed) {
+            PushTextHistoryAction(
+                HistoryActionType::UpdateText,
+                pageIndex,
+                textIndex,
+                textTransformBefore_,
+                document_.PageAt(pageIndex).texts[textIndex]);
+        }
         if (changed) {
             NotifyDocumentMutated();
         }
@@ -7290,6 +7311,14 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
     }
 
     const PageText& text = page.texts[*editingTextIndex_];
+    const PageTextStyle currentStyle = CurrentEditingTextStyle().value_or(PageTextStyle {
+        text.fontSize,
+        text.color,
+        text.fontFamily,
+        text.bold,
+        text.italic,
+        text.underline,
+    });
     const UINT dpi = WindowDpi(window_);
     const RECT canvasRect = CanvasRect(clientRect);
     const TextFormatPopupLayout layout = BuildTextFormatPopupLayout(canvasRect, textEditBounds_, textFormatFontMenuOpen_, dpi);
@@ -7350,9 +7379,9 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
     };
 
     drawButton(layout.alignCycleRect, alignmentIconFileName(text.alignment), alignmentFallbackLabel(text.alignment), true);
-    drawButton(layout.boldRect, L"text/bold.svg", L"B", text.bold);
-    drawButton(layout.italicRect, L"text/italics.svg", L"I", text.italic);
-    drawButton(layout.underlineRect, L"text/underline.svg", L"U", text.underline);
+    drawButton(layout.boldRect, L"text/bold.svg", L"B", currentStyle.bold);
+    drawButton(layout.italicRect, L"text/italics.svg", L"I", currentStyle.italic);
+    drawButton(layout.underlineRect, L"text/underline.svg", L"U", currentStyle.underline);
 
     FillRoundedRect(hdc, layout.textSizeInputRect, buttonFill);
     StrokeRoundedRect(hdc, layout.textSizeInputRect, textFormatSizeEditing_ ? accentBorder : buttonBorder, 1);
@@ -7376,7 +7405,7 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
     RECT dropdownTextRect = layout.fontDropdownRect;
     dropdownTextRect.left += ScaleForDpi(10, dpi);
     dropdownTextRect.right -= ScaleForDpi(10, dpi);
-    DrawTextW(hdc, fontFamilyLabel(text.fontFamily), -1, &dropdownTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    DrawTextW(hdc, fontFamilyLabel(currentStyle.fontFamily), -1, &dropdownTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
     if (textFormatFontMenuOpen_ && HasRect(layout.fontMenuRect)) {
         PaintRoundedPanel(hdc, layout.fontMenuRect, ui::kPanelFill, ui::kPanelBorder);
@@ -7394,7 +7423,7 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
                 break;
             }
 
-            const bool active = text.fontFamily == optionFamily;
+            const bool active = currentStyle.fontFamily == optionFamily;
             FillRoundedRect(hdc, layout.fontOptionRects[index], active ? accentFill : ui::kPanelFill);
             SetTextColor(hdc, active ? primaryText : mutedText);
             RECT optionTextRect = layout.fontOptionRects[index];
@@ -9414,45 +9443,9 @@ void App::PaintText(HDC hdc, const PageText& text, const PageView& pageView, flo
     }
 
     const Page& page = document_.PageAt(pageView.pageIndex);
-    const WrappedTextLayout layout = LayoutPageText(text, page.width);
-    const int fontHeight = PageTextFontPixelHeight(text, pageView.scale);
-    HFONT font = CreatePageTextFont(text, fontHeight);
-    HGDIOBJ previousFont = font != nullptr ? SelectObject(hdc, font) : nullptr;
-    int renderLineHeight = fontHeight;
-    TEXTMETRICW textMetrics {};
-    if (GetTextMetricsW(hdc, &textMetrics) != 0) {
-        renderLineHeight = std::max(renderLineHeight, static_cast<int>(textMetrics.tmHeight));
-    }
     const int left = pageView.rect.left + static_cast<int>(std::lround(text.x * pageView.scale));
     const int top = pageView.rect.top + static_cast<int>(std::lround(text.y * pageView.scale));
-    const int renderWidth = std::max(1, static_cast<int>(std::ceil(ResolvedPageTextWidth(text, page.width) * std::max(0.1f, pageView.scale))));
-    const auto blendChannel = [](BYTE channel, float opacityValue) {
-        return static_cast<BYTE>(std::lround((static_cast<float>(channel) * opacityValue) + (255.0f * (1.0f - opacityValue))));
-    };
-    const float clampedOpacity = std::clamp(opacity, 0.0f, 1.0f);
-    const BYTE red = static_cast<BYTE>((text.color >> 16U) & 0xFFU);
-    const BYTE green = static_cast<BYTE>((text.color >> 8U) & 0xFFU);
-    const BYTE blue = static_cast<BYTE>(text.color & 0xFFU);
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(blendChannel(red, clampedOpacity), blendChannel(green, clampedOpacity), blendChannel(blue, clampedOpacity)));
-    const UINT alignmentFlags = DrawTextAlignmentFlags(text.alignment);
-    for (std::size_t lineIndex = 0; lineIndex < layout.lines.size(); ++lineIndex) {
-        const int lineTop = top + (renderLineHeight * static_cast<int>(lineIndex));
-        const std::wstring& line = layout.lines[lineIndex];
-        RECT lineRect = MakeRect(left, lineTop, left + renderWidth, lineTop + renderLineHeight);
-        DrawTextW(
-            hdc,
-            line.c_str(),
-            static_cast<int>(line.size()),
-            &lineRect,
-            alignmentFlags | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_NOCLIP);
-    }
-    if (previousFont != nullptr) {
-        SelectObject(hdc, previousFont);
-    }
-    if (font != nullptr) {
-        DeleteObject(font);
-    }
+    static_cast<void>(text::DrawPageText(hdc, text, page.width, pageView.scale, left, top, opacity));
 }
 
 

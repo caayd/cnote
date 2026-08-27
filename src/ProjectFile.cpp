@@ -54,7 +54,7 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 12;
+constexpr std::uint32_t kProjectVersion = 13;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
 constexpr std::uint8_t kStrokeStyleFlagDotted = 1U << 0U;
@@ -302,6 +302,7 @@ void AppendText(std::vector<std::uint8_t>& output, const PageText& text) {
         styleFlags |= kTextStyleFlagUnderline;
     }
     constexpr std::uint8_t reserved = 0;
+    AppendValue(output, text.id);
     AppendValue(output, text.x);
     AppendValue(output, text.y);
     AppendValue(output, text.width);
@@ -313,14 +314,30 @@ void AppendText(std::vector<std::uint8_t>& output, const PageText& text) {
     AppendValue(output, styleFlags);
     AppendValue(output, reserved);
     AppendString(output, text.content);
+    AppendValue(output, static_cast<std::uint32_t>(text.styleSpans.size()));
+    for (const PageTextStyleSpan& span : text.styleSpans) {
+        const auto spanFontFamily = static_cast<std::uint8_t>(span.style.fontFamily);
+        std::uint8_t spanFlags = 0;
+        spanFlags |= span.style.bold ? kTextStyleFlagBold : 0;
+        spanFlags |= span.style.italic ? kTextStyleFlagItalic : 0;
+        spanFlags |= span.style.underline ? kTextStyleFlagUnderline : 0;
+        AppendValue(output, span.start);
+        AppendValue(output, span.length);
+        AppendValue(output, span.style.fontSize);
+        AppendValue(output, span.style.color);
+        AppendValue(output, spanFontFamily);
+        AppendValue(output, spanFlags);
+    }
 }
 
-bool ReadText(ByteReader& reader, PageText& text) {
+bool ReadText(ByteReader& reader, std::uint32_t version, PageText& text) {
     std::uint8_t alignment = 0;
     std::uint8_t fontFamily = 0;
     std::uint8_t styleFlags = 0;
     std::uint8_t reserved = 0;
-    const bool ok = reader.Read(text.x)
+    const bool hasId = version < 13U || reader.Read(text.id);
+    const bool ok = hasId
+        && reader.Read(text.x)
         && reader.Read(text.y)
         && reader.Read(text.width)
         && reader.Read(text.height)
@@ -362,6 +379,33 @@ bool ReadText(ByteReader& reader, PageText& text) {
     text.bold = (styleFlags & kTextStyleFlagBold) != 0;
     text.italic = (styleFlags & kTextStyleFlagItalic) != 0;
     text.underline = (styleFlags & kTextStyleFlagUnderline) != 0;
+    if (version >= 13U) {
+        std::uint32_t spanCount = 0;
+        if (!reader.Read(spanCount) || spanCount > text.content.size() + 1U) {
+            return false;
+        }
+        text.styleSpans.reserve(spanCount);
+        for (std::uint32_t spanIndex = 0; spanIndex < spanCount; ++spanIndex) {
+            PageTextStyleSpan span {};
+            std::uint8_t spanFontFamily = 0;
+            std::uint8_t spanFlags = 0;
+            if (!reader.Read(span.start)
+                || !reader.Read(span.length)
+                || !reader.Read(span.style.fontSize)
+                || !reader.Read(span.style.color)
+                || !reader.Read(spanFontFamily)
+                || !reader.Read(spanFlags)
+                || span.start > text.content.size()
+                || span.length > text.content.size() - span.start) {
+                return false;
+            }
+            span.style.fontFamily = static_cast<TextFontFamily>(std::min<std::uint8_t>(spanFontFamily, 2U));
+            span.style.bold = (spanFlags & kTextStyleFlagBold) != 0U;
+            span.style.italic = (spanFlags & kTextStyleFlagItalic) != 0U;
+            span.style.underline = (spanFlags & kTextStyleFlagUnderline) != 0U;
+            text.styleSpans.push_back(std::move(span));
+        }
+    }
     return true;
 }
 
@@ -571,7 +615,7 @@ std::optional<Document> LoadProjectPayload(
         for (std::uint32_t textIndex = 0; textIndex < textCount; ++textIndex) {
             PageText text {};
             if (version >= 8U) {
-                if (!ReadText(reader, text)) {
+                if (!ReadText(reader, version, text)) {
                     return std::nullopt;
                 }
             } else if (version >= 7U) {
@@ -605,7 +649,9 @@ std::optional<Document> LoadProjectPayload(
                 text.width = 0.0f;
                 text.height = 0.0f;
             }
-            page.texts.push_back(std::move(text));
+            if (version >= 13U) {
+                page.texts.push_back(std::move(text));
+            }
         }
 
         page.images.reserve(imageCount);

@@ -26,6 +26,9 @@ Native Windows PDF annotation app in C++.
 - `Ctrl+S` save `.cnote`
 - `Ctrl+B` toggle PDF sidebar
 - `Ctrl+W` quick popup: brush size for pen tools, text formatting while editing text
+- `Enter` inserts a new line while editing text
+- `Ctrl+Enter` commits the active text edit
+- `Escape` cancels the active text edit
 - `Ctrl+Q` toggle tool wheel
 - `Ctrl+Mouse Wheel` zoom
 - `PgUp` / `PgDn` previous / next page

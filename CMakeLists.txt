@@ -81,12 +81,41 @@ target_link_libraries(cnote PRIVATE
     dxgi
     gdi32
     gdiplus
+    msimg32
     ninput
     pdfium
     uxtheme
     user32
     winmm
 )
+
+enable_testing()
+
+add_executable(cnote_text_model_tests
+    tests/TextModelTests.cpp
+    src/DpiUtil.cpp
+    src/Document.cpp
+    src/PdfBackend.cpp
+    src/ProjectFile.cpp
+    src/selection/Geometry.cpp
+    src/text/TextGeometry.cpp
+    src/ui/UiUtil.cpp
+)
+target_include_directories(cnote_text_model_tests PRIVATE src)
+target_compile_definitions(cnote_text_model_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
+target_compile_options(cnote_text_model_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_text_model_tests PRIVATE
+    cabinet
+    comctl32
+    gdi32
+    gdiplus
+    msimg32
+    pdfium
+    user32
+)
+add_test(NAME text_model_round_trip COMMAND cnote_text_model_tests)
 
 add_custom_command(TARGET cnote POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different

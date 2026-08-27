@@ -124,7 +124,7 @@ bool App::CopySelectionToClipboard() {
     const auto appendFloat = [&](float value) { appendBytes(&value, sizeof(value)); };
 
     constexpr std::uint32_t kClipboardStrokeFlagDotted = 1U << 0U;
-    const char magic[] = { 'C', 'T', 'S', '7' };
+    const char magic[] = { 'C', 'T', 'S', '8' };
     appendBytes(magic, sizeof(magic));
     appendUint32(static_cast<std::uint32_t>(strokes.size()));
     appendUint32(static_cast<std::uint32_t>(texts.size()));
@@ -172,6 +172,18 @@ bool App::CopySelectionToClipboard() {
         appendUint32(flags);
         appendUint32(static_cast<std::uint32_t>(text.content.size()));
         appendBytes(text.content.data(), text.content.size() * sizeof(wchar_t));
+        appendUint32(static_cast<std::uint32_t>(text.styleSpans.size()));
+        for (const PageTextStyleSpan& span : text.styleSpans) {
+            std::uint32_t spanFlags = static_cast<std::uint32_t>(span.style.fontFamily);
+            spanFlags |= span.style.bold ? 1U << 8U : 0U;
+            spanFlags |= span.style.italic ? 1U << 9U : 0U;
+            spanFlags |= span.style.underline ? 1U << 10U : 0U;
+            appendUint32(span.start);
+            appendUint32(span.length);
+            appendFloat(span.style.fontSize);
+            appendUint32(span.style.color);
+            appendUint32(spanFlags);
+        }
     }
 
     for (const PageImage& image : images) {
@@ -253,7 +265,8 @@ bool App::PasteSelectionFromClipboard() {
             && std::memcmp(magic, "CTS4", 4) != 0
             && std::memcmp(magic, "CTS5", 4) != 0
             && std::memcmp(magic, "CTS6", 4) != 0
-            && std::memcmp(magic, "CTS7", 4) != 0)) {
+            && std::memcmp(magic, "CTS7", 4) != 0
+            && std::memcmp(magic, "CTS8", 4) != 0)) {
         GlobalUnlock(clipboardData);
         CloseClipboard();
         return false;
@@ -281,7 +294,8 @@ bool App::PasteSelectionFromClipboard() {
     bool headerOk = readUint32(strokeCount);
     if (headerOk && (std::memcmp(magic, "CTS2", 4) == 0 || std::memcmp(magic, "CTS3", 4) == 0
         || std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0
-        || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0)) {
+        || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0
+        || std::memcmp(magic, "CTS8", 4) == 0)) {
         headerOk = readUint32(textCount);
     }
     headerOk = headerOk && readUint32(imageCount)
@@ -306,11 +320,11 @@ bool App::PasteSelectionFromClipboard() {
         std::uint32_t pointCount = 0;
         std::uint32_t strokeFlags = 0;
         ok = readUint32(stroke.style.color) && readFloat(stroke.style.width);
-        if (ok && (std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0)) {
+        if (ok && (std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0 || std::memcmp(magic, "CTS8", 4) == 0)) {
             ok = readUint32(strokeFlags);
         }
         stroke.style.dotted = (strokeFlags & kClipboardStrokeFlagDotted) != 0U;
-        if (ok && std::memcmp(magic, "CTS7", 4) == 0) {
+        if (ok && (std::memcmp(magic, "CTS7", 4) == 0 || std::memcmp(magic, "CTS8", 4) == 0)) {
             ok = readFloat(stroke.smoothing);
         }
         ok = ok && readUint32(pointCount);
@@ -332,18 +346,18 @@ bool App::PasteSelectionFromClipboard() {
         std::uint32_t charCount = 0;
         std::uint32_t flags = 0;
         ok = readFloat(text.x) && readFloat(text.y);
-        if (ok && (std::memcmp(magic, "CTS3", 4) == 0 || std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0)) {
+        if (ok && (std::memcmp(magic, "CTS3", 4) == 0 || std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0 || std::memcmp(magic, "CTS8", 4) == 0)) {
             ok = readFloat(text.width);
         } else {
             text.width = 0.0f;
         }
-        if (ok && (std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0)) {
+        if (ok && (std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0 || std::memcmp(magic, "CTS8", 4) == 0)) {
             ok = readFloat(text.height);
         } else {
             text.height = 0.0f;
         }
         ok = ok && readFloat(text.fontSize) && readUint32(text.color);
-        if (ok && (std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0)) {
+        if (ok && (std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0 || std::memcmp(magic, "CTS8", 4) == 0)) {
             ok = readUint32(flags);
         }
         ok = ok && readUint32(charCount);
@@ -358,6 +372,28 @@ bool App::PasteSelectionFromClipboard() {
         text.bold = (flags & (1U << 16U)) != 0;
         text.italic = (flags & (1U << 17U)) != 0;
         text.underline = (flags & (1U << 18U)) != 0;
+        if (ok && std::memcmp(magic, "CTS8", 4) == 0) {
+            std::uint32_t spanCount = 0;
+            ok = readUint32(spanCount) && spanCount <= text.content.size() + 1U;
+            for (std::uint32_t spanIndex = 0; ok && spanIndex < spanCount; ++spanIndex) {
+                PageTextStyleSpan span {};
+                std::uint32_t spanFlags = 0;
+                ok = readUint32(span.start)
+                    && readUint32(span.length)
+                    && readFloat(span.style.fontSize)
+                    && readUint32(span.style.color)
+                    && readUint32(spanFlags)
+                    && span.start <= text.content.size()
+                    && span.length <= text.content.size() - span.start;
+                span.style.fontFamily = static_cast<TextFontFamily>(std::min<std::uint32_t>(spanFlags & 0xFFU, 2U));
+                span.style.bold = (spanFlags & (1U << 8U)) != 0U;
+                span.style.italic = (spanFlags & (1U << 9U)) != 0U;
+                span.style.underline = (spanFlags & (1U << 10U)) != 0U;
+                if (ok) {
+                    text.styleSpans.push_back(std::move(span));
+                }
+            }
+        }
         if (ok) {
             texts.push_back(std::move(text));
         }
@@ -431,6 +467,7 @@ bool App::PasteSelectionFromClipboard() {
     }
 
     for (PageText& text : texts) {
+        text.id = AllocateTextId();
         text.x += delta.x;
         text.y += delta.y;
         page.texts.push_back(text);

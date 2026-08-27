@@ -5,6 +5,7 @@
 #include <cwctype>
 
 #include <windowsx.h>
+#include <richedit.h>
 
 #include "ui/Layout.h"
 #include "ui/UiUtil.h"
@@ -479,6 +480,17 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         return HTCLIENT;
     }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == 4001
+            && HIWORD(wParam) == EN_CHANGE
+            && reinterpret_cast<HWND>(lParam) == textEditWindow_
+            && !textEditSyncSuppressed_) {
+            SyncTextEditModel();
+            RefreshTextEditControl();
+            InvalidateEditingTextRegion();
+            return 0;
+        }
+        break;
     case WM_LBUTTONDOWN: {
         SetFocus(window_);
         StopSmoothScroll();
@@ -756,7 +768,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             UpdateCaptureState();
             if (pageIndex.has_value() && textIndex.has_value() && *pageIndex < document_.PageCount()
                 && *textIndex < document_.PageAt(*pageIndex).texts.size()) {
-                BeginTextEdit(*pageIndex, *textIndex, document_.PageAt(*pageIndex));
+                BeginTextEdit(*pageIndex, *textIndex, document_.PageAt(*pageIndex).texts[*textIndex]);
             }
         } else if (isSelecting_) {
             EndSelection();
@@ -1193,7 +1205,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 && selectedText->first < document_.PageCount()
                 && selectedText->second < document_.PageAt(selectedText->first).texts.size()) {
                 if (!IsEditingText(selectedText->first, selectedText->second)) {
-                    BeginTextEdit(selectedText->first, selectedText->second, document_.PageAt(selectedText->first));
+                    BeginTextEdit(selectedText->first, selectedText->second, document_.PageAt(selectedText->first).texts[selectedText->second]);
                 }
                 if (!textFormatPopupOpen_) {
                     ToggleTextFormatPopup();
@@ -1427,7 +1439,7 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
             app->ToggleEditingTextUnderline();
             return 0;
         }
-        if (wParam == VK_RETURN) {
+        if (ctrlPressed && wParam == VK_RETURN) {
             app->CommitTextEdit();
             SetFocus(app->window_);
             return 0;
@@ -1463,9 +1475,10 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
             return 0;
         }
         if (ctrlPressed && wParam == VK_BACK) {
-            DWORD selection = static_cast<DWORD>(SendMessageW(window, EM_GETSEL, 0, 0));
-            const int selectionStart = static_cast<int>(LOWORD(selection));
-            const int selectionEnd = static_cast<int>(HIWORD(selection));
+            CHARRANGE selection {};
+            SendMessageW(window, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
+            const int selectionStart = static_cast<int>(selection.cpMin);
+            const int selectionEnd = static_cast<int>(selection.cpMax);
             const int textLength = GetWindowTextLengthW(window);
             std::vector<wchar_t> buffer(static_cast<std::size_t>(textLength) + 1U, L'\0');
             GetWindowTextW(window, buffer.data(), textLength + 1);
@@ -1509,6 +1522,7 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
         || message == WM_CUT
         || message == WM_CLEAR
         || (message == WM_KEYDOWN && wParam == VK_DELETE)) {
+        app->SyncTextEditModel();
         app->RefreshTextEditControl();
         RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
         if (app->textFormatPopupOpen_ && app->window_ != nullptr) {

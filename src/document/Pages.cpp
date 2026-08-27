@@ -46,7 +46,8 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
     EndTextEditControl();
     editingTextPageIndex_.reset();
     editingTextIndex_.reset();
-    editingTextBeforePage_.reset();
+    editingTextBefore_.reset();
+    editingTextCreatesText_ = false;
     pageSurfaceCaches_.assign(document_.PageCount(), {});
     sidebarThumbnailCaches_.assign(document_.PageCount(), {});
     contentCompositionDirty_ = true;

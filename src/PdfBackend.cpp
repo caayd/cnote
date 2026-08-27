@@ -34,32 +34,15 @@ namespace {
 using geometry::BuildSmoothedPoints;
 using geometry::DistanceSquared;
 using geometry::StrokeRenderSmoothing;
-using text::CreatePageTextFont;
 using text::LayoutPageText;
 using text::PageTextFontFace;
-using text::PageTextFontWeight;
 using text::ResolvedPageTextWidth;
-using text::TrimTrailingLayoutWhitespace;
 using text::WrappedTextLayout;
 
 constexpr float kMinimumStrokeRenderWidth = 1.25f;
 constexpr float kStrokeRenderWidthDivisor = 2.15f;
 constexpr float kTextLayoutScale = 8.0f;
 constexpr wchar_t kEmbeddedCnoteAttachmentName[] = L"cnote-edit-data.cnote";
-
-
-
-Gdiplus::StringAlignment GdiplusAlignmentForText(TextAlignment alignment) {
-    switch (alignment) {
-    case TextAlignment::Center:
-        return Gdiplus::StringAlignmentCenter;
-    case TextAlignment::Right:
-        return Gdiplus::StringAlignmentFar;
-    case TextAlignment::Left:
-    default:
-        return Gdiplus::StringAlignmentNear;
-    }
-}
 
 std::optional<std::vector<std::uint8_t>> ReadAllBytes(const std::wstring& filePath) {
     std::ifstream input(std::filesystem::path(filePath), std::ios::binary);
@@ -325,36 +308,113 @@ void DrawPageText(Gdiplus::Graphics& graphics, const PageText& text, float pageW
     const Gdiplus::REAL lineHeight = static_cast<Gdiplus::REAL>(std::max(
         fontSize,
         (static_cast<float>(layout.lineHeight) / kTextLayoutScale) * std::max(0.1f, renderScale)));
-    const auto alpha = static_cast<BYTE>((text.color >> 24U) & 0xFFU);
-    const auto red = static_cast<BYTE>((text.color >> 16U) & 0xFFU);
-    const auto green = static_cast<BYTE>((text.color >> 8U) & 0xFFU);
-    const auto blue = static_cast<BYTE>(text.color & 0xFFU);
-
-    Gdiplus::FontStyle fontStyle = Gdiplus::FontStyleRegular;
-    if (text.bold) {
-        fontStyle = static_cast<Gdiplus::FontStyle>(fontStyle | Gdiplus::FontStyleBold);
-    }
-    if (text.italic) {
-        fontStyle = static_cast<Gdiplus::FontStyle>(fontStyle | Gdiplus::FontStyleItalic);
-    }
-    if (text.underline) {
-        fontStyle = static_cast<Gdiplus::FontStyle>(fontStyle | Gdiplus::FontStyleUnderline);
-    }
-
-    Gdiplus::FontFamily fontFamily(PageTextFontFace(text.fontFamily));
-    Gdiplus::Font font(&fontFamily, fontSize, fontStyle, Gdiplus::UnitPixel);
-    Gdiplus::SolidBrush brush(Gdiplus::Color(alpha, red, green, blue));
     Gdiplus::StringFormat format;
-    format.SetAlignment(GdiplusAlignmentForText(text.alignment));
+    format.SetAlignment(Gdiplus::StringAlignmentNear);
     format.SetLineAlignment(Gdiplus::StringAlignmentNear);
-    format.SetFormatFlags(Gdiplus::StringFormatFlagsNoClip | Gdiplus::StringFormatFlagsNoWrap);
+    format.SetFormatFlags(
+        Gdiplus::StringFormatFlagsNoClip
+        | Gdiplus::StringFormatFlagsNoWrap
+        | Gdiplus::StringFormatFlagsMeasureTrailingSpaces);
     format.SetTrimming(Gdiplus::StringTrimmingNone);
+
+    const PageTextStyle defaultStyle {
+        text.fontSize,
+        text.color,
+        text.fontFamily,
+        text.bold,
+        text.italic,
+        text.underline,
+    };
+    const auto styleAt = [&](std::size_t sourceIndex) -> const PageTextStyle& {
+        for (const PageTextStyleSpan& span : text.styleSpans) {
+            const std::size_t spanStart = span.start;
+            const std::size_t spanEnd = spanStart + span.length;
+            if (sourceIndex >= spanStart && sourceIndex < spanEnd) {
+                return span.style;
+            }
+        }
+        return defaultStyle;
+    };
+    const auto fontStyleFor = [](const PageTextStyle& style) {
+        Gdiplus::FontStyle result = Gdiplus::FontStyleRegular;
+        if (style.bold) {
+            result = static_cast<Gdiplus::FontStyle>(result | Gdiplus::FontStyleBold);
+        }
+        if (style.italic) {
+            result = static_cast<Gdiplus::FontStyle>(result | Gdiplus::FontStyleItalic);
+        }
+        if (style.underline) {
+            result = static_cast<Gdiplus::FontStyle>(result | Gdiplus::FontStyleUnderline);
+        }
+        return result;
+    };
+    const auto measureSegment = [&](const std::wstring& value, const PageTextStyle& style) {
+        Gdiplus::FontFamily family(PageTextFontFace(style.fontFamily));
+        Gdiplus::Font font(
+            &family,
+            static_cast<Gdiplus::REAL>(std::max(1.0f, style.fontSize * std::max(0.1f, renderScale))),
+            fontStyleFor(style),
+            Gdiplus::UnitPixel);
+        Gdiplus::RectF bounds;
+        graphics.MeasureString(value.c_str(), static_cast<INT>(value.size()), &font, Gdiplus::PointF(0.0f, 0.0f), &format, &bounds);
+        return bounds.Width;
+    };
 
     for (std::size_t lineIndex = 0; lineIndex < layout.lines.size(); ++lineIndex) {
         const std::wstring& line = layout.lines[lineIndex];
+        const std::size_t sourceStart = lineIndex < layout.lineStarts.size() ? layout.lineStarts[lineIndex] : 0U;
         const Gdiplus::REAL lineTop = top + (lineHeight * static_cast<Gdiplus::REAL>(lineIndex));
-        const Gdiplus::RectF lineRect(left, lineTop, renderWidth + (fontSize * 0.5f), lineHeight * 1.25f);
-        graphics.DrawString(line.c_str(), static_cast<INT>(line.size()), &font, lineRect, &format, &brush);
+
+        struct Segment {
+            std::wstring value;
+            PageTextStyle style;
+            Gdiplus::REAL width = 0.0f;
+        };
+        std::vector<Segment> segments;
+        for (std::size_t offset = 0; offset < line.size();) {
+            const PageTextStyle& style = styleAt(sourceStart + offset);
+            std::size_t end = offset + 1U;
+            while (end < line.size() && PageTextStyleEqual(styleAt(sourceStart + end), style)) {
+                ++end;
+            }
+            Segment segment { line.substr(offset, end - offset), style, 0.0f };
+            segment.width = measureSegment(segment.value, segment.style);
+            segments.push_back(std::move(segment));
+            offset = end;
+        }
+
+        Gdiplus::REAL totalWidth = 0.0f;
+        for (const Segment& segment : segments) {
+            totalWidth += segment.width;
+        }
+        Gdiplus::REAL drawX = left;
+        if (text.alignment == TextAlignment::Center) {
+            drawX += std::max(0.0f, (renderWidth - totalWidth) * 0.5f);
+        } else if (text.alignment == TextAlignment::Right) {
+            drawX += std::max(0.0f, renderWidth - totalWidth);
+        }
+
+        for (const Segment& segment : segments) {
+            const auto alpha = static_cast<BYTE>((segment.style.color >> 24U) & 0xFFU);
+            const auto red = static_cast<BYTE>((segment.style.color >> 16U) & 0xFFU);
+            const auto green = static_cast<BYTE>((segment.style.color >> 8U) & 0xFFU);
+            const auto blue = static_cast<BYTE>(segment.style.color & 0xFFU);
+            Gdiplus::FontFamily family(PageTextFontFace(segment.style.fontFamily));
+            Gdiplus::Font font(
+                &family,
+                static_cast<Gdiplus::REAL>(std::max(1.0f, segment.style.fontSize * std::max(0.1f, renderScale))),
+                fontStyleFor(segment.style),
+                Gdiplus::UnitPixel);
+            Gdiplus::SolidBrush brush(Gdiplus::Color(alpha, red, green, blue));
+            graphics.DrawString(
+                segment.value.c_str(),
+                static_cast<INT>(segment.value.size()),
+                &font,
+                Gdiplus::PointF(drawX, lineTop),
+                &format,
+                &brush);
+            drawX += segment.width;
+        }
     }
 }
 

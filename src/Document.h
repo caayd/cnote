@@ -48,7 +48,23 @@ struct PageImage {
     std::vector<std::uint8_t> pixels;
 };
 
+struct PageTextStyle {
+    float fontSize = 24.0f;
+    std::uint32_t color = 0xFF111827;
+    TextFontFamily fontFamily = TextFontFamily::Sans;
+    bool bold = false;
+    bool italic = false;
+    bool underline = false;
+};
+
+struct PageTextStyleSpan {
+    std::uint32_t start = 0;
+    std::uint32_t length = 0;
+    PageTextStyle style {};
+};
+
 struct PageText {
+    std::uint64_t id = 0;
     float x = 0.0f;
     float y = 0.0f;
     float width = 0.0f;
@@ -61,6 +77,7 @@ struct PageText {
     bool italic = false;
     bool underline = false;
     std::wstring content {};
+    std::vector<PageTextStyleSpan> styleSpans {};
 };
 
 struct RasterImage {
@@ -80,6 +97,7 @@ struct Page;
 [[nodiscard]] bool StrokeEqual(const Stroke& a, const Stroke& b);
 [[nodiscard]] bool PageImageEqual(const PageImage& a, const PageImage& b);
 [[nodiscard]] bool PageTextEqual(const PageText& a, const PageText& b);
+[[nodiscard]] bool PageTextStyleEqual(const PageTextStyle& a, const PageTextStyle& b);
 [[nodiscard]] bool PageEqual(const Page& a, const Page& b);
 
 struct Page {

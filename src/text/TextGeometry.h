@@ -24,6 +24,7 @@ struct TextPixelMetrics {
 
 struct WrappedTextLayout {
     std::vector<std::wstring> lines;
+    std::vector<std::uint32_t> lineStarts;
     int wrapWidth = 0;
     int lineHeight = 0;
     int height = 0;
@@ -38,6 +39,9 @@ float DefaultPageTextBoxWidth(const Page& page, const PageText& text);
 float ResolvedPageTextWidth(const PageText& text, float pageWidth);
 WrappedTextLayout LayoutPageText(const PageText& text, float pageWidth);
 TextPixelMetrics MeasurePageTextPixels(const PageText& text, float pageWidth, float scale);
+bool DrawPageText(HDC dc, const PageText& text, float pageWidth, float scale, int left, int top, float opacity = 1.0f);
+void ApplyPageTextFormatting(HWND editWindow, const PageText& text, float scale, float opacity = 1.0f);
+void CapturePageTextFormatting(HWND editWindow, PageText& text, float scale);
 PageTextBounds MeasurePageTextBounds(const PageText& text, float pageWidth);
 std::optional<RECT> PageTextBoundsRect(const PageText& text, float pageWidth, float scale, int extraPadding = 0);
 std::optional<RECT> PageTextCachedBoundsRect(const PageText& text, float boundsWidth, float boundsHeight, float scale, int extraPadding = 0);

@@ -78,6 +78,9 @@ public:
     enum class HistoryActionType {
         AddStroke,
         RemoveStroke,
+        AddText,
+        RemoveText,
+        UpdateText,
         AddPages,
         RemovePages,
         ReplacePages,
@@ -136,6 +139,8 @@ public:
     struct HistoryAction {
         HistoryActionType type = HistoryActionType::AddStroke;
         Stroke stroke {};
+        PageText text {};
+        PageText replacementText {};
         std::vector<Page> pages {};
         std::vector<Page> replacementPages {};
         std::vector<std::size_t> pageIndices {};
@@ -351,7 +356,7 @@ private:
     void UpdateTextTransform(POINT cursor);
     void EndTextTransform();
     void BeginTextToolInteraction(POINT cursor);
-    void BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, Page beforePage);
+    void BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, std::optional<PageText> beforeText, bool createsText = false);
     void CommitTextEdit();
     void CancelTextEdit();
     void EndTextEditControl();
@@ -360,6 +365,8 @@ private:
     void InvalidateEditingTextRegion();
     void ReleaseTextEditBackgroundBrush();
     void RefreshTextEditBackgroundBrush(const RECT& editRect);
+    [[nodiscard]] std::uint64_t AllocateTextId() const;
+    void PushTextHistoryAction(HistoryActionType type, std::size_t pageIndex, std::size_t index, PageText text, PageText replacementText = {});
     void BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, ImageTransformHandle handle, POINT cursor);
     void UpdateImageTransform(POINT cursor);
     void EndImageTransform();
@@ -469,6 +476,8 @@ private:
     [[nodiscard]] bool IsTextSelected(std::size_t pageIndex, std::size_t textIndex) const;
     [[nodiscard]] bool IsEditingText(std::size_t pageIndex, std::size_t textIndex) const;
     [[nodiscard]] std::optional<PageText> CurrentEditingTextLayout() const;
+    [[nodiscard]] std::optional<PageTextStyle> CurrentEditingTextStyle() const;
+    void SyncTextEditModel();
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedImageHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* imageIndex = nullptr) const;
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedStrokeHandle(POINT cursor, std::size_t* pageIndex = nullptr) const;
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedTextHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* textIndex = nullptr) const;
@@ -601,6 +610,7 @@ private:
     void CycleEditingTextAlignment();
     void SetEditingTextFontSize(float fontSize);
     void SetEditingTextFontFamily(TextFontFamily family);
+    void ApplyEditingTextCharacterFormat(DWORD mask, DWORD effects, std::optional<float> fontSize = std::nullopt, std::optional<TextFontFamily> fontFamily = std::nullopt);
     void ToggleEditingTextBold();
     void ToggleEditingTextItalic();
     void ToggleEditingTextUnderline();
@@ -720,7 +730,7 @@ private:
     float strokeTransformStartAngleDegrees_ = 0.0f;
     Vec2 strokeTransformBoundsMin_ {};
     Vec2 strokeTransformBoundsMax_ {};
-    Page textTransformBeforePage_ {};
+    PageText textTransformBefore_ {};
     std::vector<std::pair<std::size_t, Stroke>> strokeTransformInitials_ {};
     std::vector<POINT> selectionLassoCursorPoints_ {};
     std::vector<std::vector<std::size_t>> selectedImageIndices_ {};
@@ -831,12 +841,14 @@ private:
     HBITMAP textEditBackgroundBitmap_ = nullptr;
     HBRUSH textEditBackgroundBrush_ = nullptr;
     bool textEditWindowNeedsLayout_ = false;
+    bool textEditSyncSuppressed_ = false;
     bool textEditWindowAutoShowSuppressed_ = false;
     RECT textEditBounds_ {};
     int textEditFontPixelHeight_ = 0;
     std::optional<std::size_t> editingTextPageIndex_ {};
     std::optional<std::size_t> editingTextIndex_ {};
-    std::optional<Page> editingTextBeforePage_ {};
+    std::optional<PageText> editingTextBefore_ {};
+    bool editingTextCreatesText_ = false;
     bool textFormatPopupOpen_ = false;
     bool textFormatFontMenuOpen_ = false;
     bool textFormatSizeEditing_ = false;

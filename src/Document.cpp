@@ -300,8 +300,18 @@ bool PageImageEqual(const PageImage& a, const PageImage& b) {
         && a.pixels == b.pixels;
 }
 
+bool PageTextStyleEqual(const PageTextStyle& a, const PageTextStyle& b) {
+    return std::abs(a.fontSize - b.fontSize) < 0.05f
+        && a.color == b.color
+        && a.fontFamily == b.fontFamily
+        && a.bold == b.bold
+        && a.italic == b.italic
+        && a.underline == b.underline;
+}
+
 bool PageTextEqual(const PageText& a, const PageText& b) {
-    return a.x == b.x
+    return a.id == b.id
+        && a.x == b.x
         && a.y == b.y
         && a.width == b.width
         && a.height == b.height
@@ -312,7 +322,17 @@ bool PageTextEqual(const PageText& a, const PageText& b) {
         && a.bold == b.bold
         && a.italic == b.italic
         && a.underline == b.underline
-        && a.content == b.content;
+        && a.content == b.content
+        && a.styleSpans.size() == b.styleSpans.size()
+        && std::equal(
+            a.styleSpans.begin(),
+            a.styleSpans.end(),
+            b.styleSpans.begin(),
+            [](const PageTextStyleSpan& left, const PageTextStyleSpan& right) {
+                return left.start == right.start
+                    && left.length == right.length
+                    && PageTextStyleEqual(left.style, right.style);
+            });
 }
 
 bool PageEqual(const Page& a, const Page& b) {
