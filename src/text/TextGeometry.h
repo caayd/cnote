@@ -31,6 +31,7 @@ struct WrappedTextLayout {
 };
 
 UINT DrawTextAlignmentFlags(TextAlignment alignment);
+HMODULE EnsureRichEditModule();
 const wchar_t* PageTextFontFace(TextFontFamily family);
 int PageTextFontWeight(const PageText& text);
 HFONT CreatePageTextFont(const PageText& text, int pixelHeight, DWORD quality = CLEARTYPE_QUALITY);

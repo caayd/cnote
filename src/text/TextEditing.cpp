@@ -569,8 +569,7 @@ bool App::EnsureTextEditWindow(TextAlignment alignment) {
 
     const DWORD desiredAlignmentStyle = TextEditAlignmentStyle(alignment);
     auto createWindow = [&](const std::wstring& text, LONG selectionStart, LONG selectionEnd) -> bool {
-        static HMODULE richEditModule = LoadLibraryW(L"Msftedit.dll");
-        if (richEditModule == nullptr) {
+        if (textgeom::EnsureRichEditModule() == nullptr) {
             return false;
         }
         textEditSyncSuppressed_ = true;

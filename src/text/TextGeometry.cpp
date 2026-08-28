@@ -46,9 +46,13 @@ std::uint64_t TextLayoutSignature(const PageText& text, float pageWidth) {
     return hash;
 }
 
-HWND RichTextLayoutWindow() {
+HMODULE EnsureRichEditModule() {
     static HMODULE richEditModule = LoadLibraryW(L"Msftedit.dll");
-    static HWND layoutWindow = richEditModule != nullptr
+    return richEditModule;
+}
+
+HWND RichTextLayoutWindow() {
+    static HWND layoutWindow = EnsureRichEditModule() != nullptr
         ? CreateWindowExW(
             0,
             L"RICHEDIT50W",

@@ -616,6 +616,8 @@ private:
     void ToggleEditingTextUnderline();
 
     void Paint();
+    void PaintWindowFallback(HDC windowDc, RECT clientRect, RECT paintRect, bool forceGdiOverlays);
+    void WarmUpTextEditPresentation();
     void PaintToolbar(HDC hdc, RECT clientRect) const;
     void PaintToolbarContents(HDC hdc, RECT clientRect) const;
     void PaintPdfSidebar(HDC hdc, RECT clientRect);
@@ -846,6 +848,7 @@ private:
     bool textEditWindowNeedsLayout_ = false;
     bool textEditSyncSuppressed_ = false;
     bool textEditWindowAutoShowSuppressed_ = false;
+    bool textEditPresentationWarmupPending_ = true;
     RECT textEditBounds_ {};
     int textEditFontPixelHeight_ = 0;
     std::optional<std::size_t> editingTextPageIndex_ {};
