@@ -1506,9 +1506,10 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
             }
 
             if (eraseStart < eraseEnd) {
-                text.erase(static_cast<std::size_t>(eraseStart), static_cast<std::size_t>(eraseEnd - eraseStart));
-                SetWindowTextW(window, text.c_str());
-                SendMessageW(window, EM_SETSEL, eraseStart, eraseStart);
+                // Delete in place: WM_SETTEXT would reset every character's
+                // formatting (color included) to the control default.
+                SendMessageW(window, EM_SETSEL, eraseStart, eraseEnd);
+                SendMessageW(window, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
                 app->RefreshTextEditControl();
                 RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
             }
