@@ -913,6 +913,8 @@ private:
     static constexpr UINT_PTR kPdfSidebarSlideTimerId = 5;
     static constexpr UINT_PTR kSmoothScrollTimerId = 6;
     static constexpr UINT_PTR kPrecisionTouchpadInertiaTimerId = 7;
+    static constexpr UINT_PTR kContentDetachTimerId = 8;
+    static constexpr UINT kContentDetachDelayMs = 20;
     static constexpr UINT kZoomSessionDelayMs = 100;
     static constexpr UINT kToolbarRevealFrameMs = 1;
     static constexpr UINT kToolbarRevealDurationMs = 120;

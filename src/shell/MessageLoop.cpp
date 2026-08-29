@@ -871,6 +871,13 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             HandleSmoothScrollTimer();
             return 0;
         }
+        if (wParam == kContentDetachTimerId) {
+            KillTimer(window_, kContentDetachTimerId);
+            if (textEditWindow_ != nullptr && IsWindowVisible(textEditWindow_) != FALSE) {
+                DetachContentComposition();
+            }
+            return 0;
+        }
         break;
     case WM_SETCURSOR:
         if (LOWORD(lParam) == HTCLIENT) {

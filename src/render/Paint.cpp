@@ -131,13 +131,12 @@ void App::WarmUpTextEditPresentation() {
     }
     textEditPresentationWarmupPending_ = false;
 
-    // The text tool is the first and only feature that shows a child window,
-    // paints the main window through GDI, and detaches the content visual.
-    // Each transition has a one-time DWM/GDI setup cost (redirection surface
-    // allocation, RichEdit module/class init, child window composition), and
-    // paying all three on the first real text placement presented a blank
-    // frame under the detached visual. Perform the whole transition here,
-    // underneath the already-attached composition tree, where it is invisible.
+    // The first text placement pays several one-time, per-Windows-session costs:
+    // RichEdit module/class init, the first child window on this HWND, the first
+    // text-control focus (TSF/caret init), the first real font usage, and the
+    // first GDI presentation to the window's redirection surface. Pay them all
+    // here at startup, underneath the already-attached composition tree, where
+    // they cannot stall the click handler or present a transient frame.
     HWND warmupEdit = nullptr;
     if (textgeom::EnsureRichEditModule() != nullptr) {
         warmupEdit = CreateWindowExW(
@@ -147,15 +146,32 @@ void App::WarmUpTextEditPresentation() {
             WS_CHILD | ES_MULTILINE,
             0,
             0,
-            1,
-            1,
+            240,
+            48,
             window_,
             nullptr,
             instance_,
             nullptr);
-        if (warmupEdit != nullptr) {
-            ShowWindow(warmupEdit, SW_SHOW);
+    }
+    if (warmupEdit != nullptr) {
+        const PageText defaultText {};
+        HFONT warmupFont = textgeom::CreatePageTextFont(defaultText, 24, CLEARTYPE_QUALITY);
+        if (warmupFont != nullptr) {
+            SendMessageW(warmupEdit, WM_SETFONT, reinterpret_cast<WPARAM>(warmupFont), TRUE);
         }
+        SetWindowTextW(warmupEdit, L"A");
+        textgeom::ApplyPageTextFormatting(warmupEdit, defaultText, 1.0f);
+        ShowWindow(warmupEdit, SW_SHOW);
+        SetFocus(warmupEdit);
+        SendMessageW(warmupEdit, EM_SETSEL, 0, -1);
+        SetFocus(window_);
+        ShowWindow(warmupEdit, SW_HIDE);
+        DestroyWindow(warmupEdit);
+        if (warmupFont != nullptr) {
+            DeleteObject(warmupFont);
+        }
+        // The measuring/layout RichEdit and its font path are separate cold costs.
+        static_cast<void>(textgeom::MeasurePageTextPixels(defaultText, 1024.0f, 1.0f));
     }
 
     HDC windowDc = GetDC(window_);
@@ -164,15 +180,6 @@ void App::WarmUpTextEditPresentation() {
         ReleaseDC(window_, windowDc);
     }
     GdiFlush();
-
-    // Detach and immediately reattach within the same handler: the fallback
-    // above painted identical pixels, so no intermediate frame can differ.
-    DetachContentComposition(false);
-    if (warmupEdit != nullptr) {
-        ShowWindow(warmupEdit, SW_HIDE);
-        DestroyWindow(warmupEdit);
-    }
-    static_cast<void>(UpdateContentComposition(clientRect, clientRect));
 }
 
 void App::Paint() {
@@ -202,7 +209,16 @@ void App::Paint() {
     PaintWindowFallback(windowDc, clientRect, fallbackPaintRect, false);
 
     EndPaint(window_, &paint);
-    DetachContentComposition(true);
+    if (contentCompositionContentAttached_) {
+        // The fallback paint landed in the window's redirection surface while the
+        // composition visual still covers it. Give DWM a frame to present those
+        // bits before detaching: an immediate detach can be composed first and
+        // show the surface's previous (blank) content — on cold sessions the
+        // first GDI presentation is slow enough to lose that race, which was the
+        // once-per-session canvas flash on the first text placement.
+        GdiFlush();
+        SetTimer(window_, kContentDetachTimerId, kContentDetachDelayMs, nullptr);
+    }
     DetachPopupComposition(true);
     if (textEditPresentationWarmupPending_) {
         WarmUpTextEditPresentation();
