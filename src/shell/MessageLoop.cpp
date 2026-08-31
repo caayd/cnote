@@ -1522,6 +1522,14 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
             return 0;
         }
         break;
+    case WM_MOUSEWHEEL:
+        // Swallow Ctrl+wheel: RichEdit would zoom its own display (EM_SETZOOM),
+        // which does not change the committed text size and desyncs from the
+        // canvas rendering.
+        if ((GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0) {
+            return 0;
+        }
+        break;
     default:
         break;
     }
