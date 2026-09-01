@@ -23,6 +23,14 @@ std::optional<std::size_t> FindTextIndexById(const Page& page, std::uint64_t tex
     }
     return std::nullopt;
 }
+std::optional<std::size_t> FindLatexIndexById(const Page& page, std::uint64_t latexId) {
+    for (std::size_t index = 0; index < page.latexes.size(); ++index) {
+        if (page.latexes[index].id == latexId) {
+            return index;
+        }
+    }
+    return std::nullopt;
+}
 
 int ShowUnsavedCloseDialog(HWND owner, HINSTANCE instance) {
     using TaskDialogIndirectFn = HRESULT(WINAPI*)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
@@ -140,6 +148,29 @@ void App::Undo() {
         InvalidateCanvas();
         return;
     }
+    case HistoryActionType::AddLatex:
+    case HistoryActionType::RemoveLatex:
+    case HistoryActionType::UpdateLatex: {
+        if (action.pageIndex >= document_.PageCount()) {
+            return;
+        }
+        Page& page = document_.PageAt(action.pageIndex);
+        if (action.type == HistoryActionType::AddLatex) {
+            if (const auto latexIndex = FindLatexIndexById(page, action.latex.id); latexIndex.has_value()) {
+                page.latexes.erase(page.latexes.begin() + static_cast<std::ptrdiff_t>(*latexIndex));
+            }
+        } else if (action.type == HistoryActionType::RemoveLatex) {
+            const std::size_t insertIndex = std::min(action.index, page.latexes.size());
+            page.latexes.insert(page.latexes.begin() + static_cast<std::ptrdiff_t>(insertIndex), action.latex);
+        } else if (const auto latexIndex = FindLatexIndexById(page, action.replacementLatex.id); latexIndex.has_value()) {
+            page.latexes[*latexIndex] = action.latex;
+        }
+        redoActions_.push_back(std::move(action));
+        RestoreAfterContentHistoryChange({ redoActions_.back().pageIndex }, redoActions_.back().pageIndex);
+        NotifyDocumentMutated();
+        InvalidateCanvas();
+        return;
+    }
     case HistoryActionType::AddPages: {
         const std::size_t removeCount = std::min(action.pages.size(), document_.PageCount() > action.index ? document_.PageCount() - action.index : 0U);
         for (std::size_t offset = 0; offset < removeCount; ++offset) {
@@ -233,6 +264,29 @@ void App::Redo() {
             }
         } else if (const auto textIndex = FindTextIndexById(page, action.text.id); textIndex.has_value()) {
             page.texts[*textIndex] = action.replacementText;
+        }
+        undoActions_.push_back(std::move(action));
+        RestoreAfterContentHistoryChange({ undoActions_.back().pageIndex }, undoActions_.back().pageIndex);
+        NotifyDocumentMutated();
+        InvalidateCanvas();
+        return;
+    }
+    case HistoryActionType::AddLatex:
+    case HistoryActionType::RemoveLatex:
+    case HistoryActionType::UpdateLatex: {
+        if (action.pageIndex >= document_.PageCount()) {
+            return;
+        }
+        Page& page = document_.PageAt(action.pageIndex);
+        if (action.type == HistoryActionType::AddLatex) {
+            const std::size_t insertIndex = std::min(action.index, page.latexes.size());
+            page.latexes.insert(page.latexes.begin() + static_cast<std::ptrdiff_t>(insertIndex), action.latex);
+        } else if (action.type == HistoryActionType::RemoveLatex) {
+            if (const auto latexIndex = FindLatexIndexById(page, action.latex.id); latexIndex.has_value()) {
+                page.latexes.erase(page.latexes.begin() + static_cast<std::ptrdiff_t>(*latexIndex));
+            }
+        } else if (const auto latexIndex = FindLatexIndexById(page, action.latex.id); latexIndex.has_value()) {
+            page.latexes[*latexIndex] = action.replacementLatex;
         }
         undoActions_.push_back(std::move(action));
         RestoreAfterContentHistoryChange({ undoActions_.back().pageIndex }, undoActions_.back().pageIndex);
@@ -347,6 +401,7 @@ bool App::IsDocumentInteractionActive() const {
 
 bool App::ConfirmCloseWithUnsavedChanges() {
     CommitTextEdit();
+    CommitLatexEdit();
     if (!documentDirty_) {
         return true;
     }
@@ -454,6 +509,29 @@ void App::PushTextHistoryAction(
     action.index = index;
     action.text = std::move(text);
     action.replacementText = std::move(replacementText);
+    undoActions_.push_back(std::move(action));
+    redoActions_.clear();
+}
+
+void App::PushLatexHistoryAction(
+    HistoryActionType type,
+    std::size_t pageIndex,
+    std::size_t index,
+    PageLatex latex,
+    PageLatex replacementLatex) {
+    if (type != HistoryActionType::AddLatex
+        && type != HistoryActionType::RemoveLatex
+        && type != HistoryActionType::UpdateLatex) {
+        return;
+    }
+
+    HistoryAction action {};
+    action.type = type;
+    action.pageIndex = pageIndex;
+    action.focusPageIndex = pageIndex;
+    action.index = index;
+    action.latex = std::move(latex);
+    action.replacementLatex = std::move(replacementLatex);
     undoActions_.push_back(std::move(action));
     redoActions_.clear();
 }

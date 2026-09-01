@@ -80,6 +80,19 @@ struct PageText {
     std::vector<PageTextStyleSpan> styleSpans {};
 };
 
+// A rendered LaTeX equation block. The source is the single source of truth:
+// rendered output is derived (and cached) by cnote::latex, never stored here.
+// x/y is the top-left of the equation's bounding box in page units; the box
+// size itself comes from latex::Measure. Resizing scales fontSize.
+struct PageLatex {
+    std::uint64_t id = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+    float fontSize = 24.0f;
+    std::uint32_t color = 0xFF111827;
+    std::wstring content {};
+};
+
 struct RasterImage {
     int width = 0;
     int height = 0;
@@ -97,6 +110,7 @@ struct Page;
 [[nodiscard]] bool StrokeEqual(const Stroke& a, const Stroke& b);
 [[nodiscard]] bool PageImageEqual(const PageImage& a, const PageImage& b);
 [[nodiscard]] bool PageTextEqual(const PageText& a, const PageText& b);
+[[nodiscard]] bool PageLatexEqual(const PageLatex& a, const PageLatex& b);
 [[nodiscard]] bool PageTextStyleEqual(const PageTextStyle& a, const PageTextStyle& b);
 [[nodiscard]] bool PageEqual(const Page& a, const Page& b);
 
@@ -109,6 +123,7 @@ struct Page {
     RasterImage raster {};
     std::vector<PageImage> images;
     std::vector<PageText> texts;
+    std::vector<PageLatex> latexes;
     std::vector<Stroke> strokes;
 };
 

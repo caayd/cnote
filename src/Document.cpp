@@ -335,6 +335,15 @@ bool PageTextEqual(const PageText& a, const PageText& b) {
             });
 }
 
+bool PageLatexEqual(const PageLatex& a, const PageLatex& b) {
+    return a.id == b.id
+        && a.x == b.x
+        && a.y == b.y
+        && a.fontSize == b.fontSize
+        && a.color == b.color
+        && a.content == b.content;
+}
+
 bool PageEqual(const Page& a, const Page& b) {
     if (a.width != b.width
         || a.height != b.height
@@ -344,6 +353,7 @@ bool PageEqual(const Page& a, const Page& b) {
         || !RasterImageEqual(a.raster, b.raster)
         || a.images.size() != b.images.size()
         || a.texts.size() != b.texts.size()
+        || a.latexes.size() != b.latexes.size()
         || a.strokes.size() != b.strokes.size()) {
         return false;
     }
@@ -354,6 +364,11 @@ bool PageEqual(const Page& a, const Page& b) {
     }
     for (std::size_t index = 0; index < a.texts.size(); ++index) {
         if (!PageTextEqual(a.texts[index], b.texts[index])) {
+            return false;
+        }
+    }
+    for (std::size_t index = 0; index < a.latexes.size(); ++index) {
+        if (!PageLatexEqual(a.latexes[index], b.latexes[index])) {
             return false;
         }
     }

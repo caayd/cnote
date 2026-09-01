@@ -157,6 +157,7 @@ bool App::OpenPdf(const std::wstring& filePath) {
 
 bool App::SaveCurrentCnote() {
     CommitTextEdit();
+    CommitLatexEdit();
     if (HasSavedCnotePath()) {
         return SaveCnoteToPath(document_.FilePath(), true);
     }
@@ -254,6 +255,7 @@ bool App::SaveAsCnote() {
 
 bool App::ExportAsPdf() {
     CommitTextEdit();
+    CommitLatexEdit();
     constexpr float kPdfExportFallbackRenderScale = 4.0f;
 
     wchar_t fileBuffer[MAX_PATH] = {};

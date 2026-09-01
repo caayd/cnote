@@ -20,6 +20,7 @@ Native Windows PDF annotation app in C++.
 - `S` select
 - `M` move
 - `H` pan
+- `L` latex equation (edit source with live preview; `Ctrl+Enter` commits)
 - `Ctrl+Z` undo
 - `Ctrl+Y` redo
 - `Ctrl+O` open

@@ -284,6 +284,8 @@ const char* ToolConfigName(App::Tool tool) {
         return "Move";
     case App::Tool::Text:
         return "Text";
+    case App::Tool::Latex:
+        return "Latex";
     case App::Tool::Draw:
         return "Draw";
     case App::Tool::Pan:
@@ -306,6 +308,9 @@ std::optional<App::Tool> ParseToolConfigName(std::string_view name) {
     }
     if (name == "Text") {
         return App::Tool::Text;
+    }
+    if (name == "Latex") {
+        return App::Tool::Latex;
     }
     if (name == "Draw") {
         return App::Tool::Draw;
@@ -1204,6 +1209,9 @@ void App::ExecuteShortcutAction(ShortcutAction action) {
         break;
     case ShortcutAction::ToolText:
         SetActiveTool(Tool::Text);
+        break;
+    case ShortcutAction::ToolLatex:
+        SetActiveTool(Tool::Latex);
         break;
     case ShortcutAction::ToolPan:
         SetActiveTool(Tool::Pan);

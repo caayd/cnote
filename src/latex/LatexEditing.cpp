@@ -1,0 +1,495 @@
+#include "App.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cwchar>
+#include <vector>
+
+#include <richedit.h>
+
+#include "latex/LatexEngine.h"
+#include "selection/Geometry.h"
+#include "text/TextGeometry.h"
+#include "ui/UiUtil.h"
+#include "DpiUtil.h"
+
+namespace cnote {
+
+namespace textgeom = cnote::text;
+namespace ui = cnote::ui;
+
+namespace {
+
+using ui::HasRect;
+using ui::MakeRect;
+using ui::UnionRectangles;
+
+constexpr int kLatexEditControlId = 4001;
+
+// Source editing is deliberately smaller than the rendered equation.
+constexpr float kLatexSourceFontScale = 0.55f;
+
+// Mirror of the helper in TextEditing.cpp (file-static there): the edit frame
+// invalidation region is the control rect inflated by the frame padding.
+RECT LiveTextEditFrameRect(const RECT& editRect, UINT dpi) {
+    RECT frameRect = editRect;
+    InflateRect(&frameRect, ScaleForDpi(4, dpi), ScaleForDpi(4, dpi));
+    return frameRect;
+}
+
+HFONT CreateLatexEditFont(int pixelHeight) {
+    return CreateFontW(
+        -std::max(1, pixelHeight),
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        FIXED_PITCH | FF_MODERN,
+        L"Consolas");
+}
+
+}  // namespace
+
+bool App::IsEditingLatex(std::size_t pageIndex, std::size_t latexIndex) const {
+    return textEditWindow_ != nullptr
+        && editingLatexPageIndex_.has_value()
+        && editingLatexIndex_.has_value()
+        && *editingLatexPageIndex_ == pageIndex
+        && *editingLatexIndex_ == latexIndex;
+}
+
+std::uint64_t App::AllocateLatexId() const {
+    std::uint64_t nextId = 1;
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        for (const PageLatex& latex : document_.PageAt(pageIndex).latexes) {
+            nextId = std::max(nextId, latex.id + 1U);
+        }
+    }
+    return nextId;
+}
+
+COLORREF App::EditingLatexBackgroundColor() const {
+    if (!editingLatexPageIndex_.has_value() || *editingLatexPageIndex_ >= document_.PageCount()) {
+        return RGB(255, 255, 255);
+    }
+    const Page& page = document_.PageAt(*editingLatexPageIndex_);
+    if (page.sourcePdfSourceIndex != -1 || page.sourcePdfPageIndex != -1) {
+        return RGB(255, 255, 255);
+    }
+    if (page.raster.pixels.size() >= 3U) {
+        // Raster pixels are stored as BGRA; the page background is the first pixel.
+        return RGB(page.raster.pixels[2], page.raster.pixels[1], page.raster.pixels[0]);
+    }
+    return RGB(255, 255, 255);
+}
+
+bool App::EnsureLatexEditWindow() {
+    if (window_ == nullptr) {
+        return false;
+    }
+    if (textEditWindow_ != nullptr && textEditWindowIsLatex_) {
+        return true;
+    }
+    if (textEditWindow_ != nullptr) {
+        // Wrong-mode window (created for rich text): drop it and recreate.
+        EndTextEditControl();
+    }
+    if (textgeom::EnsureRichEditModule() == nullptr) {
+        return false;
+    }
+
+    textEditSyncSuppressed_ = true;
+    textEditWindow_ = CreateWindowExW(
+        0,
+        L"RICHEDIT50W",
+        L"",
+        WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL,
+        0,
+        0,
+        0,
+        0,
+        window_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLatexEditControlId)),
+        instance_,
+        nullptr);
+    if (textEditWindow_ == nullptr) {
+        textEditOriginalProc_ = nullptr;
+        textEditSyncSuppressed_ = false;
+        return false;
+    }
+    textEditWindowIsLatex_ = true;
+    textEditWindowNeedsLayout_ = true;
+
+    // Latex source is plain text: no rich formatting, no autocorrect.
+    SendMessageW(textEditWindow_, EM_SETTEXTMODE, TM_PLAINTEXT, 0);
+
+    textEditBackgroundColor_ = EditingLatexBackgroundColor();
+    if (textEditSolidBackgroundBrush_ != nullptr) {
+        DeleteObject(textEditSolidBackgroundBrush_);
+    }
+    textEditSolidBackgroundBrush_ = CreateSolidBrush(textEditBackgroundColor_);
+    SendMessageW(textEditWindow_, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(textEditBackgroundColor_));
+    SetWindowLongPtrW(textEditWindow_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+    textEditOriginalProc_ = reinterpret_cast<WNDPROC>(
+        SetWindowLongPtrW(textEditWindow_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&App::TextEditProc)));
+    const LRESULT eventMask = SendMessageW(textEditWindow_, EM_GETEVENTMASK, 0, 0);
+    SendMessageW(textEditWindow_, EM_SETEVENTMASK, 0, eventMask | ENM_CHANGE);
+    SendMessageW(textEditWindow_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+    textEditSyncSuppressed_ = false;
+    return true;
+}
+
+void App::RefreshLatexEditControl() {
+    if (!editingLatexPageIndex_.has_value() || !editingLatexIndex_.has_value() || window_ == nullptr) {
+        return;
+    }
+    if (*editingLatexPageIndex_ >= document_.PageCount()) {
+        if (textEditWindow_ != nullptr) {
+            ShowWindow(textEditWindow_, SW_HIDE);
+        }
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, *editingLatexPageIndex_);
+    const Page& page = document_.PageAt(*editingLatexPageIndex_);
+    if (!pageView.valid || *editingLatexIndex_ >= page.latexes.size()) {
+        if (textEditWindow_ != nullptr) {
+            ShowWindow(textEditWindow_, SW_HIDE);
+        }
+        return;
+    }
+
+    const UINT dpi = WindowDpi(window_);
+    const PageLatex& block = page.latexes[*editingLatexIndex_];
+    if (!EnsureLatexEditWindow()) {
+        return;
+    }
+
+    const COLORREF backgroundColor = EditingLatexBackgroundColor();
+    if (backgroundColor != textEditBackgroundColor_) {
+        textEditBackgroundColor_ = backgroundColor;
+        if (textEditSolidBackgroundBrush_ != nullptr) {
+            DeleteObject(textEditSolidBackgroundBrush_);
+        }
+        textEditSolidBackgroundBrush_ = CreateSolidBrush(backgroundColor);
+        SendMessageW(textEditWindow_, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(backgroundColor));
+    }
+
+    // Size the source box from the live-parsed equation, with a floor so an
+    // empty/unparseable source still gets a usable editor.
+    const latex::FormulaMetrics metrics = latex::Measure(latex::Parse(block));
+    const float scale = std::max(0.1f, pageView.scale);
+    const int equationWidth = static_cast<int>(std::ceil(metrics.width * scale));
+    const int equationHeight = static_cast<int>(std::ceil(std::max(metrics.height, block.fontSize * 1.35f) * scale));
+
+    const int fontHeight = std::max(ScaleForDpi(12, dpi), static_cast<int>(std::lround(block.fontSize * kLatexSourceFontScale * scale)));
+    const int editMargin = std::max(1, ScaleForDpi(6, dpi));
+
+    int sourceLines = 1;
+    for (const wchar_t ch : block.content) {
+        if (ch == L'\n') {
+            ++sourceLines;
+        }
+    }
+    const int contentWidth = std::max(std::max(equationWidth, ScaleForDpi(260, dpi)), fontHeight * 12);
+    const int contentHeight = std::max(sourceLines * fontHeight, fontHeight);
+    const int width = contentWidth + (editMargin * 2);
+    const int height = contentHeight + (editMargin * 2);
+
+    // Place the source box above the equation preview; flip below when there
+    // is no room, then clamp to the window.
+    const int equationLeft = pageView.rect.left + static_cast<int>(std::lround(block.x * pageView.scale));
+    const int equationTop = pageView.rect.top + static_cast<int>(std::lround(block.y * pageView.scale));
+    const int gap = ScaleForDpi(8, dpi);
+    int left = equationLeft - editMargin;
+    int top = equationTop - height - gap;
+    if (top < pageView.rect.top) {
+        top = equationTop + equationHeight + gap;
+    }
+    left = std::clamp(left, 0, std::max(0, static_cast<int>(clientRect.right) - width));
+    top = std::clamp(top, 0, std::max(0, static_cast<int>(clientRect.bottom) - height));
+    const RECT editRect = MakeRect(left, top, left + width, top + height);
+
+    const bool fontChanged = textEditFont_ == nullptr || textEditFontPixelHeight_ != fontHeight;
+    if (fontChanged) {
+        if (textEditFont_ != nullptr) {
+            DeleteObject(textEditFont_);
+            textEditFont_ = nullptr;
+        }
+        textEditFont_ = CreateLatexEditFont(fontHeight);
+        textEditFontPixelHeight_ = fontHeight;
+        if (textEditFont_ != nullptr) {
+            SendMessageW(textEditWindow_, WM_SETFONT, reinterpret_cast<WPARAM>(textEditFont_), TRUE);
+        }
+    }
+
+    const bool boundsChanged = EqualRect(&textEditBounds_, &editRect) == 0;
+    const bool needsLayout = textEditWindowNeedsLayout_;
+    const bool wasVisible = IsWindowVisible(textEditWindow_) != FALSE;
+    RECT dirtyRect {};
+    bool needsParentRedraw = false;
+    if (boundsChanged || needsLayout) {
+        dirtyRect = LiveTextEditFrameRect(editRect, dpi);
+        if (HasRect(textEditBounds_)) {
+            const RECT previousFrameRect = LiveTextEditFrameRect(textEditBounds_, dpi);
+            dirtyRect = UnionRectangles(previousFrameRect, dirtyRect);
+        }
+        RefreshTextEditBackgroundBrush(editRect);
+        textEditBounds_ = editRect;
+        needsParentRedraw = true;
+        InvalidateRect(window_, &dirtyRect, FALSE);
+    }
+    if (boundsChanged || needsLayout) {
+        SendMessageW(textEditWindow_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+        UINT setWindowFlags = SWP_NOACTIVATE | SWP_NOCOPYBITS;
+        if (wasVisible) {
+            setWindowFlags |= SWP_SHOWWINDOW;
+        }
+        SetWindowPos(textEditWindow_, HWND_TOP, left, top, width, height, setWindowFlags);
+        RECT formatRect { editMargin, editMargin, editMargin + contentWidth, editMargin + contentHeight };
+        SendMessageW(textEditWindow_, EM_SETRECT, 0, reinterpret_cast<LPARAM>(&formatRect));
+        textEditWindowNeedsLayout_ = false;
+    } else if (!wasVisible && !textEditWindowAutoShowSuppressed_) {
+        ShowWindow(textEditWindow_, SW_SHOW);
+    }
+    if (needsParentRedraw) {
+        if (!wasVisible) {
+            textEditWindowAutoShowSuppressed_ = true;
+        }
+        RedrawWindow(
+            window_,
+            &dirtyRect,
+            nullptr,
+            RDW_INVALIDATE | RDW_NOCHILDREN | (!wasVisible ? RDW_UPDATENOW : 0U));
+        if (!wasVisible) {
+            textEditWindowAutoShowSuppressed_ = false;
+            ShowWindow(textEditWindow_, SW_SHOW);
+        }
+    }
+    if (boundsChanged || needsLayout || fontChanged) {
+        InvalidateRect(textEditWindow_, nullptr, TRUE);
+    }
+}
+
+void App::SyncLatexEditModel() {
+    if (textEditWindow_ == nullptr
+        || !editingLatexPageIndex_.has_value()
+        || !editingLatexIndex_.has_value()
+        || *editingLatexPageIndex_ >= document_.PageCount()) {
+        return;
+    }
+    Page& page = document_.PageAt(*editingLatexPageIndex_);
+    if (*editingLatexIndex_ >= page.latexes.size()) {
+        return;
+    }
+
+    const int textLength = GetWindowTextLengthW(textEditWindow_);
+    std::wstring content;
+    if (textLength > 0) {
+        std::vector<wchar_t> buffer(static_cast<std::size_t>(textLength) + 1U, L'\0');
+        GetWindowTextW(textEditWindow_, buffer.data(), textLength + 1);
+        content.assign(buffer.data(), static_cast<std::size_t>(textLength));
+    }
+    page.latexes[*editingLatexIndex_].content = std::move(content);
+    // Live preview repaints directly (the editing block is excluded from the
+    // page surface caches), so a canvas repaint is all that is needed.
+    InvalidateCanvas();
+}
+
+void App::BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex, std::optional<PageLatex> beforeLatex, bool createsLatex) {
+    CommitTextEdit();
+    CommitLatexEdit();
+    if (pageIndex >= document_.PageCount() || latexIndex >= document_.PageAt(pageIndex).latexes.size()) {
+        return;
+    }
+
+    ClearSelection();
+    selectedLatexIndices_[pageIndex].push_back(latexIndex);
+    editingLatexPageIndex_ = pageIndex;
+    editingLatexIndex_ = latexIndex;
+    editingLatexBefore_ = std::move(beforeLatex);
+    editingLatexCreatesLatex_ = createsLatex;
+
+    const PageLatex& block = document_.PageAt(pageIndex).latexes[latexIndex];
+    if (!EnsureLatexEditWindow()) {
+        editingLatexPageIndex_.reset();
+        editingLatexIndex_.reset();
+        if (createsLatex && latexIndex < document_.PageAt(pageIndex).latexes.size()) {
+            document_.PageAt(pageIndex).latexes.erase(document_.PageAt(pageIndex).latexes.begin() + static_cast<std::ptrdiff_t>(latexIndex));
+        }
+        editingLatexBefore_.reset();
+        editingLatexCreatesLatex_ = false;
+        return;
+    }
+    textEditSyncSuppressed_ = true;
+    SetWindowTextW(textEditWindow_, block.content.c_str());
+    textEditSyncSuppressed_ = false;
+    InvalidatePageSurfaceCache(pageIndex);
+    RefreshLatexEditControl();
+    ShowWindow(textEditWindow_, SW_SHOW);
+    SetFocus(textEditWindow_);
+    SendMessageW(textEditWindow_, EM_SETSEL, 0, -1);
+    UpdateCaptureState();
+    InvalidateCanvas();
+}
+
+void App::CommitLatexEdit() {
+    if (textEditWindow_ == nullptr || !editingLatexPageIndex_.has_value() || !editingLatexIndex_.has_value()) {
+        return;
+    }
+
+    const std::size_t pageIndex = *editingLatexPageIndex_;
+    const std::size_t latexIndex = *editingLatexIndex_;
+    const std::optional<PageLatex> beforeLatex = editingLatexBefore_;
+    const bool createdLatex = editingLatexCreatesLatex_;
+    std::optional<PageLatex> committedLatex;
+
+    if (pageIndex < document_.PageCount() && latexIndex < document_.PageAt(pageIndex).latexes.size()) {
+        const int textLength = GetWindowTextLengthW(textEditWindow_);
+        std::wstring content;
+        if (textLength > 0) {
+            std::vector<wchar_t> buffer(static_cast<std::size_t>(textLength) + 1U, L'\0');
+            GetWindowTextW(textEditWindow_, buffer.data(), textLength + 1);
+            content.assign(buffer.data(), static_cast<std::size_t>(textLength));
+        }
+        Page& page = document_.PageAt(pageIndex);
+        page.latexes[latexIndex].content = std::move(content);
+        if (page.latexes[latexIndex].content.empty()) {
+            page.latexes.erase(page.latexes.begin() + static_cast<std::ptrdiff_t>(latexIndex));
+        } else {
+            committedLatex = page.latexes[latexIndex];
+        }
+    }
+
+    const RECT editFrameRect = (window_ != nullptr && HasRect(textEditBounds_))
+        ? LiveTextEditFrameRect(textEditBounds_, WindowDpi(window_))
+        : RECT {};
+    if (pageIndex < document_.PageCount()) {
+        InvalidatePageSurfaceCache(pageIndex);
+    }
+    EndTextEditControl();
+    editingLatexPageIndex_.reset();
+    editingLatexIndex_.reset();
+    editingLatexBefore_.reset();
+    editingLatexCreatesLatex_ = false;
+    if (window_ != nullptr && HasRect(editFrameRect)) {
+        RedrawWindow(window_, &editFrameRect, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    }
+    ClearSelection();
+    if (pageIndex < document_.PageCount() && latexIndex < document_.PageAt(pageIndex).latexes.size()) {
+        selectedLatexIndices_[pageIndex].push_back(latexIndex);
+    }
+    if (pageIndex < document_.PageCount()) {
+        bool changed = false;
+        if (createdLatex) {
+            if (committedLatex.has_value()) {
+                PushLatexHistoryAction(HistoryActionType::AddLatex, pageIndex, latexIndex, *committedLatex);
+                changed = true;
+            }
+        } else if (beforeLatex.has_value()) {
+            if (!committedLatex.has_value()) {
+                PushLatexHistoryAction(HistoryActionType::RemoveLatex, pageIndex, latexIndex, *beforeLatex);
+                changed = true;
+            } else if (!PageLatexEqual(*beforeLatex, *committedLatex)) {
+                PushLatexHistoryAction(HistoryActionType::UpdateLatex, pageIndex, latexIndex, *beforeLatex, *committedLatex);
+                changed = true;
+            }
+        }
+        if (changed) {
+            NotifyDocumentMutated();
+        }
+    }
+    UpdateCaptureState();
+    InvalidateCanvas();
+}
+
+void App::CancelLatexEdit() {
+    if (!editingLatexPageIndex_.has_value() || !editingLatexIndex_.has_value()) {
+        EndTextEditControl();
+        return;
+    }
+
+    const std::size_t pageIndex = *editingLatexPageIndex_;
+    const std::size_t latexIndex = editingLatexIndex_.value_or(0);
+    if (pageIndex < document_.PageCount()) {
+        auto& latexes = document_.PageAt(pageIndex).latexes;
+        if (editingLatexCreatesLatex_) {
+            if (latexIndex < latexes.size()) {
+                latexes.erase(latexes.begin() + static_cast<std::ptrdiff_t>(latexIndex));
+            }
+        } else if (editingLatexBefore_.has_value() && latexIndex < latexes.size()) {
+            latexes[latexIndex] = *editingLatexBefore_;
+        }
+        InvalidatePageSurfaceCache(pageIndex);
+    }
+
+    const RECT editFrameRect = (window_ != nullptr && HasRect(textEditBounds_))
+        ? LiveTextEditFrameRect(textEditBounds_, WindowDpi(window_))
+        : RECT {};
+    EndTextEditControl();
+    editingLatexPageIndex_.reset();
+    editingLatexIndex_.reset();
+    editingLatexBefore_.reset();
+    editingLatexCreatesLatex_ = false;
+    if (window_ != nullptr && HasRect(editFrameRect)) {
+        RedrawWindow(window_, &editFrameRect, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    }
+    ClearSelection();
+    if (pageIndex < document_.PageCount() && latexIndex < document_.PageAt(pageIndex).latexes.size()) {
+        selectedLatexIndices_[pageIndex].push_back(latexIndex);
+    }
+    UpdateCaptureState();
+    InvalidateCanvas();
+}
+
+void App::BeginLatexToolInteraction(POINT cursor) {
+    const auto hitLatex = HitTestLatex(cursor);
+    if (hitLatex.has_value()) {
+        document_.SetCurrentPageIndex(hitLatex->first);
+        MarkPdfSidebarCompositionDirty();
+        BeginLatexEdit(hitLatex->first, hitLatex->second, document_.PageAt(hitLatex->first).latexes[hitLatex->second]);
+        return;
+    }
+
+    const auto hitPage = HitTestPage(cursor);
+    if (!hitPage.has_value()) {
+        ClearSelection();
+        InvalidateCanvas();
+        return;
+    }
+
+    Page& page = document_.PageAt(hitPage->pageIndex);
+    PageLatex block {};
+    const PageLatex defaultBlock {};
+    constexpr float newLatexSizeScale = 0.5f;
+    const Vec2 pagePoint = ScreenToPage(*hitPage, cursor, true);
+    block.id = AllocateLatexId();
+    block.fontSize = std::max(1.0f, defaultBlock.fontSize * newLatexSizeScale);
+    block.x = pagePoint.x;
+    block.y = pagePoint.y;
+    if (page.width > 0.0f) {
+        block.x = std::min(block.x, std::max(0.0f, page.width - block.fontSize));
+    }
+    if (page.height > 0.0f) {
+        const float estimatedInitialHeight = std::max(1.0f, block.fontSize * 1.35f);
+        if (block.y + estimatedInitialHeight > page.height) {
+            block.y = std::max(0.0f, page.height - estimatedInitialHeight);
+        }
+    }
+    block.color = palette_[colorIndex_];
+    page.latexes.push_back(block);
+    document_.SetCurrentPageIndex(hitPage->pageIndex);
+    MarkPdfSidebarCompositionDirty();
+    BeginLatexEdit(hitPage->pageIndex, page.latexes.size() - 1U, std::nullopt, true);
+}
+
+}  // namespace cnote

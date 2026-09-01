@@ -15,6 +15,7 @@ namespace textgeom = cnote::text;
 void App::ClearSelection() {
     selectedImageIndices_.assign(document_.PageCount(), {});
     selectedTextIndices_.assign(document_.PageCount(), {});
+    selectedLatexIndices_.assign(document_.PageCount(), {});
     selectedStrokeIndices_.assign(document_.PageCount(), {});
 }
 
@@ -22,6 +23,7 @@ bool App::HasSelection() const {
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         if ((pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
             || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())
+            || (pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty())
             || (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())) {
             return true;
         }
@@ -34,8 +36,9 @@ std::optional<std::size_t> App::FirstSelectedPageIndex() const {
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         const bool hasStrokes = pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty();
         const bool hasTexts = pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty();
+        const bool hasLatexes = pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty();
         const bool hasImages = pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty();
-        if (hasStrokes || hasTexts || hasImages) {
+        if (hasStrokes || hasTexts || hasLatexes || hasImages) {
             return pageIndex;
         }
     }
@@ -56,8 +59,9 @@ void App::DeleteSelection(std::optional<std::size_t> pageIndex) {
 
         const bool hasSelectedStrokes = index < selectedStrokeIndices_.size() && !selectedStrokeIndices_[index].empty();
         const bool hasSelectedTexts = index < selectedTextIndices_.size() && !selectedTextIndices_[index].empty();
+        const bool hasSelectedLatexes = index < selectedLatexIndices_.size() && !selectedLatexIndices_[index].empty();
         const bool hasSelectedImages = index < selectedImageIndices_.size() && !selectedImageIndices_[index].empty();
-        if (!hasSelectedImages && !hasSelectedTexts && !hasSelectedStrokes) {
+        if (!hasSelectedImages && !hasSelectedTexts && !hasSelectedLatexes && !hasSelectedStrokes) {
             continue;
         }
 
@@ -70,6 +74,17 @@ void App::DeleteSelection(std::optional<std::size_t> pageIndex) {
             for (std::size_t textIndex : textIndices) {
                 if (textIndex < texts.size()) {
                     texts.erase(texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
+                }
+            }
+            InvalidatePageSurfaceCache(index);
+        }
+        if (hasSelectedLatexes) {
+            auto latexIndices = selectedLatexIndices_[index];
+            std::sort(latexIndices.rbegin(), latexIndices.rend());
+            auto& latexes = document_.PageAt(index).latexes;
+            for (std::size_t latexIndex : latexIndices) {
+                if (latexIndex < latexes.size()) {
+                    latexes.erase(latexes.begin() + static_cast<std::ptrdiff_t>(latexIndex));
                 }
             }
             InvalidatePageSurfaceCache(index);
@@ -186,6 +201,15 @@ bool App::IsTextSelected(std::size_t pageIndex, std::size_t textIndex) const {
     return std::find(selected.begin(), selected.end(), textIndex) != selected.end();
 }
 
+bool App::IsLatexSelected(std::size_t pageIndex, std::size_t latexIndex) const {
+    if (pageIndex >= selectedLatexIndices_.size()) {
+        return false;
+    }
+
+    const auto& selected = selectedLatexIndices_[pageIndex];
+    return std::find(selected.begin(), selected.end(), latexIndex) != selected.end();
+}
+
 bool App::IsEditingText(std::size_t pageIndex, std::size_t textIndex) const {
     return textEditWindow_ != nullptr
         && editingTextPageIndex_.has_value()
@@ -198,7 +222,8 @@ std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedImage() co
     std::optional<std::pair<std::size_t, std::size_t>> result;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         if ((pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
-            || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())) {
+            || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())
+            || (pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty())) {
             return std::nullopt;
         }
         if (pageIndex >= selectedImageIndices_.size()) {
@@ -218,7 +243,8 @@ std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedText() con
     std::optional<std::pair<std::size_t, std::size_t>> result;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         if ((pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
-            || (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())) {
+            || (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())
+            || (pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty())) {
             return std::nullopt;
         }
         if (pageIndex >= selectedTextIndices_.size()) {
@@ -234,11 +260,33 @@ std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedText() con
     return result;
 }
 
+std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedLatex() const {
+    std::optional<std::pair<std::size_t, std::size_t>> result;
+    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+        if ((pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
+            || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())
+            || (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())) {
+            return std::nullopt;
+        }
+        if (pageIndex >= selectedLatexIndices_.size()) {
+            continue;
+        }
+        for (std::size_t latexIndex : selectedLatexIndices_[pageIndex]) {
+            if (result.has_value()) {
+                return std::nullopt;
+            }
+            result = std::make_pair(pageIndex, latexIndex);
+        }
+    }
+    return result;
+}
+
 std::optional<std::size_t> App::SingleSelectedStrokePage() const {
     std::optional<std::size_t> result;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         if ((pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())
-            || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())) {
+            || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())
+            || (pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty())) {
             return std::nullopt;
         }
         if (pageIndex >= selectedStrokeIndices_.size() || selectedStrokeIndices_[pageIndex].empty()) {
@@ -340,6 +388,23 @@ std::optional<std::pair<std::size_t, std::size_t>> App::HitTestText(POINT cursor
 
     return std::nullopt;
 }
+std::optional<std::pair<std::size_t, std::size_t>> App::HitTestLatex(POINT cursor) const {
+    const auto hitPage = HitTestPage(cursor);
+    if (!hitPage.has_value() || hitPage->pageIndex >= document_.PageCount()) {
+        return std::nullopt;
+    }
+
+    const Vec2 pagePoint = ScreenToPage(*hitPage, cursor, true);
+    const Page& page = document_.PageAt(hitPage->pageIndex);
+    for (std::size_t latexIndex = page.latexes.size(); latexIndex > 0; --latexIndex) {
+        const std::size_t actualIndex = latexIndex - 1U;
+        if (LatexHitsPoint(page.latexes[actualIndex], page.width, pagePoint)) {
+            return std::make_pair(hitPage->pageIndex, actualIndex);
+        }
+    }
+
+    return std::nullopt;
+}
 
 std::optional<App::ImageTransformHandle> App::HitTestSelectedTextHandle(POINT cursor, std::size_t* pageIndex, std::size_t* textIndex) const {
     const auto singleText = SingleSelectedText();
@@ -391,6 +456,63 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedTextHandle(POINT cu
             }
             if (textIndex != nullptr) {
                 *textIndex = singleText->second;
+            }
+            return handlePoint.handle;
+        }
+    }
+
+    return std::nullopt;
+}
+std::optional<App::ImageTransformHandle> App::HitTestSelectedLatexHandle(POINT cursor, std::size_t* pageIndex, std::size_t* latexIndex) const {
+    const auto singleLatex = SingleSelectedLatex();
+    if (!singleLatex.has_value() || window_ == nullptr) {
+        return std::nullopt;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, singleLatex->first);
+    if (!pageView.valid) {
+        return std::nullopt;
+    }
+
+    const Page& page = document_.PageAt(singleLatex->first);
+    if (singleLatex->second >= page.latexes.size()) {
+        return std::nullopt;
+    }
+
+    const auto boundsRect = PageLatexBoundsRect(page.latexes[singleLatex->second], page.width, pageView.scale, 0);
+    if (!boundsRect.has_value()) {
+        return std::nullopt;
+    }
+    RECT screenBounds = *boundsRect;
+    OffsetRect(&screenBounds, pageView.rect.left, pageView.rect.top);
+    const Vec2 center {
+        static_cast<float>((screenBounds.left + screenBounds.right) / 2),
+        static_cast<float>((screenBounds.top + screenBounds.bottom) / 2),
+    };
+    const struct {
+        ImageTransformHandle handle;
+        Vec2 point;
+    } handlePoints[] {
+        { ImageTransformHandle::ResizeNorthWest, { static_cast<float>(screenBounds.left), static_cast<float>(screenBounds.top) } },
+        { ImageTransformHandle::ResizeNorth, { center.x, static_cast<float>(screenBounds.top) } },
+        { ImageTransformHandle::ResizeNorthEast, { static_cast<float>(screenBounds.right), static_cast<float>(screenBounds.top) } },
+        { ImageTransformHandle::ResizeEast, { static_cast<float>(screenBounds.right), center.y } },
+        { ImageTransformHandle::ResizeSouthEast, { static_cast<float>(screenBounds.right), static_cast<float>(screenBounds.bottom) } },
+        { ImageTransformHandle::ResizeSouth, { center.x, static_cast<float>(screenBounds.bottom) } },
+        { ImageTransformHandle::ResizeSouthWest, { static_cast<float>(screenBounds.left), static_cast<float>(screenBounds.bottom) } },
+        { ImageTransformHandle::ResizeWest, { static_cast<float>(screenBounds.left), center.y } },
+    };
+    const float handleRadiusPixels = SelectionHandleHitRadiusPixels(WindowDpi(window_));
+    const Vec2 cursorPoint { static_cast<float>(cursor.x), static_cast<float>(cursor.y) };
+    for (const auto& handlePoint : handlePoints) {
+        if (DistanceSquared(handlePoint.point, cursorPoint) <= (handleRadiusPixels * handleRadiusPixels)) {
+            if (pageIndex != nullptr) {
+                *pageIndex = singleLatex->first;
+            }
+            if (latexIndex != nullptr) {
+                *latexIndex = singleLatex->second;
             }
             return handlePoint.handle;
         }
@@ -484,6 +606,7 @@ bool App::CursorHitsSelectedContent(POINT cursor) const {
     const std::size_t pageIndex = hitPage->pageIndex;
     if (pageIndex >= selectedStrokeIndices_.size()
         && pageIndex >= selectedTextIndices_.size()
+        && pageIndex >= selectedLatexIndices_.size()
         && pageIndex >= selectedImageIndices_.size()) {
         return false;
     }
@@ -508,6 +631,13 @@ bool App::CursorHitsSelectedContent(POINT cursor) const {
     if (pageIndex < selectedTextIndices_.size()) {
         for (std::size_t textIndex : selectedTextIndices_[pageIndex]) {
             if (textIndex < page.texts.size() && textgeom::TextHitsPoint(page.texts[textIndex], page.width, pagePoint)) {
+                return true;
+            }
+        }
+    }
+    if (pageIndex < selectedLatexIndices_.size()) {
+        for (std::size_t latexIndex : selectedLatexIndices_[pageIndex]) {
+            if (latexIndex < page.latexes.size() && LatexHitsPoint(page.latexes[latexIndex], page.width, pagePoint)) {
                 return true;
             }
         }
@@ -537,8 +667,9 @@ bool App::CursorHitsSelectionMoveGrip(POINT cursor) const {
 
     const bool hasSelectedStrokes = pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty();
     const bool hasSelectedTexts = pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty();
+    const bool hasSelectedLatexes = pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty();
     const bool hasSelectedImages = pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty();
-    if (!hasSelectedStrokes && !hasSelectedTexts && !hasSelectedImages) {
+    if (!hasSelectedStrokes && !hasSelectedTexts && !hasSelectedLatexes && !hasSelectedImages) {
         return false;
     }
 
@@ -575,6 +706,24 @@ bool App::CursorHitsSelectionMoveGrip(POINT cursor) const {
             }
 
             RECT screenRect = *textRect;
+            OffsetRect(&screenRect, hitPage->rect.left, hitPage->rect.top);
+            if (RectContainsPointWithPadding(screenRect, cursor, gripPadding)) {
+                return true;
+            }
+        }
+    }
+    if (hasSelectedLatexes) {
+        for (std::size_t latexIndex : selectedLatexIndices_[pageIndex]) {
+            if (latexIndex >= page.latexes.size()) {
+                continue;
+            }
+
+            const auto latexRect = PageLatexBoundsRect(page.latexes[latexIndex], page.width, hitPage->scale, 4);
+            if (!latexRect.has_value()) {
+                continue;
+            }
+
+            RECT screenRect = *latexRect;
             OffsetRect(&screenRect, hitPage->rect.left, hitPage->rect.top);
             if (RectContainsPointWithPadding(screenRect, cursor, gripPadding)) {
                 return true;
@@ -620,6 +769,7 @@ bool App::CursorHitsSelectionMoveGrip(POINT cursor) const {
 bool App::CursorInteractsWithSelection(POINT cursor) const {
     return HitTestSelectedStrokeHandle(cursor).has_value()
         || HitTestSelectedTextHandle(cursor).has_value()
+        || HitTestSelectedLatexHandle(cursor).has_value()
         || HitTestSelectedImageHandle(cursor).has_value()
         || CursorHitsSelectionMoveGrip(cursor)
         || CursorHitsSelectedContent(cursor);
@@ -633,6 +783,7 @@ void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta, bool clamp
     Page& page = document_.PageAt(pageIndex);
     if (pageIndex >= selectedStrokeIndices_.size()
         || pageIndex >= selectedTextIndices_.size()
+        || pageIndex >= selectedLatexIndices_.size()
         || pageIndex >= selectedImageIndices_.size()) {
         return;
     }
@@ -661,6 +812,17 @@ void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta, bool clamp
             continue;
         }
         const textgeom::PageTextBounds bounds = textgeom::MeasurePageTextBounds(page.texts[textIndex], page.width);
+        minX = std::min(minX, bounds.left);
+        minY = std::min(minY, bounds.top);
+        maxX = std::max(maxX, bounds.right);
+        maxY = std::max(maxY, bounds.bottom);
+        hasSelection = true;
+    }
+    for (std::size_t latexIndex : selectedLatexIndices_[pageIndex]) {
+        if (latexIndex >= page.latexes.size()) {
+            continue;
+        }
+        const PageLatexBounds bounds = MeasurePageLatexBounds(page.latexes[latexIndex], page.width);
         minX = std::min(minX, bounds.left);
         minY = std::min(minY, bounds.top);
         maxX = std::max(maxX, bounds.right);
@@ -711,6 +873,13 @@ void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta, bool clamp
         }
         page.texts[textIndex].x += delta.x;
         page.texts[textIndex].y += delta.y;
+    }
+    for (std::size_t latexIndex : selectedLatexIndices_[pageIndex]) {
+        if (latexIndex >= page.latexes.size()) {
+            continue;
+        }
+        page.latexes[latexIndex].x += delta.x;
+        page.latexes[latexIndex].y += delta.y;
     }
 
     for (std::size_t imageIndex : selectedImageIndices_[pageIndex]) {
@@ -768,6 +937,7 @@ bool App::RehomeSelectedContentAcrossPages(bool clampToPage) {
     std::vector<bool> invalidatedPages(document_.PageCount(), false);
     std::vector<std::vector<Stroke>> movedStrokes(document_.PageCount());
     std::vector<std::vector<PageImage>> movedImages(document_.PageCount());
+    std::vector<std::vector<PageLatex>> movedLatexes(document_.PageCount());
 
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         Page& page = document_.PageAt(pageIndex);
@@ -896,6 +1066,65 @@ bool App::RehomeSelectedContentAcrossPages(bool clampToPage) {
             page.images = std::move(retainedImages);
             selectedImageIndices_[pageIndex] = std::move(retainedSelected);
         }
+        if (pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty()) {
+            std::vector<bool> selectedFlags(page.latexes.size(), false);
+            for (std::size_t latexIndex : selectedLatexIndices_[pageIndex]) {
+                if (latexIndex < selectedFlags.size()) {
+                    selectedFlags[latexIndex] = true;
+                }
+            }
+
+            std::vector<PageLatex> retainedLatexes;
+            retainedLatexes.reserve(page.latexes.size());
+            std::vector<std::size_t> retainedSelected;
+            for (std::size_t latexIndex = 0; latexIndex < page.latexes.size(); ++latexIndex) {
+                PageLatex latex = std::move(page.latexes[latexIndex]);
+                if (!selectedFlags[latexIndex]) {
+                    retainedLatexes.push_back(std::move(latex));
+                    continue;
+                }
+
+                const PageLatexBounds bounds = MeasurePageLatexBounds(latex, page.width);
+                const Vec2 center { (bounds.left + bounds.right) * 0.5f, (bounds.top + bounds.bottom) * 0.5f };
+                const POINT centerPoint {
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.left) + (center.x * sourceView.scale))),
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.top) + (center.y * sourceView.scale))),
+                };
+                const std::size_t targetPageIndex = targetPageForScreenPoint(centerPoint, pageIndex);
+                if (targetPageIndex != pageIndex) {
+                    const PageView& targetView = pageViews[targetPageIndex];
+                    const Vec2 remappedTopLeft = RemapPagePointBetweenViews(sourceView, targetView, { latex.x, latex.y });
+                    latex.x = remappedTopLeft.x;
+                    latex.y = remappedTopLeft.y;
+                    if (clampToPage) {
+                        const Vec2 clampDelta = ClampLatexDeltaToPage(latex, document_.PageAt(targetPageIndex), {});
+                        latex.x += clampDelta.x;
+                        latex.y += clampDelta.y;
+                    }
+                    movedLatexes[targetPageIndex].push_back(std::move(latex));
+                    invalidatedPages[pageIndex] = true;
+                    invalidatedPages[targetPageIndex] = true;
+                    changed = true;
+                    continue;
+                }
+
+                if (clampToPage) {
+                    const Vec2 clampDelta = ClampLatexDeltaToPage(latex, page, {});
+                    if (std::abs(clampDelta.x) >= 0.001f || std::abs(clampDelta.y) >= 0.001f) {
+                        latex.x += clampDelta.x;
+                        latex.y += clampDelta.y;
+                        invalidatedPages[pageIndex] = true;
+                        changed = true;
+                    }
+                }
+
+                retainedLatexes.push_back(std::move(latex));
+                retainedSelected.push_back(retainedLatexes.size() - 1U);
+            }
+
+            page.latexes = std::move(retainedLatexes);
+            selectedLatexIndices_[pageIndex] = std::move(retainedSelected);
+        }
     }
 
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
@@ -913,6 +1142,14 @@ bool App::RehomeSelectedContentAcrossPages(bool clampToPage) {
             for (PageImage& image : movedImages[pageIndex]) {
                 images.push_back(std::move(image));
                 selectedImageIndices_[pageIndex].push_back(images.size() - 1U);
+            }
+            invalidatedPages[pageIndex] = true;
+        }
+        if (!movedLatexes[pageIndex].empty()) {
+            auto& latexes = document_.PageAt(pageIndex).latexes;
+            for (PageLatex& latex : movedLatexes[pageIndex]) {
+                latexes.push_back(std::move(latex));
+                selectedLatexIndices_[pageIndex].push_back(latexes.size() - 1U);
             }
             invalidatedPages[pageIndex] = true;
         }
@@ -1061,6 +1298,22 @@ void App::EndSelection() {
                 selectedTextIndices_[pageView.pageIndex].push_back(textIndex);
             }
         }
+        for (std::size_t latexIndex = 0; latexIndex < page.latexes.size(); ++latexIndex) {
+            const PageLatex& latex = page.latexes[latexIndex];
+            bool hit = false;
+            if (effectiveSelectionMode == SelectionMode::Box) {
+                hit = clickSelection
+                    ? LatexHitsPoint(latex, page.width, currentPage)
+                    : LatexIntersectsRectSelection(latex, page.width, anchorPage, currentPage);
+            } else {
+                hit = (pagePolygon.size() < 3U)
+                    ? LatexHitsPoint(latex, page.width, currentPage)
+                    : LatexIntersectsPolygonSelection(latex, page.width, pagePolygon);
+            }
+            if (hit && pageView.pageIndex < selectedLatexIndices_.size()) {
+                selectedLatexIndices_[pageView.pageIndex].push_back(latexIndex);
+            }
+        }
     }
 
     isSelecting_ = false;
@@ -1106,16 +1359,33 @@ void App::BeginMoveSelection(POINT cursor) {
         BeginTextTransform(pageIndex, textHandleTextIndex, *textHandle, cursor);
         return;
     }
+    std::size_t latexHandlePageIndex = 0;
+    std::size_t latexHandleLatexIndex = 0;
+    const auto latexHandle = HitTestSelectedLatexHandle(cursor, &latexHandlePageIndex, &latexHandleLatexIndex);
+    if (latexHandle.has_value() && latexHandlePageIndex == pageIndex) {
+        BeginLatexTransform(pageIndex, latexHandleLatexIndex, *latexHandle, cursor);
+        return;
+    }
 
     const bool clickedSelectionMoveGrip = CursorHitsSelectionMoveGrip(cursor);
     std::optional<std::size_t> clickedSelectedStroke {};
     std::optional<std::size_t> clickedSelectedText {};
+    std::optional<std::size_t> clickedSelectedLatex {};
     std::optional<std::size_t> clickedSelectedImage {};
     std::optional<std::size_t> clickedStroke {};
     std::optional<std::size_t> clickedText {};
+    std::optional<std::size_t> clickedLatex {};
     std::optional<std::size_t> clickedImage {};
-
-    if (!clickedSelectionMoveGrip && pageIndex < selectedStrokeIndices_.size()) {
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value()
+        && pageIndex < selectedLatexIndices_.size()) {
+        for (std::size_t latexIndex : selectedLatexIndices_[pageIndex]) {
+            if (latexIndex < page.latexes.size() && LatexHitsPoint(page.latexes[latexIndex], page.width, pagePoint)) {
+                clickedSelectedLatex = latexIndex;
+                break;
+            }
+        }
+    }
+    if (!clickedSelectionMoveGrip && !clickedSelectedLatex.has_value() && pageIndex < selectedStrokeIndices_.size()) {
         for (std::size_t strokeIndex : selectedStrokeIndices_[pageIndex]) {
             if (strokeIndex < page.strokes.size() && StrokeHitsPoint(page.strokes[strokeIndex], pagePoint, hitRadius, settings_.strokeSmoothing)) {
                 clickedSelectedStroke = strokeIndex;
@@ -1123,7 +1393,8 @@ void App::BeginMoveSelection(POINT cursor) {
             }
         }
     }
-    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && pageIndex < selectedTextIndices_.size()) {
+    if (!clickedSelectionMoveGrip && !clickedSelectedLatex.has_value() && !clickedSelectedStroke.has_value()
+        && pageIndex < selectedTextIndices_.size()) {
         for (std::size_t textIndex : selectedTextIndices_[pageIndex]) {
             if (textIndex < page.texts.size() && textgeom::TextHitsPoint(page.texts[textIndex], page.width, pagePoint)) {
                 clickedSelectedText = textIndex;
@@ -1131,7 +1402,8 @@ void App::BeginMoveSelection(POINT cursor) {
             }
         }
     }
-    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && pageIndex < selectedImageIndices_.size()) {
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value()
+        && !clickedSelectedLatex.has_value() && pageIndex < selectedImageIndices_.size()) {
         for (std::size_t imageIndex : selectedImageIndices_[pageIndex]) {
             if (imageIndex < page.images.size() && ImageHitsPoint(page.images[imageIndex], pagePoint)) {
                 clickedSelectedImage = imageIndex;
@@ -1140,7 +1412,19 @@ void App::BeginMoveSelection(POINT cursor) {
         }
     }
 
-    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()) {
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value()
+        && !clickedSelectedLatex.has_value() && !clickedSelectedImage.has_value() && !clickedStroke.has_value()
+        && !clickedText.has_value()) {
+        for (std::size_t latexIndex = page.latexes.size(); latexIndex > 0; --latexIndex) {
+            const std::size_t actualIndex = latexIndex - 1U;
+            if (LatexHitsPoint(page.latexes[actualIndex], page.width, pagePoint)) {
+                clickedLatex = actualIndex;
+                break;
+            }
+        }
+    }
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value()
+        && !clickedSelectedLatex.has_value() && !clickedSelectedImage.has_value()) {
         for (std::size_t strokeIndex = page.strokes.size(); strokeIndex > 0; --strokeIndex) {
             const std::size_t actualIndex = strokeIndex - 1U;
             if (StrokeHitsPoint(page.strokes[actualIndex], pagePoint, hitRadius, settings_.strokeSmoothing)) {
@@ -1149,7 +1433,8 @@ void App::BeginMoveSelection(POINT cursor) {
             }
         }
     }
-    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value() && !clickedStroke.has_value()) {
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value()
+        && !clickedSelectedLatex.has_value() && !clickedSelectedImage.has_value() && !clickedStroke.has_value()) {
         for (std::size_t textIndex = page.texts.size(); textIndex > 0; --textIndex) {
             const std::size_t actualIndex = textIndex - 1U;
             if (textgeom::TextHitsPoint(page.texts[actualIndex], page.width, pagePoint)) {
@@ -1158,8 +1443,9 @@ void App::BeginMoveSelection(POINT cursor) {
             }
         }
     }
-    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()
-        && !clickedStroke.has_value() && !clickedText.has_value()) {
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value()
+        && !clickedSelectedLatex.has_value() && !clickedSelectedImage.has_value()
+        && !clickedStroke.has_value() && !clickedText.has_value() && !clickedLatex.has_value()) {
         for (std::size_t imageIndex = page.images.size(); imageIndex > 0; --imageIndex) {
             const std::size_t actualIndex = imageIndex - 1U;
             if (ImageHitsPoint(page.images[actualIndex], pagePoint)) {
@@ -1169,14 +1455,16 @@ void App::BeginMoveSelection(POINT cursor) {
         }
     }
 
-    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()
-        && !clickedStroke.has_value() && !clickedText.has_value() && !clickedImage.has_value()) {
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value()
+        && !clickedSelectedLatex.has_value() && !clickedSelectedImage.has_value()
+        && !clickedStroke.has_value() && !clickedText.has_value() && !clickedLatex.has_value() && !clickedImage.has_value()) {
         ClearSelection();
         BeginSelection(cursor, true);
         return;
     }
 
-    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value() && !clickedSelectedImage.has_value()) {
+    if (!clickedSelectionMoveGrip && !clickedSelectedStroke.has_value() && !clickedSelectedText.has_value()
+        && !clickedSelectedLatex.has_value() && !clickedSelectedImage.has_value()) {
         ClearSelection();
         if (clickedStroke.has_value() && pageIndex < selectedStrokeIndices_.size()) {
             selectedStrokeIndices_[pageIndex].push_back(*clickedStroke);
@@ -1184,12 +1472,16 @@ void App::BeginMoveSelection(POINT cursor) {
         if (clickedText.has_value() && pageIndex < selectedTextIndices_.size()) {
             selectedTextIndices_[pageIndex].push_back(*clickedText);
         }
+        if (clickedLatex.has_value() && pageIndex < selectedLatexIndices_.size()) {
+            selectedLatexIndices_[pageIndex].push_back(*clickedLatex);
+        }
         if (clickedImage.has_value() && pageIndex < selectedImageIndices_.size()) {
             selectedImageIndices_[pageIndex].push_back(*clickedImage);
         }
     }
 
-    if (!clickedSelectionMoveGrip && activeTool_ == Tool::Move && clickedSelectedText.has_value() && !clickedSelectedStroke.has_value() && !clickedSelectedImage.has_value()) {
+    if (!clickedSelectionMoveGrip && activeTool_ == Tool::Move && clickedSelectedText.has_value()
+        && !clickedSelectedStroke.has_value() && !clickedSelectedLatex.has_value() && !clickedSelectedImage.has_value()) {
         pendingTextEditClick_ = true;
         pendingTextEditCursor_ = cursor;
         pendingTextEditPageIndex_ = pageIndex;
@@ -1214,8 +1506,9 @@ void App::BeginMoveSelection(POINT cursor) {
     for (const PageView& previewPageView : pageViews) {
         const bool hasSelectedStrokes = previewPageView.pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[previewPageView.pageIndex].empty();
         const bool hasSelectedTexts = previewPageView.pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[previewPageView.pageIndex].empty();
+        const bool hasSelectedLatexes = previewPageView.pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[previewPageView.pageIndex].empty();
         const bool hasSelectedImages = previewPageView.pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[previewPageView.pageIndex].empty();
-        if (hasSelectedStrokes || hasSelectedTexts || hasSelectedImages) {
+        if (hasSelectedStrokes || hasSelectedTexts || hasSelectedLatexes || hasSelectedImages) {
             BuildInteractionPageSnapshot(previewPageView);
         }
     }
@@ -1233,7 +1526,6 @@ void App::UpdateMoveSelection(POINT cursor) {
             || !pendingTextEditPageIndex_.has_value()) {
             return;
         }
-
         pendingTextEditClick_ = false;
         const std::size_t pageIndex = *pendingTextEditPageIndex_;
         pendingTextEditPageIndex_.reset();
@@ -1258,8 +1550,9 @@ void App::UpdateMoveSelection(POINT cursor) {
         for (const PageView& previewPageView : pageViews) {
             const bool hasSelectedStrokes = previewPageView.pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[previewPageView.pageIndex].empty();
             const bool hasSelectedTexts = previewPageView.pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[previewPageView.pageIndex].empty();
+            const bool hasSelectedLatexes = previewPageView.pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[previewPageView.pageIndex].empty();
             const bool hasSelectedImages = previewPageView.pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[previewPageView.pageIndex].empty();
-            if (hasSelectedStrokes || hasSelectedTexts || hasSelectedImages) {
+            if (hasSelectedStrokes || hasSelectedTexts || hasSelectedLatexes || hasSelectedImages) {
                 BuildInteractionPageSnapshot(previewPageView);
             }
         }
@@ -1302,15 +1595,18 @@ void App::EndMoveSelection() {
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         const bool hasSelectedStrokes = pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty();
         const bool hasSelectedTexts = pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty();
+        const bool hasSelectedLatexes = pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty();
         const bool hasSelectedImages = pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty();
         const bool hasPreviewStrokes = pageIndex < interactionPreviewStrokes_.size() && !interactionPreviewStrokes_[pageIndex].empty();
         const bool hasPreviewTexts = pageIndex < interactionPreviewTexts_.size() && !interactionPreviewTexts_[pageIndex].empty();
+        const bool hasPreviewLatexes = pageIndex < interactionPreviewLatexes_.size() && !interactionPreviewLatexes_[pageIndex].empty();
         const bool hasPreviewImages = pageIndex < interactionPreviewImages_.size() && !interactionPreviewImages_[pageIndex].empty();
-        if (hasSelectedStrokes || hasSelectedTexts || hasSelectedImages || hasPreviewStrokes || hasPreviewTexts || hasPreviewImages) {
+        if (hasSelectedStrokes || hasSelectedTexts || hasSelectedLatexes || hasSelectedImages
+            || hasPreviewStrokes || hasPreviewTexts || hasPreviewLatexes || hasPreviewImages) {
             affectedPageIndices.push_back(pageIndex);
         }
-    }
 
+    }
     std::vector<Page> beforePages;
     beforePages.reserve(affectedPageIndices.size());
     for (std::size_t pageIndex : affectedPageIndices) {

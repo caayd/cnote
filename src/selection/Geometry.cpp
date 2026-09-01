@@ -4,8 +4,22 @@
 #include <cmath>
 
 #include "DpiUtil.h"
+#include "latex/LatexEngine.h"
 #include "text/TextGeometry.h"
 #include "ui/UiUtil.h"
+
+namespace {
+
+RECT MakeLatexRect(float left, float top, float right, float bottom) {
+    return {
+        static_cast<LONG>(std::lround(left)),
+        static_cast<LONG>(std::lround(top)),
+        static_cast<LONG>(std::lround(right)),
+        static_cast<LONG>(std::lround(bottom)),
+    };
+}
+
+}
 
 namespace cnote {
 
@@ -229,6 +243,91 @@ Vec2 ClampImageDeltaToPage(const PageImage& image, const Page& page, Vec2 delta)
         std::clamp(delta.x, -minX, page.width - maxX),
         std::clamp(delta.y, -minY, page.height - maxY),
     };
+}
+
+Vec2 ClampLatexDeltaToPage(const PageLatex& latex, const Page& page, Vec2 delta) {
+    const PageLatexBounds bounds = MeasurePageLatexBounds(latex, page.width);
+    return {
+        std::clamp(delta.x, -bounds.left, page.width - bounds.right),
+        std::clamp(delta.y, -bounds.top, page.height - bounds.bottom),
+    };
+}
+
+PageLatexBounds MeasurePageLatexBounds(const PageLatex& latex, float pageWidth) {
+    static_cast<void>(pageWidth);
+    const cnote::latex::FormulaMetrics metrics = cnote::latex::Measure(latex);
+    return {
+        latex.x,
+        latex.y,
+        latex.x + metrics.width,
+        latex.y + metrics.height,
+    };
+}
+
+std::optional<RECT> PageLatexBoundsRect(const PageLatex& latex, float pageWidth, float scale, int extraPadding) {
+    if (scale <= 0.0f) {
+        return std::nullopt;
+    }
+
+    const PageLatexBounds bounds = MeasurePageLatexBounds(latex, pageWidth);
+    const float padding = static_cast<float>(extraPadding);
+    return MakeLatexRect(
+        (bounds.left * scale) - padding,
+        (bounds.top * scale) - padding,
+        (bounds.right * scale) + padding + 1.0f,
+        (bounds.bottom * scale) + padding + 1.0f);
+}
+
+bool LatexHitsPoint(const PageLatex& latex, float pageWidth, Vec2 point) {
+    const PageLatexBounds bounds = MeasurePageLatexBounds(latex, pageWidth);
+    return PointInRectF(point, bounds.left, bounds.top, bounds.right, bounds.bottom);
+}
+
+bool LatexIntersectsRectSelection(const PageLatex& latex, float pageWidth, Vec2 a, Vec2 b) {
+    const PageLatexBounds bounds = MeasurePageLatexBounds(latex, pageWidth);
+    const float left = std::min(a.x, b.x);
+    const float right = std::max(a.x, b.x);
+    const float top = std::min(a.y, b.y);
+    const float bottom = std::max(a.y, b.y);
+    return !(bounds.right < left || bounds.left > right || bounds.bottom < top || bounds.top > bottom);
+}
+
+bool LatexIntersectsPolygonSelection(const PageLatex& latex, float pageWidth, const std::vector<Vec2>& polygon) {
+    if (polygon.size() < 3U) {
+        return false;
+    }
+
+    const PageLatexBounds bounds = MeasurePageLatexBounds(latex, pageWidth);
+    const std::array<Vec2, 4> corners {{
+        { bounds.left, bounds.top },
+        { bounds.right, bounds.top },
+        { bounds.right, bounds.bottom },
+        { bounds.left, bounds.bottom },
+    }};
+
+    for (const Vec2& corner : corners) {
+        if (PointInPolygon(corner, polygon)) {
+            return true;
+        }
+    }
+
+    for (const Vec2& point : polygon) {
+        if (LatexHitsPoint(latex, pageWidth, point)) {
+            return true;
+        }
+    }
+
+    for (std::size_t edgeIndex = 0; edgeIndex < polygon.size(); ++edgeIndex) {
+        const Vec2 polyA = polygon[edgeIndex];
+        const Vec2 polyB = polygon[(edgeIndex + 1U) % polygon.size()];
+        for (std::size_t rectEdgeIndex = 0; rectEdgeIndex < corners.size(); ++rectEdgeIndex) {
+            if (SegmentsIntersect(polyA, polyB, corners[rectEdgeIndex], corners[(rectEdgeIndex + 1U) % corners.size()])) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 float SelectionHandleHitRadiusPixels(UINT dpi) {

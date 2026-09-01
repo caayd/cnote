@@ -38,7 +38,13 @@ int main() {
         },
     });
     document.CurrentPage().texts.push_back(text);
-
+    cnote::PageLatex latex {};
+    latex.id = 43;
+    latex.x = 48.0f;
+    latex.y = 72.0f;
+    latex.fontSize = 30.0f;
+    latex.content = L"\\frac{a}{b}";
+    document.CurrentPage().latexes.push_back(latex);
     const std::vector<std::uint8_t> bytes = cnote::ProjectFile::Serialize(document);
     if (!Require(!bytes.empty(), "serialized project is empty")) {
         return 1;
@@ -49,13 +55,21 @@ int main() {
     if (!Require(loaded.has_value(), "serialized project did not load")
         || !Require(loaded->PageCount() == 1U, "page count changed")
         || !Require(loaded->CurrentPage().texts.size() == 1U, "text count changed")
-        || !Require(cnote::PageTextEqual(text, loaded->CurrentPage().texts.front()), "text block changed during round trip")) {
+        || !Require(loaded->CurrentPage().latexes.size() == 1U, "latex block count changed")
+        || !Require(cnote::PageTextEqual(text, loaded->CurrentPage().texts.front()), "text block changed during round trip")
+        || !Require(cnote::PageLatexEqual(latex, loaded->CurrentPage().latexes.front()), "latex block changed during round trip")) {
         return 1;
     }
 
     cnote::PageText changed = text;
     changed.styleSpans.front().style.bold = false;
     if (!Require(!cnote::PageTextEqual(text, changed), "style span changes are not detected")) {
+        return 1;
+    }
+
+    cnote::PageLatex changedLatex = latex;
+    changedLatex.content = L"\\sqrt{a}";
+    if (!Require(!cnote::PageLatexEqual(latex, changedLatex), "latex block changes are not detected")) {
         return 1;
     }
 

@@ -566,6 +566,11 @@ bool App::EnsureTextEditWindow(TextAlignment alignment) {
     if (window_ == nullptr) {
         return false;
     }
+    if (textEditWindow_ != nullptr && textEditWindowIsLatex_) {
+        // The shared control is in plain-text latex mode: rich text needs a
+        // fresh window.
+        EndTextEditControl();
+    }
 
     const DWORD desiredAlignmentStyle = TextEditAlignmentStyle(alignment);
     auto createWindow = [&](const std::wstring& text, LONG selectionStart, LONG selectionEnd) -> bool {
@@ -673,6 +678,7 @@ void App::EndTextEditControl() {
         textEditWindow_ = nullptr;
     }
     textEditOriginalProc_ = nullptr;
+    textEditWindowIsLatex_ = false;
     if (textEditFont_ != nullptr) {
         DeleteObject(textEditFont_);
         textEditFont_ = nullptr;
@@ -1020,6 +1026,7 @@ void App::CommitTextEdit() {
 
 void App::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, std::optional<PageText> beforeText, bool createsText) {
     CommitTextEdit();
+    CommitLatexEdit();
     if (pageIndex >= document_.PageCount() || textIndex >= document_.PageAt(pageIndex).texts.size()) {
         return;
     }
@@ -1055,6 +1062,11 @@ void App::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, std::optio
 }
 
 void App::CancelTextEdit() {
+    if (!editingTextPageIndex_.has_value() && editingLatexPageIndex_.has_value()) {
+        // Shared control is hosting a latex session: cancel that instead.
+        CancelLatexEdit();
+        return;
+    }
     if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value()) {
         EndTextEditControl();
         return;

@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "text/TextGeometry.h"
+#include "latex/LatexEngine.h"
 
 namespace cnote {
 
@@ -62,6 +63,7 @@ bool App::CopySelectionToClipboard() {
     const Page& page = document_.PageAt(*pageIndex);
     std::vector<Stroke> strokes;
     std::vector<PageText> texts;
+    std::vector<PageLatex> latexes;
     std::vector<PageImage> images;
     float minX = page.width;
     float minY = page.height;
@@ -95,6 +97,20 @@ bool App::CopySelectionToClipboard() {
         minY = std::min(minY, bounds.top);
         maxX = std::max(maxX, bounds.right);
         maxY = std::max(maxY, bounds.bottom);
+        hasContent = true;
+    }
+
+    for (std::size_t latexIndex : selectedLatexIndices_[*pageIndex]) {
+        if (latexIndex >= page.latexes.size()) {
+            continue;
+        }
+        const PageLatex& latexBlock = page.latexes[latexIndex];
+        const cnote::latex::FormulaMetrics metrics = cnote::latex::Measure(latexBlock);
+        latexes.push_back(latexBlock);
+        minX = std::min(minX, latexBlock.x);
+        minY = std::min(minY, latexBlock.y);
+        maxX = std::max(maxX, latexBlock.x + metrics.width);
+        maxY = std::max(maxY, latexBlock.y + metrics.height);
         hasContent = true;
     }
 
@@ -201,6 +217,18 @@ bool App::CopySelectionToClipboard() {
         }
     }
 
+    appendUint32(static_cast<std::uint32_t>(latexes.size()));
+    for (const PageLatex& latex : latexes) {
+        appendFloat(latex.x);
+        appendFloat(latex.y);
+        appendFloat(latex.fontSize);
+        appendUint32(latex.color);
+        appendUint32(static_cast<std::uint32_t>(latex.content.size()));
+        if (!latex.content.empty()) {
+            appendBytes(latex.content.data(), latex.content.size() * sizeof(wchar_t));
+        }
+    }
+
     EmptyClipboard();
     HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes.size());
     if (memory == nullptr) {
@@ -287,6 +315,7 @@ bool App::PasteSelectionFromClipboard() {
     std::uint32_t strokeCount = 0;
     std::uint32_t textCount = 0;
     std::uint32_t imageCount = 0;
+    std::uint32_t latexCount = 0;
     float minX = 0.0f;
     float minY = 0.0f;
     float maxX = 0.0f;
@@ -308,6 +337,7 @@ bool App::PasteSelectionFromClipboard() {
 
     std::vector<Stroke> strokes;
     std::vector<PageText> texts;
+    std::vector<PageLatex> latexes;
     std::vector<PageImage> images;
     strokes.reserve(strokeCount);
     texts.reserve(textCount);
@@ -420,6 +450,29 @@ bool App::PasteSelectionFromClipboard() {
             images.push_back(std::move(image));
         }
     }
+    if (ok && std::memcmp(magic, "CTS8", 4) == 0
+        && offset + sizeof(std::uint32_t) <= static_cast<std::size_t>(size)) {
+        ok = readUint32(latexCount);
+        latexes.reserve(latexCount);
+        for (std::uint32_t latexIndex = 0; ok && latexIndex < latexCount; ++latexIndex) {
+            PageLatex latex {};
+            std::uint32_t charCount = 0;
+            ok = readFloat(latex.x)
+                && readFloat(latex.y)
+                && readFloat(latex.fontSize)
+                && readUint32(latex.color)
+                && readUint32(charCount);
+            if (ok) {
+                const std::size_t byteCount = static_cast<std::size_t>(charCount) * sizeof(wchar_t);
+                latex.content.resize(charCount);
+                ok = readExact(offset, latex.content.data(), byteCount);
+                offset += ok ? byteCount : 0U;
+            }
+            if (ok) {
+                latexes.push_back(std::move(latex));
+            }
+        }
+    }
 
     GlobalUnlock(clipboardData);
     CloseClipboard();
@@ -472,6 +525,13 @@ bool App::PasteSelectionFromClipboard() {
         text.y += delta.y;
         page.texts.push_back(text);
         selectedTextIndices_[targetPageIndex].push_back(page.texts.size() - 1U);
+    }
+    for (PageLatex& latex : latexes) {
+        latex.id = AllocateLatexId();
+        latex.x += delta.x;
+        latex.y += delta.y;
+        page.latexes.push_back(latex);
+        selectedLatexIndices_[targetPageIndex].push_back(page.latexes.size() - 1U);
     }
 
     for (PageImage& image : images) {

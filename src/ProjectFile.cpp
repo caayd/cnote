@@ -54,7 +54,7 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 13;
+constexpr std::uint32_t kProjectVersion = 14;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
 constexpr std::uint8_t kStrokeStyleFlagDotted = 1U << 0U;
@@ -330,6 +330,24 @@ void AppendText(std::vector<std::uint8_t>& output, const PageText& text) {
     }
 }
 
+void AppendLatex(std::vector<std::uint8_t>& output, const PageLatex& latex) {
+    AppendValue(output, latex.id);
+    AppendValue(output, latex.x);
+    AppendValue(output, latex.y);
+    AppendValue(output, latex.fontSize);
+    AppendValue(output, latex.color);
+    AppendString(output, latex.content);
+}
+
+bool ReadLatex(ByteReader& reader, PageLatex& latex) {
+    return reader.Read(latex.id)
+        && reader.Read(latex.x)
+        && reader.Read(latex.y)
+        && reader.Read(latex.fontSize)
+        && reader.Read(latex.color)
+        && reader.ReadString(latex.content);
+}
+
 bool ReadText(ByteReader& reader, std::uint32_t version, PageText& text) {
     std::uint8_t alignment = 0;
     std::uint8_t fontFamily = 0;
@@ -562,6 +580,7 @@ std::optional<Document> LoadProjectPayload(
         std::uint32_t pageFlags = 0;
         std::uint32_t strokeCount = 0;
         std::uint32_t textCount = 0;
+        std::uint32_t latexCount = 0;
         std::uint32_t imageCount = 0;
         if (!reader.Read(page.width) || !reader.Read(page.height)) {
             return std::nullopt;
@@ -597,6 +616,9 @@ std::optional<Document> LoadProjectPayload(
             if (!reader.Read(textCount)) {
                 return std::nullopt;
             }
+        }
+        if (version >= 14U && !reader.Read(latexCount)) {
+            return std::nullopt;
         }
         if (!reader.Read(imageCount)) {
             return std::nullopt;
@@ -652,6 +674,15 @@ std::optional<Document> LoadProjectPayload(
             if (version >= 13U) {
                 page.texts.push_back(std::move(text));
             }
+        }
+
+        page.latexes.reserve(latexCount);
+        for (std::uint32_t latexIndex = 0; latexIndex < latexCount; ++latexIndex) {
+            PageLatex latex {};
+            if (!ReadLatex(reader, latex)) {
+                return std::nullopt;
+            }
+            page.latexes.push_back(std::move(latex));
         }
 
         page.images.reserve(imageCount);
@@ -732,6 +763,7 @@ std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
         const std::uint32_t pageFlags = (page.sourcePdfSourceIndex < 0 && !page.raster.pixels.empty()) ? kPageFlagHasRaster : 0U;
         const auto strokeCount = static_cast<std::uint32_t>(page.strokes.size());
         const auto textCount = static_cast<std::uint32_t>(page.texts.size());
+        const auto latexCount = static_cast<std::uint32_t>(page.latexes.size());
         const auto imageCount = static_cast<std::uint32_t>(page.images.size());
         AppendValue(bytes, page.width);
         AppendValue(bytes, page.height);
@@ -744,12 +776,16 @@ std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
         AppendPaletteProfile(bytes, page.paletteProfile);
         AppendValue(bytes, strokeCount);
         AppendValue(bytes, textCount);
+        AppendValue(bytes, latexCount);
         AppendValue(bytes, imageCount);
         for (const Stroke& stroke : page.strokes) {
             AppendStroke(bytes, stroke);
         }
         for (const PageText& text : page.texts) {
             AppendText(bytes, text);
+        }
+        for (const PageLatex& latex : page.latexes) {
+            AppendLatex(bytes, latex);
         }
         for (const PageImage& image : page.images) {
             AppendImage(bytes, image);
@@ -769,7 +805,6 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
 
     return LoadFromBytes(*bytes, filePath, pdfBackend);
 }
-
 std::optional<Document> ProjectFile::LoadFromBytes(
     const std::vector<std::uint8_t>& bytes,
     const std::wstring& filePath,

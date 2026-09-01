@@ -14,6 +14,8 @@
 #include <objidl.h>
 #include <gdiplus.h>
 
+#include "latex/LatexEngine.h"
+
 #include "fpdf_attachment.h"
 #include "fpdf_edit.h"
 #include "fpdf_ppo.h"
@@ -236,6 +238,25 @@ void DrawPageImage(Gdiplus::Graphics& graphics, const PageImage& image, float re
     graphics.Restore(state);
 }
 
+void DrawPageLatex(Gdiplus::Graphics& graphics, const PageLatex& latex, float renderScale) {
+    if (!cnote::latex::IsInitialized()) {
+        return;
+    }
+
+    const cnote::latex::FormulaHandle formula = cnote::latex::Parse(latex);
+    if (formula == nullptr) {
+        return;
+    }
+
+    cnote::latex::Draw(
+        formula,
+        graphics,
+        latex.x * renderScale,
+        latex.y * renderScale,
+        renderScale,
+        latex.color);
+}
+
 void DrawStroke(Gdiplus::Graphics& graphics, const Stroke& stroke, float renderScale, float strokeSmoothing, float dashLength, float dashGap) {
     if (stroke.points.empty()) {
         return;
@@ -426,7 +447,12 @@ std::optional<RasterImage> ComposeTextOverlayRaster(const Page& page, float rend
             break;
         }
     }
-    if (!hasText) {
+    const bool hasLatex = cnote::latex::IsInitialized()
+        && std::any_of(
+            page.latexes.begin(),
+            page.latexes.end(),
+            [](const PageLatex& latex) { return !latex.content.empty(); });
+    if (!hasText && !hasLatex) {
         return std::nullopt;
     }
 
@@ -447,6 +473,10 @@ std::optional<RasterImage> ComposeTextOverlayRaster(const Page& page, float rend
 
     for (const PageText& text : page.texts) {
         DrawPageText(graphics, text, page.width, renderScale);
+    }
+
+    for (const PageLatex& latex : page.latexes) {
+        DrawPageLatex(graphics, latex, renderScale);
     }
 
     return raster;

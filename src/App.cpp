@@ -27,6 +27,7 @@
 #include <windowsx.h>
 
 #include "DpiUtil.h"
+#include "latex/LatexEngine.h"
 #include "resource.h"
 #include "NewPageSettingsWindow.h"
 #include "SettingsWindow.h"
@@ -384,6 +385,23 @@ std::uint64_t PageTextSurfaceSignature(const Page& page) {
             HashValue(hash, span.style.bold);
             HashValue(hash, span.style.italic);
             HashValue(hash, span.style.underline);
+        }
+    }
+    return hash;
+}
+
+std::uint64_t PageLatexSurfaceSignature(const Page& page) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    HashValue(hash, page.latexes.size());
+    for (const PageLatex& latex : page.latexes) {
+        HashValue(hash, latex.id);
+        HashValue(hash, latex.x);
+        HashValue(hash, latex.y);
+        HashValue(hash, latex.fontSize);
+        HashValue(hash, latex.color);
+        HashValue(hash, latex.content.size());
+        if (!latex.content.empty()) {
+            HashBytes(hash, latex.content.data(), latex.content.size() * sizeof(wchar_t));
         }
     }
     return hash;
@@ -797,6 +815,8 @@ const wchar_t* ToolSvgFileName(App::Tool tool) {
     case App::Tool::Move:
         return L"cursor.svg";
     case App::Tool::Text:
+        return L"text.svg";
+    case App::Tool::Latex:
         return L"text.svg";
     case App::Tool::Draw:
         return L"draw.svg";
@@ -2185,6 +2205,11 @@ bool TextHitsSegment(const PageText& text, float pageWidth, Vec2 a, Vec2 b, floa
     return SegmentHitsRect(bounds.left, bounds.top, bounds.right, bounds.bottom, a, b, radius);
 }
 
+bool LatexHitsSegment(const PageLatex& latex, float pageWidth, Vec2 a, Vec2 b, float radius) {
+    const geometry::PageLatexBounds bounds = geometry::MeasurePageLatexBounds(latex, pageWidth);
+    return SegmentHitsRect(bounds.left, bounds.top, bounds.right, bounds.bottom, a, b, radius);
+}
+
 std::optional<RECT> ImageBoundsRect(const PageImage& image, float scale, int extraPadding = 0) {
     if (scale <= 0.0f) {
         return std::nullopt;
@@ -2226,6 +2251,19 @@ App::App(HINSTANCE instance) : instance_(instance) {
     for (const ShortcutDefinition& definition : ShortcutDefinitions()) {
         shortcuts_.bindings.push_back({ definition.action, definition.defaultBinding });
     }
+
+    // MicroTeX resources live in latex-res next to the executable (staged by
+    // the build). Failure is non-fatal: the latex tool simply won't render.
+    wchar_t modulePath[MAX_PATH] = {};
+    if (GetModuleFileNameW(nullptr, modulePath, MAX_PATH) != 0) {
+        std::wstring resRoot(modulePath);
+        const std::wstring::size_type slash = resRoot.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) {
+            resRoot = resRoot.substr(0, slash) + L"\\latex-res";
+            static_cast<void>(latex::Initialize(resRoot));
+        }
+    }
+
     LoadAppSettings();
     ClearSelection();
 }
@@ -2236,6 +2274,7 @@ App::~App() {
     delete newPageSettings_.window;
     newPageSettings_.window = nullptr;
     EndTextEditControl();
+    latex::Shutdown();
     SaveAppSettings();
     ClearZoomSessionSnapshots();
     ReleasePaintBackbuffer();
@@ -2597,6 +2636,8 @@ void App::InvalidatePageSurfaceCache(std::size_t pageIndex) {
     cache.imageCount = 0;
     cache.textCount = 0;
     cache.textSignature = 0;
+    cache.latexCount = 0;
+    cache.latexSignature = 0;
     cache.rasterWidth = 0;
     cache.rasterHeight = 0;
     cache.rasterScale = 0.0f;
@@ -2703,6 +2744,9 @@ void App::SetActiveTool(Tool tool) {
     if (tool != Tool::Text) {
         CommitTextEdit();
     }
+    if (tool != Tool::Latex) {
+        CommitLatexEdit();
+    }
     if (tool == Tool::Select) {
         selectionMode_ = SelectionMode::Lasso;
     }
@@ -2727,6 +2771,10 @@ void App::SetActiveTool(Tool tool) {
         transformingTextPageIndex_.reset();
         transformingTextIndex_.reset();
         textTransformHandle_ = ImageTransformHandle::None;
+        isTransformingLatex_ = false;
+        latexTransformPageIndex_.reset();
+        latexTransformIndex_.reset();
+        latexTransformHandle_ = ImageTransformHandle::None;
         isTransformingStroke_ = false;
         transformingStrokePageIndex_.reset();
         strokeTransformHandle_ = ImageTransformHandle::None;
@@ -5165,6 +5213,205 @@ void App::EndTextTransform() {
     InvalidateCanvas();
 }
 
+void App::BeginLatexTransform(std::size_t pageIndex, std::size_t latexIndex, ImageTransformHandle handle, POINT cursor) {
+    if (pageIndex >= document_.PageCount() || latexIndex >= document_.PageAt(pageIndex).latexes.size()) {
+        return;
+    }
+
+    isTransformingLatex_ = true;
+    latexTransformPageIndex_ = pageIndex;
+    latexTransformIndex_ = latexIndex;
+    latexTransformHandle_ = handle;
+    latexTransformInitial_ = document_.PageAt(pageIndex).latexes[latexIndex];
+    latexTransformBefore_ = document_.PageAt(pageIndex).latexes[latexIndex];
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, pageIndex);
+    interactionPreviewMode_ = InteractionPreviewMode::LatexTransform;
+    interactionPreviewStartCursor_ = cursor;
+    EnsureInteractionPreviewStorage();
+    BuildInteractionPageSnapshot(pageView);
+    UpdateLatexTransform(cursor);
+    UpdateCaptureState();
+    InvalidateCanvas();
+}
+
+void App::UpdateLatexTransform(POINT cursor) {
+    if (!isTransformingLatex_ || !latexTransformPageIndex_.has_value() || !latexTransformIndex_.has_value()) {
+        return;
+    }
+
+    const std::size_t pageIndex = *latexTransformPageIndex_;
+    const std::size_t latexIndex = *latexTransformIndex_;
+    if (pageIndex >= document_.PageCount() || latexIndex >= document_.PageAt(pageIndex).latexes.size()) {
+        return;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const PageView pageView = CalculatePageView(clientRect, pageIndex);
+    if (!pageView.valid) {
+        return;
+    }
+
+    std::vector<std::optional<RECT>> previousBounds(document_.PageCount());
+    for (std::size_t index = 0; index < document_.PageCount(); ++index) {
+        previousBounds[index] = InteractionPreviewBoundsForPage(index);
+    }
+
+    const Page& page = document_.PageAt(pageIndex);
+    const Vec2 currentPoint = ScreenToPage(pageView, cursor, false);
+    const geometry::PageLatexBounds initialBounds = geometry::MeasurePageLatexBounds(latexTransformInitial_, page.width);
+    const float initialWidth = std::max(1.0f, initialBounds.right - initialBounds.left);
+    const float initialHeight = std::max(1.0f, initialBounds.bottom - initialBounds.top);
+    const float centerX = (initialBounds.left + initialBounds.right) * 0.5f;
+    const float centerY = (initialBounds.top + initialBounds.bottom) * 0.5f;
+    constexpr float kMinLatexFontSize = 4.0f;
+    const float minScale = std::max(0.05f, kMinLatexFontSize / std::max(1.0f, latexTransformInitial_.fontSize));
+    const float maxScaleToFit = std::max(0.05f, std::min(page.width / initialWidth, page.height / initialHeight));
+
+    const auto clampScale = [&](float value) {
+        return std::clamp(value, minScale, std::max(minScale, maxScaleToFit));
+    };
+
+    // Latex blocks have no box: every handle drag is a uniform fontSize scale,
+    // anchored at the opposite corner (or centered on the opposite edge).
+    float scale = 1.0f;
+    float newLeft = initialBounds.left;
+    float newTop = initialBounds.top;
+    switch (latexTransformHandle_) {
+    case ImageTransformHandle::ResizeNorthWest:
+        scale = clampScale(std::max(
+            (initialBounds.right - currentPoint.x) / initialWidth,
+            (initialBounds.bottom - currentPoint.y) / initialHeight));
+        newLeft = initialBounds.right - (initialWidth * scale);
+        newTop = initialBounds.bottom - (initialHeight * scale);
+        break;
+    case ImageTransformHandle::ResizeNorth:
+        scale = clampScale((initialBounds.bottom - currentPoint.y) / initialHeight);
+        newLeft = centerX - ((initialWidth * scale) * 0.5f);
+        newTop = initialBounds.bottom - (initialHeight * scale);
+        break;
+    case ImageTransformHandle::ResizeNorthEast:
+        scale = clampScale(std::max(
+            (currentPoint.x - initialBounds.left) / initialWidth,
+            (initialBounds.bottom - currentPoint.y) / initialHeight));
+        newLeft = initialBounds.left;
+        newTop = initialBounds.bottom - (initialHeight * scale);
+        break;
+    case ImageTransformHandle::ResizeEast:
+        scale = clampScale((currentPoint.x - initialBounds.left) / initialWidth);
+        newLeft = initialBounds.left;
+        newTop = centerY - ((initialHeight * scale) * 0.5f);
+        break;
+    case ImageTransformHandle::ResizeSouthEast:
+        scale = clampScale(std::max(
+            (currentPoint.x - initialBounds.left) / initialWidth,
+            (currentPoint.y - initialBounds.top) / initialHeight));
+        newLeft = initialBounds.left;
+        newTop = initialBounds.top;
+        break;
+    case ImageTransformHandle::ResizeSouth:
+        scale = clampScale((currentPoint.y - initialBounds.top) / initialHeight);
+        newLeft = centerX - ((initialWidth * scale) * 0.5f);
+        newTop = initialBounds.top;
+        break;
+    case ImageTransformHandle::ResizeSouthWest:
+        scale = clampScale(std::max(
+            (initialBounds.right - currentPoint.x) / initialWidth,
+            (currentPoint.y - initialBounds.top) / initialHeight));
+        newLeft = initialBounds.right - (initialWidth * scale);
+        newTop = initialBounds.top;
+        break;
+    case ImageTransformHandle::ResizeWest:
+        scale = clampScale((initialBounds.right - currentPoint.x) / initialWidth);
+        newLeft = initialBounds.right - (initialWidth * scale);
+        newTop = centerY - ((initialHeight * scale) * 0.5f);
+        break;
+    default:
+        return;
+    }
+
+    PageLatex updated = latexTransformInitial_;
+    updated.fontSize = std::max(kMinLatexFontSize, latexTransformInitial_.fontSize * scale);
+    updated.x = newLeft;
+    updated.y = newTop;
+
+    // Keep the (re-measured) result on the page.
+    const geometry::PageLatexBounds updatedBounds = geometry::MeasurePageLatexBounds(updated, page.width);
+    if (updatedBounds.left < 0.0f) {
+        updated.x -= updatedBounds.left;
+    } else if (updatedBounds.right > page.width) {
+        updated.x += page.width - updatedBounds.right;
+    }
+    if (updatedBounds.top < 0.0f) {
+        updated.y -= updatedBounds.top;
+    } else if (updatedBounds.bottom > page.height) {
+        updated.y += page.height - updatedBounds.bottom;
+    }
+    updated.x = std::clamp(updated.x, 0.0f, std::max(0.0f, page.width - 1.0f));
+    updated.y = std::clamp(updated.y, 0.0f, std::max(0.0f, page.height - 1.0f));
+
+    const geometry::PageLatexBounds finalBounds = geometry::MeasurePageLatexBounds(updated, page.width);
+    if (interactionPreviewLatexes_.size() != document_.PageCount()) {
+        EnsureInteractionPreviewStorage();
+    }
+    interactionPreviewLatexes_.assign(document_.PageCount(), {});
+    interactionPreviewLatexes_[pageIndex].push_back({
+        pageIndex,
+        latexIndex,
+        std::move(updated),
+        std::max(1.0f, finalBounds.right - finalBounds.left),
+        std::max(1.0f, finalBounds.bottom - finalBounds.top),
+    });
+    InvalidateInteractionPreviewDelta(previousBounds);
+}
+
+void App::EndLatexTransform() {
+    if (!isTransformingLatex_ || !latexTransformPageIndex_.has_value()) {
+        return;
+    }
+
+    const std::size_t pageIndex = *latexTransformPageIndex_;
+    const std::size_t latexIndex = latexTransformIndex_.value_or(std::numeric_limits<std::size_t>::max());
+    if (pageIndex < document_.PageCount()
+        && latexIndex < document_.PageAt(pageIndex).latexes.size()
+        && pageIndex < interactionPreviewLatexes_.size()) {
+        for (const InteractionPreviewLatex& preview : interactionPreviewLatexes_[pageIndex]) {
+            if (preview.sourcePageIndex == pageIndex && preview.sourceIndex == latexIndex) {
+                document_.PageAt(pageIndex).latexes[latexIndex] = preview.latex;
+                break;
+            }
+        }
+    }
+    const bool changed = pageIndex < document_.PageCount()
+        && latexIndex < document_.PageAt(pageIndex).latexes.size()
+        && !PageLatexEqual(latexTransformBefore_, document_.PageAt(pageIndex).latexes[latexIndex]);
+
+    isTransformingLatex_ = false;
+    latexTransformPageIndex_.reset();
+    latexTransformIndex_.reset();
+    latexTransformHandle_ = ImageTransformHandle::None;
+    ClearInteractionPreview();
+    UpdateCaptureState();
+
+    if (pageIndex < document_.PageCount()) {
+        if (changed) {
+            PushLatexHistoryAction(
+                HistoryActionType::UpdateLatex,
+                pageIndex,
+                latexIndex,
+                latexTransformBefore_,
+                document_.PageAt(pageIndex).latexes[latexIndex]);
+            NotifyDocumentMutated();
+        }
+        InvalidatePageSurfaceCache(pageIndex);
+    }
+
+    InvalidateCanvas();
+}
+
 void App::BeginStrokeTransform(std::size_t pageIndex, ImageTransformHandle handle, POINT cursor) {
     if (pageIndex >= document_.PageCount() || pageIndex >= selectedStrokeIndices_.size() || selectedStrokeIndices_[pageIndex].empty()) {
         return;
@@ -5315,12 +5562,16 @@ void App::EnsurePendingEraseStorage() {
     if (pendingEraseTextIndices_.size() != document_.PageCount()) {
         pendingEraseTextIndices_.assign(document_.PageCount(), {});
     }
+    if (pendingEraseLatexIndices_.size() != document_.PageCount()) {
+        pendingEraseLatexIndices_.assign(document_.PageCount(), {});
+    }
 }
 
 bool App::PageHasPendingErase(std::size_t pageIndex) const {
     return (pageIndex < pendingEraseStrokeIndices_.size() && !pendingEraseStrokeIndices_[pageIndex].empty())
         || (pageIndex < pendingEraseImageIndices_.size() && !pendingEraseImageIndices_[pageIndex].empty())
-        || (pageIndex < pendingEraseTextIndices_.size() && !pendingEraseTextIndices_[pageIndex].empty());
+        || (pageIndex < pendingEraseTextIndices_.size() && !pendingEraseTextIndices_[pageIndex].empty())
+        || (pageIndex < pendingEraseLatexIndices_.size() && !pendingEraseLatexIndices_[pageIndex].empty());
 }
 
 bool App::IsStrokePendingErase(std::size_t pageIndex, std::size_t strokeIndex) const {
@@ -5350,6 +5601,15 @@ bool App::IsTextPendingErase(std::size_t pageIndex, std::size_t textIndex) const
     return std::find(pending.begin(), pending.end(), textIndex) != pending.end();
 }
 
+bool App::IsLatexPendingErase(std::size_t pageIndex, std::size_t latexIndex) const {
+    if (pageIndex >= pendingEraseLatexIndices_.size()) {
+        return false;
+    }
+
+    const auto& pending = pendingEraseLatexIndices_[pageIndex];
+    return std::find(pending.begin(), pending.end(), latexIndex) != pending.end();
+}
+
 void App::ClearPendingEraseObjects() {
     for (auto& pagePending : pendingEraseStrokeIndices_) {
         pagePending.clear();
@@ -5358,6 +5618,9 @@ void App::ClearPendingEraseObjects() {
         pagePending.clear();
     }
     for (auto& pagePending : pendingEraseTextIndices_) {
+        pagePending.clear();
+    }
+    for (auto& pagePending : pendingEraseLatexIndices_) {
         pagePending.clear();
     }
 }
@@ -5374,7 +5637,8 @@ void App::EndErase() {
         const bool hasPendingStrokes = pageIndex < pendingEraseStrokeIndices_.size() && !pendingEraseStrokeIndices_[pageIndex].empty();
         const bool hasPendingImages = pageIndex < pendingEraseImageIndices_.size() && !pendingEraseImageIndices_[pageIndex].empty();
         const bool hasPendingTexts = pageIndex < pendingEraseTextIndices_.size() && !pendingEraseTextIndices_[pageIndex].empty();
-        if (!hasPendingStrokes && !hasPendingImages && !hasPendingTexts) {
+        const bool hasPendingLatexes = pageIndex < pendingEraseLatexIndices_.size() && !pendingEraseLatexIndices_[pageIndex].empty();
+        if (!hasPendingStrokes && !hasPendingImages && !hasPendingTexts && !hasPendingLatexes) {
             continue;
         }
 
@@ -5398,6 +5662,9 @@ void App::EndErase() {
 
         if (hasPendingTexts) {
             removeObjects(page.texts, pendingEraseTextIndices_[pageIndex]);
+        }
+        if (hasPendingLatexes) {
+            removeObjects(page.latexes, pendingEraseLatexIndices_[pageIndex]);
         }
         if (hasPendingImages) {
             removeObjects(page.images, pendingEraseImageIndices_[pageIndex]);
@@ -5481,6 +5748,15 @@ bool App::EraseAt(POINT cursor) {
             && TextHitsSegment(page.texts[textIndex], page.width, eraseStart, center, eraseRadiusPage)) {
             pendingEraseTextIndices_[pageView.pageIndex].push_back(textIndex);
             addDirtyRect(PageTextBoundsRect(page.texts[textIndex], page.width, pageView.scale, 8));
+            hitAny = true;
+        }
+    }
+
+    for (std::size_t latexIndex = 0; latexIndex < page.latexes.size(); ++latexIndex) {
+        if (!IsLatexPendingErase(pageView.pageIndex, latexIndex)
+            && LatexHitsSegment(page.latexes[latexIndex], page.width, eraseStart, center, eraseRadiusPage)) {
+            pendingEraseLatexIndices_[pageView.pageIndex].push_back(latexIndex);
+            addDirtyRect(geometry::PageLatexBoundsRect(page.latexes[latexIndex], page.width, pageView.scale, 8));
             hitAny = true;
         }
     }
@@ -7059,6 +7335,36 @@ void App::PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSe
         }
     }
 
+    if (pageView.pageIndex < interactionPreviewLatexes_.size()) {
+        for (const InteractionPreviewLatex& entry : interactionPreviewLatexes_[pageView.pageIndex]) {
+            PaintLatex(hdc, entry.latex, pageView);
+            if (const auto latexRect = geometry::PageLatexBoundsRect(entry.latex, document_.PageAt(pageView.pageIndex).width, pageView.scale, 4); latexRect.has_value()) {
+                RECT screenRect = *latexRect;
+                OffsetRect(&screenRect, pageView.rect.left, pageView.rect.top);
+                DrawRectangleAA(hdc, screenRect, RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
+                const bool shouldDrawHandles = (interactionPreviewMode_ == InteractionPreviewMode::LatexTransform || interactionPreviewMode_ == InteractionPreviewMode::MoveSelection)
+                    && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingLatex_
+                        || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances));
+                if (shouldDrawHandles) {
+                    const int left = screenRect.left;
+                    const int top = screenRect.top;
+                    const int right = screenRect.right;
+                    const int bottom = screenRect.bottom;
+                    const int centerX = (left + right) / 2;
+                    const int centerY = (top + bottom) / 2;
+                    PaintSelectionHandle(hdc, left, top, dpi);
+                    PaintSelectionHandle(hdc, centerX, top, dpi);
+                    PaintSelectionHandle(hdc, right, top, dpi);
+                    PaintSelectionHandle(hdc, right, centerY, dpi);
+                    PaintSelectionHandle(hdc, right, bottom, dpi);
+                    PaintSelectionHandle(hdc, centerX, bottom, dpi);
+                    PaintSelectionHandle(hdc, left, bottom, dpi);
+                    PaintSelectionHandle(hdc, left, centerY, dpi);
+                }
+            }
+        }
+    }
+
     if (pageView.pageIndex < interactionPreviewTexts_.size()) {
         for (const InteractionPreviewText& entry : interactionPreviewTexts_[pageView.pageIndex]) {
             PaintText(hdc, entry.text, pageView);
@@ -7504,6 +7810,8 @@ bool App::TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke&
         || cache.imageCount != page.images.size()
         || cache.textCount != page.texts.size()
         || cache.textSignature != PageTextSurfaceSignature(page)
+        || cache.latexCount != page.latexes.size()
+        || cache.latexSignature != PageLatexSurfaceSignature(page)
         || cache.rasterWidth != page.raster.width
         || cache.rasterHeight != page.raster.height
         || std::abs(cache.rasterScale - page.raster.scale) >= 0.001f
@@ -7589,6 +7897,8 @@ bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect
         || cache.imageCount != page.images.size()
         || cache.textCount != page.texts.size()
         || cache.textSignature != PageTextSurfaceSignature(page)
+        || cache.latexCount != page.latexes.size()
+        || cache.latexSignature != PageLatexSurfaceSignature(page)
         || cache.rasterWidth != page.raster.width
         || cache.rasterHeight != page.raster.height
         || std::abs(cache.rasterScale - page.raster.scale) >= 0.001f
@@ -7732,6 +8042,17 @@ bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect
         }
         PaintText(cacheDc, text, cacheView);
     }
+    for (std::size_t latexIndex = 0; latexIndex < page.latexes.size(); ++latexIndex) {
+        if (IsEditingLatex(pageIndex, latexIndex)) {
+            continue;
+        }
+        const PageLatex& latexBlock = page.latexes[latexIndex];
+        const auto latexBounds = geometry::PageLatexBoundsRect(latexBlock, page.width, 1.0f, 0);
+        if (!latexBounds.has_value() || !RectsOverlap(*latexBounds, dirtyPageRect)) {
+            continue;
+        }
+        PaintLatex(cacheDc, latexBlock, cacheView);
+    }
     for (const Stroke& pageStroke : page.strokes) {
         const std::optional<RECT> strokeBounds = StrokeBoundsRect(pageStroke, 1.0f, 0);
         if (strokeBounds.has_value() && !RectsOverlap(*strokeBounds, dirtyPageRect)) {
@@ -7746,6 +8067,8 @@ bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect
     cache.imageCount = page.images.size();
     cache.textCount = page.texts.size();
     cache.textSignature = PageTextSurfaceSignature(page);
+    cache.latexCount = page.latexes.size();
+    cache.latexSignature = PageLatexSurfaceSignature(page);
 
     SelectObject(cacheDc, previousBitmap);
     DeleteObject(cacheBitmap);
@@ -7762,6 +8085,7 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
     PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
     const float cacheScale = std::max(0.1f, pageView.scale);
     const std::uint64_t textSignature = PageTextSurfaceSignature(page);
+    const std::uint64_t latexSignature = PageLatexSurfaceSignature(page);
     const int width = std::max(1, static_cast<int>(std::lround(std::max(1.0f, page.width) * cacheScale)));
     const int height = std::max(1, static_cast<int>(std::lround(std::max(1.0f, page.height) * cacheScale)));
     if (width <= 0 || height <= 0) {
@@ -7776,6 +8100,8 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
         && cache.imageCount == page.images.size()
         && cache.textCount == page.texts.size()
         && cache.textSignature == textSignature
+        && cache.latexCount == page.latexes.size()
+        && cache.latexSignature == latexSignature
         && cache.rasterWidth == page.raster.width
         && cache.rasterHeight == page.raster.height
         && std::abs(cache.rasterScale - page.raster.scale) < 0.001f
@@ -7886,6 +8212,12 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
         const PageText& text = page.texts[textIndex];
         PaintText(cacheDc, text, cacheView);
     }
+    for (std::size_t latexIndex = 0; latexIndex < page.latexes.size(); ++latexIndex) {
+        if (IsEditingLatex(pageView.pageIndex, latexIndex)) {
+            continue;
+        }
+        PaintLatex(cacheDc, page.latexes[latexIndex], cacheView);
+    }
     for (const Stroke& stroke : page.strokes) {
         PaintStroke(cacheDc, stroke, cacheView, false);
     }
@@ -7902,6 +8234,8 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
     cache.imageCount = page.images.size();
     cache.textCount = page.texts.size();
     cache.textSignature = textSignature;
+    cache.latexCount = page.latexes.size();
+    cache.latexSignature = latexSignature;
     cache.rasterWidth = page.raster.width;
     cache.rasterHeight = page.raster.height;
     cache.rasterScale = page.raster.scale;
@@ -7991,6 +8325,26 @@ bool App::ShouldSkipTextInInteractionSnapshot(std::size_t pageIndex, std::size_t
             && transformingTextIndex_.has_value()
             && *transformingTextPageIndex_ == pageIndex
             && *transformingTextIndex_ == textIndex;
+    }
+
+    return false;
+}
+
+bool App::ShouldSkipLatexInInteractionSnapshot(std::size_t pageIndex, std::size_t latexIndex) const {
+    if (interactionPreviewMode_ == InteractionPreviewMode::None) {
+        return false;
+    }
+
+    if (interactionPreviewMode_ == InteractionPreviewMode::MoveSelection) {
+        return pageIndex < selectedLatexIndices_.size()
+            && std::find(selectedLatexIndices_[pageIndex].begin(), selectedLatexIndices_[pageIndex].end(), latexIndex) != selectedLatexIndices_[pageIndex].end();
+    }
+
+    if (interactionPreviewMode_ == InteractionPreviewMode::LatexTransform) {
+        return latexTransformPageIndex_.has_value()
+            && latexTransformIndex_.has_value()
+            && *latexTransformPageIndex_ == pageIndex
+            && *latexTransformIndex_ == latexIndex;
     }
 
     return false;
@@ -8116,6 +8470,12 @@ void App::BuildInteractionPageSnapshot(const PageView& pageView) {
         }
         PaintText(cacheDc, page.texts[textIndex], cacheView);
     }
+    for (std::size_t latexIndex = 0; latexIndex < page.latexes.size(); ++latexIndex) {
+        if (ShouldSkipLatexInInteractionSnapshot(pageView.pageIndex, latexIndex) || IsEditingLatex(pageView.pageIndex, latexIndex)) {
+            continue;
+        }
+        PaintLatex(cacheDc, page.latexes[latexIndex], cacheView);
+    }
     for (std::size_t strokeIndex = 0; strokeIndex < page.strokes.size(); ++strokeIndex) {
         if (ShouldSkipStrokeInInteractionSnapshot(pageView.pageIndex, strokeIndex)) {
             continue;
@@ -8213,6 +8573,18 @@ std::optional<RECT> App::InteractionPreviewBoundsForPage(std::size_t pageIndex) 
         }
     }
 
+    if (pageIndex < interactionPreviewLatexes_.size()) {
+        for (const InteractionPreviewLatex& entry : interactionPreviewLatexes_[pageIndex]) {
+            const auto rect = geometry::PageLatexBoundsRect(entry.latex, document_.PageAt(pageIndex).width, pageView.scale, damagePadding);
+            if (!rect.has_value()) {
+                continue;
+            }
+            RECT windowRect = *rect;
+            OffsetRect(&windowRect, pageView.rect.left, pageView.rect.top);
+            includeRect(windowRect);
+        }
+    }
+
     return hasBounds ? std::optional<RECT>(bounds) : std::nullopt;
 }
 
@@ -8247,6 +8619,7 @@ void App::RebuildMoveSelectionPreview(POINT cursor) {
     }
     interactionPreviewStrokes_.assign(document_.PageCount(), {});
     interactionPreviewTexts_.assign(document_.PageCount(), {});
+    interactionPreviewLatexes_.assign(document_.PageCount(), {});
     interactionPreviewImages_.assign(document_.PageCount(), {});
 
     RECT clientRect {};
@@ -8346,6 +8719,36 @@ void App::RebuildMoveSelectionPreview(POINT cursor) {
                 preview.text.x = (screenX - static_cast<float>(targetView.rect.left)) / std::max(0.1f, targetView.scale);
                 preview.text.y = (screenY - static_cast<float>(targetView.rect.top)) / std::max(0.1f, targetView.scale);
                 interactionPreviewTexts_[targetPageIndex].push_back(std::move(preview));
+            }
+        }
+
+        if (pageIndex < selectedLatexIndices_.size()) {
+            for (std::size_t latexIndex : selectedLatexIndices_[pageIndex]) {
+                if (latexIndex >= page.latexes.size()) {
+                    continue;
+                }
+                const PageLatex& originalLatex = page.latexes[latexIndex];
+                const geometry::PageLatexBounds bounds = geometry::MeasurePageLatexBounds(originalLatex, page.width);
+                const float centerX = (bounds.left + bounds.right) * 0.5f;
+                const float centerY = (bounds.top + bounds.bottom) * 0.5f;
+                const POINT centerPoint {
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.left) + (centerX * sourceView.scale) + static_cast<float>(deltaX))),
+                    static_cast<LONG>(std::lround(static_cast<float>(sourceView.rect.top) + (centerY * sourceView.scale) + static_cast<float>(deltaY))),
+                };
+                const std::size_t targetPageIndex = targetPageForScreenPoint(centerPoint, pageIndex);
+                const PageView& targetView = pageViews[targetPageIndex];
+
+                InteractionPreviewLatex preview {};
+                preview.sourcePageIndex = pageIndex;
+                preview.sourceIndex = latexIndex;
+                preview.latex = originalLatex;
+                preview.boundsWidth = std::max(1.0f, bounds.right - bounds.left);
+                preview.boundsHeight = std::max(1.0f, bounds.bottom - bounds.top);
+                const float screenX = static_cast<float>(sourceView.rect.left) + (originalLatex.x * sourceView.scale) + static_cast<float>(deltaX);
+                const float screenY = static_cast<float>(sourceView.rect.top) + (originalLatex.y * sourceView.scale) + static_cast<float>(deltaY);
+                preview.latex.x = (screenX - static_cast<float>(targetView.rect.left)) / std::max(0.1f, targetView.scale);
+                preview.latex.y = (screenY - static_cast<float>(targetView.rect.top)) / std::max(0.1f, targetView.scale);
+                interactionPreviewLatexes_[targetPageIndex].push_back(std::move(preview));
             }
         }
 
@@ -9034,6 +9437,14 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
             PaintText(hdc, page.texts[textIndex], pageView, opacity);
         }
 
+        for (std::size_t latexIndex = 0; latexIndex < page.latexes.size(); ++latexIndex) {
+            if (IsEditingLatex(pageView.pageIndex, latexIndex)) {
+                continue;
+            }
+            const float opacity = IsLatexPendingErase(pageView.pageIndex, latexIndex) ? kPendingEraseObjectOpacity : 1.0f;
+            PaintLatex(hdc, page.latexes[latexIndex], pageView, opacity);
+        }
+
         for (std::size_t strokeIndex = 0; strokeIndex < page.strokes.size(); ++strokeIndex) {
             const float opacity = IsStrokePendingErase(pageView.pageIndex, strokeIndex) ? kPendingEraseObjectOpacity : 1.0f;
             PaintStroke(hdc, page.strokes[strokeIndex], pageView, false, false, opacity);
@@ -9095,9 +9506,19 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         }
     }
 
+    // Live latex editing preview: the block under edit is excluded from every
+    // cache/snapshot above, so paint its current render directly.
+    if (editingLatexPageIndex_.has_value() && *editingLatexPageIndex_ == pageView.pageIndex
+        && editingLatexIndex_.has_value()
+        && pageView.pageIndex < document_.PageCount()
+        && *editingLatexIndex_ < document_.PageAt(pageView.pageIndex).latexes.size()) {
+        PaintLatex(hdc, document_.PageAt(pageView.pageIndex).latexes[*editingLatexIndex_], pageView);
+    }
+
     const bool pageHasInteractionPreview = interactionPreviewMode_ != InteractionPreviewMode::None
         && ((pageView.pageIndex < interactionPreviewStrokes_.size() && !interactionPreviewStrokes_[pageView.pageIndex].empty())
             || (pageView.pageIndex < interactionPreviewTexts_.size() && !interactionPreviewTexts_[pageView.pageIndex].empty())
+            || (pageView.pageIndex < interactionPreviewLatexes_.size() && !interactionPreviewLatexes_[pageView.pageIndex].empty())
             || (pageView.pageIndex < interactionPreviewImages_.size() && !interactionPreviewImages_[pageView.pageIndex].empty())
             || interactionSnapshot != nullptr);
     const UINT dpi = window_ != nullptr ? WindowDpi(window_) : SystemDpi();
@@ -9107,6 +9528,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     }
     const auto singleImage = SingleSelectedImage();
     const auto singleText = SingleSelectedText();
+    const auto singleLatex = SingleSelectedLatex();
     const auto singleStrokePage = SingleSelectedStrokePage();
     for (std::size_t imageIndex = 0; !pageHasInteractionPreview && imageIndex < page.images.size(); ++imageIndex) {
         if (!IsImageSelected(pageView.pageIndex, imageIndex)) {
@@ -9239,6 +9661,41 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
                 paintHandle(left, bottom);
                 paintHandle(left, centerY);
             }
+        }
+    }
+
+    for (std::size_t latexIndex = 0; !pageHasInteractionPreview && latexIndex < page.latexes.size(); ++latexIndex) {
+        if (!IsLatexSelected(pageView.pageIndex, latexIndex)) {
+            continue;
+        }
+        const auto latexRect = geometry::PageLatexBoundsRect(page.latexes[latexIndex], page.width, pageView.scale, 4);
+        if (!latexRect.has_value()) {
+            continue;
+        }
+        RECT screenRect = *latexRect;
+        OffsetRect(&screenRect, pageView.rect.left, pageView.rect.top);
+        if (!IsEditingLatex(pageView.pageIndex, latexIndex)) {
+            DrawRectangleAA(hdc, screenRect, RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
+        }
+
+        if (singleLatex.has_value() && singleLatex->first == pageView.pageIndex && singleLatex->second == latexIndex
+            && !IsEditingLatex(pageView.pageIndex, latexIndex)
+            && (activeTool_ == Tool::Move || isTransformingLatex_
+                || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances))) {
+            const int left = screenRect.left;
+            const int top = screenRect.top;
+            const int right = screenRect.right;
+            const int bottom = screenRect.bottom;
+            const int centerX = (left + right) / 2;
+            const int centerY = (top + bottom) / 2;
+            PaintSelectionHandle(hdc, left, top, dpi);
+            PaintSelectionHandle(hdc, centerX, top, dpi);
+            PaintSelectionHandle(hdc, right, top, dpi);
+            PaintSelectionHandle(hdc, right, centerY, dpi);
+            PaintSelectionHandle(hdc, right, bottom, dpi);
+            PaintSelectionHandle(hdc, centerX, bottom, dpi);
+            PaintSelectionHandle(hdc, left, bottom, dpi);
+            PaintSelectionHandle(hdc, left, centerY, dpi);
         }
     }
 
@@ -9446,6 +9903,25 @@ void App::PaintText(HDC hdc, const PageText& text, const PageView& pageView, flo
     const int left = pageView.rect.left + static_cast<int>(std::lround(text.x * pageView.scale));
     const int top = pageView.rect.top + static_cast<int>(std::lround(text.y * pageView.scale));
     static_cast<void>(text::DrawPageText(hdc, text, page.width, pageView.scale, left, top, opacity));
+}
+
+void App::PaintLatex(HDC hdc, const PageLatex& latexBlock, const PageView& pageView, float opacity) const {
+    if (pageView.pageIndex >= document_.PageCount()) {
+        return;
+    }
+
+    const auto formula = latex::Parse(latexBlock);
+    if (formula == nullptr) {
+        return;
+    }
+    // Fold opacity into the color's alpha channel.
+    const float clampedOpacity = std::clamp(opacity, 0.0f, 1.0f);
+    const std::uint32_t alpha = static_cast<std::uint32_t>(
+        std::lround(static_cast<float>((latexBlock.color >> 24U) & 0xFFU) * clampedOpacity));
+    const std::uint32_t color = (latexBlock.color & 0x00FFFFFFU) | (alpha << 24U);
+    const float left = static_cast<float>(pageView.rect.left) + latexBlock.x * pageView.scale;
+    const float top = static_cast<float>(pageView.rect.top) + latexBlock.y * pageView.scale;
+    latex::Draw(formula, hdc, left, top, pageView.scale, color);
 }
 
 

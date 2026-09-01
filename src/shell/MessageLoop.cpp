@@ -485,8 +485,13 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             && HIWORD(wParam) == EN_CHANGE
             && reinterpret_cast<HWND>(lParam) == textEditWindow_
             && !textEditSyncSuppressed_) {
-            SyncTextEditModel();
-            RefreshTextEditControl();
+            if (editingLatexIndex_.has_value()) {
+                SyncLatexEditModel();
+                RefreshLatexEditControl();
+            } else {
+                SyncTextEditModel();
+                RefreshTextEditControl();
+            }
             return 0;
         }
         break;
@@ -499,6 +504,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         CommitTextEdit();
+        CommitLatexEdit();
         if (HandlePaletteClick(cursor)) {
             return 0;
         }
@@ -534,6 +540,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             }
         } else if (activeTool_ == Tool::Text) {
             BeginTextToolInteraction(cursor);
+        } else if (activeTool_ == Tool::Latex) {
+            BeginLatexToolInteraction(cursor);
         } else if (activeTool_ == Tool::Erase) {
             BeginErase(cursor);
         } else {
@@ -967,6 +975,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 }
             } else if (activeTool_ == Tool::Text) {
                 SetCursor(LoadCursorW(nullptr, HitTestText(cursor).has_value() ? IDC_IBEAM : IDC_CROSS));
+            } else if (activeTool_ == Tool::Latex) {
+                SetCursor(LoadCursorW(nullptr, HitTestLatex(cursor).has_value() ? IDC_IBEAM : IDC_CROSS));
             } else if (activeTool_ == Tool::Erase) {
                 HCURSOR eraserCursor = EraserCursorForCurrentSize();
                 SetCursor(eraserCursor != nullptr ? eraserCursor : LoadCursorW(nullptr, IDC_CROSS));
@@ -1432,34 +1442,43 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
     }
     case WM_KEYDOWN: {
         const bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-        if (ctrlPressed && wParam == 'W') {
+        const bool latexMode = app->editingLatexIndex_.has_value();
+        if (!latexMode && ctrlPressed && wParam == 'W') {
             app->ToggleTextFormatPopup();
             return 0;
         }
-        if (ctrlPressed && wParam == 'B') {
+        if (!latexMode && ctrlPressed && wParam == 'B') {
             app->ToggleEditingTextBold();
             return 0;
         }
-        if (ctrlPressed && wParam == 'I') {
+        if (!latexMode && ctrlPressed && wParam == 'I') {
             app->ToggleEditingTextItalic();
             return 0;
         }
-        if (ctrlPressed && wParam == 'U') {
+        if (!latexMode && ctrlPressed && wParam == 'U') {
             app->ToggleEditingTextUnderline();
             return 0;
         }
         if (ctrlPressed && wParam == VK_RETURN) {
-            app->CommitTextEdit();
+            if (latexMode) {
+                app->CommitLatexEdit();
+            } else {
+                app->CommitTextEdit();
+            }
             SetFocus(app->window_);
             return 0;
         }
         if (wParam == VK_ESCAPE) {
-            if (app->textFormatPopupOpen_) {
+            if (!latexMode && app->textFormatPopupOpen_) {
                 app->CancelTextFormatPopup();
                 InvalidateRect(app->window_, nullptr, FALSE);
                 return 0;
             }
-            app->CancelTextEdit();
+            if (latexMode) {
+                app->CancelLatexEdit();
+            } else {
+                app->CancelTextEdit();
+            }
             SetFocus(app->window_);
             return 0;
         }
@@ -1473,13 +1492,21 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
         }
         if (ctrlPressed && wParam == 'X') {
             SendMessageW(window, WM_CUT, 0, 0);
-            app->RefreshTextEditControl();
+            if (latexMode) {
+                app->RefreshLatexEditControl();
+            } else {
+                app->RefreshTextEditControl();
+            }
             RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
             return 0;
         }
         if (ctrlPressed && wParam == 'V') {
             SendMessageW(window, WM_PASTE, 0, 0);
-            app->RefreshTextEditControl();
+            if (latexMode) {
+                app->RefreshLatexEditControl();
+            } else {
+                app->RefreshTextEditControl();
+            }
             RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
             return 0;
         }
@@ -1510,7 +1537,11 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
                 // formatting (color included) to the control default.
                 SendMessageW(window, EM_SETSEL, eraseStart, eraseEnd);
                 SendMessageW(window, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
-                app->RefreshTextEditControl();
+                if (latexMode) {
+                    app->RefreshLatexEditControl();
+                } else {
+                    app->RefreshTextEditControl();
+                }
                 RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
             }
             return 0;
@@ -1540,8 +1571,13 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
         || message == WM_CUT
         || message == WM_CLEAR
         || (message == WM_KEYDOWN && wParam == VK_DELETE)) {
-        app->SyncTextEditModel();
-        app->RefreshTextEditControl();
+        if (app->editingLatexIndex_.has_value()) {
+            app->SyncLatexEditModel();
+            app->RefreshLatexEditControl();
+        } else {
+            app->SyncTextEditModel();
+            app->RefreshTextEditControl();
+        }
         RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
         if (app->textFormatPopupOpen_ && app->window_ != nullptr) {
             InvalidateRect(app->window_, nullptr, FALSE);

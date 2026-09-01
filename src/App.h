@@ -59,6 +59,7 @@ public:
         Select,
         Move,
         Text,
+        Latex,
         Draw,
         Pan,
         Erase,
@@ -84,6 +85,9 @@ public:
         AddPages,
         RemovePages,
         ReplacePages,
+        AddLatex,
+        RemoveLatex,
+        UpdateLatex,
     };
 
     enum class ShortcutAction {
@@ -91,6 +95,7 @@ public:
         ToolSelect,
         ToolMove,
         ToolText,
+        ToolLatex,
         ToolPan,
         ToolErase,
         New,
@@ -141,6 +146,8 @@ public:
         Stroke stroke {};
         PageText text {};
         PageText replacementText {};
+        PageLatex latex {};
+        PageLatex replacementLatex {};
         std::vector<Page> pages {};
         std::vector<Page> replacementPages {};
         std::vector<std::size_t> pageIndices {};
@@ -159,6 +166,8 @@ public:
         std::size_t imageCount = 0;
         std::size_t textCount = 0;
         std::uint64_t textSignature = 0;
+        std::size_t latexCount = 0;
+        std::uint64_t latexSignature = 0;
         int rasterWidth = 0;
         int rasterHeight = 0;
         float rasterScale = 0.0f;
@@ -197,6 +206,7 @@ public:
         ImageTransform,
         StrokeTransform,
         TextTransform,
+        LatexTransform,
     };
 
     struct InteractionPreviewStroke {
@@ -215,6 +225,14 @@ public:
         std::size_t sourcePageIndex = 0;
         std::size_t sourceIndex = 0;
         PageText text {};
+        float boundsWidth = 0.0f;
+        float boundsHeight = 0.0f;
+    };
+
+    struct InteractionPreviewLatex {
+        std::size_t sourcePageIndex = 0;
+        std::size_t sourceIndex = 0;
+        PageLatex latex {};
         float boundsWidth = 0.0f;
         float boundsHeight = 0.0f;
     };
@@ -355,18 +373,31 @@ private:
     void BeginTextTransform(std::size_t pageIndex, std::size_t textIndex, ImageTransformHandle handle, POINT cursor);
     void UpdateTextTransform(POINT cursor);
     void EndTextTransform();
+    void BeginLatexTransform(std::size_t pageIndex, std::size_t latexIndex, ImageTransformHandle handle, POINT cursor);
+    void UpdateLatexTransform(POINT cursor);
+    void EndLatexTransform();
+    void BeginLatexToolInteraction(POINT cursor);
     void BeginTextToolInteraction(POINT cursor);
     void BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, std::optional<PageText> beforeText, bool createsText = false);
     void CommitTextEdit();
     void CancelTextEdit();
+    void BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex, std::optional<PageLatex> beforeLatex, bool createsLatex = false);
+    void CommitLatexEdit();
+    void CancelLatexEdit();
     void EndTextEditControl();
     bool EnsureTextEditWindow(TextAlignment alignment);
+    bool EnsureLatexEditWindow();
+    void RefreshLatexEditControl();
+    void SyncLatexEditModel();
     void RefreshTextEditControl();
     void ReleaseTextEditBackgroundBrush();
     void RefreshTextEditBackgroundBrush(const RECT& editRect);
     [[nodiscard]] COLORREF EditingTextBackgroundColor() const;
+    [[nodiscard]] COLORREF EditingLatexBackgroundColor() const;
     [[nodiscard]] std::uint64_t AllocateTextId() const;
+    [[nodiscard]] std::uint64_t AllocateLatexId() const;
     void PushTextHistoryAction(HistoryActionType type, std::size_t pageIndex, std::size_t index, PageText text, PageText replacementText = {});
+    void PushLatexHistoryAction(HistoryActionType type, std::size_t pageIndex, std::size_t index, PageLatex latex, PageLatex replacementLatex = {});
     void BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, ImageTransformHandle handle, POINT cursor);
     void UpdateImageTransform(POINT cursor);
     void EndImageTransform();
@@ -382,6 +413,7 @@ private:
     [[nodiscard]] bool IsStrokePendingErase(std::size_t pageIndex, std::size_t strokeIndex) const;
     [[nodiscard]] bool IsImagePendingErase(std::size_t pageIndex, std::size_t imageIndex) const;
     [[nodiscard]] bool IsTextPendingErase(std::size_t pageIndex, std::size_t textIndex) const;
+    [[nodiscard]] bool IsLatexPendingErase(std::size_t pageIndex, std::size_t latexIndex) const;
     void ClearPendingEraseObjects();
     void BeginPan(POINT cursor, bool fromMiddleButton);
     void UpdatePan(POINT cursor);
@@ -474,14 +506,18 @@ private:
     [[nodiscard]] bool IsImageSelected(std::size_t pageIndex, std::size_t imageIndex) const;
     [[nodiscard]] bool IsStrokeSelected(std::size_t pageIndex, std::size_t strokeIndex) const;
     [[nodiscard]] bool IsTextSelected(std::size_t pageIndex, std::size_t textIndex) const;
+    [[nodiscard]] bool IsLatexSelected(std::size_t pageIndex, std::size_t latexIndex) const;
     [[nodiscard]] bool IsEditingText(std::size_t pageIndex, std::size_t textIndex) const;
+    [[nodiscard]] bool IsEditingLatex(std::size_t pageIndex, std::size_t latexIndex) const;
     [[nodiscard]] std::optional<PageText> CurrentEditingTextLayout() const;
     [[nodiscard]] std::optional<PageTextStyle> CurrentEditingTextStyle() const;
     void SyncTextEditModel();
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedImageHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* imageIndex = nullptr) const;
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedStrokeHandle(POINT cursor, std::size_t* pageIndex = nullptr) const;
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedTextHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* textIndex = nullptr) const;
+    [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedLatexHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* latexIndex = nullptr) const;
     [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> HitTestText(POINT cursor) const;
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> HitTestLatex(POINT cursor) const;
     [[nodiscard]] std::vector<Vec2> CurrentSelectionLassoPolygon() const;
     [[nodiscard]] bool CursorHitsSelectionMoveGrip(POINT cursor) const;
     [[nodiscard]] bool CursorHitsSelectedContent(POINT cursor) const;
@@ -493,6 +529,7 @@ private:
     [[nodiscard]] std::optional<Vec2> DefaultPasteOrigin(std::size_t pageIndex) const;
     [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> SingleSelectedImage() const;
     [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> SingleSelectedText() const;
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> SingleSelectedLatex() const;
     [[nodiscard]] std::optional<std::size_t> SingleSelectedStrokePage() const;
     void TranslateSelectedContent(std::size_t pageIndex, Vec2 delta, bool clampToPage = true, bool notify = true);
     bool RehomeSelectedContentAcrossPages(bool clampToPage);
@@ -635,6 +672,7 @@ private:
     void PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSelectToolSelectionAffordances) const;
     void PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke, bool fastPreview = false, float opacity = 1.0f) const;
     void PaintText(HDC hdc, const PageText& text, const PageView& pageView, float opacity = 1.0f) const;
+    void PaintLatex(HDC hdc, const PageLatex& latex, const PageView& pageView, float opacity = 1.0f) const;
     bool TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke& stroke);
     bool TryRefreshPageSurfaceCacheForStroke(std::size_t pageIndex, const Stroke& stroke);
     bool TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect);
@@ -645,6 +683,7 @@ private:
     [[nodiscard]] bool ShouldSkipStrokeInInteractionSnapshot(std::size_t pageIndex, std::size_t strokeIndex) const;
     [[nodiscard]] bool ShouldSkipImageInInteractionSnapshot(std::size_t pageIndex, std::size_t imageIndex) const;
     [[nodiscard]] bool ShouldSkipTextInInteractionSnapshot(std::size_t pageIndex, std::size_t textIndex) const;
+    [[nodiscard]] bool ShouldSkipLatexInInteractionSnapshot(std::size_t pageIndex, std::size_t latexIndex) const;
     void RebuildMoveSelectionTextCache();
     void RebuildMoveSelectionPreview(POINT cursor);
     void RebuildImageTransformPreview(POINT cursor);
@@ -690,6 +729,7 @@ private:
     bool isTransformingImage_ = false;
     bool isTransformingStroke_ = false;
     bool isTransformingText_ = false;
+    bool isTransformingLatex_ = false;
     struct ActiveStrokeRenderCache {
         bool valid = false;
         std::size_t pointCount = 0;
@@ -733,14 +773,21 @@ private:
     Vec2 strokeTransformBoundsMin_ {};
     Vec2 strokeTransformBoundsMax_ {};
     PageText textTransformBefore_ {};
+    PageLatex latexTransformBefore_ {};
+    PageLatex latexTransformInitial_ {};
+    ImageTransformHandle latexTransformHandle_ = ImageTransformHandle::None;
+    std::optional<std::size_t> latexTransformPageIndex_ {};
+    std::optional<std::size_t> latexTransformIndex_ {};
     std::vector<std::pair<std::size_t, Stroke>> strokeTransformInitials_ {};
     std::vector<POINT> selectionLassoCursorPoints_ {};
     std::vector<std::vector<std::size_t>> selectedImageIndices_ {};
     std::vector<std::vector<std::size_t>> selectedTextIndices_ {};
+    std::vector<std::vector<std::size_t>> selectedLatexIndices_ {};
     std::vector<std::vector<std::size_t>> selectedStrokeIndices_ {};
     std::vector<std::vector<std::size_t>> pendingEraseStrokeIndices_ {};
     std::vector<std::vector<std::size_t>> pendingEraseImageIndices_ {};
     std::vector<std::vector<std::size_t>> pendingEraseTextIndices_ {};
+    std::vector<std::vector<std::size_t>> pendingEraseLatexIndices_ {};
     std::optional<std::size_t> lastErasePageIndex_ {};
     Vec2 lastErasePagePoint_ {};
     bool selectionBoxOverride_ = false;
@@ -756,6 +803,7 @@ private:
     std::vector<std::vector<InteractionPreviewStroke>> interactionPreviewStrokes_ {};
     std::vector<std::vector<InteractionPreviewImage>> interactionPreviewImages_ {};
     std::vector<std::vector<InteractionPreviewText>> interactionPreviewTexts_ {};
+    std::vector<std::vector<InteractionPreviewLatex>> interactionPreviewLatexes_ {};
     std::vector<std::vector<MoveSelectionTextCacheEntry>> moveSelectionTextCache_ {};
     std::vector<SidebarThumbnailCache> sidebarThumbnailCaches_ {};
     std::vector<ZoomPageSnapshot> zoomPageSnapshots_ {};
@@ -838,6 +886,7 @@ private:
     std::optional<std::size_t> pendingTextEditPageIndex_ {};
     std::optional<std::size_t> pendingTextEditIndex_ {};
     HWND textEditWindow_ = nullptr;
+    bool textEditWindowIsLatex_ = false;
     HFONT textEditFont_ = nullptr;
     WNDPROC textEditOriginalProc_ = nullptr;
     HBITMAP textEditBackgroundBitmap_ = nullptr;
@@ -855,6 +904,10 @@ private:
     std::optional<std::size_t> editingTextIndex_ {};
     std::optional<PageText> editingTextBefore_ {};
     bool editingTextCreatesText_ = false;
+    std::optional<std::size_t> editingLatexPageIndex_ {};
+    std::optional<std::size_t> editingLatexIndex_ {};
+    std::optional<PageLatex> editingLatexBefore_ {};
+    bool editingLatexCreatesLatex_ = false;
     bool textFormatPopupOpen_ = false;
     bool textFormatFontMenuOpen_ = false;
     bool textFormatSizeEditing_ = false;

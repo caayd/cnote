@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <vector>
 
 #include "App.h"
@@ -23,6 +24,20 @@ bool StrokeBounds(const Stroke& stroke, float* minX, float* minY, float* maxX, f
 void TranslateStrokePoints(Stroke& stroke, Vec2 delta);
 Vec2 ClampStrokeDeltaToPage(const Stroke& stroke, const Page& page, Vec2 delta);
 Vec2 ClampImageDeltaToPage(const PageImage& image, const Page& page, Vec2 delta);
+Vec2 ClampLatexDeltaToPage(const PageLatex& latex, const Page& page, Vec2 delta);
+
+struct PageLatexBounds {
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+};
+
+PageLatexBounds MeasurePageLatexBounds(const PageLatex& latex, float pageWidth);
+std::optional<RECT> PageLatexBoundsRect(const PageLatex& latex, float pageWidth, float scale, int extraPadding = 0);
+bool LatexHitsPoint(const PageLatex& latex, float pageWidth, Vec2 point);
+bool LatexIntersectsRectSelection(const PageLatex& latex, float pageWidth, Vec2 a, Vec2 b);
+bool LatexIntersectsPolygonSelection(const PageLatex& latex, float pageWidth, const std::vector<Vec2>& polygon);
 
 float SelectionHandleHitRadiusPixels(UINT dpi);
 float SelectionRotateOffsetPageUnits(float pageScale, UINT dpi);
