@@ -5037,9 +5037,7 @@ void App::UpdateTextTransform(POINT cursor) {
         if (textTransformInitial_.width > 0.0f) {
             updated.width = std::max(minTextBoxWidth, textTransformInitial_.width * scale);
         }
-        if (textTransformInitial_.height > 0.0f) {
-            updated.height = std::max(minTextBoxHeight, textTransformInitial_.height * scale);
-        }
+        updated.height = 0.0f;
         updated.x = newLeft;
         updated.y = newTop;
     } else {
@@ -5119,8 +5117,22 @@ void App::UpdateTextTransform(POINT cursor) {
 
         updated.x = newLeft;
         updated.y = newTop;
-        updated.width = newWidth;
-        updated.height = newHeight;
+        switch (textTransformHandle_) {
+        case ImageTransformHandle::ResizeEast:
+        case ImageTransformHandle::ResizeWest:
+            updated.width = newWidth;
+            updated.height = 0.0f;
+            break;
+        case ImageTransformHandle::ResizeNorth:
+        case ImageTransformHandle::ResizeSouth:
+            updated.width = textTransformInitial_.width;
+            updated.height = newHeight;
+            break;
+        default:
+            updated.width = newWidth;
+            updated.height = newHeight;
+            break;
+        }
     }
 
     if (updated.width > 0.0f) {

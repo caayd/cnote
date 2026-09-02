@@ -79,6 +79,21 @@ int main() {
         return 1;
     }
 
+    cnote::PageText wrappingText {};
+    wrappingText.width = 90.0f;
+    wrappingText.fontSize = 12.0f;
+    wrappingText.content = L"the quick brown fox jumps over the lazy dog several times without adding a line";
+    const cnote::text::WrappedTextLayout narrowLayout = cnote::text::LayoutPageText(
+        wrappingText,
+        document.CurrentPage().width);
+    wrappingText.width = 120.0f;
+    const cnote::text::WrappedTextLayout wideLayout = cnote::text::LayoutPageText(
+        wrappingText,
+        document.CurrentPage().width);
+    if (!Require(wideLayout.height <= narrowLayout.height, "widening text increased its layout height")) {
+        return 1;
+    }
+
     BITMAPINFO bitmapInfo {};
     bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bitmapInfo.bmiHeader.biWidth = 320;

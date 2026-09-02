@@ -401,6 +401,8 @@ WrappedTextLayout BuildPageTextLayout(const PageText& text, float pageWidth) {
             SendMessageW(layoutWindow, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
         }
         SetWindowPos(layoutWindow, nullptr, 0, 0, layout.wrapWidth, 32767, SWP_NOACTIVATE | SWP_NOZORDER);
+        RECT formatRect { 0, 0, layout.wrapWidth, 32767 };
+        SendMessageW(layoutWindow, EM_SETRECT, 0, reinterpret_cast<LPARAM>(&formatRect));
         SetWindowTextW(layoutWindow, text.content.c_str());
         ApplyPageTextFormatting(layoutWindow, text, kTextLayoutScale);
 
@@ -419,7 +421,6 @@ WrappedTextLayout BuildPageTextLayout(const PageText& text, float pageWidth) {
 
         const int textLength = static_cast<int>(text.content.size());
         const int lineCount = std::max(1, static_cast<int>(SendMessageW(layoutWindow, EM_GETLINECOUNT, 0, 0)));
-        int lastLineTop = 0;
         layout.lines.reserve(static_cast<std::size_t>(lineCount));
         for (int lineIndex = 0; lineIndex < lineCount; ++lineIndex) {
             const int start = static_cast<int>(SendMessageW(layoutWindow, EM_LINEINDEX, lineIndex, 0));
@@ -429,15 +430,12 @@ WrappedTextLayout BuildPageTextLayout(const PageText& text, float pageWidth) {
                 continue;
             }
             layout.lineStarts.push_back(static_cast<std::uint32_t>(start));
-            POINT linePosition {};
-            SendMessageW(layoutWindow, EM_POSFROMCHAR, reinterpret_cast<WPARAM>(&linePosition), start);
-            lastLineTop = std::max(lastLineTop, static_cast<int>(linePosition.y));
             const int length = std::max(0, static_cast<int>(SendMessageW(layoutWindow, EM_LINELENGTH, start, 0)));
             layout.lines.push_back(TrimTrailingLayoutWhitespace(text.content.substr(
                 static_cast<std::size_t>(start),
                 static_cast<std::size_t>(std::min(length, textLength - start)))));
         }
-        layout.height = std::max(layout.lineHeight, lastLineTop + layout.lineHeight);
+        layout.height = std::max(layout.lineHeight, lineCount * layout.lineHeight);
         SetWindowTextW(layoutWindow, L"");
         if (font != nullptr) {
             DeleteObject(font);
@@ -528,6 +526,8 @@ bool DrawPageText(HDC dc, const PageText& text, float pageWidth, float scale, in
         SendMessageW(layoutWindow, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
     }
     SetWindowPos(layoutWindow, nullptr, 0, 0, width, 32767, SWP_NOACTIVATE | SWP_NOZORDER);
+    RECT layoutRect { 0, 0, width, 32767 };
+    SendMessageW(layoutWindow, EM_SETRECT, 0, reinterpret_cast<LPARAM>(&layoutRect));
     SetWindowTextW(layoutWindow, text.content.c_str());
     ApplyPageTextFormatting(layoutWindow, text, renderScale, 1.0f);
 
