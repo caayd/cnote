@@ -27,6 +27,7 @@ add_executable(cnote WIN32
     src/document/History.cpp
     src/document/Pages.cpp
     src/latex/LatexEditing.cpp
+    src/latex/LatexCompletion.cpp
     src/latex/LatexEngine.cpp
     src/render/Paint.cpp
     src/selection/Selection.cpp
@@ -200,6 +201,7 @@ add_executable(cnote_latex_engine_tests
     tests/LatexEngineTests.cpp
     src/Document.cpp
     src/latex/LatexEngine.cpp
+    src/latex/LatexCompletion.cpp
 )
 target_include_directories(cnote_latex_engine_tests PRIVATE src)
 target_compile_definitions(cnote_latex_engine_tests PRIVATE

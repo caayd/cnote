@@ -488,10 +488,28 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             if (editingLatexIndex_.has_value()) {
                 SyncLatexEditModel();
                 RefreshLatexEditControl();
+                UpdateLatexSuggestions();
             } else {
                 SyncTextEditModel();
                 RefreshTextEditControl();
             }
+            return 0;
+        }
+        if (LOWORD(wParam) == 4002
+            && HIWORD(wParam) == LBN_SELCHANGE
+            && reinterpret_cast<HWND>(lParam) == latexSuggestionWindow_
+            && !latexSuggestionUpdating_) {
+            const LRESULT selection = SendMessageW(latexSuggestionWindow_, LB_GETCURSEL, 0, 0);
+            if (selection >= 0) {
+                latexSuggestionSelection_ = static_cast<std::size_t>(selection);
+                AcceptLatexSuggestion();
+            }
+            return 0;
+        }
+        if (LOWORD(wParam) == 4002
+            && HIWORD(wParam) == LBN_DBLCLK
+            && reinterpret_cast<HWND>(lParam) == latexSuggestionWindow_) {
+            AcceptLatexSuggestion();
             return 0;
         }
         break;
@@ -1455,8 +1473,7 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
             app->ToggleEditingTextItalic();
             return 0;
         }
-        if (!latexMode && ctrlPressed && wParam == 'U') {
-            app->ToggleEditingTextUnderline();
+        if (latexMode && app->HandleLatexSuggestionKey(wParam)) {
             return 0;
         }
         if (ctrlPressed && wParam == VK_RETURN) {
@@ -1549,6 +1566,11 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
         break;
     }
     case WM_CHAR:
+        if (app->editingLatexIndex_.has_value() && wParam == VK_TAB) {
+            if (app->HandleLatexSuggestionKey(VK_TAB)) {
+                return 0;
+            }
+        }
         if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 && (wParam < 32 || wParam == 127)) {
             return 0;
         }
@@ -1574,6 +1596,7 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
         if (app->editingLatexIndex_.has_value()) {
             app->SyncLatexEditModel();
             app->RefreshLatexEditControl();
+            app->UpdateLatexSuggestions();
         } else {
             app->SyncTextEditModel();
             app->RefreshTextEditControl();
@@ -1582,6 +1605,15 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
         if (app->textFormatPopupOpen_ && app->window_ != nullptr) {
             InvalidateRect(app->window_, nullptr, FALSE);
         }
+    }
+    if (app->editingLatexIndex_.has_value()
+        && (message == WM_LBUTTONUP
+            || (message == WM_KEYDOWN
+                && (wParam == VK_LEFT
+                    || wParam == VK_RIGHT
+                    || wParam == VK_HOME
+                    || wParam == VK_END)))) {
+        app->UpdateLatexSuggestions();
     }
     return result;
 }

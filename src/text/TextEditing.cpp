@@ -670,6 +670,7 @@ bool App::EnsureTextEditWindow(TextAlignment alignment) {
 
 void App::EndTextEditControl() {
     const RECT previousBounds = textEditBounds_;
+    HideLatexSuggestions();
     if (textEditWindow_ != nullptr) {
         if (textEditOriginalProc_ != nullptr) {
             SetWindowLongPtrW(textEditWindow_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(textEditOriginalProc_));

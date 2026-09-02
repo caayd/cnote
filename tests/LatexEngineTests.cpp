@@ -10,8 +10,8 @@
 #include <gdiplus.h>
 
 #include "Document.h"
+#include "latex/LatexCompletion.h"
 #include "latex/LatexEngine.h"
-
 namespace {
 
 int failures = 0;
@@ -64,6 +64,25 @@ int RenderInk(cnote::latex::FormulaHandle formula, float scale, std::uint32_t ar
 }  // namespace
 
 int main() {
+    const std::wstring completionSource = L"x + \\fr";
+    const auto completionContext = cnote::latex::FindCompletionContext(
+        completionSource,
+        completionSource.size());
+    Check(completionContext.has_value(), "completion finds a command prefix");
+    Check(
+        completionContext.has_value()
+            && completionContext->prefix == L"\\fr"
+            && completionContext->start == 4U
+            && completionContext->end == completionSource.size(),
+        "completion context has the typed range");
+    const auto fractionSuggestions = cnote::latex::SuggestionsFor(L"\\fr");
+    Check(
+        !fractionSuggestions.empty()
+            && fractionSuggestions.front().command == L"\\frac",
+        "completion suggests fraction command");
+    Check(
+        !cnote::latex::FindCompletionContext(L"x + \\\\fr", std::wstring(L"x + \\\\fr").size()).has_value(),
+        "completion ignores escaped backslashes");
     Gdiplus::GdiplusStartupInput gdiplusInput;
     ULONG_PTR gdiplusToken = 0;
     if (Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusInput, nullptr) != Gdiplus::Ok) {

@@ -4,9 +4,9 @@
 #include <cmath>
 #include <cwchar>
 #include <vector>
-
 #include <richedit.h>
 
+#include "latex/LatexCompletion.h"
 #include "latex/LatexEngine.h"
 #include "selection/Geometry.h"
 #include "text/TextGeometry.h"
@@ -25,6 +25,8 @@ using ui::MakeRect;
 using ui::UnionRectangles;
 
 constexpr int kLatexEditControlId = 4001;
+constexpr int kLatexSuggestionControlId = 4002;
+constexpr int kLatexSuggestionMaximumVisible = 8;
 
 // Source editing is deliberately smaller than the rendered equation.
 constexpr float kLatexSourceFontScale = 0.55f;
@@ -55,8 +57,27 @@ HFONT CreateLatexEditFont(int pixelHeight) {
         L"Consolas");
 }
 
-}  // namespace
+std::wstring ReadEditText(HWND editWindow) {
+    if (editWindow == nullptr) {
+        return {};
+    }
+    const int textLength = GetWindowTextLengthW(editWindow);
+    if (textLength <= 0) {
+        return {};
+    }
+    std::vector<wchar_t> buffer(static_cast<std::size_t>(textLength) + 1U, L'\0');
+    GetWindowTextW(editWindow, buffer.data(), textLength + 1);
+    return std::wstring(buffer.data(), static_cast<std::size_t>(textLength));
+}
 
+POINT LatexEditCaretPosition(HWND editWindow, LONG characterIndex) {
+    const LRESULT packedPosition = SendMessageW(editWindow, EM_POSFROMCHAR, characterIndex, 0);
+    return {
+        static_cast<LONG>(static_cast<SHORT>(LOWORD(packedPosition))),
+        static_cast<LONG>(static_cast<SHORT>(HIWORD(packedPosition))),
+    };
+}
+}  // namespace
 bool App::IsEditingLatex(std::size_t pageIndex, std::size_t latexIndex) const {
     return textEditWindow_ != nullptr
         && editingLatexPageIndex_.has_value()
@@ -144,6 +165,233 @@ bool App::EnsureLatexEditWindow() {
     SendMessageW(textEditWindow_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
     textEditSyncSuppressed_ = false;
     return true;
+}
+
+void App::HideLatexSuggestions() {
+    if (latexSuggestionWindow_ != nullptr) {
+        DestroyWindow(latexSuggestionWindow_);
+        latexSuggestionWindow_ = nullptr;
+    }
+    latexSuggestionEntries_.clear();
+    latexSuggestionSelection_ = 0;
+}
+
+void App::UpdateLatexSuggestions() {
+    if (latexSuggestionUpdating_
+        || !editingLatexIndex_.has_value()
+        || textEditWindow_ == nullptr
+        || window_ == nullptr) {
+        return;
+    }
+
+    const std::wstring text = ReadEditText(textEditWindow_);
+    CHARRANGE selection {};
+    SendMessageW(textEditWindow_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
+    if (selection.cpMin != selection.cpMax) {
+        HideLatexSuggestions();
+        return;
+    }
+
+    const auto context = latex::FindCompletionContext(
+        text,
+        static_cast<std::size_t>(std::max<LONG>(0, selection.cpMin)));
+    if (!context.has_value()) {
+        HideLatexSuggestions();
+        return;
+    }
+    const std::vector<latex::CompletionItem> suggestions = latex::SuggestionsFor(context->prefix);
+    if (suggestions.empty()) {
+        HideLatexSuggestions();
+        return;
+    }
+
+    latexSuggestionUpdating_ = true;
+    const std::wstring selectedCommand = (latexSuggestionWindow_ != nullptr
+            && latexSuggestionSelection_ < latexSuggestionEntries_.size())
+        ? latexSuggestionEntries_[latexSuggestionSelection_].command
+        : std::wstring {};
+    latexSuggestionEntries_ = suggestions;
+    latexSuggestionSelection_ = 0;
+    if (!selectedCommand.empty()) {
+        for (std::size_t index = 0; index < latexSuggestionEntries_.size(); ++index) {
+            if (latexSuggestionEntries_[index].command == selectedCommand) {
+                latexSuggestionSelection_ = index;
+                break;
+            }
+        }
+    }
+
+    if (latexSuggestionWindow_ == nullptr) {
+        latexSuggestionWindow_ = CreateWindowExW(
+            0,
+            L"LISTBOX",
+            nullptr,
+            WS_CHILD | WS_BORDER | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL,
+            0,
+            0,
+            0,
+            0,
+            window_,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLatexSuggestionControlId)),
+            instance_,
+            nullptr);
+    }
+    if (latexSuggestionWindow_ == nullptr) {
+        latexSuggestionUpdating_ = false;
+        return;
+    }
+
+    SendMessageW(latexSuggestionWindow_, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(latexSuggestionWindow_, LB_RESETCONTENT, 0, 0);
+    for (const latex::CompletionItem& item : latexSuggestionEntries_) {
+        const std::wstring display = item.command + L"  \u2014  " + item.description;
+        SendMessageW(
+            latexSuggestionWindow_,
+            LB_ADDSTRING,
+            0,
+            reinterpret_cast<LPARAM>(display.c_str()));
+    }
+    const UINT dpi = WindowDpi(window_);
+    const int itemHeight = std::max(ScaleForDpi(22, dpi), textEditFontPixelHeight_ + ScaleForDpi(6, dpi));
+    SendMessageW(latexSuggestionWindow_, LB_SETITEMHEIGHT, 0, itemHeight);
+    SendMessageW(
+        latexSuggestionWindow_,
+        LB_SETCURSEL,
+        static_cast<WPARAM>(latexSuggestionSelection_),
+        0);
+    SendMessageW(latexSuggestionWindow_, WM_SETFONT, reinterpret_cast<WPARAM>(textEditFont_), TRUE);
+    SendMessageW(latexSuggestionWindow_, WM_SETREDRAW, TRUE, 0);
+
+    const POINT caret = LatexEditCaretPosition(textEditWindow_, selection.cpMin);
+    POINT parentCaret = caret;
+    MapWindowPoints(textEditWindow_, window_, &parentCaret, 1);
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    const int width = ScaleForDpi(360, dpi);
+    const int visibleCount = std::min(
+        kLatexSuggestionMaximumVisible,
+        static_cast<int>(latexSuggestionEntries_.size()));
+    const int height = itemHeight * std::max(1, visibleCount) + ScaleForDpi(2, dpi);
+    int x = parentCaret.x;
+    int y = parentCaret.y + std::max(itemHeight, textEditFontPixelHeight_ + ScaleForDpi(4, dpi));
+    if (x + width > clientRect.right) {
+        x = std::max(0, static_cast<int>(clientRect.right) - width);
+    }
+    if (y + height > clientRect.bottom) {
+        y = parentCaret.y - height;
+    }
+    x = std::max(0, x);
+    y = std::clamp(y, 0, std::max(0, static_cast<int>(clientRect.bottom) - height));
+    SetWindowPos(
+        latexSuggestionWindow_,
+        HWND_TOP,
+        x,
+        y,
+        width,
+        height,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    latexSuggestionUpdating_ = false;
+}
+
+void App::MoveLatexSuggestionSelection(int delta) {
+    if (latexSuggestionWindow_ == nullptr || latexSuggestionEntries_.empty()) {
+        return;
+    }
+    const int count = static_cast<int>(latexSuggestionEntries_.size());
+    int next = static_cast<int>(latexSuggestionSelection_) + delta;
+    next = std::clamp(next, 0, count - 1);
+    latexSuggestionSelection_ = static_cast<std::size_t>(next);
+    SendMessageW(
+        latexSuggestionWindow_,
+        LB_SETCURSEL,
+        static_cast<WPARAM>(latexSuggestionSelection_),
+        0);
+}
+
+void App::AcceptLatexSuggestion() {
+    if (latexSuggestionEntries_.empty() || textEditWindow_ == nullptr) {
+        return;
+    }
+    const std::wstring text = ReadEditText(textEditWindow_);
+    CHARRANGE selection {};
+    SendMessageW(textEditWindow_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
+    if (selection.cpMin != selection.cpMax || selection.cpMin < 0) {
+        return;
+    }
+    const auto context = latex::FindCompletionContext(
+        text,
+        static_cast<std::size_t>(selection.cpMin));
+    if (!context.has_value()) {
+        HideLatexSuggestions();
+        return;
+    }
+
+    const std::wstring command = latexSuggestionEntries_[latexSuggestionSelection_].command;
+    latexSuggestionUpdating_ = true;
+    textEditSyncSuppressed_ = true;
+    CHARRANGE replacement {
+        static_cast<LONG>(context->start),
+        static_cast<LONG>(context->end),
+    };
+    SendMessageW(textEditWindow_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&replacement));
+    SendMessageW(
+        textEditWindow_,
+        EM_REPLACESEL,
+        TRUE,
+        reinterpret_cast<LPARAM>(command.c_str()));
+    textEditSyncSuppressed_ = false;
+    SyncLatexEditModel();
+    RefreshLatexEditControl();
+    HideLatexSuggestions();
+    latexSuggestionUpdating_ = false;
+}
+
+bool App::HandleLatexSuggestionKey(WPARAM key) {
+    if (key == VK_TAB) {
+        if (latexSuggestionWindow_ == nullptr || !IsWindowVisible(latexSuggestionWindow_)) {
+            const std::wstring text = ReadEditText(textEditWindow_);
+            CHARRANGE selection {};
+            SendMessageW(textEditWindow_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
+            if (selection.cpMin != selection.cpMax || selection.cpMin < 0) {
+                return false;
+            }
+            const auto context = latex::FindCompletionContext(
+                text,
+                static_cast<std::size_t>(selection.cpMin));
+            if (!context.has_value()) {
+                return false;
+            }
+            latexSuggestionEntries_ = latex::SuggestionsFor(context->prefix);
+            latexSuggestionSelection_ = 0;
+        }
+        if (latexSuggestionEntries_.empty()) {
+            return false;
+        }
+        AcceptLatexSuggestion();
+        return true;
+    }
+    if (latexSuggestionWindow_ == nullptr || !IsWindowVisible(latexSuggestionWindow_)) {
+        return false;
+    }
+    switch (key) {
+    case VK_ESCAPE:
+        HideLatexSuggestions();
+        return true;
+    case VK_UP:
+        MoveLatexSuggestionSelection(-1);
+        return true;
+    case VK_DOWN:
+        MoveLatexSuggestionSelection(1);
+        return true;
+    case VK_PRIOR:
+        MoveLatexSuggestionSelection(-static_cast<int>(kLatexSuggestionMaximumVisible));
+        return true;
+    case VK_NEXT:
+        MoveLatexSuggestionSelection(static_cast<int>(kLatexSuggestionMaximumVisible));
+        return true;
+    default:
+        return false;
+    }
 }
 
 void App::RefreshLatexEditControl() {

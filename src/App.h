@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <interactioncontext.h>
 
+#include "latex/LatexCompletion.h"
 #include "Document.h"
 #include "PdfBackend.h"
 #include "ProjectFile.h"
@@ -394,6 +395,11 @@ private:
     void RefreshTextEditBackgroundBrush(const RECT& editRect);
     [[nodiscard]] COLORREF EditingTextBackgroundColor() const;
     [[nodiscard]] COLORREF EditingLatexBackgroundColor() const;
+    void UpdateLatexSuggestions();
+    void HideLatexSuggestions();
+    [[nodiscard]] bool HandleLatexSuggestionKey(WPARAM key);
+    void AcceptLatexSuggestion();
+    void MoveLatexSuggestionSelection(int delta);
     [[nodiscard]] std::uint64_t AllocateTextId() const;
     [[nodiscard]] std::uint64_t AllocateLatexId() const;
     void PushTextHistoryAction(HistoryActionType type, std::size_t pageIndex, std::size_t index, PageText text, PageText replacementText = {});
@@ -886,6 +892,10 @@ private:
     std::optional<std::size_t> pendingTextEditPageIndex_ {};
     std::optional<std::size_t> pendingTextEditIndex_ {};
     HWND textEditWindow_ = nullptr;
+    HWND latexSuggestionWindow_ = nullptr;
+    std::vector<latex::CompletionItem> latexSuggestionEntries_ {};
+    bool latexSuggestionUpdating_ = false;
+    std::size_t latexSuggestionSelection_ = 0;
     bool textEditWindowIsLatex_ = false;
     HFONT textEditFont_ = nullptr;
     WNDPROC textEditOriginalProc_ = nullptr;
