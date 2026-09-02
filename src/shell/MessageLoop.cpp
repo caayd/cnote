@@ -1473,7 +1473,13 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
             app->ToggleEditingTextItalic();
             return 0;
         }
-        if (latexMode && app->HandleLatexSuggestionKey(wParam)) {
+        if (latexMode && wParam == VK_TAB) {
+            static_cast<void>(app->HandleLatexSuggestionKey(VK_TAB));
+            return 0;
+        }
+        if (latexMode
+            && !(ctrlPressed && wParam == VK_RETURN)
+            && app->HandleLatexSuggestionKey(wParam)) {
             return 0;
         }
         if (ctrlPressed && wParam == VK_RETURN) {
@@ -1567,9 +1573,22 @@ LRESULT CALLBACK App::TextEditProc(HWND window, UINT message, WPARAM wParam, LPA
     }
     case WM_CHAR:
         if (app->editingLatexIndex_.has_value() && wParam == VK_TAB) {
-            if (app->HandleLatexSuggestionKey(VK_TAB)) {
+            static_cast<void>(app->HandleLatexSuggestionKey(VK_TAB));
+            return 0;
+        }
+        if (app->editingLatexIndex_.has_value()
+            && wParam == VK_RETURN
+            && (GetKeyState(VK_CONTROL) & 0x8000) == 0) {
+            if (app->HandleLatexSuggestionKey(VK_RETURN)) {
                 return 0;
             }
+        }
+        if (app->editingLatexIndex_.has_value()
+            && (wParam == L'{' || wParam == L'}'
+                || wParam == L'(' || wParam == L')'
+                || wParam == L'[' || wParam == L']')
+            && app->HandleLatexAutoPair(static_cast<wchar_t>(wParam))) {
+            return 0;
         }
         if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 && (wParam < 32 || wParam == 127)) {
             return 0;

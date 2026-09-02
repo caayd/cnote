@@ -167,6 +167,81 @@ bool App::EnsureLatexEditWindow() {
     return true;
 }
 
+bool App::HandleLatexAutoPair(wchar_t character) {
+    if (textEditWindow_ == nullptr || !editingLatexIndex_.has_value()) {
+        return false;
+    }
+
+    wchar_t closingCharacter = L'\0';
+    switch (character) {
+    case L'{':
+        closingCharacter = L'}';
+        break;
+    case L'(':
+        closingCharacter = L')';
+        break;
+    case L'[':
+        closingCharacter = L']';
+        break;
+    case L'}':
+    case L')':
+    case L']': {
+        const std::wstring text = ReadEditText(textEditWindow_);
+        CHARRANGE selection {};
+        SendMessageW(textEditWindow_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
+        if (selection.cpMin == selection.cpMax
+            && selection.cpMin >= 0
+            && static_cast<std::size_t>(selection.cpMin) < text.size()
+            && text[static_cast<std::size_t>(selection.cpMin)] == character) {
+            CHARRANGE nextPosition { selection.cpMin + 1, selection.cpMin + 1 };
+            SendMessageW(textEditWindow_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&nextPosition));
+            UpdateLatexSuggestions();
+            return true;
+        }
+        return false;
+    }
+    default:
+        return false;
+    }
+
+    const std::wstring text = ReadEditText(textEditWindow_);
+    CHARRANGE selection {};
+    SendMessageW(textEditWindow_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
+    if (selection.cpMin < 0 || selection.cpMax < selection.cpMin) {
+        return false;
+    }
+    const std::size_t selectedStart = static_cast<std::size_t>(selection.cpMin);
+    const std::size_t selectedEnd = static_cast<std::size_t>(selection.cpMax);
+    if (selectedEnd > text.size()) {
+        return false;
+    }
+
+    std::wstring replacement;
+    replacement.reserve((selectedEnd - selectedStart) + 2U);
+    replacement.push_back(character);
+    replacement.append(text, selectedStart, selectedEnd - selectedStart);
+    replacement.push_back(closingCharacter);
+
+    const bool wasSyncSuppressed = textEditSyncSuppressed_;
+    textEditSyncSuppressed_ = true;
+    SendMessageW(
+        textEditWindow_,
+        EM_REPLACESEL,
+        TRUE,
+        reinterpret_cast<LPARAM>(replacement.c_str()));
+    textEditSyncSuppressed_ = wasSyncSuppressed;
+
+    const LONG cursorPosition = selection.cpMin + 1
+        + static_cast<LONG>(selectedEnd - selectedStart);
+    CHARRANGE cursor { cursorPosition, cursorPosition };
+    SendMessageW(textEditWindow_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&cursor));
+    SyncLatexEditModel();
+    RefreshLatexEditControl();
+    UpdateLatexSuggestions();
+    RedrawWindow(textEditWindow_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+    return true;
+}
+
 void App::HideLatexSuggestions() {
     if (latexSuggestionWindow_ != nullptr) {
         DestroyWindow(latexSuggestionWindow_);
@@ -244,12 +319,11 @@ void App::UpdateLatexSuggestions() {
     SendMessageW(latexSuggestionWindow_, WM_SETREDRAW, FALSE, 0);
     SendMessageW(latexSuggestionWindow_, LB_RESETCONTENT, 0, 0);
     for (const latex::CompletionItem& item : latexSuggestionEntries_) {
-        const std::wstring display = item.command + L"  \u2014  " + item.description;
         SendMessageW(
             latexSuggestionWindow_,
             LB_ADDSTRING,
             0,
-            reinterpret_cast<LPARAM>(display.c_str()));
+            reinterpret_cast<LPARAM>(item.command.c_str()));
     }
     const UINT dpi = WindowDpi(window_);
     const int itemHeight = std::max(ScaleForDpi(22, dpi), textEditFontPixelHeight_ + ScaleForDpi(6, dpi));
@@ -267,7 +341,7 @@ void App::UpdateLatexSuggestions() {
     MapWindowPoints(textEditWindow_, window_, &parentCaret, 1);
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
-    const int width = ScaleForDpi(360, dpi);
+    const int width = ScaleForDpi(220, dpi);
     const int visibleCount = std::min(
         kLatexSuggestionMaximumVisible,
         static_cast<int>(latexSuggestionEntries_.size()));
@@ -309,7 +383,9 @@ void App::MoveLatexSuggestionSelection(int delta) {
 }
 
 void App::AcceptLatexSuggestion() {
-    if (latexSuggestionEntries_.empty() || textEditWindow_ == nullptr) {
+    if (latexSuggestionEntries_.empty()
+        || latexSuggestionSelection_ >= latexSuggestionEntries_.size()
+        || textEditWindow_ == nullptr) {
         return;
     }
     const std::wstring text = ReadEditText(textEditWindow_);
@@ -326,8 +402,11 @@ void App::AcceptLatexSuggestion() {
         return;
     }
 
-    const std::wstring command = latexSuggestionEntries_[latexSuggestionSelection_].command;
+    const latex::CompletionItem item = latexSuggestionEntries_[latexSuggestionSelection_];
+    const std::wstring insertion = item.insertion.empty() ? item.command : item.insertion;
+    const std::size_t cursorOffset = std::min(item.cursorOffset, insertion.size());
     latexSuggestionUpdating_ = true;
+    const bool wasSyncSuppressed = textEditSyncSuppressed_;
     textEditSyncSuppressed_ = true;
     CHARRANGE replacement {
         static_cast<LONG>(context->start),
@@ -338,8 +417,11 @@ void App::AcceptLatexSuggestion() {
         textEditWindow_,
         EM_REPLACESEL,
         TRUE,
-        reinterpret_cast<LPARAM>(command.c_str()));
-    textEditSyncSuppressed_ = false;
+        reinterpret_cast<LPARAM>(insertion.c_str()));
+    textEditSyncSuppressed_ = wasSyncSuppressed;
+    const LONG cursorPosition = static_cast<LONG>(context->start + cursorOffset);
+    CHARRANGE cursor { cursorPosition, cursorPosition };
+    SendMessageW(textEditWindow_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&cursor));
     SyncLatexEditModel();
     RefreshLatexEditControl();
     HideLatexSuggestions();
@@ -347,7 +429,7 @@ void App::AcceptLatexSuggestion() {
 }
 
 bool App::HandleLatexSuggestionKey(WPARAM key) {
-    if (key == VK_TAB) {
+    if (key == VK_TAB || key == VK_RETURN) {
         if (latexSuggestionWindow_ == nullptr || !IsWindowVisible(latexSuggestionWindow_)) {
             const std::wstring text = ReadEditText(textEditWindow_);
             CHARRANGE selection {};

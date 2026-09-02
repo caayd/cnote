@@ -81,6 +81,11 @@ int main() {
             && fractionSuggestions.front().command == L"\\frac",
         "completion suggests fraction command");
     Check(
+        !fractionSuggestions.empty()
+            && fractionSuggestions.front().insertion == L"\\frac{}{}"
+            && fractionSuggestions.front().cursorOffset == 6U,
+        "fraction completion creates two argument slots");
+    Check(
         !cnote::latex::FindCompletionContext(L"x + \\\\fr", std::wstring(L"x + \\\\fr").size()).has_value(),
         "completion ignores escaped backslashes");
     Gdiplus::GdiplusStartupInput gdiplusInput;
@@ -106,6 +111,21 @@ int main() {
     Check(metrics.baselineFraction > 0.0f && metrics.baselineFraction < 1.0f, "baseline fraction valid");
 
     // Cache: same source returns the same shared formula.
+    const auto emptyFraction = cnote::latex::Parse(L"\\frac{}{}", 24.0f, true);
+    Check(emptyFraction == nullptr, "empty fraction placeholder is deferred safely");
+    const auto partialFraction = cnote::latex::Parse(L"\\frac{x}{}", 24.0f, true);
+    Check(partialFraction == nullptr, "partially empty fraction is deferred safely");
+    const auto unmatchedOpening = cnote::latex::Parse(L"{", 24.0f, true);
+    const auto unmatchedClosing = cnote::latex::Parse(L"}", 24.0f, true);
+    Check(unmatchedOpening != nullptr, "unmatched opening brace parses safely");
+    Check(unmatchedClosing == nullptr, "unmatched closing brace is rejected safely");
+    if (unmatchedOpening != nullptr) {
+        Check(RenderInk(unmatchedOpening, 1.0f, 0xFF000000U) >= 0, "unmatched opening brace renders safely");
+    }
+    const auto unmatchedSquareClose = cnote::latex::Parse(L"]", 24.0f, true);
+    const auto unmatchedParenthesisClose = cnote::latex::Parse(L")", 24.0f, true);
+    Check(unmatchedSquareClose != nullptr, "unmatched square bracket parses safely");
+    Check(unmatchedParenthesisClose != nullptr, "unmatched parenthesis parses safely");
     auto again = cnote::latex::Parse(L"e^{i\\pi} + 1 = \\frac{a}{b}", 32.0f, true);
     Check(again == formula, "identical parse is served from cache");
 
@@ -116,11 +136,10 @@ int main() {
     Check(ink1 > 300, "1x draw paints ink");
     Check(ink3 > ink1 * 4, "3x draw scales vector-crisp (not bitmap-stretched)");
 
-    // Display-mode parsing is lenient by design: unbalanced braces and unknown
-    // commands still produce a render (errors show as red text in place), so
-    // live preview always has something to show. Null is reserved for input
-    // that yields no formula at all.
-    Check(cnote::latex::Parse(L"x } y", 24.0f, true) != nullptr, "unbalanced brace stays lenient in display mode");
+    // Display-mode parsing is lenient for incomplete opening groups and
+    // unknown commands. Unmatched closing groups are rejected before MicroTeX
+    // rendering because that parser can dereference malformed group atoms.
+    Check(cnote::latex::Parse(L"x } y", 24.0f, true) == nullptr, "unmatched closing brace is rejected in display mode");
     Check(cnote::latex::Parse(L"a + \\nosuchcmd + b", 24.0f, true) != nullptr, "unknown command stays lenient (renders red)");
     Check(cnote::latex::Parse(L"", 24.0f, true) == nullptr, "empty source returns null");
 

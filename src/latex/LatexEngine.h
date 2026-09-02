@@ -7,9 +7,9 @@
 // here must be called on the UI thread.
 //
 // Error contract: Parse returns nullptr for structural errors (unbalanced
-// braces etc., which throw inside MicroTeX). Unknown commands do NOT fail —
-// MicroTeX's partial mode renders them as red text in place, which doubles as
-// the live-preview error indication.
+// braces etc.) and incomplete required arguments such as an empty fraction
+// slot. Unknown commands do NOT fail — MicroTeX's partial mode renders them
+// as red text in place, which doubles as the live-preview error indication.
 
 #include <cstdint>
 #include <memory>

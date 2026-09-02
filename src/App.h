@@ -400,6 +400,7 @@ private:
     [[nodiscard]] bool HandleLatexSuggestionKey(WPARAM key);
     void AcceptLatexSuggestion();
     void MoveLatexSuggestionSelection(int delta);
+    [[nodiscard]] bool HandleLatexAutoPair(wchar_t character);
     [[nodiscard]] std::uint64_t AllocateTextId() const;
     [[nodiscard]] std::uint64_t AllocateLatexId() const;
     void PushTextHistoryAction(HistoryActionType type, std::size_t pageIndex, std::size_t index, PageText text, PageText replacementText = {});

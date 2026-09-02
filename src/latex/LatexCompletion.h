@@ -16,7 +16,8 @@ struct CompletionContext {
 
 struct CompletionItem {
     std::wstring command;
-    std::wstring description;
+    std::wstring insertion;
+    std::size_t cursorOffset = 0;
 };
 
 // Returns the active \\command immediately before the cursor, if any.

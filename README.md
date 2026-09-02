@@ -20,8 +20,8 @@ Native Windows PDF annotation app in C++.
 - `S` select
 - `M` move
 - `H` pan
-- `L` latex equation (edit source with live preview; type `\` for command suggestions, `Tab` completes the selected command, `Ctrl+Enter` commits)
-- `Up` / `Down` choose a LaTeX suggestion; `Escape` dismisses suggestions before cancelling the edit
+- `L` latex equation (edit source with live preview; type `\` for command suggestions, `Tab` or `Enter` completes the selected command, `Ctrl+Enter` commits)
+- LaTeX editing auto-closes `{}`, `()`, and `[]`; completing `\frac` inserts both argument slots
 - `Ctrl+Z` undo
 - `Ctrl+Y` redo
 - `Ctrl+O` open

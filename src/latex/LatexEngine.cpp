@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <bit>
 #include <cwchar>
+#include <cwctype>
 #include <deque>
+#include <string_view>
 
 #include <objidl.h>
 #include <gdiplus.h>
@@ -57,6 +59,68 @@ FormulaMetrics ReadMetrics(const tex::TeXRender& render) {
     return metrics;
 }
 
+bool HasUnmatchedClosingGroup(const std::wstring& source) {
+    int groupDepth = 0;
+    for (std::size_t index = 0; index < source.size(); ++index) {
+        if (source[index] == L'\\' && index + 1U < source.size()) {
+            ++index;
+            continue;
+        }
+        if (source[index] == L'{') {
+            ++groupDepth;
+        } else if (source[index] == L'}') {
+            if (groupDepth == 0) {
+                return true;
+            }
+            --groupDepth;
+        }
+    }
+    return false;
+}
+bool HasEmptyFractionArgument(const std::wstring& source) {
+    constexpr std::wstring_view commands[] = { L"\\frac", L"\\dfrac" };
+    for (const std::wstring_view command : commands) {
+        std::size_t searchPosition = 0;
+        while ((searchPosition = source.find(command, searchPosition)) != std::wstring::npos) {
+            std::size_t argumentPosition = searchPosition + command.size();
+            while (argumentPosition < source.size() && std::iswspace(source[argumentPosition])) {
+                ++argumentPosition;
+            }
+            for (int argument = 0; argument < 2 && argumentPosition < source.size(); ++argument) {
+                if (source[argumentPosition] != L'{') {
+                    break;
+                }
+                if (argumentPosition + 1U < source.size() && source[argumentPosition + 1U] == L'}') {
+                    return true;
+                }
+                int depth = 0;
+                std::size_t endPosition = argumentPosition;
+                for (; endPosition < source.size(); ++endPosition) {
+                    if (source[endPosition] == L'\\' && endPosition + 1U < source.size()) {
+                        ++endPosition;
+                        continue;
+                    }
+                    if (source[endPosition] == L'{') {
+                        ++depth;
+                    } else if (source[endPosition] == L'}' && --depth == 0) {
+                        break;
+                    }
+                }
+                if (endPosition >= source.size()) {
+                    break;
+                }
+                argumentPosition = endPosition + 1U;
+                while (argumentPosition < source.size() && std::iswspace(source[argumentPosition])) {
+                    ++argumentPosition;
+                }
+            }
+            searchPosition += command.size();
+        }
+    }
+    return false;
+}
+
+
 }  // namespace
 
 bool Initialize(const std::wstring& resRoot) {
@@ -89,10 +153,13 @@ bool IsInitialized() {
 }
 
 FormulaHandle Parse(const std::wstring& source, float fontSize, bool display) {
-    if (!g_initialized || source.empty() || fontSize <= 0.0f) {
+    if (!g_initialized
+        || source.empty()
+        || fontSize <= 0.0f
+        || HasUnmatchedClosingGroup(source)
+        || HasEmptyFractionArgument(source)) {
         return nullptr;
     }
-
     const std::uint64_t key = FormulaKey(source, fontSize, display);
     const auto existing = std::find_if(g_cache.begin(), g_cache.end(), [&](const CacheEntry& entry) {
         return entry.key == key;
