@@ -7806,6 +7806,39 @@ bool App::PaintNativePdfBackground(HDC hdc, const Page& page, const RECT& destin
         destinationRect.bottom - destinationRect.top);
 }
 
+void App::PaintPdfTextSelection(HDC hdc, const Page& page, const PageView& pageView) const {
+    if (hdc == nullptr
+        || pageView.pageIndex >= selectedPdfTextBoxes_.size()
+        || selectedPdfTextBoxes_[pageView.pageIndex].empty()
+        || pageView.scale <= 0.0f) {
+        return;
+    }
+
+    Gdiplus::Graphics graphics(hdc);
+    graphics.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::SolidBrush brush(Gdiplus::Color(96, 64, 150, 255));
+    const float pageUnitPadding = 0.75f / pageView.scale;
+
+    for (const PdfTextCharBox& box : selectedPdfTextBoxes_[pageView.pageIndex]) {
+        const float left = std::max(0.0f, box.left - pageUnitPadding);
+        const float top = std::max(0.0f, box.top - pageUnitPadding);
+        const float right = std::min(page.width, box.right + pageUnitPadding);
+        const float bottom = std::min(page.height, box.bottom + pageUnitPadding);
+        if (right <= left || bottom <= top) {
+            continue;
+        }
+
+        graphics.FillRectangle(
+            &brush,
+            static_cast<Gdiplus::REAL>(pageView.rect.left + (left * pageView.scale)),
+            static_cast<Gdiplus::REAL>(pageView.rect.top + (top * pageView.scale)),
+            static_cast<Gdiplus::REAL>((right - left) * pageView.scale),
+            static_cast<Gdiplus::REAL>((bottom - top) * pageView.scale));
+    }
+}
+
 bool App::TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke& stroke) {
     if (pageIndex >= pageSurfaceCaches_.size() || stroke.points.empty()) {
         return false;
@@ -9484,6 +9517,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
         bitmapInfo.bmiHeader.biWidth = zoomSnapshot->width;
         bitmapInfo.bmiHeader.biHeight = -zoomSnapshot->height;
         bitmapInfo.bmiHeader.biPlanes = 1;
+
         bitmapInfo.bmiHeader.biBitCount = 32;
         bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
@@ -9517,6 +9551,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
                 highQuality);
         }
     }
+    PaintPdfTextSelection(hdc, page, pageView);
 
     // Live latex editing preview: the block under edit is excluded from every
     // cache/snapshot above, so paint its current render directly.

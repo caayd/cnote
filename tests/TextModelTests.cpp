@@ -1,4 +1,7 @@
 #include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "Document.h"
 #include "PdfBackend.h"
@@ -12,6 +15,34 @@ bool Require(bool condition, const char* message) {
         std::cerr << message << '\n';
     }
     return condition;
+}
+
+std::vector<std::uint8_t> BuildTextPdf() {
+    const std::string content = "BT /F1 24 Tf 72 720 Td (Hello PDF) Tj ET\n";
+    const std::vector<std::string> objects {
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        "<< /Length " + std::to_string(content.size()) + " >>\nstream\n" + content + "endstream",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    };
+
+    std::string pdf = "%PDF-1.4\n";
+    std::vector<std::size_t> offsets(1, 0);
+    for (std::size_t index = 0; index < objects.size(); ++index) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(index + 1U) + " 0 obj\n" + objects[index] + "\nendobj\n";
+    }
+
+    const std::size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 6\n0000000000 65535 f \n";
+    for (std::size_t index = 1; index < offsets.size(); ++index) {
+        std::string offset = std::to_string(offsets[index]);
+        pdf += std::string(10U - offset.size(), '0') + offset + " 00000 n \n";
+    }
+    pdf += "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n";
+    pdf += std::to_string(xrefOffset) + "\n%%EOF\n";
+    return std::vector<std::uint8_t>(pdf.begin(), pdf.end());
 }
 
 }  // namespace
@@ -51,6 +82,22 @@ int main() {
     }
 
     cnote::PdfiumBackend pdfBackend;
+    const auto pdfBytes = std::make_shared<std::vector<std::uint8_t>>(BuildTextPdf());
+    const auto pdfDocument = pdfBackend.OpenFromMemory(L"detected-text-test.pdf", pdfBytes);
+    if (!Require(pdfDocument.has_value(), "synthetic PDF did not open")) {
+        return 1;
+    }
+    const auto pdfTextBoxes = pdfBackend.ExtractTextCharBoxes(pdfBytes, 0);
+    if (!Require(pdfTextBoxes.has_value(), "PDF text extraction failed")
+        || !Require(pdfTextBoxes->size() >= 9U, "PDF text boxes were not detected")) {
+        return 1;
+    }
+    for (const cnote::PdfTextCharBox& box : *pdfTextBoxes) {
+        if (!Require(box.left < box.right && box.top < box.bottom, "PDF text box coordinates were not normalized")) {
+            return 1;
+        }
+    }
+
     const auto loaded = cnote::ProjectFile::LoadFromBytes(bytes, L"text-model-test.cnote", pdfBackend);
     if (!Require(loaded.has_value(), "serialized project did not load")
         || !Require(loaded->PageCount() == 1U, "page count changed")

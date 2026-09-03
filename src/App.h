@@ -524,6 +524,7 @@ private:
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedTextHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* textIndex = nullptr) const;
     [[nodiscard]] std::optional<ImageTransformHandle> HitTestSelectedLatexHandle(POINT cursor, std::size_t* pageIndex = nullptr, std::size_t* latexIndex = nullptr) const;
     [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> HitTestText(POINT cursor) const;
+    [[nodiscard]] bool HasSelectedPdfText() const;
     [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> HitTestLatex(POINT cursor) const;
     [[nodiscard]] std::vector<Vec2> CurrentSelectionLassoPolygon() const;
     [[nodiscard]] bool CursorHitsSelectionMoveGrip(POINT cursor) const;
@@ -676,6 +677,7 @@ private:
     void PaintPage(HDC hdc, const PageView& pageView);
     [[nodiscard]] bool PaintNativePdfBackground(HDC hdc, const Page& page, const RECT& destinationRect) const;
     void PaintSelectionOverlay(HDC hdc, RECT canvasRect) const;
+    void PaintPdfTextSelection(HDC hdc, const Page& page, const PageView& pageView) const;
     void PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSelectToolSelectionAffordances) const;
     void PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, bool smoothLiveStroke, bool fastPreview = false, float opacity = 1.0f) const;
     void PaintText(HDC hdc, const PageText& text, const PageView& pageView, float opacity = 1.0f) const;
@@ -789,6 +791,7 @@ private:
     std::vector<POINT> selectionLassoCursorPoints_ {};
     std::vector<std::vector<std::size_t>> selectedImageIndices_ {};
     std::vector<std::vector<std::size_t>> selectedTextIndices_ {};
+    std::vector<std::vector<PdfTextCharBox>> selectedPdfTextBoxes_ {};
     std::vector<std::vector<std::size_t>> selectedLatexIndices_ {};
     std::vector<std::vector<std::size_t>> selectedStrokeIndices_ {};
     std::vector<std::vector<std::size_t>> pendingEraseStrokeIndices_ {};

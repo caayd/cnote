@@ -15,14 +15,25 @@ namespace textgeom = cnote::text;
 void App::ClearSelection() {
     selectedImageIndices_.assign(document_.PageCount(), {});
     selectedTextIndices_.assign(document_.PageCount(), {});
+    selectedPdfTextBoxes_.assign(document_.PageCount(), {});
     selectedLatexIndices_.assign(document_.PageCount(), {});
     selectedStrokeIndices_.assign(document_.PageCount(), {});
+}
+
+bool App::HasSelectedPdfText() const {
+    for (const auto& boxes : selectedPdfTextBoxes_) {
+        if (!boxes.empty()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool App::HasSelection() const {
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         if ((pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
             || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())
+            || (pageIndex < selectedPdfTextBoxes_.size() && !selectedPdfTextBoxes_[pageIndex].empty())
             || (pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty())
             || (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())) {
             return true;
@@ -36,9 +47,10 @@ std::optional<std::size_t> App::FirstSelectedPageIndex() const {
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
         const bool hasStrokes = pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty();
         const bool hasTexts = pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty();
+        const bool hasPdfText = pageIndex < selectedPdfTextBoxes_.size() && !selectedPdfTextBoxes_[pageIndex].empty();
         const bool hasLatexes = pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty();
         const bool hasImages = pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty();
-        if (hasStrokes || hasTexts || hasLatexes || hasImages) {
+        if (hasStrokes || hasTexts || hasPdfText || hasLatexes || hasImages) {
             return pageIndex;
         }
     }
@@ -52,6 +64,7 @@ void App::DeleteSelection(std::optional<std::size_t> pageIndex) {
     }
 
     bool hadSelection = false;
+    bool hadEditableSelection = false;
     for (std::size_t index = 0; index < document_.PageCount(); ++index) {
         if (pageIndex.has_value() && index != *pageIndex) {
             continue;
@@ -59,13 +72,15 @@ void App::DeleteSelection(std::optional<std::size_t> pageIndex) {
 
         const bool hasSelectedStrokes = index < selectedStrokeIndices_.size() && !selectedStrokeIndices_[index].empty();
         const bool hasSelectedTexts = index < selectedTextIndices_.size() && !selectedTextIndices_[index].empty();
+        const bool hasSelectedPdfText = index < selectedPdfTextBoxes_.size() && !selectedPdfTextBoxes_[index].empty();
         const bool hasSelectedLatexes = index < selectedLatexIndices_.size() && !selectedLatexIndices_[index].empty();
         const bool hasSelectedImages = index < selectedImageIndices_.size() && !selectedImageIndices_[index].empty();
-        if (!hasSelectedImages && !hasSelectedTexts && !hasSelectedLatexes && !hasSelectedStrokes) {
+        if (!hasSelectedImages && !hasSelectedTexts && !hasSelectedPdfText && !hasSelectedLatexes && !hasSelectedStrokes) {
             continue;
         }
 
         hadSelection = true;
+        hadEditableSelection = hadEditableSelection || hasSelectedImages || hasSelectedTexts || hasSelectedLatexes || hasSelectedStrokes;
 
         if (hasSelectedTexts) {
             auto textIndices = selectedTextIndices_[index];
@@ -120,6 +135,10 @@ void App::DeleteSelection(std::optional<std::size_t> pageIndex) {
     }
 
     ClearSelection();
+    if (!hadEditableSelection) {
+        InvalidateCanvas();
+        return;
+    }
     isMovingSelection_ = false;
     isTransformingImage_ = false;
     isTransformingStroke_ = false;
@@ -221,7 +240,8 @@ bool App::IsEditingText(std::size_t pageIndex, std::size_t textIndex) const {
 std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedImage() const {
     std::optional<std::pair<std::size_t, std::size_t>> result;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        if ((pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
+        if (HasSelectedPdfText()
+            || (pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
             || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())
             || (pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty())) {
             return std::nullopt;
@@ -242,7 +262,8 @@ std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedImage() co
 std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedText() const {
     std::optional<std::pair<std::size_t, std::size_t>> result;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        if ((pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
+        if (HasSelectedPdfText()
+            || (pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
             || (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())
             || (pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty())) {
             return std::nullopt;
@@ -263,7 +284,8 @@ std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedText() con
 std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedLatex() const {
     std::optional<std::pair<std::size_t, std::size_t>> result;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        if ((pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
+        if (HasSelectedPdfText()
+            || (pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
             || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())
             || (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())) {
             return std::nullopt;
@@ -284,7 +306,8 @@ std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedLatex() co
 std::optional<std::size_t> App::SingleSelectedStrokePage() const {
     std::optional<std::size_t> result;
     for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        if ((pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())
+        if (HasSelectedPdfText()
+            || (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())
             || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())
             || (pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty())) {
             return std::nullopt;
@@ -1312,6 +1335,64 @@ void App::EndSelection() {
             }
             if (hit && pageView.pageIndex < selectedLatexIndices_.size()) {
                 selectedLatexIndices_[pageView.pageIndex].push_back(latexIndex);
+            }
+        }
+        const Document::PdfSource* pdfSource = document_.PdfSourceAtIndex(page.sourcePdfSourceIndex);
+        if (pdfSource != nullptr
+            && page.sourcePdfPageIndex >= 0
+            && pageView.pageIndex < selectedPdfTextBoxes_.size()) {
+            const std::optional<std::vector<PdfTextCharBox>> pdfTextBoxes = pdfBackend_.ExtractTextCharBoxes(
+                pdfSource->pdfData,
+                static_cast<std::size_t>(page.sourcePdfPageIndex));
+            if (pdfTextBoxes.has_value()) {
+                const auto boxContainsPoint = [&](const PdfTextCharBox& box, Vec2 point) {
+                    return point.x >= box.left
+                        && point.x <= box.right
+                        && point.y >= box.top
+                        && point.y <= box.bottom;
+                };
+                const auto boxIntersectsRect = [&](const PdfTextCharBox& box) {
+                    const float left = std::min(anchorPage.x, currentPage.x);
+                    const float top = std::min(anchorPage.y, currentPage.y);
+                    const float right = std::max(anchorPage.x, currentPage.x);
+                    const float bottom = std::max(anchorPage.y, currentPage.y);
+                    return box.right >= left
+                        && box.left <= right
+                        && box.bottom >= top
+                        && box.top <= bottom;
+                };
+                const auto boxIntersectsPolygon = [&](const PdfTextCharBox& box) {
+                    const Vec2 center {
+                        (box.left + box.right) * 0.5f,
+                        (box.top + box.bottom) * 0.5f,
+                    };
+                    if (PointInPolygon(center, pagePolygon)) {
+                        return true;
+                    }
+                    const Vec2 corners[] {
+                        { box.left, box.top },
+                        { box.right, box.top },
+                        { box.right, box.bottom },
+                        { box.left, box.bottom },
+                    };
+                    for (const Vec2 corner : corners) {
+                        if (PointInPolygon(corner, pagePolygon)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
+                for (const PdfTextCharBox& box : *pdfTextBoxes) {
+                    const bool hit = effectiveSelectionMode == SelectionMode::Box
+                        ? (clickSelection ? boxContainsPoint(box, currentPage) : boxIntersectsRect(box))
+                        : (pagePolygon.size() < 3U
+                            ? boxContainsPoint(box, currentPage)
+                            : boxIntersectsPolygon(box));
+                    if (hit) {
+                        selectedPdfTextBoxes_[pageView.pageIndex].push_back(box);
+                    }
+                }
             }
         }
     }

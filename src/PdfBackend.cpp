@@ -20,6 +20,7 @@
 #include "fpdf_edit.h"
 #include "fpdf_ppo.h"
 #include "fpdf_save.h"
+#include "fpdf_text.h"
 #include "fpdfview.h"
 
 #include "ProjectFile.h"
@@ -836,6 +837,74 @@ std::optional<RasterImage> PdfiumBackend::RenderPage(
     FPDF_ClosePage(pageHandle);
     FPDF_CloseDocument(documentHandle);
     return raster;
+}
+std::optional<std::vector<PdfTextCharBox>> PdfiumBackend::ExtractTextCharBoxes(
+    const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
+    std::size_t pageIndex) const {
+    if (!initialized_ || !pdfBytes || pdfBytes->empty()) {
+        return std::nullopt;
+    }
+
+    FPDF_DOCUMENT documentHandle = FPDF_LoadMemDocument64(pdfBytes->data(), pdfBytes->size(), nullptr);
+    if (documentHandle == nullptr) {
+        return std::nullopt;
+    }
+
+    const int pageCount = FPDF_GetPageCount(documentHandle);
+    if (pageCount <= 0 || pageIndex >= static_cast<std::size_t>(pageCount)) {
+        FPDF_CloseDocument(documentHandle);
+        return std::nullopt;
+    }
+
+    FPDF_PAGE pageHandle = FPDF_LoadPage(documentHandle, static_cast<int>(pageIndex));
+    if (pageHandle == nullptr) {
+        FPDF_CloseDocument(documentHandle);
+        return std::nullopt;
+    }
+
+    FPDF_TEXTPAGE textPage = FPDFText_LoadPage(pageHandle);
+    std::vector<PdfTextCharBox> boxes;
+    if (textPage != nullptr) {
+        const int characterCount = FPDFText_CountChars(textPage);
+        const float pageHeight = std::max(1.0f, FPDF_GetPageHeightF(pageHandle));
+        if (characterCount > 0) {
+            boxes.reserve(static_cast<std::size_t>(characterCount));
+        }
+
+        for (int characterIndex = 0; characterIndex < characterCount; ++characterIndex) {
+            const unsigned int unicode = FPDFText_GetUnicode(textPage, characterIndex);
+            if (unicode == 0U || unicode == static_cast<unsigned int>(L'\r') || unicode == static_cast<unsigned int>(L'\n')) {
+                continue;
+            }
+
+            double left = 0.0;
+            double right = 0.0;
+            double bottom = 0.0;
+            double top = 0.0;
+            if (FPDFText_GetCharBox(textPage, characterIndex, &left, &right, &bottom, &top) == 0
+                || !std::isfinite(left)
+                || !std::isfinite(right)
+                || !std::isfinite(bottom)
+                || !std::isfinite(top)
+                || right <= left
+                || top <= bottom) {
+                continue;
+            }
+
+            boxes.push_back({
+                static_cast<float>(left),
+                static_cast<float>(pageHeight - top),
+                static_cast<float>(right),
+                static_cast<float>(pageHeight - bottom),
+            });
+        }
+
+        FPDFText_ClosePage(textPage);
+    }
+
+    FPDF_ClosePage(pageHandle);
+    FPDF_CloseDocument(documentHandle);
+    return boxes;
 }
 
 bool PdfiumBackend::RenderPageToHdc(
