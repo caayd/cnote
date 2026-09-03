@@ -56,6 +56,26 @@ HFONT CreateLatexEditFont(int pixelHeight) {
         FIXED_PITCH | FF_MODERN,
         L"Consolas");
 }
+int LatexEditLineHeight(HWND editWindow, HFONT font, int fallbackHeight, UINT dpi) {
+    int lineHeight = fallbackHeight;
+    if (editWindow != nullptr && font != nullptr) {
+        HDC dc = GetDC(editWindow);
+        if (dc != nullptr) {
+            const HGDIOBJ previousFont = SelectObject(dc, font);
+            TEXTMETRICW textMetrics {};
+            if (GetTextMetricsW(dc, &textMetrics) != 0) {
+                lineHeight = std::max(lineHeight, static_cast<int>(textMetrics.tmHeight));
+            }
+            if (previousFont != nullptr) {
+                SelectObject(dc, previousFont);
+            }
+            ReleaseDC(editWindow, dc);
+        }
+    }
+    // RichEdit positions the baseline within the formatting rectangle. Keep
+    // one scaled pixel below the measured line so descenders are not clipped.
+    return lineHeight + std::max(1, ScaleForDpi(1, dpi));
+}
 
 std::wstring ReadEditText(HWND editWindow) {
     if (editWindow == nullptr) {
@@ -522,6 +542,19 @@ void App::RefreshLatexEditControl() {
     const int equationHeight = static_cast<int>(std::ceil(std::max(metrics.height, block.fontSize * 1.35f) * scale));
 
     const int fontHeight = std::max(ScaleForDpi(12, dpi), static_cast<int>(std::lround(block.fontSize * kLatexSourceFontScale * scale)));
+    const bool fontChanged = textEditFont_ == nullptr || textEditFontPixelHeight_ != fontHeight;
+    if (fontChanged) {
+        if (textEditFont_ != nullptr) {
+            DeleteObject(textEditFont_);
+            textEditFont_ = nullptr;
+        }
+        textEditFont_ = CreateLatexEditFont(fontHeight);
+        textEditFontPixelHeight_ = fontHeight;
+        if (textEditFont_ != nullptr) {
+            SendMessageW(textEditWindow_, WM_SETFONT, reinterpret_cast<WPARAM>(textEditFont_), TRUE);
+        }
+    }
+    const int lineHeight = LatexEditLineHeight(textEditWindow_, textEditFont_, fontHeight, dpi);
     const int editMargin = std::max(1, ScaleForDpi(6, dpi));
 
     int sourceLines = 1;
@@ -531,7 +564,7 @@ void App::RefreshLatexEditControl() {
         }
     }
     const int contentWidth = std::max(std::max(equationWidth, ScaleForDpi(260, dpi)), fontHeight * 12);
-    const int contentHeight = std::max(sourceLines * fontHeight, fontHeight);
+    const int contentHeight = std::max(sourceLines * lineHeight, lineHeight);
     const int width = contentWidth + (editMargin * 2);
     const int height = contentHeight + (editMargin * 2);
 
@@ -548,19 +581,6 @@ void App::RefreshLatexEditControl() {
     left = std::clamp(left, 0, std::max(0, static_cast<int>(clientRect.right) - width));
     top = std::clamp(top, 0, std::max(0, static_cast<int>(clientRect.bottom) - height));
     const RECT editRect = MakeRect(left, top, left + width, top + height);
-
-    const bool fontChanged = textEditFont_ == nullptr || textEditFontPixelHeight_ != fontHeight;
-    if (fontChanged) {
-        if (textEditFont_ != nullptr) {
-            DeleteObject(textEditFont_);
-            textEditFont_ = nullptr;
-        }
-        textEditFont_ = CreateLatexEditFont(fontHeight);
-        textEditFontPixelHeight_ = fontHeight;
-        if (textEditFont_ != nullptr) {
-            SendMessageW(textEditWindow_, WM_SETFONT, reinterpret_cast<WPARAM>(textEditFont_), TRUE);
-        }
-    }
 
     const bool boundsChanged = EqualRect(&textEditBounds_, &editRect) == 0;
     const bool needsLayout = textEditWindowNeedsLayout_;
