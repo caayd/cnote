@@ -527,10 +527,12 @@ private:
     [[nodiscard]] bool HasSelectedPdfText() const;
     [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> HitTestLatex(POINT cursor) const;
     [[nodiscard]] std::vector<Vec2> CurrentSelectionLassoPolygon() const;
-    [[nodiscard]] bool CursorHitsSelectionMoveGrip(POINT cursor) const;
     [[nodiscard]] bool CursorHitsSelectedContent(POINT cursor) const;
+    [[nodiscard]] bool CursorHitsSelectionMoveGrip(POINT cursor) const;
+    [[nodiscard]] bool CursorHitsPdfText(POINT cursor) const;
     [[nodiscard]] bool CursorInteractsWithSelection(POINT cursor) const;
     bool CopySelectionToClipboard();
+    bool CopyPdfTextSelectionToClipboard();
     bool CutSelectionToClipboard();
     bool PasteSelectionFromClipboard();
     bool PasteImageFromClipboard();

@@ -677,6 +677,37 @@ bool App::CursorHitsSelectedContent(POINT cursor) const {
     return false;
 }
 
+bool App::CursorHitsPdfText(POINT cursor) const {
+    const auto hitPage = HitTestPage(cursor);
+    if (!hitPage.has_value() || hitPage->pageIndex >= document_.PageCount()) {
+        return false;
+    }
+    const Page& page = document_.PageAt(hitPage->pageIndex);
+    if (page.sourcePdfPageIndex < 0) {
+        return false;
+    }
+    const Document::PdfSource* pdfSource = document_.PdfSourceAtIndex(page.sourcePdfSourceIndex);
+    if (pdfSource == nullptr) {
+        return false;
+    }
+    const std::optional<std::vector<PdfTextCharBox>> boxes = pdfBackend_.ExtractTextCharBoxes(
+        pdfSource->pdfData,
+        static_cast<std::size_t>(page.sourcePdfPageIndex));
+    if (!boxes.has_value()) {
+        return false;
+    }
+    const Vec2 pagePoint = ScreenToPage(*hitPage, cursor, false);
+    for (const PdfTextCharBox& box : *boxes) {
+        if (pagePoint.x >= box.left
+            && pagePoint.x <= box.right
+            && pagePoint.y >= box.top
+            && pagePoint.y <= box.bottom) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool App::CursorHitsSelectionMoveGrip(POINT cursor) const {
     const auto hitPage = HitTestPage(cursor);
     if (!hitPage.has_value()) {
@@ -1337,66 +1368,81 @@ void App::EndSelection() {
                 selectedLatexIndices_[pageView.pageIndex].push_back(latexIndex);
             }
         }
+        const bool genericTextSelection = !selectionBoxOverride_
+            && effectiveSelectionMode == SelectionMode::Lasso
+            && CursorHitsPdfText(selectionAnchorCursor_);
         const Document::PdfSource* pdfSource = document_.PdfSourceAtIndex(page.sourcePdfSourceIndex);
-        if (pdfSource != nullptr
-            && page.sourcePdfPageIndex >= 0
-            && pageView.pageIndex < selectedPdfTextBoxes_.size()) {
-            const std::optional<std::vector<PdfTextCharBox>> pdfTextBoxes = pdfBackend_.ExtractTextCharBoxes(
-                pdfSource->pdfData,
-                static_cast<std::size_t>(page.sourcePdfPageIndex));
-            if (pdfTextBoxes.has_value()) {
-                const auto boxContainsPoint = [&](const PdfTextCharBox& box, Vec2 point) {
-                    return point.x >= box.left
-                        && point.x <= box.right
-                        && point.y >= box.top
-                        && point.y <= box.bottom;
+        if (!genericTextSelection
+            || pdfSource == nullptr
+            || page.sourcePdfPageIndex < 0
+            || pageView.pageIndex >= selectedPdfTextBoxes_.size()) {
+            continue;
+        }
+        const std::optional<std::vector<PdfTextCharBox>> pdfTextBoxes = pdfBackend_.ExtractTextCharBoxes(
+            pdfSource->pdfData,
+            static_cast<std::size_t>(page.sourcePdfPageIndex));
+        if (!pdfTextBoxes.has_value() || pdfTextBoxes->empty()) {
+            continue;
+        }
+        const auto boxContainsPoint = [](const PdfTextCharBox& box, Vec2 point) {
+            return point.x >= box.left
+                && point.x <= box.right
+                && point.y >= box.top
+                && point.y <= box.bottom;
+        };
+        const auto anchorHitPage = HitTestPage(selectionAnchorCursor_);
+        const auto currentHitPage = HitTestPage(selectionCurrentCursor_);
+        if (!anchorHitPage.has_value()
+            || !currentHitPage.has_value()
+            || anchorHitPage->pageIndex != pageView.pageIndex
+            || currentHitPage->pageIndex != pageView.pageIndex) {
+            continue;
+        }
+        const Vec2 pdfAnchorPoint = ScreenToPage(*anchorHitPage, selectionAnchorCursor_, false);
+        const Vec2 pdfCurrentPoint = ScreenToPage(*currentHitPage, selectionCurrentCursor_, false);
+        const auto nearestBoxIndex = [&](Vec2 point) {
+            std::size_t nearestIndex = 0;
+            float nearestDistance = std::numeric_limits<float>::max();
+            for (std::size_t index = 0; index < pdfTextBoxes->size(); ++index) {
+                const PdfTextCharBox& box = (*pdfTextBoxes)[index];
+                if (boxContainsPoint(box, point)) {
+                    return index;
+                }
+                const Vec2 center {
+                    (box.left + box.right) * 0.5f,
+                    (box.top + box.bottom) * 0.5f,
                 };
-                const auto boxIntersectsRect = [&](const PdfTextCharBox& box) {
-                    const float left = std::min(anchorPage.x, currentPage.x);
-                    const float top = std::min(anchorPage.y, currentPage.y);
-                    const float right = std::max(anchorPage.x, currentPage.x);
-                    const float bottom = std::max(anchorPage.y, currentPage.y);
-                    return box.right >= left
-                        && box.left <= right
-                        && box.bottom >= top
-                        && box.top <= bottom;
-                };
-                const auto boxIntersectsPolygon = [&](const PdfTextCharBox& box) {
-                    const Vec2 center {
-                        (box.left + box.right) * 0.5f,
-                        (box.top + box.bottom) * 0.5f,
-                    };
-                    if (PointInPolygon(center, pagePolygon)) {
-                        return true;
-                    }
-                    const Vec2 corners[] {
-                        { box.left, box.top },
-                        { box.right, box.top },
-                        { box.right, box.bottom },
-                        { box.left, box.bottom },
-                    };
-                    for (const Vec2 corner : corners) {
-                        if (PointInPolygon(corner, pagePolygon)) {
-                            return true;
-                        }
-                    }
-                    return false;
-                };
-
-                for (const PdfTextCharBox& box : *pdfTextBoxes) {
-                    const bool hit = effectiveSelectionMode == SelectionMode::Box
-                        ? (clickSelection ? boxContainsPoint(box, currentPage) : boxIntersectsRect(box))
-                        : (pagePolygon.size() < 3U
-                            ? boxContainsPoint(box, currentPage)
-                            : boxIntersectsPolygon(box));
-                    if (hit) {
-                        selectedPdfTextBoxes_[pageView.pageIndex].push_back(box);
-                    }
+                const float distance = DistanceSquared(center, point);
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestIndex = index;
                 }
             }
+            return nearestIndex;
+        };
+        const std::size_t anchorIndex = nearestBoxIndex(pdfAnchorPoint);
+        const std::size_t currentIndex = nearestBoxIndex(pdfCurrentPoint);
+        const std::size_t firstIndex = std::min(anchorIndex, currentIndex);
+        const std::size_t lastIndex = std::max(anchorIndex, currentIndex);
+        for (std::size_t index = firstIndex; index <= lastIndex; ++index) {
+            selectedPdfTextBoxes_[pageView.pageIndex].push_back((*pdfTextBoxes)[index]);
         }
     }
 
+    if (HasSelectedPdfText()) {
+        for (std::vector<std::size_t>& indices : selectedImageIndices_) {
+            indices.clear();
+        }
+        for (std::vector<std::size_t>& indices : selectedTextIndices_) {
+            indices.clear();
+        }
+        for (std::vector<std::size_t>& indices : selectedLatexIndices_) {
+            indices.clear();
+        }
+        for (std::vector<std::size_t>& indices : selectedStrokeIndices_) {
+            indices.clear();
+        }
+    }
     isSelecting_ = false;
     selectionLassoCursorPoints_.clear();
     selectionBoxOverride_ = false;

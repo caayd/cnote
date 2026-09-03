@@ -546,7 +546,14 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         if (activeTool_ == Tool::Pan) {
             BeginPan(cursor, false);
         } else if (activeTool_ == Tool::Move) {
-            BeginMoveSelection(cursor);
+            if (CursorHitsPdfText(cursor)) {
+                if (HasSelection()) {
+                    ClearSelection();
+                }
+                BeginSelection(cursor);
+            } else {
+                BeginMoveSelection(cursor);
+            }
         } else if (activeTool_ == Tool::Select) {
             if (HasSelection() && CursorInteractsWithSelection(cursor)) {
                 BeginMoveSelection(cursor);
@@ -977,7 +984,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 } else if (CursorHitsSelectionMoveGrip(cursor) || CursorHitsSelectedContent(cursor)) {
                     SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
                 } else {
-                    SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+                    SetCursor(LoadCursorW(nullptr, CursorHitsPdfText(cursor) ? IDC_IBEAM : IDC_ARROW));
                 }
             } else if (activeTool_ == Tool::Select) {
                 if (const auto strokeHandle = HitTestSelectedStrokeHandle(cursor); strokeHandle.has_value()) {
@@ -989,7 +996,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 } else if (CursorHitsSelectionMoveGrip(cursor) || CursorHitsSelectedContent(cursor)) {
                     SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
                 } else {
-                    SetCursor(LoadCursorW(nullptr, IDC_CROSS));
+                    SetCursor(LoadCursorW(nullptr, CursorHitsPdfText(cursor) ? IDC_IBEAM : IDC_CROSS));
                 }
             } else if (activeTool_ == Tool::Text) {
                 SetCursor(LoadCursorW(nullptr, HitTestText(cursor).has_value() ? IDC_IBEAM : IDC_CROSS));

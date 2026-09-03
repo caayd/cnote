@@ -12,6 +12,7 @@
 namespace cnote {
 
 struct PdfTextCharBox {
+    std::uint32_t unicode = 0;
     float left = 0.0f;
     float top = 0.0f;
     float right = 0.0f;

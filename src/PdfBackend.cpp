@@ -892,6 +892,7 @@ std::optional<std::vector<PdfTextCharBox>> PdfiumBackend::ExtractTextCharBoxes(
             }
 
             boxes.push_back({
+                unicode,
                 static_cast<float>(left),
                 static_cast<float>(pageHeight - top),
                 static_cast<float>(right),

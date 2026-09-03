@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 #include "text/TextGeometry.h"
 #include "latex/LatexEngine.h"
@@ -18,6 +19,18 @@ UINT SelectionClipboardFormat() {
 }
 
 }  // namespace
+
+void AppendPdfUnicode(std::wstring& text, std::uint32_t unicode) {
+    if (unicode <= 0xFFFFU) {
+        text.push_back(static_cast<wchar_t>(unicode));
+        return;
+    }
+    if (unicode <= 0x10FFFFU) {
+        const std::uint32_t codePoint = unicode - 0x10000U;
+        text.push_back(static_cast<wchar_t>(0xD800U + (codePoint >> 10U)));
+        text.push_back(static_cast<wchar_t>(0xDC00U + (codePoint & 0x3FFU)));
+    }
+}
 
 std::optional<Vec2> App::DefaultPasteOrigin(std::size_t pageIndex) const {
     if (pageIndex >= document_.PageCount()) {
@@ -41,7 +54,6 @@ std::optional<Vec2> App::DefaultPasteOrigin(std::size_t pageIndex) const {
     if (!pageView.valid || pageView.scale <= 0.0f) {
         return fallback;
     }
-
     RECT visibleRect {};
     if (IntersectRect(&visibleRect, &pageView.rect, &canvasRect) == 0) {
         return fallback;
@@ -54,7 +66,56 @@ std::optional<Vec2> App::DefaultPasteOrigin(std::size_t pageIndex) const {
     return ScreenToPage(pageView, visibleCenter, true);
 }
 
+bool App::CopyPdfTextSelectionToClipboard() {
+    std::wstring text;
+    const PdfTextCharBox* previousBox = nullptr;
+    for (const std::vector<PdfTextCharBox>& boxes : selectedPdfTextBoxes_) {
+        for (const PdfTextCharBox& box : boxes) {
+            if (previousBox != nullptr) {
+                const float previousHeight = previousBox->bottom - previousBox->top;
+                const float currentHeight = box.bottom - box.top;
+                const float lineBreakThreshold = std::max(previousHeight, currentHeight) * 0.5f;
+                if (box.top > previousBox->bottom + lineBreakThreshold
+                    || box.left + (box.right - box.left) * 0.5f < previousBox->left) {
+                    text.push_back(L'\n');
+                }
+            }
+            AppendPdfUnicode(text, box.unicode);
+            previousBox = &box;
+        }
+    }
+    if (text.empty() || window_ == nullptr || !OpenClipboard(window_)) {
+        return false;
+    }
+
+    EmptyClipboard();
+    const SIZE_T bytes = (text.size() + 1U) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (memory == nullptr) {
+        CloseClipboard();
+        return false;
+    }
+    void* destination = GlobalLock(memory);
+    if (destination == nullptr) {
+        GlobalFree(memory);
+        CloseClipboard();
+        return false;
+    }
+    std::memcpy(destination, text.c_str(), bytes);
+    GlobalUnlock(memory);
+    if (SetClipboardData(CF_UNICODETEXT, memory) == nullptr) {
+        GlobalFree(memory);
+        CloseClipboard();
+        return false;
+    }
+    CloseClipboard();
+    return true;
+}
+
 bool App::CopySelectionToClipboard() {
+    if (HasSelectedPdfText()) {
+        return CopyPdfTextSelectionToClipboard();
+    }
     const std::optional<std::size_t> pageIndex = FirstSelectedPageIndex();
     if (!pageIndex.has_value()) {
         return false;

@@ -7231,6 +7231,12 @@ void App::PaintSelectionOverlay(HDC hdc, RECT canvasRect) const {
     if (!isSelecting_) {
         return;
     }
+    const bool pdfTextSelection = !selectionBoxOverride_
+        && selectionMode_ == SelectionMode::Lasso
+        && CursorHitsPdfText(selectionAnchorCursor_);
+    if (pdfTextSelection) {
+        return;
+    }
 
     SaveDC(hdc);
     IntersectClipRect(hdc, canvasRect.left, canvasRect.top, canvasRect.right, canvasRect.bottom);
@@ -7807,10 +7813,13 @@ bool App::PaintNativePdfBackground(HDC hdc, const Page& page, const RECT& destin
 }
 
 void App::PaintPdfTextSelection(HDC hdc, const Page& page, const PageView& pageView) const {
-    if (hdc == nullptr
-        || pageView.pageIndex >= selectedPdfTextBoxes_.size()
-        || selectedPdfTextBoxes_[pageView.pageIndex].empty()
-        || pageView.scale <= 0.0f) {
+    const bool hasCommittedSelection = pageView.pageIndex < selectedPdfTextBoxes_.size()
+        && !selectedPdfTextBoxes_[pageView.pageIndex].empty();
+    const bool showLiveSelection = isSelecting_
+        && !selectionBoxOverride_
+        && selectionMode_ == SelectionMode::Lasso
+        && CursorHitsPdfText(selectionAnchorCursor_);
+    if (hdc == nullptr || pageView.scale <= 0.0f || (!hasCommittedSelection && !showLiveSelection)) {
         return;
     }
 
@@ -7820,22 +7829,77 @@ void App::PaintPdfTextSelection(HDC hdc, const Page& page, const PageView& pageV
     graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
     Gdiplus::SolidBrush brush(Gdiplus::Color(96, 64, 150, 255));
     const float pageUnitPadding = 0.75f / pageView.scale;
-
-    for (const PdfTextCharBox& box : selectedPdfTextBoxes_[pageView.pageIndex]) {
+    const auto paintBox = [&](const PdfTextCharBox& box) {
         const float left = std::max(0.0f, box.left - pageUnitPadding);
         const float top = std::max(0.0f, box.top - pageUnitPadding);
         const float right = std::min(page.width, box.right + pageUnitPadding);
         const float bottom = std::min(page.height, box.bottom + pageUnitPadding);
         if (right <= left || bottom <= top) {
-            continue;
+            return;
         }
-
         graphics.FillRectangle(
             &brush,
             static_cast<Gdiplus::REAL>(pageView.rect.left + (left * pageView.scale)),
             static_cast<Gdiplus::REAL>(pageView.rect.top + (top * pageView.scale)),
             static_cast<Gdiplus::REAL>((right - left) * pageView.scale),
             static_cast<Gdiplus::REAL>((bottom - top) * pageView.scale));
+    };
+
+    if (hasCommittedSelection) {
+        for (const PdfTextCharBox& box : selectedPdfTextBoxes_[pageView.pageIndex]) {
+            paintBox(box);
+        }
+    }
+
+    if (!showLiveSelection) {
+        return;
+    }
+    const auto anchorHitPage = HitTestPage(selectionAnchorCursor_);
+    const auto currentHitPage = HitTestPage(selectionCurrentCursor_);
+    if (!anchorHitPage.has_value()
+        || !currentHitPage.has_value()
+        || anchorHitPage->pageIndex != pageView.pageIndex
+        || currentHitPage->pageIndex != pageView.pageIndex
+        || page.sourcePdfPageIndex < 0) {
+        return;
+    }
+    const Document::PdfSource* pdfSource = document_.PdfSourceAtIndex(page.sourcePdfSourceIndex);
+    if (pdfSource == nullptr) {
+        return;
+    }
+    const std::optional<std::vector<PdfTextCharBox>> pdfTextBoxes = pdfBackend_.ExtractTextCharBoxes(
+        pdfSource->pdfData,
+        static_cast<std::size_t>(page.sourcePdfPageIndex));
+    if (!pdfTextBoxes.has_value() || pdfTextBoxes->empty()) {
+        return;
+    }
+    const Vec2 anchorPage = ScreenToPage(*anchorHitPage, selectionAnchorCursor_, false);
+    const Vec2 currentPage = ScreenToPage(*currentHitPage, selectionCurrentCursor_, false);
+    const auto nearestBoxIndex = [&](Vec2 point) {
+        std::size_t nearestIndex = 0;
+        float nearestDistance = std::numeric_limits<float>::max();
+        for (std::size_t index = 0; index < pdfTextBoxes->size(); ++index) {
+            const PdfTextCharBox& box = (*pdfTextBoxes)[index];
+            if (point.x >= box.left && point.x <= box.right
+                && point.y >= box.top && point.y <= box.bottom) {
+                return index;
+            }
+            const Vec2 center {
+                (box.left + box.right) * 0.5f,
+                (box.top + box.bottom) * 0.5f,
+            };
+            const float distance = DistanceSquared(center, point);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearestIndex = index;
+            }
+        }
+        return nearestIndex;
+    };
+    const std::size_t firstIndex = std::min(nearestBoxIndex(anchorPage), nearestBoxIndex(currentPage));
+    const std::size_t lastIndex = std::max(nearestBoxIndex(anchorPage), nearestBoxIndex(currentPage));
+    for (std::size_t index = firstIndex; index <= lastIndex; ++index) {
+        paintBox((*pdfTextBoxes)[index]);
     }
 }
 
