@@ -1,6 +1,7 @@
 #include "App.h"
 
 #include <dwmapi.h>
+#include <algorithm>
 
 #include "DpiUtil.h"
 #include "resource.h"
@@ -35,49 +36,44 @@ int App::Run(int showCommand, std::optional<std::wstring> startupPath) {
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         TranslateMessage(&message);
         DispatchMessageW(&message);
+        std::erase_if(childWindows_, [](const auto& view) { return view->window_ == nullptr; });
     }
 
+    childWindows_.clear();
     return static_cast<int>(message.wParam);
 }
 
-bool App::OpenNewWindow() {
-    std::wstring executablePath(MAX_PATH, L'\0');
-    DWORD pathLength = GetModuleFileNameW(nullptr, executablePath.data(), static_cast<DWORD>(executablePath.size()));
-    while (pathLength >= executablePath.size()) {
-        executablePath.resize(executablePath.size() * 2, L'\0');
-        pathLength = GetModuleFileNameW(nullptr, executablePath.data(), static_cast<DWORD>(executablePath.size()));
-    }
+bool App::OpenNewWindow() { return CreateAdditionalWindow(false); }
+bool App::OpenNewView() { return CreateAdditionalWindow(true); }
 
-    if (pathLength == 0) {
-        MessageBoxW(window_, L"Failed to locate the cnote executable.", L"New window", MB_OK | MB_ICONERROR);
+bool App::CreateAdditionalWindow(bool linked, int showCommand) {
+    FinishDocumentInteraction();
+    auto view = std::make_unique<App>(instance_);
+    view->host_ = host_;
+    if (linked) {
+        view->AttachSession(session_);
+        view->currentPageIndex_ = CurrentPageIndex();
+        view->zoom_ = zoom_;
+        view->targetZoom_ = zoom_;
+        view->panX_ = panX_;
+        view->panY_ = panY_;
+        view->pdfSidebarOpen_ = pdfSidebarOpen_;
+        view->pdfSidebarSlideProgress_ = pdfSidebarOpen_ ? 1.0f : 0.0f;
+        view->newPageSettings_.width = session_->document.NewPageDefaults().width;
+        view->newPageSettings_.height = session_->document.NewPageDefaults().height;
+        view->newPageSettings_.backgroundColor = session_->document.NewPageDefaults().backgroundColor;
+        view->newPageSettings_.paletteProfile = session_->document.NewPageDefaults().paletteProfile;
+        view->ClearSelection();
+    }
+    if (!view->CreateMainWindow(showCommand)) {
+        MessageBoxW(window_, L"Failed to create a window.", L"New window", MB_OK | MB_ICONERROR);
         return false;
     }
-
-    executablePath.resize(pathLength);
-    std::wstring commandLine = L"\"" + executablePath + L"\"";
-
-    STARTUPINFOW startupInfo {};
-    startupInfo.cb = sizeof(startupInfo);
-    PROCESS_INFORMATION processInfo {};
-    std::wstring mutableCommandLine = commandLine;
-    const BOOL created = CreateProcessW(
-        executablePath.c_str(),
-        mutableCommandLine.data(),
-        nullptr,
-        nullptr,
-        FALSE,
-        0,
-        nullptr,
-        nullptr,
-        &startupInfo,
-        &processInfo);
-    if (created == FALSE) {
-        MessageBoxW(window_, L"Failed to open a new window.", L"New window", MB_OK | MB_ICONERROR);
-        return false;
-    }
-
-    CloseHandle(processInfo.hThread);
-    CloseHandle(processInfo.hProcess);
+    if (!linked) view->CreateBlankDocument();
+    App* created = view.get();
+    host_->childWindows_.push_back(std::move(view));
+    ShowWindow(created->window_, showCommand);
+    UpdateWindow(created->window_);
     return true;
 }
 
@@ -95,7 +91,7 @@ bool App::CreateMainWindow(int showCommand) {
     windowClass.hbrBackground = nullptr;
     windowClass.lpszClassName = kWindowClassName;
 
-    if (RegisterClassExW(&windowClass) == 0) {
+    if (RegisterClassExW(&windowClass) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
         return false;
     }
 
@@ -119,6 +115,8 @@ bool App::CreateMainWindow(int showCommand) {
     if (window_ == nullptr) {
         return false;
     }
+
+    openWindows_.push_back(this);
 
     constexpr DWORD kDwmDarkModeAttribute = 20;
     constexpr DWORD kDwmBorderColorAttribute = 34;

@@ -1,4 +1,6 @@
 #include "App.h"
+#include "SettingsWindow.h"
+#include "NewPageSettingsWindow.h"
 
 #include <algorithm>
 #include <cmath>
@@ -798,9 +800,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             pendingTextEditPageIndex_.reset();
             pendingTextEditIndex_.reset();
             UpdateCaptureState();
-            if (pageIndex.has_value() && textIndex.has_value() && *pageIndex < document_.PageCount()
-                && *textIndex < document_.PageAt(*pageIndex).texts.size()) {
-                BeginTextEdit(*pageIndex, *textIndex, document_.PageAt(*pageIndex).texts[*textIndex]);
+            if (pageIndex.has_value() && textIndex.has_value() && *pageIndex < session_->document.PageCount()
+                && *textIndex < session_->document.PageAt(*pageIndex).texts.size()) {
+                BeginTextEdit(*pageIndex, *textIndex, session_->document.PageAt(*pageIndex).texts[*textIndex]);
             }
         } else if (isSelecting_) {
             EndSelection();
@@ -835,8 +837,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 const SidebarMetrics metrics = BuildSidebarMetrics(dpi);
                 const int itemWidth = std::max(1, static_cast<int>(headerLayout.headerRect.right - headerLayout.headerRect.left) - (metrics.itemInset * 2));
                 int contentHeight = metrics.contentPadding;
-                for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-                    const Page& page = document_.PageAt(pageIndex);
+                for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+                    const Page& page = session_->document.PageAt(pageIndex);
                     const float aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
                     const int thumbHeight = std::max(metrics.minThumbHeight, static_cast<int>(std::lround(static_cast<float>(itemWidth) * aspect)));
                     contentHeight += thumbHeight + metrics.labelHeight + metrics.itemGap;
@@ -866,10 +868,13 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         SmoothPanBy(-WheelScrollPixels(wheelDelta, WindowDpi(window_), true, viewportWidth), 0.0f);
         return 0;
     }
+    case WM_ACTIVATE:
+        if (LOWORD(wParam) != WA_INACTIVE) FinishOtherViewInteractions();
+        break;
     case WM_ACTIVATEAPP:
         if (wParam == FALSE) {
-            if (CanAutoSaveCurrentDocument() && !IsDocumentInteractionActive()) {
-                static_cast<void>(SaveCnoteToPath(document_.FilePath(), false));
+            if (CanAutoSaveCurrentDocument() && !IsSessionInteractionActive()) {
+                static_cast<void>(SaveCnoteToPath(session_->document.FilePath(), false));
             } else {
                 UpdateAutoSaveTimer();
             }
@@ -877,8 +882,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         break;
     case WM_TIMER:
         if (wParam == kAutoSaveTimerId) {
-            if (CanAutoSaveCurrentDocument() && !IsDocumentInteractionActive()) {
-                static_cast<void>(SaveCnoteToPath(document_.FilePath(), false));
+            if (CanAutoSaveCurrentDocument() && !IsSessionInteractionActive()) {
+                static_cast<void>(SaveCnoteToPath(session_->document.FilePath(), false));
             } else {
                 UpdateAutoSaveTimer();
             }
@@ -1243,10 +1248,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         if (ctrlPressed && wParam == 'W') {
             const auto selectedText = SingleSelectedText();
             if (selectedText.has_value()
-                && selectedText->first < document_.PageCount()
-                && selectedText->second < document_.PageAt(selectedText->first).texts.size()) {
+                && selectedText->first < session_->document.PageCount()
+                && selectedText->second < session_->document.PageAt(selectedText->first).texts.size()) {
                 if (!IsEditingText(selectedText->first, selectedText->second)) {
-                    BeginTextEdit(selectedText->first, selectedText->second, document_.PageAt(selectedText->first).texts[selectedText->second]);
+                    BeginTextEdit(selectedText->first, selectedText->second, session_->document.PageAt(selectedText->first).texts[selectedText->second]);
                 }
                 if (!textFormatPopupOpen_) {
                     ToggleTextFormatPopup();
@@ -1336,8 +1341,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             HDC editDc = reinterpret_cast<HDC>(wParam);
             SetBkMode(editDc, TRANSPARENT);
             if (editingTextPageIndex_.has_value() && editingTextIndex_.has_value()
-                && *editingTextPageIndex_ < document_.PageCount()) {
-                const Page& page = document_.PageAt(*editingTextPageIndex_);
+                && *editingTextPageIndex_ < session_->document.PageCount()) {
+                const Page& page = session_->document.PageAt(*editingTextPageIndex_);
                 if (*editingTextIndex_ < page.texts.size()) {
                     SetTextColor(editDc, ToColorRef(page.texts[*editingTextIndex_].color));
                 }
@@ -1407,6 +1412,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         DestroyWindow(window_);
         return 0;
     case WM_DESTROY:
+        SaveAppSettings();
+        delete settings_.window;
+        settings_.window = nullptr;
+        delete newPageSettings_.window;
+        newPageSettings_.window = nullptr;
+        KillTimer(window_, kAutoSaveTimerId);
         KillTimer(window_, kZoomSessionTimerId);
         StopToolbarRevealAnimationTimer();
         StopPdfSidebarSlideAnimationTimer();
@@ -1415,7 +1426,13 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         ClearZoomSessionSnapshots();
         ReleasePaintBackbuffer();
         ReleaseCompositionResources();
-        PostQuitMessage(0);
+        DetachSession();
+        // The original App remains the window host until the message loop ends;
+        // it must not keep a closed project's content/history alive meanwhile.
+        session_ = std::make_shared<ProjectSession>();
+        currentPageIndex_ = 0;
+        std::erase(openWindows_, this);
+        if (openWindows_.empty()) PostQuitMessage(0);
         return 0;
     default:
         break;
@@ -1436,7 +1453,12 @@ LRESULT CALLBACK App::WindowProc(HWND window, UINT message, WPARAM wParam, LPARA
     }
 
     if (app != nullptr) {
-        return app->HandleMessage(message, wParam, lParam);
+        const LRESULT result = app->HandleMessage(message, wParam, lParam);
+        if (message == WM_NCDESTROY) {
+            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+            app->window_ = nullptr;
+        }
+        return result;
     }
 
     return DefWindowProcW(window, message, wParam, lParam);

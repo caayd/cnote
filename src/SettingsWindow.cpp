@@ -1641,7 +1641,7 @@ void SettingsWindow::HandleHScroll(LPARAM lParam) {
     }
 
     app_.SaveAppSettings();
-    app_.UpdateAutoSaveTimer();
+    app_.SetSessionAutoSaveInterval(app_.settings_.autoSaveIntervalSeconds);
     if (reinterpret_cast<HWND>(lParam) == dashLengthSlider_ || reinterpret_cast<HWND>(lParam) == dashGapSlider_) {
         InvalidateRect(app_.window_, nullptr, FALSE);
     }
@@ -2503,7 +2503,7 @@ void SettingsWindow::UpdateSliderValue(SliderKind kind, int value) {
     }
 
     app_.SaveAppSettings();
-    app_.UpdateAutoSaveTimer();
+    app_.SetSessionAutoSaveInterval(app_.settings_.autoSaveIntervalSeconds);
     if (kind == SliderKind::DashLength || kind == SliderKind::DashGap) {
         InvalidateRect(app_.window_, nullptr, FALSE);
     }
@@ -2655,6 +2655,9 @@ LRESULT CALLBACK SettingsWindow::WindowProc(HWND window, UINT message, WPARAM wP
 
 LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+    case WM_ACTIVATE:
+        if (LOWORD(wParam) != WA_INACTIVE) app_.FinishOtherViewInteractions();
+        break;
     case WM_GETMINMAXINFO:
     {
         auto* minMax = reinterpret_cast<MINMAXINFO*>(lParam);

@@ -1,4 +1,5 @@
 /build/
+/build-multiview/
 /build_stable/
 /build_verify/
 /.vs/

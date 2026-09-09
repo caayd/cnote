@@ -80,11 +80,11 @@ std::optional<PageText> App::CurrentEditingTextLayout() const {
     if (textEditWindow_ == nullptr
         || !editingTextPageIndex_.has_value()
         || !editingTextIndex_.has_value()
-        || *editingTextPageIndex_ >= document_.PageCount()) {
+        || *editingTextPageIndex_ >= session_->document.PageCount()) {
         return std::nullopt;
     }
 
-    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    const Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         return std::nullopt;
     }
@@ -105,10 +105,10 @@ std::optional<PageTextStyle> App::CurrentEditingTextStyle() const {
     if (textEditWindow_ == nullptr
         || !editingTextPageIndex_.has_value()
         || !editingTextIndex_.has_value()
-        || *editingTextPageIndex_ >= document_.PageCount()) {
+        || *editingTextPageIndex_ >= session_->document.PageCount()) {
         return std::nullopt;
     }
-    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    const Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         return std::nullopt;
     }
@@ -162,11 +162,11 @@ void App::SyncTextEditModel() {
     if (textEditWindow_ == nullptr
         || !editingTextPageIndex_.has_value()
         || !editingTextIndex_.has_value()
-        || *editingTextPageIndex_ >= document_.PageCount()) {
+        || *editingTextPageIndex_ >= session_->document.PageCount()) {
         return;
     }
 
-    Page& page = document_.PageAt(*editingTextPageIndex_);
+    Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         return;
     }
@@ -189,8 +189,8 @@ void App::ToggleTextFormatPopup() {
     if (textEditWindow_ == nullptr
         || !editingTextPageIndex_.has_value()
         || !editingTextIndex_.has_value()
-        || *editingTextPageIndex_ >= document_.PageCount()
-        || *editingTextIndex_ >= document_.PageAt(*editingTextPageIndex_).texts.size()) {
+        || *editingTextPageIndex_ >= session_->document.PageCount()
+        || *editingTextIndex_ >= session_->document.PageAt(*editingTextPageIndex_).texts.size()) {
         return;
     }
 
@@ -229,10 +229,10 @@ void App::CancelTextFormatSizeInput(bool restoreFocus) {
 }
 
 void App::BeginTextFormatSizeInput() {
-    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= session_->document.PageCount()) {
         return;
     }
-    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    const Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         return;
     }
@@ -262,11 +262,11 @@ void App::ApplyTextFormatSizeInput() {
 }
 
 void App::SetEditingTextAlignment(TextAlignment alignment) {
-    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= session_->document.PageCount()) {
         return;
     }
 
-    Page& page = document_.PageAt(*editingTextPageIndex_);
+    Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         return;
     }
@@ -283,11 +283,11 @@ void App::SetEditingTextAlignment(TextAlignment alignment) {
 }
 
 void App::CycleEditingTextAlignment() {
-    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= session_->document.PageCount()) {
         return;
     }
 
-    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    const Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         return;
     }
@@ -315,10 +315,10 @@ void App::ApplyEditingTextCharacterFormat(
     if (textEditWindow_ == nullptr
         || !editingTextPageIndex_.has_value()
         || !editingTextIndex_.has_value()
-        || *editingTextPageIndex_ >= document_.PageCount()) {
+        || *editingTextPageIndex_ >= session_->document.PageCount()) {
         return;
     }
-    Page& page = document_.PageAt(*editingTextPageIndex_);
+    Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         return;
     }
@@ -358,11 +358,11 @@ void App::ApplyEditingTextCharacterFormat(
 }
 
 void App::SetEditingTextFontSize(float fontSize) {
-    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= session_->document.PageCount()) {
         return;
     }
 
-    Page& page = document_.PageAt(*editingTextPageIndex_);
+    Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         return;
     }
@@ -380,11 +380,11 @@ void App::SetEditingTextFontSize(float fontSize) {
 }
 
 void App::SetEditingTextFontFamily(TextFontFamily family) {
-    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= session_->document.PageCount()) {
         return;
     }
 
-    Page& page = document_.PageAt(*editingTextPageIndex_);
+    Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         return;
     }
@@ -404,11 +404,11 @@ void App::SetEditingTextFontFamily(TextFontFamily family) {
 }
 
 void App::ToggleEditingTextBold() {
-    if (textEditWindow_ == nullptr || !editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+    if (textEditWindow_ == nullptr || !editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= session_->document.PageCount()) {
         return;
     }
 
-    Page& page = document_.PageAt(*editingTextPageIndex_);
+    Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         return;
     }
@@ -432,11 +432,11 @@ void App::ToggleEditingTextBold() {
 }
 
 void App::ToggleEditingTextItalic() {
-    if (textEditWindow_ == nullptr || !editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+    if (textEditWindow_ == nullptr || !editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= session_->document.PageCount()) {
         return;
     }
 
-    Page& page = document_.PageAt(*editingTextPageIndex_);
+    Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         return;
     }
@@ -460,11 +460,11 @@ void App::ToggleEditingTextItalic() {
 }
 
 void App::ToggleEditingTextUnderline() {
-    if (textEditWindow_ == nullptr || !editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+    if (textEditWindow_ == nullptr || !editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= session_->document.PageCount()) {
         return;
     }
 
-    Page& page = document_.PageAt(*editingTextPageIndex_);
+    Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         return;
     }
@@ -491,12 +491,12 @@ bool App::HandleTextFormatPopupClick(POINT cursor) {
     if (!textFormatPopupOpen_ || window_ == nullptr || !HasRect(textEditBounds_)) {
         return false;
     }
-    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+    if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || *editingTextPageIndex_ >= session_->document.PageCount()) {
         CancelTextFormatPopup();
         return false;
     }
 
-    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    const Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         CancelTextFormatPopup();
         return false;
@@ -647,8 +647,8 @@ bool App::EnsureTextEditWindow(TextAlignment alignment) {
     if (!text.empty()
         && editingTextPageIndex_.has_value()
         && editingTextIndex_.has_value()
-        && *editingTextPageIndex_ < document_.PageCount()) {
-        Page& page = document_.PageAt(*editingTextPageIndex_);
+        && *editingTextPageIndex_ < session_->document.PageCount()) {
+        Page& page = session_->document.PageAt(*editingTextPageIndex_);
         if (*editingTextIndex_ < page.texts.size()) {
             page.texts[*editingTextIndex_].content = text;
             RECT clientRect {};
@@ -707,10 +707,10 @@ void App::EndTextEditControl() {
 }
 
 COLORREF App::EditingTextBackgroundColor() const {
-    if (!editingTextPageIndex_.has_value() || *editingTextPageIndex_ >= document_.PageCount()) {
+    if (!editingTextPageIndex_.has_value() || *editingTextPageIndex_ >= session_->document.PageCount()) {
         return RGB(255, 255, 255);
     }
-    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    const Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (page.sourcePdfSourceIndex != -1 || page.sourcePdfPageIndex != -1) {
         return RGB(255, 255, 255);
     }
@@ -744,7 +744,7 @@ void App::RefreshTextEditBackgroundBrush(const RECT& editRect) {
     ReleaseTextEditBackgroundBrush();
     if (window_ == nullptr
         || !editingTextPageIndex_.has_value()
-        || *editingTextPageIndex_ >= document_.PageCount()
+        || *editingTextPageIndex_ >= session_->document.PageCount()
         || editRect.right <= editRect.left
         || editRect.bottom <= editRect.top) {
         return;
@@ -813,7 +813,7 @@ void App::RefreshTextEditControl() {
     if (!editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || window_ == nullptr) {
         return;
     }
-    if (*editingTextPageIndex_ >= document_.PageCount()) {
+    if (*editingTextPageIndex_ >= session_->document.PageCount()) {
         if (textEditWindow_ != nullptr) {
             ShowWindow(textEditWindow_, SW_HIDE);
         }
@@ -823,7 +823,7 @@ void App::RefreshTextEditControl() {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const PageView pageView = CalculatePageView(clientRect, *editingTextPageIndex_);
-    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    const Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (!pageView.valid || *editingTextIndex_ >= page.texts.size()) {
         if (textEditWindow_ != nullptr) {
             ShowWindow(textEditWindow_, SW_HIDE);
@@ -960,7 +960,7 @@ void App::CommitTextEdit() {
     const bool createdText = editingTextCreatesText_;
     std::optional<PageText> committedText;
 
-    if (pageIndex < document_.PageCount() && textIndex < document_.PageAt(pageIndex).texts.size()) {
+    if (pageIndex < session_->document.PageCount() && textIndex < session_->document.PageAt(pageIndex).texts.size()) {
         const int textLength = GetWindowTextLengthW(textEditWindow_);
         std::wstring content(static_cast<std::size_t>(textLength), L'\0');
         if (textLength > 0) {
@@ -968,7 +968,7 @@ void App::CommitTextEdit() {
             GetWindowTextW(textEditWindow_, buffer.data(), textLength + 1);
             content.assign(buffer.data(), static_cast<std::size_t>(textLength));
         }
-        Page& page = document_.PageAt(pageIndex);
+        Page& page = session_->document.PageAt(pageIndex);
         page.texts[textIndex].content = std::move(content);
         if (page.texts[textIndex].content.empty()) {
             page.texts.erase(page.texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
@@ -986,7 +986,7 @@ void App::CommitTextEdit() {
     const RECT editFrameRect = (window_ != nullptr && HasRect(textEditBounds_))
         ? LiveTextEditFrameRect(textEditBounds_, WindowDpi(window_))
         : RECT {};
-    if (pageIndex < document_.PageCount()) {
+    if (pageIndex < session_->document.PageCount()) {
         InvalidatePageSurfaceCache(pageIndex);
     }
     EndTextEditControl();
@@ -998,10 +998,10 @@ void App::CommitTextEdit() {
         RedrawWindow(window_, &editFrameRect, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
     }
     ClearSelection();
-    if (pageIndex < document_.PageCount() && textIndex < document_.PageAt(pageIndex).texts.size()) {
+    if (pageIndex < session_->document.PageCount() && textIndex < session_->document.PageAt(pageIndex).texts.size()) {
         selectedTextIndices_[pageIndex].push_back(textIndex);
     }
-    if (pageIndex < document_.PageCount()) {
+    if (pageIndex < session_->document.PageCount()) {
         bool changed = false;
         if (createdText) {
             if (committedText.has_value()) {
@@ -1028,7 +1028,7 @@ void App::CommitTextEdit() {
 void App::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, std::optional<PageText> beforeText, bool createsText) {
     CommitTextEdit();
     CommitLatexEdit();
-    if (pageIndex >= document_.PageCount() || textIndex >= document_.PageAt(pageIndex).texts.size()) {
+    if (pageIndex >= session_->document.PageCount() || textIndex >= session_->document.PageAt(pageIndex).texts.size()) {
         return;
     }
 
@@ -1039,12 +1039,12 @@ void App::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, std::optio
     editingTextBefore_ = std::move(beforeText);
     editingTextCreatesText_ = createsText;
 
-    const PageText& text = document_.PageAt(pageIndex).texts[textIndex];
+    const PageText& text = session_->document.PageAt(pageIndex).texts[textIndex];
     if (!EnsureTextEditWindow(text.alignment)) {
         editingTextPageIndex_.reset();
         editingTextIndex_.reset();
-        if (createsText && textIndex < document_.PageAt(pageIndex).texts.size()) {
-            document_.PageAt(pageIndex).texts.erase(document_.PageAt(pageIndex).texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
+        if (createsText && textIndex < session_->document.PageAt(pageIndex).texts.size()) {
+            session_->document.PageAt(pageIndex).texts.erase(session_->document.PageAt(pageIndex).texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
         }
         editingTextBefore_.reset();
         editingTextCreatesText_ = false;
@@ -1075,8 +1075,8 @@ void App::CancelTextEdit() {
 
     const std::size_t pageIndex = *editingTextPageIndex_;
     const std::size_t textIndex = editingTextIndex_.value_or(0);
-    if (pageIndex < document_.PageCount()) {
-        auto& texts = document_.PageAt(pageIndex).texts;
+    if (pageIndex < session_->document.PageCount()) {
+        auto& texts = session_->document.PageAt(pageIndex).texts;
         if (editingTextCreatesText_) {
             if (textIndex < texts.size()) {
                 texts.erase(texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
@@ -1099,7 +1099,7 @@ void App::CancelTextEdit() {
         RedrawWindow(window_, &editFrameRect, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
     }
     ClearSelection();
-    if (pageIndex < document_.PageCount() && textIndex < document_.PageAt(pageIndex).texts.size()) {
+    if (pageIndex < session_->document.PageCount() && textIndex < session_->document.PageAt(pageIndex).texts.size()) {
         selectedTextIndices_[pageIndex].push_back(textIndex);
     }
     UpdateCaptureState();
@@ -1109,9 +1109,9 @@ void App::CancelTextEdit() {
 void App::BeginTextToolInteraction(POINT cursor) {
     const auto hitText = HitTestText(cursor);
     if (hitText.has_value()) {
-        document_.SetCurrentPageIndex(hitText->first);
+        SetViewPageIndex(hitText->first);
         MarkPdfSidebarCompositionDirty();
-        BeginTextEdit(hitText->first, hitText->second, document_.PageAt(hitText->first).texts[hitText->second]);
+        BeginTextEdit(hitText->first, hitText->second, session_->document.PageAt(hitText->first).texts[hitText->second]);
         return;
     }
 
@@ -1122,7 +1122,7 @@ void App::BeginTextToolInteraction(POINT cursor) {
         return;
     }
 
-    Page& page = document_.PageAt(hitPage->pageIndex);
+    Page& page = session_->document.PageAt(hitPage->pageIndex);
     PageText text {};
     const PageText defaultText {};
     const float newTextSizeScale = DefaultNewTextSizeScale();
@@ -1146,15 +1146,15 @@ void App::BeginTextToolInteraction(POINT cursor) {
     }
     text.color = palette_[colorIndex_];
     page.texts.push_back(text);
-    document_.SetCurrentPageIndex(hitPage->pageIndex);
+    SetViewPageIndex(hitPage->pageIndex);
     MarkPdfSidebarCompositionDirty();
     BeginTextEdit(hitPage->pageIndex, page.texts.size() - 1U, std::nullopt, true);
 }
 
 std::uint64_t App::AllocateTextId() const {
     std::uint64_t nextId = 1;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        for (const PageText& text : document_.PageAt(pageIndex).texts) {
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+        for (const PageText& text : session_->document.PageAt(pageIndex).texts) {
             nextId = std::max(nextId, text.id + 1U);
         }
     }

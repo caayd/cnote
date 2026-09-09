@@ -13,11 +13,11 @@ namespace cnote {
 namespace textgeom = cnote::text;
 
 void App::ClearSelection() {
-    selectedImageIndices_.assign(document_.PageCount(), {});
-    selectedTextIndices_.assign(document_.PageCount(), {});
-    selectedPdfTextBoxes_.assign(document_.PageCount(), {});
-    selectedLatexIndices_.assign(document_.PageCount(), {});
-    selectedStrokeIndices_.assign(document_.PageCount(), {});
+    selectedImageIndices_.assign(session_->document.PageCount(), {});
+    selectedTextIndices_.assign(session_->document.PageCount(), {});
+    selectedPdfTextBoxes_.assign(session_->document.PageCount(), {});
+    selectedLatexIndices_.assign(session_->document.PageCount(), {});
+    selectedStrokeIndices_.assign(session_->document.PageCount(), {});
 }
 
 bool App::HasSelectedPdfText() const {
@@ -30,7 +30,7 @@ bool App::HasSelectedPdfText() const {
 }
 
 bool App::HasSelection() const {
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         if ((pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
             || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())
             || (pageIndex < selectedPdfTextBoxes_.size() && !selectedPdfTextBoxes_[pageIndex].empty())
@@ -44,7 +44,7 @@ bool App::HasSelection() const {
 }
 
 std::optional<std::size_t> App::FirstSelectedPageIndex() const {
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         const bool hasStrokes = pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty();
         const bool hasTexts = pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty();
         const bool hasPdfText = pageIndex < selectedPdfTextBoxes_.size() && !selectedPdfTextBoxes_[pageIndex].empty();
@@ -65,7 +65,7 @@ void App::DeleteSelection(std::optional<std::size_t> pageIndex) {
 
     bool hadSelection = false;
     bool hadEditableSelection = false;
-    for (std::size_t index = 0; index < document_.PageCount(); ++index) {
+    for (std::size_t index = 0; index < session_->document.PageCount(); ++index) {
         if (pageIndex.has_value() && index != *pageIndex) {
             continue;
         }
@@ -85,7 +85,7 @@ void App::DeleteSelection(std::optional<std::size_t> pageIndex) {
         if (hasSelectedTexts) {
             auto textIndices = selectedTextIndices_[index];
             std::sort(textIndices.rbegin(), textIndices.rend());
-            auto& texts = document_.PageAt(index).texts;
+            auto& texts = session_->document.PageAt(index).texts;
             for (std::size_t textIndex : textIndices) {
                 if (textIndex < texts.size()) {
                     texts.erase(texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
@@ -96,7 +96,7 @@ void App::DeleteSelection(std::optional<std::size_t> pageIndex) {
         if (hasSelectedLatexes) {
             auto latexIndices = selectedLatexIndices_[index];
             std::sort(latexIndices.rbegin(), latexIndices.rend());
-            auto& latexes = document_.PageAt(index).latexes;
+            auto& latexes = session_->document.PageAt(index).latexes;
             for (std::size_t latexIndex : latexIndices) {
                 if (latexIndex < latexes.size()) {
                     latexes.erase(latexes.begin() + static_cast<std::ptrdiff_t>(latexIndex));
@@ -108,7 +108,7 @@ void App::DeleteSelection(std::optional<std::size_t> pageIndex) {
         if (hasSelectedImages) {
             auto imageIndices = selectedImageIndices_[index];
             std::sort(imageIndices.rbegin(), imageIndices.rend());
-            auto& images = document_.PageAt(index).images;
+            auto& images = session_->document.PageAt(index).images;
             for (std::size_t imageIndex : imageIndices) {
                 if (imageIndex < images.size()) {
                     images.erase(images.begin() + static_cast<std::ptrdiff_t>(imageIndex));
@@ -120,7 +120,7 @@ void App::DeleteSelection(std::optional<std::size_t> pageIndex) {
         if (hasSelectedStrokes) {
             auto strokeIndices = selectedStrokeIndices_[index];
             std::sort(strokeIndices.rbegin(), strokeIndices.rend());
-            auto& strokes = document_.PageAt(index).strokes;
+            auto& strokes = session_->document.PageAt(index).strokes;
             for (std::size_t strokeIndex : strokeIndices) {
                 if (strokeIndex < strokes.size()) {
                     strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(strokeIndex));
@@ -239,7 +239,7 @@ bool App::IsEditingText(std::size_t pageIndex, std::size_t textIndex) const {
 
 std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedImage() const {
     std::optional<std::pair<std::size_t, std::size_t>> result;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         if (HasSelectedPdfText()
             || (pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
             || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())
@@ -261,7 +261,7 @@ std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedImage() co
 
 std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedText() const {
     std::optional<std::pair<std::size_t, std::size_t>> result;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         if (HasSelectedPdfText()
             || (pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
             || (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())
@@ -283,7 +283,7 @@ std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedText() con
 
 std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedLatex() const {
     std::optional<std::pair<std::size_t, std::size_t>> result;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         if (HasSelectedPdfText()
             || (pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty())
             || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())
@@ -305,7 +305,7 @@ std::optional<std::pair<std::size_t, std::size_t>> App::SingleSelectedLatex() co
 
 std::optional<std::size_t> App::SingleSelectedStrokePage() const {
     std::optional<std::size_t> result;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         if (HasSelectedPdfText()
             || (pageIndex < selectedImageIndices_.size() && !selectedImageIndices_[pageIndex].empty())
             || (pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty())
@@ -336,7 +336,7 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedImageHandle(POINT c
         return std::nullopt;
     }
 
-    const Page& page = document_.PageAt(singleImage->first);
+    const Page& page = session_->document.PageAt(singleImage->first);
     if (singleImage->second >= page.images.size()) {
         return std::nullopt;
     }
@@ -396,12 +396,12 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedImageHandle(POINT c
 
 std::optional<std::pair<std::size_t, std::size_t>> App::HitTestText(POINT cursor) const {
     const auto hitPage = HitTestPage(cursor);
-    if (!hitPage.has_value() || hitPage->pageIndex >= document_.PageCount()) {
+    if (!hitPage.has_value() || hitPage->pageIndex >= session_->document.PageCount()) {
         return std::nullopt;
     }
 
     const Vec2 pagePoint = ScreenToPage(*hitPage, cursor, true);
-    const Page& page = document_.PageAt(hitPage->pageIndex);
+    const Page& page = session_->document.PageAt(hitPage->pageIndex);
     for (std::size_t textIndex = page.texts.size(); textIndex > 0; --textIndex) {
         const std::size_t actualIndex = textIndex - 1U;
         if (textgeom::TextHitsPoint(page.texts[actualIndex], page.width, pagePoint)) {
@@ -413,12 +413,12 @@ std::optional<std::pair<std::size_t, std::size_t>> App::HitTestText(POINT cursor
 }
 std::optional<std::pair<std::size_t, std::size_t>> App::HitTestLatex(POINT cursor) const {
     const auto hitPage = HitTestPage(cursor);
-    if (!hitPage.has_value() || hitPage->pageIndex >= document_.PageCount()) {
+    if (!hitPage.has_value() || hitPage->pageIndex >= session_->document.PageCount()) {
         return std::nullopt;
     }
 
     const Vec2 pagePoint = ScreenToPage(*hitPage, cursor, true);
-    const Page& page = document_.PageAt(hitPage->pageIndex);
+    const Page& page = session_->document.PageAt(hitPage->pageIndex);
     for (std::size_t latexIndex = page.latexes.size(); latexIndex > 0; --latexIndex) {
         const std::size_t actualIndex = latexIndex - 1U;
         if (LatexHitsPoint(page.latexes[actualIndex], page.width, pagePoint)) {
@@ -442,7 +442,7 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedTextHandle(POINT cu
         return std::nullopt;
     }
 
-    const Page& page = document_.PageAt(singleText->first);
+    const Page& page = session_->document.PageAt(singleText->first);
     if (singleText->second >= page.texts.size()) {
         return std::nullopt;
     }
@@ -499,7 +499,7 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedLatexHandle(POINT c
         return std::nullopt;
     }
 
-    const Page& page = document_.PageAt(singleLatex->first);
+    const Page& page = session_->document.PageAt(singleLatex->first);
     if (singleLatex->second >= page.latexes.size()) {
         return std::nullopt;
     }
@@ -557,7 +557,7 @@ std::optional<App::ImageTransformHandle> App::HitTestSelectedStrokeHandle(POINT 
         return std::nullopt;
     }
 
-    const Page& page = document_.PageAt(*strokePage);
+    const Page& page = session_->document.PageAt(*strokePage);
     const UINT dpi = WindowDpi(window_);
     float minX = page.width;
     float minY = page.height;
@@ -634,7 +634,7 @@ bool App::CursorHitsSelectedContent(POINT cursor) const {
         return false;
     }
 
-    const Page& page = document_.PageAt(pageIndex);
+    const Page& page = session_->document.PageAt(pageIndex);
     const float pageX = (static_cast<float>(cursor.x - hitPage->rect.left)) / hitPage->scale;
     const float pageY = (static_cast<float>(cursor.y - hitPage->rect.top)) / hitPage->scale;
     const Vec2 pagePoint {
@@ -679,14 +679,14 @@ bool App::CursorHitsSelectedContent(POINT cursor) const {
 
 bool App::CursorHitsPdfText(POINT cursor) const {
     const auto hitPage = HitTestPage(cursor);
-    if (!hitPage.has_value() || hitPage->pageIndex >= document_.PageCount()) {
+    if (!hitPage.has_value() || hitPage->pageIndex >= session_->document.PageCount()) {
         return false;
     }
-    const Page& page = document_.PageAt(hitPage->pageIndex);
+    const Page& page = session_->document.PageAt(hitPage->pageIndex);
     if (page.sourcePdfPageIndex < 0) {
         return false;
     }
-    const Document::PdfSource* pdfSource = document_.PdfSourceAtIndex(page.sourcePdfSourceIndex);
+    const Document::PdfSource* pdfSource = session_->document.PdfSourceAtIndex(page.sourcePdfSourceIndex);
     if (pdfSource == nullptr) {
         return false;
     }
@@ -715,7 +715,7 @@ bool App::CursorHitsSelectionMoveGrip(POINT cursor) const {
     }
 
     const std::size_t pageIndex = hitPage->pageIndex;
-    if (pageIndex >= document_.PageCount()) {
+    if (pageIndex >= session_->document.PageCount()) {
         return false;
     }
 
@@ -727,7 +727,7 @@ bool App::CursorHitsSelectionMoveGrip(POINT cursor) const {
         return false;
     }
 
-    const Page& page = document_.PageAt(pageIndex);
+    const Page& page = session_->document.PageAt(pageIndex);
     const UINT dpi = window_ != nullptr ? WindowDpi(window_) : SystemDpi();
     const int gripPadding = std::max(2, ScaleForDpi(2, dpi));
 
@@ -830,11 +830,11 @@ bool App::CursorInteractsWithSelection(POINT cursor) const {
 }
 
 void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta, bool clampToPage, bool notify) {
-    if (pageIndex >= document_.PageCount()) {
+    if (pageIndex >= session_->document.PageCount()) {
         return;
     }
 
-    Page& page = document_.PageAt(pageIndex);
+    Page& page = session_->document.PageAt(pageIndex);
     if (pageIndex >= selectedStrokeIndices_.size()
         || pageIndex >= selectedTextIndices_.size()
         || pageIndex >= selectedLatexIndices_.size()
@@ -952,14 +952,14 @@ void App::TranslateSelectedContent(std::size_t pageIndex, Vec2 delta, bool clamp
 }
 
 bool App::RehomeSelectedContentAcrossPages(bool clampToPage) {
-    if (window_ == nullptr || document_.PageCount() == 0U) {
+    if (window_ == nullptr || session_->document.PageCount() == 0U) {
         return false;
     }
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const std::vector<PageView> pageViews = CalculatePageViews(clientRect);
-    if (pageViews.size() != document_.PageCount()) {
+    if (pageViews.size() != session_->document.PageCount()) {
         return false;
     }
 
@@ -988,13 +988,13 @@ bool App::RehomeSelectedContentAcrossPages(bool clampToPage) {
     };
 
     bool changed = false;
-    std::vector<bool> invalidatedPages(document_.PageCount(), false);
-    std::vector<std::vector<Stroke>> movedStrokes(document_.PageCount());
-    std::vector<std::vector<PageImage>> movedImages(document_.PageCount());
-    std::vector<std::vector<PageLatex>> movedLatexes(document_.PageCount());
+    std::vector<bool> invalidatedPages(session_->document.PageCount(), false);
+    std::vector<std::vector<Stroke>> movedStrokes(session_->document.PageCount());
+    std::vector<std::vector<PageImage>> movedImages(session_->document.PageCount());
+    std::vector<std::vector<PageLatex>> movedLatexes(session_->document.PageCount());
 
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        Page& page = document_.PageAt(pageIndex);
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+        Page& page = session_->document.PageAt(pageIndex);
         const PageView& sourceView = pageViews[pageIndex];
 
         if (pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty()) {
@@ -1036,7 +1036,7 @@ bool App::RehomeSelectedContentAcrossPages(bool clampToPage) {
                         point = RemapPagePointBetweenViews(sourceView, targetView, point);
                     }
                     if (clampToPage) {
-                        TranslateStrokePoints(stroke, ClampStrokeDeltaToPage(stroke, document_.PageAt(targetPageIndex), {}));
+                        TranslateStrokePoints(stroke, ClampStrokeDeltaToPage(stroke, session_->document.PageAt(targetPageIndex), {}));
                     }
                     movedStrokes[targetPageIndex].push_back(std::move(stroke));
                     invalidatedPages[pageIndex] = true;
@@ -1092,7 +1092,7 @@ bool App::RehomeSelectedContentAcrossPages(bool clampToPage) {
                     image.x = remappedTopLeft.x;
                     image.y = remappedTopLeft.y;
                     if (clampToPage) {
-                        const Vec2 clampDelta = ClampImageDeltaToPage(image, document_.PageAt(targetPageIndex), {});
+                        const Vec2 clampDelta = ClampImageDeltaToPage(image, session_->document.PageAt(targetPageIndex), {});
                         image.x += clampDelta.x;
                         image.y += clampDelta.y;
                     }
@@ -1151,7 +1151,7 @@ bool App::RehomeSelectedContentAcrossPages(bool clampToPage) {
                     latex.x = remappedTopLeft.x;
                     latex.y = remappedTopLeft.y;
                     if (clampToPage) {
-                        const Vec2 clampDelta = ClampLatexDeltaToPage(latex, document_.PageAt(targetPageIndex), {});
+                        const Vec2 clampDelta = ClampLatexDeltaToPage(latex, session_->document.PageAt(targetPageIndex), {});
                         latex.x += clampDelta.x;
                         latex.y += clampDelta.y;
                     }
@@ -1181,9 +1181,9 @@ bool App::RehomeSelectedContentAcrossPages(bool clampToPage) {
         }
     }
 
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         if (!movedStrokes[pageIndex].empty()) {
-            auto& strokes = document_.PageAt(pageIndex).strokes;
+            auto& strokes = session_->document.PageAt(pageIndex).strokes;
             for (Stroke& stroke : movedStrokes[pageIndex]) {
                 strokes.push_back(std::move(stroke));
                 selectedStrokeIndices_[pageIndex].push_back(strokes.size() - 1U);
@@ -1192,7 +1192,7 @@ bool App::RehomeSelectedContentAcrossPages(bool clampToPage) {
         }
 
         if (!movedImages[pageIndex].empty()) {
-            auto& images = document_.PageAt(pageIndex).images;
+            auto& images = session_->document.PageAt(pageIndex).images;
             for (PageImage& image : movedImages[pageIndex]) {
                 images.push_back(std::move(image));
                 selectedImageIndices_[pageIndex].push_back(images.size() - 1U);
@@ -1200,7 +1200,7 @@ bool App::RehomeSelectedContentAcrossPages(bool clampToPage) {
             invalidatedPages[pageIndex] = true;
         }
         if (!movedLatexes[pageIndex].empty()) {
-            auto& latexes = document_.PageAt(pageIndex).latexes;
+            auto& latexes = session_->document.PageAt(pageIndex).latexes;
             for (PageLatex& latex : movedLatexes[pageIndex]) {
                 latexes.push_back(std::move(latex));
                 selectedLatexIndices_[pageIndex].push_back(latexes.size() - 1U);
@@ -1240,7 +1240,7 @@ void App::BeginSelection(POINT cursor, bool boxOverride) {
     selectionBoxOverride_ = boxOverride;
     isSelecting_ = true;
     if (const auto hitPage = HitTestPage(cursor); hitPage.has_value()) {
-        document_.SetCurrentPageIndex(hitPage->pageIndex);
+        SetViewPageIndex(hitPage->pageIndex);
         MarkPdfSidebarCompositionDirty();
     }
     UpdateCaptureState();
@@ -1282,11 +1282,11 @@ void App::EndSelection() {
     GetClientRect(window_, &clientRect);
     ClearSelection();
     for (const PageView& pageView : CalculatePageViews(clientRect)) {
-        if (!pageView.valid || pageView.pageIndex >= document_.PageCount()) {
+        if (!pageView.valid || pageView.pageIndex >= session_->document.PageCount()) {
             continue;
         }
 
-        const Page& page = document_.PageAt(pageView.pageIndex);
+        const Page& page = session_->document.PageAt(pageView.pageIndex);
         const Vec2 anchorPage = ScreenToPage(pageView, selectionAnchorCursor_, false);
         const Vec2 currentPage = ScreenToPage(pageView, selectionCurrentCursor_, false);
         std::vector<Vec2> pagePolygon;
@@ -1371,7 +1371,7 @@ void App::EndSelection() {
         const bool genericTextSelection = !selectionBoxOverride_
             && effectiveSelectionMode == SelectionMode::Lasso
             && CursorHitsPdfText(selectionAnchorCursor_);
-        const Document::PdfSource* pdfSource = document_.PdfSourceAtIndex(page.sourcePdfSourceIndex);
+        const Document::PdfSource* pdfSource = session_->document.PdfSourceAtIndex(page.sourcePdfSourceIndex);
         if (!genericTextSelection
             || pdfSource == nullptr
             || page.sourcePdfPageIndex < 0
@@ -1463,7 +1463,7 @@ void App::BeginMoveSelection(POINT cursor) {
     const std::size_t pageIndex = hitPage->pageIndex;
     const Vec2 pagePoint = ScreenToPage(cursor, nullptr);
     const float hitRadius = std::max(8.0f, brushWidth_ * 2.5f) / std::max(0.1f, hitPage->scale);
-    const Page& page = document_.PageAt(pageIndex);
+    const Page& page = session_->document.PageAt(pageIndex);
     std::size_t strokeHandlePageIndex = 0;
     const auto strokeHandle = HitTestSelectedStrokeHandle(cursor, &strokeHandlePageIndex);
     if (strokeHandle.has_value() && strokeHandlePageIndex == pageIndex) {
@@ -1641,7 +1641,7 @@ void App::BeginMoveSelection(POINT cursor) {
     }
     RebuildMoveSelectionTextCache();
     RebuildMoveSelectionPreview(cursor);
-    document_.SetCurrentPageIndex(pageIndex);
+    SetViewPageIndex(pageIndex);
     MarkPdfSidebarCompositionDirty();
     UpdateCaptureState();
     InvalidateCanvas();
@@ -1659,7 +1659,7 @@ void App::UpdateMoveSelection(POINT cursor) {
         pendingTextEditIndex_.reset();
 
         const auto hitPage = HitTestPage(pendingTextEditCursor_);
-        if (!hitPage.has_value() || pageIndex >= document_.PageCount()) {
+        if (!hitPage.has_value() || pageIndex >= session_->document.PageCount()) {
             UpdateCaptureState();
             return;
         }
@@ -1685,7 +1685,7 @@ void App::UpdateMoveSelection(POINT cursor) {
         }
         RebuildMoveSelectionTextCache();
         RebuildMoveSelectionPreview(cursor);
-        document_.SetCurrentPageIndex(pageIndex);
+        SetViewPageIndex(pageIndex);
         MarkPdfSidebarCompositionDirty();
         UpdateCaptureState();
         InvalidateCanvas();
@@ -1718,8 +1718,8 @@ void App::EndMoveSelection() {
     }
 
     std::vector<std::size_t> affectedPageIndices;
-    affectedPageIndices.reserve(document_.PageCount());
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    affectedPageIndices.reserve(session_->document.PageCount());
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         const bool hasSelectedStrokes = pageIndex < selectedStrokeIndices_.size() && !selectedStrokeIndices_[pageIndex].empty();
         const bool hasSelectedTexts = pageIndex < selectedTextIndices_.size() && !selectedTextIndices_[pageIndex].empty();
         const bool hasSelectedLatexes = pageIndex < selectedLatexIndices_.size() && !selectedLatexIndices_[pageIndex].empty();
@@ -1737,9 +1737,9 @@ void App::EndMoveSelection() {
     std::vector<Page> beforePages;
     beforePages.reserve(affectedPageIndices.size());
     for (std::size_t pageIndex : affectedPageIndices) {
-        beforePages.push_back(document_.PageAt(pageIndex));
+        beforePages.push_back(session_->document.PageAt(pageIndex));
     }
-    const std::size_t focusPageIndex = std::min(document_.CurrentPageIndex(), document_.PageCount() - 1U);
+    const std::size_t focusPageIndex = std::min(CurrentPageIndex(), session_->document.PageCount() - 1U);
 
     CommitMoveSelectionPreview();
     PushReplacePagesHistoryAction(std::move(affectedPageIndices), std::move(beforePages), focusPageIndex);

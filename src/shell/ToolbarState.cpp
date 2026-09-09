@@ -273,7 +273,7 @@ void App::BeginPageJumpInput() {
     CancelToolbarBrushSizeInput();
     CancelToolbarZoomInput();
     pageJumpEditing_ = true;
-    pageJumpText_ = std::to_wstring(document_.CurrentPageIndex() + 1U);
+    pageJumpText_ = std::to_wstring(CurrentPageIndex() + 1U);
     pageJumpReplaceOnType_ = true;
     MarkPdfSidebarCompositionDirty();
 }
@@ -290,7 +290,7 @@ void App::ApplyPageJumpInput() {
     }
 
     const std::size_t pageIndex = static_cast<std::size_t>(pageValue - 1UL);
-    if (pageIndex < document_.PageCount()) {
+    if (pageIndex < session_->document.PageCount()) {
         FocusPage(pageIndex);
     }
 }
@@ -519,11 +519,11 @@ void App::SetColorIndex(std::size_t index) {
     SaveAppSettings();
     ClosePaletteOverlays();
     bool recoloredSelection = false;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         if (pageIndex >= selectedStrokeIndices_.size() || selectedStrokeIndices_[pageIndex].empty()) {
             continue;
         }
-        Page& page = document_.PageAt(pageIndex);
+        Page& page = session_->document.PageAt(pageIndex);
         for (std::size_t strokeIndex : selectedStrokeIndices_[pageIndex]) {
             if (strokeIndex < page.strokes.size()) {
                 page.strokes[strokeIndex].style.color = palette_[index];

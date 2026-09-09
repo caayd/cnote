@@ -13,11 +13,11 @@ void App::ClearInteractionPreview() {
 }
 
 void App::EnsureInteractionPreviewStorage() {
-    interactionPageSnapshots_.assign(document_.PageCount(), {});
-    interactionPreviewStrokes_.assign(document_.PageCount(), {});
-    interactionPreviewTexts_.assign(document_.PageCount(), {});
-    interactionPreviewLatexes_.assign(document_.PageCount(), {});
-    interactionPreviewImages_.assign(document_.PageCount(), {});
+    interactionPageSnapshots_.assign(session_->document.PageCount(), {});
+    interactionPreviewStrokes_.assign(session_->document.PageCount(), {});
+    interactionPreviewTexts_.assign(session_->document.PageCount(), {});
+    interactionPreviewLatexes_.assign(session_->document.PageCount(), {});
+    interactionPreviewImages_.assign(session_->document.PageCount(), {});
 }
 
 }  // namespace cnote

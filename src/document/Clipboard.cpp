@@ -33,11 +33,11 @@ void AppendPdfUnicode(std::wstring& text, std::uint32_t unicode) {
 }
 
 std::optional<Vec2> App::DefaultPasteOrigin(std::size_t pageIndex) const {
-    if (pageIndex >= document_.PageCount()) {
+    if (pageIndex >= session_->document.PageCount()) {
         return std::nullopt;
     }
 
-    const Page& page = document_.PageAt(pageIndex);
+    const Page& page = session_->document.PageAt(pageIndex);
     const Vec2 fallback {
         page.width * 0.5f,
         page.height * 0.5f,
@@ -121,7 +121,7 @@ bool App::CopySelectionToClipboard() {
         return false;
     }
 
-    const Page& page = document_.PageAt(*pageIndex);
+    const Page& page = session_->document.PageAt(*pageIndex);
     std::vector<Stroke> strokes;
     std::vector<PageText> texts;
     std::vector<PageLatex> latexes;
@@ -541,8 +541,8 @@ bool App::PasteSelectionFromClipboard() {
         return false;
     }
 
-    const std::size_t targetPageIndex = document_.CurrentPageIndex();
-    if (targetPageIndex >= document_.PageCount()) {
+    const std::size_t targetPageIndex = CurrentPageIndex();
+    if (targetPageIndex >= session_->document.PageCount()) {
         return false;
     }
 
@@ -551,7 +551,7 @@ bool App::PasteSelectionFromClipboard() {
         return false;
     }
 
-    const Page& targetPage = document_.PageAt(targetPageIndex);
+    const Page& targetPage = session_->document.PageAt(targetPageIndex);
     const float contentWidth = std::max(0.0f, maxX - minX);
     const float contentHeight = std::max(0.0f, maxY - minY);
     const Vec2 pasteTopLeft {
@@ -569,7 +569,7 @@ bool App::PasteSelectionFromClipboard() {
         pasteTopLeft.y - minY,
     };
 
-    Page& page = document_.PageAt(targetPageIndex);
+    Page& page = session_->document.PageAt(targetPageIndex);
     ClearSelection();
     for (Stroke& stroke : strokes) {
         for (Vec2& point : stroke.points) {
@@ -602,7 +602,7 @@ bool App::PasteSelectionFromClipboard() {
         selectedImageIndices_[targetPageIndex].push_back(page.images.size() - 1U);
     }
 
-    document_.SetCurrentPageIndex(targetPageIndex);
+    SetViewPageIndex(targetPageIndex);
     MarkPdfSidebarCompositionDirty();
     NotifyDocumentMutated();
     InvalidatePageSurfaceCache(targetPageIndex);
@@ -645,15 +645,15 @@ bool App::PasteImageFromClipboard() {
         return false;
     }
 
-    const std::size_t targetPageIndex = document_.CurrentPageIndex();
-    if (targetPageIndex >= document_.PageCount()) {
+    const std::size_t targetPageIndex = CurrentPageIndex();
+    if (targetPageIndex >= session_->document.PageCount()) {
         return false;
     }
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const PageView pageView = CalculatePageView(clientRect, targetPageIndex);
-    const Page& page = document_.PageAt(targetPageIndex);
+    const Page& page = session_->document.PageAt(targetPageIndex);
     const float pageScale = std::max(0.1f, pageView.valid ? pageView.scale : 1.0f);
 
     const float pageWidth = std::min(page.width * 0.75f, static_cast<float>(sourceInfo.bmWidth) / pageScale);
@@ -674,11 +674,11 @@ bool App::PasteImageFromClipboard() {
     image.stride = stride;
     image.pixels = std::move(pixels);
 
-    Page& mutablePage = document_.PageAt(targetPageIndex);
+    Page& mutablePage = session_->document.PageAt(targetPageIndex);
     mutablePage.images.push_back(std::move(image));
     ClearSelection();
     selectedImageIndices_[targetPageIndex].push_back(mutablePage.images.size() - 1U);
-    document_.SetCurrentPageIndex(targetPageIndex);
+    SetViewPageIndex(targetPageIndex);
     MarkPdfSidebarCompositionDirty();
     NotifyDocumentMutated();
     InvalidatePageSurfaceCache(targetPageIndex);

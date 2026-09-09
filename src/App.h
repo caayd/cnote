@@ -12,6 +12,7 @@
 
 #include "latex/LatexCompletion.h"
 #include "Document.h"
+#include "ProjectSession.h"
 #include "PdfBackend.h"
 #include "ProjectFile.h"
 
@@ -77,20 +78,6 @@ public:
         Lasso,
     };
 
-    enum class HistoryActionType {
-        AddStroke,
-        RemoveStroke,
-        AddText,
-        RemoveText,
-        UpdateText,
-        AddPages,
-        RemovePages,
-        ReplacePages,
-        AddLatex,
-        RemoveLatex,
-        UpdateLatex,
-    };
-
     enum class ShortcutAction {
         ToolDraw,
         ToolSelect,
@@ -140,22 +127,6 @@ public:
         std::size_t pageIndex = 0;
         float scale = 1.0f;
         bool valid = false;
-    };
-
-    struct HistoryAction {
-        HistoryActionType type = HistoryActionType::AddStroke;
-        Stroke stroke {};
-        PageText text {};
-        PageText replacementText {};
-        PageLatex latex {};
-        PageLatex replacementLatex {};
-        std::vector<Page> pages {};
-        std::vector<Page> replacementPages {};
-        std::vector<std::size_t> pageIndices {};
-        std::size_t index = 0;
-        std::size_t pageIndex = 0;
-        std::size_t focusPageIndex = 0;
-        std::size_t previousPageIndex = 0;
     };
 
     struct PageSurfaceCache {
@@ -305,7 +276,29 @@ private:
     friend class SettingsWindow;
     friend class NewPageSettingsWindow;
 
+    friend struct ProjectSessionTests;
     bool CreateMainWindow(int showCommand);
+    bool OpenNewView();
+    bool CreateAdditionalWindow(bool linked, int showCommand = SW_SHOWNORMAL);
+    void ResetDocumentView(bool resetBrushWidth = false);
+    void AttachSession(std::shared_ptr<ProjectSession> session);
+    void DetachSession();
+    void FinishDocumentInteraction();
+    void FinishOtherViewInteractions();
+    void OnSessionChanged(const ProjectChange& change, bool originatingView);
+    void BroadcastSessionChange(ProjectChange::Kind kind);
+    bool IsSessionInteractionActive() const;
+    App* AutoSaveOwner() const;
+    void SetSessionAutoSaveInterval(unsigned int seconds);
+    static std::shared_ptr<ProjectSession> FindOpenSession(const std::wstring& path);
+    std::size_t CurrentPageIndex() const;
+    Page& CurrentPage();
+    const Page& CurrentPage() const;
+    bool SetViewPageIndex(std::size_t index);
+    std::vector<std::pair<App*, int>> CaptureViewPageAnchors();
+    void RestoreViewPageAnchors(const std::vector<std::pair<App*, int>>& anchors);
+    std::size_t InsertDocumentPage(std::size_t index, Page page);
+    std::size_t RemoveDocumentPage(std::size_t index);
     void CreateBlankDocument();
     void ClearHistory();
     void InvalidateCanvas();
@@ -716,7 +709,12 @@ private:
 
     HINSTANCE instance_ = nullptr;
     HWND window_ = nullptr;
-    Document document_ = Document::CreateBlank();
+    std::shared_ptr<ProjectSession> session_ = std::make_shared<ProjectSession>();
+    std::size_t currentPageIndex_ = 0;
+    App* host_ = this;
+    std::vector<std::unique_ptr<App>> childWindows_;
+    static std::vector<App*> openWindows_;
+    static unsigned int appInstanceCount_;
     PdfiumBackend pdfBackend_ {};
 
     float zoom_ = 1.0f;
@@ -756,8 +754,6 @@ private:
     mutable ActiveStrokeRenderCache activeStrokeRenderCache_ {};
     std::optional<std::size_t> activeStrokePageIndex_ {};
     std::optional<UINT32> activeStrokePointerId_ {};
-    std::vector<HistoryAction> undoActions_ {};
-    std::vector<HistoryAction> redoActions_ {};
     POINT lastPanCursor_ {};
     ULONG_PTR gdiplusToken_ = 0;
     SelectionMode selectionMode_ = SelectionMode::Lasso;
@@ -938,7 +934,6 @@ private:
     bool titleMenuActive_ = false;
     int hoveredWindowButton_ = -1;
     bool trackingMouseLeave_ = false;
-    bool documentDirty_ = false;
     std::vector<std::wstring> recentDocumentPaths_ {};
     HDC paintBackbufferDc_ = nullptr;
     HBITMAP paintBackbufferBitmap_ = nullptr;

@@ -76,11 +76,11 @@ void App::ResetView() {
 }
 
 void App::FocusPage(std::size_t index) {
-    if (index >= document_.PageCount() || window_ == nullptr) {
+    if (index >= session_->document.PageCount() || window_ == nullptr) {
         return;
     }
 
-    document_.SetCurrentPageIndex(index);
+    SetViewPageIndex(index);
     MarkPdfSidebarCompositionDirty();
 
     RECT clientRect {};
@@ -130,7 +130,7 @@ void App::ApplyPanDelta(float dx, float dy) {
 }
 
 void App::ClampViewportPan(RECT clientRect, float* panX, float* panY) const {
-    if (panX == nullptr || panY == nullptr || document_.PageCount() == 0U) {
+    if (panX == nullptr || panY == nullptr || session_->document.PageCount() == 0U) {
         return;
     }
 
@@ -142,8 +142,8 @@ void App::ClampViewportPan(RECT clientRect, float* panX, float* panY) const {
 
     float widestPage = 1.0f;
     float totalPageHeight = 0.0f;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        const Page& page = document_.PageAt(pageIndex);
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+        const Page& page = session_->document.PageAt(pageIndex);
         widestPage = std::max(widestPage, page.width);
         totalPageHeight += page.height;
     }
@@ -152,7 +152,7 @@ void App::ClampViewportPan(RECT clientRect, float* panX, float* panY) const {
     const float scale = std::max(0.1f, fitScale * zoom_);
     const float scaledDocumentWidth = widestPage * scale;
     const float scaledDocumentHeight = (totalPageHeight * scale)
-        + static_cast<float>(std::max<std::size_t>(document_.PageCount() - 1U, 0U) * ScaleForDpi(kPageGap, dpi));
+        + static_cast<float>(std::max<std::size_t>(session_->document.PageCount() - 1U, 0U) * ScaleForDpi(kPageGap, dpi));
     const float canvasCenterX = static_cast<float>(canvasRect.left + (canvasWidth / 2));
 
     const DocumentViewportBounds documentBounds {
@@ -459,7 +459,7 @@ Vec2 App::ScreenToPage(POINT cursor, std::size_t* pageIndex) const {
     const auto hitPage = HitTestPage(cursor);
     if (!hitPage.has_value() || hitPage->scale <= 0.0f) {
         if (pageIndex != nullptr) {
-            *pageIndex = document_.CurrentPageIndex();
+            *pageIndex = CurrentPageIndex();
         }
         return {};
     }
@@ -468,7 +468,7 @@ Vec2 App::ScreenToPage(POINT cursor, std::size_t* pageIndex) const {
         *pageIndex = hitPage->pageIndex;
     }
 
-    const Page& page = document_.PageAt(hitPage->pageIndex);
+    const Page& page = session_->document.PageAt(hitPage->pageIndex);
     const float pageX = (static_cast<float>(cursor.x - hitPage->rect.left)) / hitPage->scale;
     const float pageY = (static_cast<float>(cursor.y - hitPage->rect.top)) / hitPage->scale;
     return {
@@ -478,11 +478,11 @@ Vec2 App::ScreenToPage(POINT cursor, std::size_t* pageIndex) const {
 }
 
 Vec2 App::ScreenToPage(const PageView& pageView, POINT cursor, bool clampToPage) const {
-    if (!pageView.valid || pageView.pageIndex >= document_.PageCount() || pageView.scale <= 0.0f) {
+    if (!pageView.valid || pageView.pageIndex >= session_->document.PageCount() || pageView.scale <= 0.0f) {
         return {};
     }
 
-    const Page& page = document_.PageAt(pageView.pageIndex);
+    const Page& page = session_->document.PageAt(pageView.pageIndex);
     const float pageX = (static_cast<float>(cursor.x - pageView.rect.left)) / pageView.scale;
     const float pageY = (static_cast<float>(cursor.y - pageView.rect.top)) / pageView.scale;
     if (!clampToPage) {
@@ -520,8 +520,8 @@ std::vector<App::PageView> App::CalculatePageViews(RECT clientRect) const {
     const int canvasWidth = std::max(1, static_cast<int>(canvasRect.right - canvasRect.left));
     const int zoomReferenceCanvasWidth = MaximizedCanvasWidthForZoom(window_, canvasWidth, 0, dpi);
     float widestPage = 1.0f;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        widestPage = std::max(widestPage, document_.PageAt(pageIndex).width);
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+        widestPage = std::max(widestPage, session_->document.PageAt(pageIndex).width);
     }
 
     const float fitScale = static_cast<float>(zoomReferenceCanvasWidth - ScaleForDpi(120, dpi)) / widestPage;
@@ -530,9 +530,9 @@ std::vector<App::PageView> App::CalculatePageViews(RECT clientRect) const {
     int top = canvasRect.top + ScaleForDpi(40, dpi) + static_cast<int>(std::lround(panY_));
 
     std::vector<PageView> pageViews;
-    pageViews.reserve(document_.PageCount());
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        const Page& page = document_.PageAt(pageIndex);
+    pageViews.reserve(session_->document.PageCount());
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+        const Page& page = session_->document.PageAt(pageIndex);
         const int pageWidth = static_cast<int>(std::lround(page.width * scale));
         const int pageHeight = static_cast<int>(std::lround(page.height * scale));
         const int left = static_cast<int>(std::lround(canvasCenterX - (pageWidth / 2.0f) + panX_));
@@ -549,14 +549,14 @@ std::vector<App::PageView> App::CalculatePageViews(RECT clientRect) const {
 }
 
 std::optional<std::size_t> App::ViewedPageIndex(RECT clientRect) const {
-    if (document_.PageCount() == 0U) {
+    if (session_->document.PageCount() == 0U) {
         return std::nullopt;
     }
 
     const RECT canvasRect = CanvasRect(clientRect);
     const int viewportCenterY = canvasRect.top + ((canvasRect.bottom - canvasRect.top) / 2);
     bool hasBestPage = false;
-    std::size_t bestPageIndex = document_.CurrentPageIndex();
+    std::size_t bestPageIndex = CurrentPageIndex();
     int bestVisibleHeight = -1;
     int bestCenterDistance = 0;
 

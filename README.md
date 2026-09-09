@@ -12,6 +12,28 @@ Native Windows PDF annotation app in C++.
 - Save editable `.cnote` projects.
 - Export annotated pages as PDF.
 - Customize palette, brush behavior, auto-save, zoom presets, and shortcuts.
+- Open linked views of a project with independent navigation and shared edits.
+
+## Linked Project Views
+
+Choose **New view of this project** from the title menu to open another window
+on the same project, including an unsaved project. Each view keeps its own page,
+zoom, scroll, tool, and selection. Completed edits update all linked views.
+Switching to another linked view commits an unfinished stroke, drag, text edit,
+or equation edit before editing continues there.
+
+Undo/redo belongs to the project: undo in either window reverses the latest
+project edit. Saving updates the path and saved state in every view, and one
+window coordinates autosave. Closing a view leaves the others open; closing the
+last view uses the normal save behavior.
+
+**New window** starts a separate blank project in the same app instance. Opening
+an already-open file from that window joins its existing session. Choosing
+**New** or opening another file detaches only that window from its old project.
+
+Linked views currently work within one app instance. Separate executable or
+Explorer launches do not join existing sessions. Window layouts are not restored
+after restarting, and live interaction previews are not broadcast to other views.
 
 ## Default Controls
 

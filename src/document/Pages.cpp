@@ -3,6 +3,7 @@
 namespace cnote {
 
 void App::CreateBlankDocument() {
+    if (!ConfirmCloseWithUnsavedChanges()) return;
     PrepareForDocumentSwitch();
     newPageSettings_.backgroundColor = settings_.defaultPageColor;
     const std::vector<std::uint32_t> resolvedPaletteProfile = ResolvedPaletteProfile(newPageSettings_.paletteProfile);
@@ -19,7 +20,7 @@ void App::CreateBlankDocument() {
 }
 
 void App::PrepareForDocumentSwitch() {
-    CancelTextEdit();
+    FinishDocumentInteraction();
     KillTimer(window_, kZoomSessionTimerId);
     StopPdfSidebarSlideAnimationTimer();
     CancelQuickSizePopup();
@@ -31,10 +32,16 @@ void App::PrepareForDocumentSwitch() {
 }
 
 void App::ApplyDocument(Document document, bool resetBrushWidth) {
-    document_ = std::move(document);
+    auto session = std::make_shared<ProjectSession>();
+    session->document = std::move(document);
+    session->autoSaveIntervalSeconds = settings_.autoSaveIntervalSeconds;
+    AttachSession(std::move(session));
     NormalizeDocumentPaletteProfiles();
-    documentDirty_ = false;
-    pdfSidebarOpen_ = pdfSidebarOpen_ && document_.PageCount() > 0U;
+    ResetDocumentView(resetBrushWidth);
+}
+
+void App::ResetDocumentView(bool resetBrushWidth) {
+    pdfSidebarOpen_ = pdfSidebarOpen_ && session_->document.PageCount() > 0U;
     pdfSidebarSlideProgress_ = pdfSidebarOpen_ ? 1.0f : 0.0f;
     pdfSidebarSlideAnimationStartProgress_ = pdfSidebarSlideProgress_;
     pdfSidebarSlideAnimationTargetProgress_ = pdfSidebarSlideProgress_;
@@ -48,15 +55,14 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
     editingTextIndex_.reset();
     editingTextBefore_.reset();
     editingTextCreatesText_ = false;
-    pageSurfaceCaches_.assign(document_.PageCount(), {});
-    sidebarThumbnailCaches_.assign(document_.PageCount(), {});
+    pageSurfaceCaches_.assign(session_->document.PageCount(), {});
+    sidebarThumbnailCaches_.assign(session_->document.PageCount(), {});
     contentCompositionDirty_ = true;
     ClearInteractionPreview();
     ClearSelection();
     ClosePaletteOverlays();
     selectionLassoCursorPoints_.clear();
     isSelecting_ = false;
-    ClearHistory();
     if (resetBrushWidth) {
         SyncBrushWidthFromActiveTool();
     }
@@ -68,30 +74,30 @@ void App::ApplyDocument(Document document, bool resetBrushWidth) {
 }
 
 void App::AddBlankPageAfterCurrent() {
-    if (document_.PageCount() == 0U) {
+    if (session_->document.PageCount() == 0U) {
         return;
     }
 
     ClearSelection();
-    const std::size_t previousPageIndex = document_.CurrentPageIndex();
+    const std::size_t previousPageIndex = CurrentPageIndex();
     Page newPage = BuildConfiguredNewPage();
-    const std::size_t insertIndex = document_.InsertPage(document_.CurrentPageIndex() + 1U, newPage);
+    const std::size_t insertIndex = InsertDocumentPage(CurrentPageIndex() + 1U, newPage);
     PushPageHistoryAction(HistoryActionType::AddPages, insertIndex, { std::move(newPage) }, insertIndex, previousPageIndex);
     RestoreAfterPageHistoryChange(insertIndex);
     NotifyDocumentMutated();
 }
 
 void App::CopyCurrentPageToSidebarBuffer() {
-    if (document_.PageCount() == 0U) {
+    if (session_->document.PageCount() == 0U) {
         copiedSidebarPage_.reset();
         return;
     }
 
-    copiedSidebarPage_ = document_.CurrentPage();
+    copiedSidebarPage_ = CurrentPage();
 }
 
 bool App::CutCurrentPageToSidebarBuffer() {
-    if (document_.PageCount() <= 1U) {
+    if (session_->document.PageCount() <= 1U) {
         return false;
     }
 
@@ -100,14 +106,14 @@ bool App::CutCurrentPageToSidebarBuffer() {
 }
 
 bool App::PasteSidebarPageAfterCurrent() {
-    if (!copiedSidebarPage_.has_value() || document_.PageCount() == 0U) {
+    if (!copiedSidebarPage_.has_value() || session_->document.PageCount() == 0U) {
         return false;
     }
 
     ClearSelection();
-    const std::size_t previousPageIndex = document_.CurrentPageIndex();
+    const std::size_t previousPageIndex = CurrentPageIndex();
     const Page insertedPage = *copiedSidebarPage_;
-    const std::size_t insertIndex = document_.InsertPage(document_.CurrentPageIndex() + 1U, insertedPage);
+    const std::size_t insertIndex = InsertDocumentPage(CurrentPageIndex() + 1U, insertedPage);
     PushPageHistoryAction(HistoryActionType::AddPages, insertIndex, { insertedPage }, insertIndex, previousPageIndex);
     RestoreAfterPageHistoryChange(insertIndex);
     NotifyDocumentMutated();
@@ -115,14 +121,14 @@ bool App::PasteSidebarPageAfterCurrent() {
 }
 
 bool App::DeleteCurrentPage() {
-    if (document_.PageCount() <= 1U) {
+    if (session_->document.PageCount() <= 1U) {
         return false;
     }
 
     ClearSelection();
-    const std::size_t currentIndex = document_.CurrentPageIndex();
-    Page removedPage = document_.PageAt(currentIndex);
-    const std::size_t focusIndex = document_.RemovePage(currentIndex);
+    const std::size_t currentIndex = CurrentPageIndex();
+    Page removedPage = session_->document.PageAt(currentIndex);
+    const std::size_t focusIndex = RemoveDocumentPage(currentIndex);
     PushPageHistoryAction(HistoryActionType::RemovePages, currentIndex, { std::move(removedPage) }, focusIndex, currentIndex);
     RestoreAfterPageHistoryChange(focusIndex);
     NotifyDocumentMutated();

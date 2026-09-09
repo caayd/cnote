@@ -1147,7 +1147,7 @@ void NewPageSettingsWindow::ApplyDraftToFuturePages() {
     app_.newPageSettings_.backgroundColor = draftBackgroundColor_;
     app_.newPageSettings_.paletteProfile = app_.ResolvedPaletteProfile(draftPaletteProfile_);
     app_.newPageSettings_.applyPaletteProfileToExistingStrokes = draftApplyPaletteProfileToExistingStrokes_;
-    app_.document_.SetNewPageDefaults({
+    app_.session_->document.SetNewPageDefaults({
         app_.newPageSettings_.width,
         app_.newPageSettings_.height,
         app_.newPageSettings_.backgroundColor,
@@ -1447,6 +1447,9 @@ LRESULT CALLBACK NewPageSettingsWindow::WindowProc(HWND window, UINT message, WP
 
 LRESULT NewPageSettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+    case WM_ACTIVATE:
+        if (LOWORD(wParam) != WA_INACTIVE) app_.FinishOtherViewInteractions();
+        break;
     case WM_GETMINMAXINFO:
     {
         auto* minMax = reinterpret_cast<MINMAXINFO*>(lParam);

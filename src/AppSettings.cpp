@@ -349,7 +349,7 @@ void App::ToggleNewPageSettings() {
 }
 
 void App::TogglePdfSidebar() {
-    if (document_.PageCount() == 0U) {
+    if (session_->document.PageCount() == 0U) {
         pdfSidebarOpen_ = false;
         pdfSidebarSlideProgress_ = 0.0f;
         pdfSidebarSlideAnimationStartProgress_ = 0.0f;
@@ -411,15 +411,15 @@ std::vector<std::uint32_t> App::ResolvedPaletteProfile(const std::vector<std::ui
 }
 
 void App::NormalizeDocumentPaletteProfiles() {
-    document_.SetNewPageDefaults({
-        document_.NewPageDefaults().width,
-        document_.NewPageDefaults().height,
-        document_.NewPageDefaults().backgroundColor,
-        ResolvedPaletteProfile(document_.NewPageDefaults().paletteProfile),
+    session_->document.SetNewPageDefaults({
+        session_->document.NewPageDefaults().width,
+        session_->document.NewPageDefaults().height,
+        session_->document.NewPageDefaults().backgroundColor,
+        ResolvedPaletteProfile(session_->document.NewPageDefaults().paletteProfile),
     });
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        Page& page = document_.PageAt(pageIndex);
-        page.paletteProfile = ResolvedPaletteProfile(page.paletteProfile.empty() ? document_.NewPageDefaults().paletteProfile : page.paletteProfile);
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+        Page& page = session_->document.PageAt(pageIndex);
+        page.paletteProfile = ResolvedPaletteProfile(page.paletteProfile.empty() ? session_->document.NewPageDefaults().paletteProfile : page.paletteProfile);
     }
 }
 
@@ -438,14 +438,14 @@ void App::ApplyConfiguredSettingsToCurrentPage(
     std::uint32_t backgroundColor,
     const std::vector<std::uint32_t>& paletteProfile,
     bool applyPaletteProfileToExistingStrokes) {
-    if (document_.PageCount() == 0U) {
+    if (session_->document.PageCount() == 0U) {
         return;
     }
 
     const std::vector<std::uint32_t> resolvedPaletteProfile = ResolvedPaletteProfile(paletteProfile);
-    const std::size_t pageIndex = document_.CurrentPageIndex();
-    const Page beforePage = document_.CurrentPage();
-    Page& page = document_.CurrentPage();
+    const std::size_t pageIndex = CurrentPageIndex();
+    const Page beforePage = CurrentPage();
+    Page& page = CurrentPage();
     if (!ApplyConfiguredSettingsToPage(page, width, height, backgroundColor, resolvedPaletteProfile, applyPaletteProfileToExistingStrokes)) {
         return;
     }
@@ -463,20 +463,20 @@ void App::ApplyConfiguredSettingsToAllPages(
     std::uint32_t backgroundColor,
     const std::vector<std::uint32_t>& paletteProfile,
     bool applyPaletteProfileToExistingStrokes) {
-    if (document_.PageCount() == 0U) {
+    if (session_->document.PageCount() == 0U) {
         return;
     }
 
     const std::vector<std::uint32_t> resolvedPaletteProfile = ResolvedPaletteProfile(paletteProfile);
     std::vector<std::size_t> affectedPageIndices;
     std::vector<Page> beforePages;
-    affectedPageIndices.reserve(document_.PageCount());
-    beforePages.reserve(document_.PageCount());
+    affectedPageIndices.reserve(session_->document.PageCount());
+    beforePages.reserve(session_->document.PageCount());
     bool changed = false;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        beforePages.push_back(document_.PageAt(pageIndex));
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+        beforePages.push_back(session_->document.PageAt(pageIndex));
         affectedPageIndices.push_back(pageIndex);
-        Page& page = document_.PageAt(pageIndex);
+        Page& page = session_->document.PageAt(pageIndex);
         changed = ApplyConfiguredSettingsToPage(
             page,
             width,
@@ -491,9 +491,9 @@ void App::ApplyConfiguredSettingsToAllPages(
         return;
     }
 
-    PushReplacePagesHistoryAction(std::move(affectedPageIndices), std::move(beforePages), document_.CurrentPageIndex());
-    pageSurfaceCaches_.assign(document_.PageCount(), {});
-    sidebarThumbnailCaches_.assign(document_.PageCount(), {});
+    PushReplacePagesHistoryAction(std::move(affectedPageIndices), std::move(beforePages), CurrentPageIndex());
+    pageSurfaceCaches_.assign(session_->document.PageCount(), {});
+    sidebarThumbnailCaches_.assign(session_->document.PageCount(), {});
     NotifyDocumentMutated();
     InvalidateRect(window_, nullptr, FALSE);
 }
@@ -547,8 +547,8 @@ bool App::AppendPagesFromDocumentPath(const std::wstring& filePath) {
 
     ClearSelection();
 
-    const std::size_t insertIndex = document_.PageCount();
-    const std::size_t previousPageIndex = document_.CurrentPageIndex();
+    const std::size_t insertIndex = session_->document.PageCount();
+    const std::size_t previousPageIndex = CurrentPageIndex();
     std::vector<Page> importedPages;
     importedPages.reserve(opened->PageCount());
     std::vector<std::int32_t> sourceIndexRemap(opened->PdfSourceCount(), -1);
@@ -561,7 +561,7 @@ bool App::AppendPagesFromDocumentPath(const std::wstring& filePath) {
             if (sourceIndex < sourceIndexRemap.size()) {
                 if (sourceIndexRemap[sourceIndex] < 0) {
                     const Document::PdfSource& source = opened->PdfSourceAt(sourceIndex);
-                    sourceIndexRemap[sourceIndex] = document_.AppendPdfSource(source.sourcePath, source.pdfData);
+                    sourceIndexRemap[sourceIndex] = session_->document.AppendPdfSource(source.sourcePath, source.pdfData);
                 }
                 if (sourceIndexRemap[sourceIndex] >= 0) {
                     importedPage.sourcePdfSourceIndex = sourceIndexRemap[sourceIndex];
@@ -573,7 +573,7 @@ bool App::AppendPagesFromDocumentPath(const std::wstring& filePath) {
             }
         }
         importedPages.push_back(importedPage);
-        document_.InsertPage(document_.PageCount(), std::move(importedPage));
+        InsertDocumentPage(session_->document.PageCount(), std::move(importedPage));
     }
 
     PushPageHistoryAction(HistoryActionType::AddPages, insertIndex, std::move(importedPages), insertIndex, previousPageIndex);

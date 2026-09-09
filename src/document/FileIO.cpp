@@ -49,9 +49,9 @@ std::wstring NormalizeFilePathForHistory(const std::wstring& filePath) {
 }  // namespace
 
 std::wstring App::SuggestedCnotePath() const {
-    std::wstring basePath = document_.FilePath();
+    std::wstring basePath = session_->document.FilePath();
     if (basePath.empty()) {
-        basePath = document_.SourcePath();
+        basePath = session_->document.SourcePath();
     }
 
     std::filesystem::path suggestion;
@@ -66,9 +66,9 @@ std::wstring App::SuggestedCnotePath() const {
 }
 
 std::wstring App::SuggestedPdfExportPath() const {
-    std::wstring basePath = document_.FilePath();
+    std::wstring basePath = session_->document.FilePath();
     if (basePath.empty()) {
-        basePath = document_.SourcePath();
+        basePath = session_->document.SourcePath();
     }
 
     std::filesystem::path suggestion;
@@ -105,6 +105,21 @@ void App::OpenDocument() {
 }
 
 bool App::OpenDocumentPath(const std::wstring& filePath) {
+    if (auto existing = FindOpenSession(filePath)) {
+        if (existing == session_) return true;
+        if (!ConfirmCloseWithUnsavedChanges()) return false;
+        PrepareForDocumentSwitch();
+        AttachSession(std::move(existing));
+        FinishOtherViewInteractions();
+        ResetDocumentView();
+        newPageSettings_.width = session_->document.NewPageDefaults().width;
+        newPageSettings_.height = session_->document.NewPageDefaults().height;
+        newPageSettings_.backgroundColor = session_->document.NewPageDefaults().backgroundColor;
+        newPageSettings_.paletteProfile = session_->document.NewPageDefaults().paletteProfile;
+        RefreshNewPageSettingsWindow();
+        RecordRecentDocumentPath(filePath);
+        return true;
+    }
     if (HasExtension(filePath, kCnoteFileExtension)) {
         return OpenProject(filePath);
     }
@@ -124,12 +139,13 @@ bool App::OpenProject(const std::wstring& filePath) {
         return false;
     }
 
+    if (!ConfirmCloseWithUnsavedChanges()) return false;
     PrepareForDocumentSwitch();
     ApplyDocument(*opened);
-    newPageSettings_.width = document_.NewPageDefaults().width;
-    newPageSettings_.height = document_.NewPageDefaults().height;
-    newPageSettings_.backgroundColor = document_.NewPageDefaults().backgroundColor;
-    newPageSettings_.paletteProfile = ResolvedPaletteProfile(document_.NewPageDefaults().paletteProfile);
+    newPageSettings_.width = session_->document.NewPageDefaults().width;
+    newPageSettings_.height = session_->document.NewPageDefaults().height;
+    newPageSettings_.backgroundColor = session_->document.NewPageDefaults().backgroundColor;
+    newPageSettings_.paletteProfile = ResolvedPaletteProfile(session_->document.NewPageDefaults().paletteProfile);
     newPageSettings_.applyPaletteProfileToExistingStrokes = false;
     RefreshNewPageSettingsWindow();
     RecordRecentDocumentPath(filePath);
@@ -143,9 +159,10 @@ bool App::OpenPdf(const std::wstring& filePath) {
         return false;
     }
 
+    if (!ConfirmCloseWithUnsavedChanges()) return false;
     PrepareForDocumentSwitch();
     ApplyDocument(*opened);
-    document_.SetNewPageDefaults({
+    session_->document.SetNewPageDefaults({
         newPageSettings_.width,
         newPageSettings_.height,
         newPageSettings_.backgroundColor,
@@ -156,23 +173,29 @@ bool App::OpenPdf(const std::wstring& filePath) {
 }
 
 bool App::SaveCurrentCnote() {
-    CommitTextEdit();
-    CommitLatexEdit();
+    FinishOtherViewInteractions();
+    FinishDocumentInteraction();
     if (HasSavedCnotePath()) {
-        return SaveCnoteToPath(document_.FilePath(), true);
+        return SaveCnoteToPath(session_->document.FilePath(), true);
     }
     return SaveAsCnote();
 }
 
 bool App::SaveCnoteToPath(const std::wstring& filePath, bool showError) {
-    if (!ProjectFile::Save(document_, filePath)) {
+    if (auto existing = FindOpenSession(filePath); existing && existing != session_) {
+        if (showError) MessageBoxW(window_, L"This path is already open in another project. Choose a different filename.", L"Save Cnote", MB_OK | MB_ICONERROR);
+        return false;
+    }
+    // The serialized page is a reopening hint, not shared navigation state.
+    session_->document.SetCurrentPageIndex(CurrentPageIndex());
+    if (!ProjectFile::Save(session_->document, filePath)) {
         if (showError) {
             MessageBoxW(window_, L"Failed to save the cnote file.", L"Save Cnote", MB_OK | MB_ICONERROR);
         }
         return false;
     }
 
-    document_.SetFilePath(filePath);
+    session_->document.SetFilePath(filePath);
     MarkDocumentSaved();
     RecordRecentDocumentPath(filePath);
     InvalidateRect(window_, nullptr, FALSE);
@@ -276,7 +299,7 @@ bool App::ExportAsPdf() {
     }
 
     if (!pdfBackend_.ExportPdf(
-            document_,
+            session_->document,
             fileBuffer,
             kPdfExportFallbackRenderScale,
             settings_.strokeSmoothing,

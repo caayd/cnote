@@ -30,6 +30,8 @@ class PdfiumBackend final : public IPdfBackend {
 public:
     PdfiumBackend();
     ~PdfiumBackend() override;
+    PdfiumBackend(const PdfiumBackend&) = delete;
+    PdfiumBackend& operator=(const PdfiumBackend&) = delete;
 
     [[nodiscard]] std::optional<Document> Open(const std::wstring& filePath) override;
     [[nodiscard]] std::optional<Document> OpenFromMemory(

@@ -108,8 +108,8 @@ bool App::IsEditingLatex(std::size_t pageIndex, std::size_t latexIndex) const {
 
 std::uint64_t App::AllocateLatexId() const {
     std::uint64_t nextId = 1;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        for (const PageLatex& latex : document_.PageAt(pageIndex).latexes) {
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+        for (const PageLatex& latex : session_->document.PageAt(pageIndex).latexes) {
             nextId = std::max(nextId, latex.id + 1U);
         }
     }
@@ -117,10 +117,10 @@ std::uint64_t App::AllocateLatexId() const {
 }
 
 COLORREF App::EditingLatexBackgroundColor() const {
-    if (!editingLatexPageIndex_.has_value() || *editingLatexPageIndex_ >= document_.PageCount()) {
+    if (!editingLatexPageIndex_.has_value() || *editingLatexPageIndex_ >= session_->document.PageCount()) {
         return RGB(255, 255, 255);
     }
-    const Page& page = document_.PageAt(*editingLatexPageIndex_);
+    const Page& page = session_->document.PageAt(*editingLatexPageIndex_);
     if (page.sourcePdfSourceIndex != -1 || page.sourcePdfPageIndex != -1) {
         return RGB(255, 255, 255);
     }
@@ -500,7 +500,7 @@ void App::RefreshLatexEditControl() {
     if (!editingLatexPageIndex_.has_value() || !editingLatexIndex_.has_value() || window_ == nullptr) {
         return;
     }
-    if (*editingLatexPageIndex_ >= document_.PageCount()) {
+    if (*editingLatexPageIndex_ >= session_->document.PageCount()) {
         if (textEditWindow_ != nullptr) {
             ShowWindow(textEditWindow_, SW_HIDE);
         }
@@ -510,7 +510,7 @@ void App::RefreshLatexEditControl() {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const PageView pageView = CalculatePageView(clientRect, *editingLatexPageIndex_);
-    const Page& page = document_.PageAt(*editingLatexPageIndex_);
+    const Page& page = session_->document.PageAt(*editingLatexPageIndex_);
     if (!pageView.valid || *editingLatexIndex_ >= page.latexes.size()) {
         if (textEditWindow_ != nullptr) {
             ShowWindow(textEditWindow_, SW_HIDE);
@@ -634,10 +634,10 @@ void App::SyncLatexEditModel() {
     if (textEditWindow_ == nullptr
         || !editingLatexPageIndex_.has_value()
         || !editingLatexIndex_.has_value()
-        || *editingLatexPageIndex_ >= document_.PageCount()) {
+        || *editingLatexPageIndex_ >= session_->document.PageCount()) {
         return;
     }
-    Page& page = document_.PageAt(*editingLatexPageIndex_);
+    Page& page = session_->document.PageAt(*editingLatexPageIndex_);
     if (*editingLatexIndex_ >= page.latexes.size()) {
         return;
     }
@@ -658,7 +658,7 @@ void App::SyncLatexEditModel() {
 void App::BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex, std::optional<PageLatex> beforeLatex, bool createsLatex) {
     CommitTextEdit();
     CommitLatexEdit();
-    if (pageIndex >= document_.PageCount() || latexIndex >= document_.PageAt(pageIndex).latexes.size()) {
+    if (pageIndex >= session_->document.PageCount() || latexIndex >= session_->document.PageAt(pageIndex).latexes.size()) {
         return;
     }
 
@@ -669,12 +669,12 @@ void App::BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex, std::opt
     editingLatexBefore_ = std::move(beforeLatex);
     editingLatexCreatesLatex_ = createsLatex;
 
-    const PageLatex& block = document_.PageAt(pageIndex).latexes[latexIndex];
+    const PageLatex& block = session_->document.PageAt(pageIndex).latexes[latexIndex];
     if (!EnsureLatexEditWindow()) {
         editingLatexPageIndex_.reset();
         editingLatexIndex_.reset();
-        if (createsLatex && latexIndex < document_.PageAt(pageIndex).latexes.size()) {
-            document_.PageAt(pageIndex).latexes.erase(document_.PageAt(pageIndex).latexes.begin() + static_cast<std::ptrdiff_t>(latexIndex));
+        if (createsLatex && latexIndex < session_->document.PageAt(pageIndex).latexes.size()) {
+            session_->document.PageAt(pageIndex).latexes.erase(session_->document.PageAt(pageIndex).latexes.begin() + static_cast<std::ptrdiff_t>(latexIndex));
         }
         editingLatexBefore_.reset();
         editingLatexCreatesLatex_ = false;
@@ -703,7 +703,7 @@ void App::CommitLatexEdit() {
     const bool createdLatex = editingLatexCreatesLatex_;
     std::optional<PageLatex> committedLatex;
 
-    if (pageIndex < document_.PageCount() && latexIndex < document_.PageAt(pageIndex).latexes.size()) {
+    if (pageIndex < session_->document.PageCount() && latexIndex < session_->document.PageAt(pageIndex).latexes.size()) {
         const int textLength = GetWindowTextLengthW(textEditWindow_);
         std::wstring content;
         if (textLength > 0) {
@@ -711,7 +711,7 @@ void App::CommitLatexEdit() {
             GetWindowTextW(textEditWindow_, buffer.data(), textLength + 1);
             content.assign(buffer.data(), static_cast<std::size_t>(textLength));
         }
-        Page& page = document_.PageAt(pageIndex);
+        Page& page = session_->document.PageAt(pageIndex);
         page.latexes[latexIndex].content = std::move(content);
         if (page.latexes[latexIndex].content.empty()) {
             page.latexes.erase(page.latexes.begin() + static_cast<std::ptrdiff_t>(latexIndex));
@@ -723,7 +723,7 @@ void App::CommitLatexEdit() {
     const RECT editFrameRect = (window_ != nullptr && HasRect(textEditBounds_))
         ? LiveTextEditFrameRect(textEditBounds_, WindowDpi(window_))
         : RECT {};
-    if (pageIndex < document_.PageCount()) {
+    if (pageIndex < session_->document.PageCount()) {
         InvalidatePageSurfaceCache(pageIndex);
     }
     EndTextEditControl();
@@ -735,10 +735,10 @@ void App::CommitLatexEdit() {
         RedrawWindow(window_, &editFrameRect, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
     }
     ClearSelection();
-    if (pageIndex < document_.PageCount() && latexIndex < document_.PageAt(pageIndex).latexes.size()) {
+    if (pageIndex < session_->document.PageCount() && latexIndex < session_->document.PageAt(pageIndex).latexes.size()) {
         selectedLatexIndices_[pageIndex].push_back(latexIndex);
     }
-    if (pageIndex < document_.PageCount()) {
+    if (pageIndex < session_->document.PageCount()) {
         bool changed = false;
         if (createdLatex) {
             if (committedLatex.has_value()) {
@@ -770,8 +770,8 @@ void App::CancelLatexEdit() {
 
     const std::size_t pageIndex = *editingLatexPageIndex_;
     const std::size_t latexIndex = editingLatexIndex_.value_or(0);
-    if (pageIndex < document_.PageCount()) {
-        auto& latexes = document_.PageAt(pageIndex).latexes;
+    if (pageIndex < session_->document.PageCount()) {
+        auto& latexes = session_->document.PageAt(pageIndex).latexes;
         if (editingLatexCreatesLatex_) {
             if (latexIndex < latexes.size()) {
                 latexes.erase(latexes.begin() + static_cast<std::ptrdiff_t>(latexIndex));
@@ -794,7 +794,7 @@ void App::CancelLatexEdit() {
         RedrawWindow(window_, &editFrameRect, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
     }
     ClearSelection();
-    if (pageIndex < document_.PageCount() && latexIndex < document_.PageAt(pageIndex).latexes.size()) {
+    if (pageIndex < session_->document.PageCount() && latexIndex < session_->document.PageAt(pageIndex).latexes.size()) {
         selectedLatexIndices_[pageIndex].push_back(latexIndex);
     }
     UpdateCaptureState();
@@ -804,9 +804,9 @@ void App::CancelLatexEdit() {
 void App::BeginLatexToolInteraction(POINT cursor) {
     const auto hitLatex = HitTestLatex(cursor);
     if (hitLatex.has_value()) {
-        document_.SetCurrentPageIndex(hitLatex->first);
+        SetViewPageIndex(hitLatex->first);
         MarkPdfSidebarCompositionDirty();
-        BeginLatexEdit(hitLatex->first, hitLatex->second, document_.PageAt(hitLatex->first).latexes[hitLatex->second]);
+        BeginLatexEdit(hitLatex->first, hitLatex->second, session_->document.PageAt(hitLatex->first).latexes[hitLatex->second]);
         return;
     }
 
@@ -817,7 +817,7 @@ void App::BeginLatexToolInteraction(POINT cursor) {
         return;
     }
 
-    Page& page = document_.PageAt(hitPage->pageIndex);
+    Page& page = session_->document.PageAt(hitPage->pageIndex);
     PageLatex block {};
     const PageLatex defaultBlock {};
     constexpr float newLatexSizeScale = 0.5f;
@@ -837,7 +837,7 @@ void App::BeginLatexToolInteraction(POINT cursor) {
     }
     block.color = palette_[colorIndex_];
     page.latexes.push_back(block);
-    document_.SetCurrentPageIndex(hitPage->pageIndex);
+    SetViewPageIndex(hitPage->pageIndex);
     MarkPdfSidebarCompositionDirty();
     BeginLatexEdit(hitPage->pageIndex, page.latexes.size() - 1U, std::nullopt, true);
 }

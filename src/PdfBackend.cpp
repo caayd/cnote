@@ -730,13 +730,15 @@ struct PdfFileWriter {
 
 }  // namespace
 
+namespace { unsigned int pdfiumUsers = 0; }
+
 PdfiumBackend::PdfiumBackend() {
-    FPDF_InitLibrary();
+    if (pdfiumUsers++ == 0) FPDF_InitLibrary();
     initialized_ = true;
 }
 
 PdfiumBackend::~PdfiumBackend() {
-    if (initialized_) {
+    if (initialized_ && --pdfiumUsers == 0) {
         FPDF_DestroyLibrary();
     }
 }

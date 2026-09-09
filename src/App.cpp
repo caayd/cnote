@@ -179,6 +179,7 @@ constexpr unsigned int kCommandFileSaveCnote = 1003;
 constexpr unsigned int kCommandFileExportPdf = 1004;
 constexpr unsigned int kCommandFileExit = 1005;
 constexpr unsigned int kCommandFileNewWindow = 1006;
+constexpr unsigned int kCommandFileNewView = 1007;
 constexpr unsigned int kCommandEditBrushSettings = 1103;
 constexpr unsigned int kCommandSelectLasso = 1111;
 constexpr unsigned int kCommandToolToggleQuickWheel = 1301;
@@ -2242,6 +2243,8 @@ float App::SnapBrushSize(float size) {
 }
 
 App::App(HINSTANCE instance) : instance_(instance) {
+    ++appInstanceCount_;
+    session_->views.push_back(this);
     Gdiplus::GdiplusStartupInput startupInput;
     ULONG_PTR token = 0;
     if (Gdiplus::GdiplusStartup(&token, &startupInput, nullptr) == Gdiplus::Ok) {
@@ -2265,17 +2268,19 @@ App::App(HINSTANCE instance) : instance_(instance) {
     }
 
     LoadAppSettings();
+    session_->autoSaveIntervalSeconds = settings_.autoSaveIntervalSeconds;
     ClearSelection();
 }
 
 App::~App() {
+    childWindows_.clear();
+    DetachSession();
     delete settings_.window;
     settings_.window = nullptr;
     delete newPageSettings_.window;
     newPageSettings_.window = nullptr;
     EndTextEditControl();
-    latex::Shutdown();
-    SaveAppSettings();
+    if (--appInstanceCount_ == 0) latex::Shutdown();
     ClearZoomSessionSnapshots();
     ReleasePaintBackbuffer();
     ReleaseCompositionResources();
@@ -2794,18 +2799,18 @@ void App::SetActiveTool(Tool tool) {
 
 void App::PreviousPage() {
     if (CanGoToPreviousPage()) {
-        FocusPage(document_.CurrentPageIndex() - 1U);
+        FocusPage(CurrentPageIndex() - 1U);
     }
 }
 
 void App::NextPage() {
     if (CanGoToNextPage()) {
-        FocusPage(document_.CurrentPageIndex() + 1U);
+        FocusPage(CurrentPageIndex() + 1U);
     }
 }
 
 void App::SetCurrentPageIndex(std::size_t index) {
-    if (document_.SetCurrentPageIndex(index)) {
+    if (SetViewPageIndex(index)) {
         targetZoom_ = zoom_;
         MarkPdfSidebarCompositionDirty();
         EnsureSidebarCurrentPageVisible();
@@ -2816,15 +2821,15 @@ void App::SetCurrentPageIndex(std::size_t index) {
 
 std::wstring App::CurrentWindowTitle() const {
     std::wstring title;
-    if (!document_.FilePath().empty()) {
-        title = BaseName(document_.FilePath());
-    } else if (!document_.SourcePath().empty()) {
-        title = BaseName(document_.SourcePath());
+    if (!session_->document.FilePath().empty()) {
+        title = BaseName(session_->document.FilePath());
+    } else if (!session_->document.SourcePath().empty()) {
+        title = BaseName(session_->document.SourcePath());
     } else {
         title = L"Untitled";
     }
 
-    if (documentDirty_) {
+    if (session_->dirty) {
         title += L"*";
     }
 
@@ -2843,12 +2848,12 @@ std::wstring App::PageIndicatorLabel() const {
         return pageJumpText_.empty() ? L"" : pageJumpText_;
     }
     wchar_t buffer[64] = {};
-    std::swprintf(buffer, std::size(buffer), L"%zu / %zu", document_.CurrentPageIndex() + 1U, document_.PageCount());
+    std::swprintf(buffer, std::size(buffer), L"%zu / %zu", CurrentPageIndex() + 1U, session_->document.PageCount());
     return buffer;
 }
 
 bool App::IsPdfSidebarVisible() const {
-    return document_.PageCount() > 0U && (pdfSidebarOpen_ || pdfSidebarSlideProgress_ > 0.001f);
+    return session_->document.PageCount() > 0U && (pdfSidebarOpen_ || pdfSidebarSlideProgress_ > 0.001f);
 }
 
 void App::MarkPdfSidebarCompositionDirty() {
@@ -4224,8 +4229,8 @@ std::optional<std::size_t> App::HitTestSidebarPage(POINT cursor) const {
     const int itemWidth = std::max(1, static_cast<int>(headerLayout.headerRect.right - headerLayout.headerRect.left) - (metrics.itemInset * 2));
     const int left = ((sidebarRect.left + sidebarRect.right) - itemWidth) / 2;
     int top = headerLayout.contentRect.top + metrics.contentPadding - pdfSidebarScrollY_;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        const Page& page = document_.PageAt(pageIndex);
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+        const Page& page = session_->document.PageAt(pageIndex);
         const float aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
         const int thumbHeight = std::max(metrics.minThumbHeight, static_cast<int>(std::lround(static_cast<float>(itemWidth) * aspect)));
         RECT itemRect = MakeRect(left, top, left + itemWidth, top + thumbHeight + metrics.labelHeight);
@@ -4239,7 +4244,7 @@ std::optional<std::size_t> App::HitTestSidebarPage(POINT cursor) const {
 }
 
 void App::EnsureSidebarCurrentPageVisible() {
-    if (!IsPdfSidebarVisible() || window_ == nullptr || document_.PageCount() == 0U) {
+    if (!IsPdfSidebarVisible() || window_ == nullptr || session_->document.PageCount() == 0U) {
         return;
     }
 
@@ -4253,12 +4258,12 @@ void App::EnsureSidebarCurrentPageVisible() {
     const int itemWidth = std::max(1, static_cast<int>(headerLayout.headerRect.right - headerLayout.headerRect.left) - (metrics.itemInset * 2));
     const int left = ((sidebarRect.left + sidebarRect.right) - itemWidth) / 2;
     int top = headerLayout.contentRect.top + metrics.contentPadding;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        const Page& page = document_.PageAt(pageIndex);
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+        const Page& page = session_->document.PageAt(pageIndex);
         const float aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
         const int thumbHeight = std::max(metrics.minThumbHeight, static_cast<int>(std::lround(static_cast<float>(itemWidth) * aspect)));
         RECT itemRect = MakeRect(left, top, left + itemWidth, top + thumbHeight + metrics.labelHeight);
-        if (pageIndex == document_.CurrentPageIndex()) {
+        if (pageIndex == CurrentPageIndex()) {
             const int visibleTop = headerLayout.contentRect.top + metrics.contentPadding + pdfSidebarScrollY_;
             const int visibleBottom = headerLayout.contentRect.bottom - metrics.contentPadding + pdfSidebarScrollY_;
             if (itemRect.top < visibleTop) {
@@ -4283,11 +4288,11 @@ void App::SyncCurrentPageToViewport() {
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const auto viewedPageIndex = ViewedPageIndex(clientRect);
-    if (!viewedPageIndex.has_value() || *viewedPageIndex == document_.CurrentPageIndex()) {
+    if (!viewedPageIndex.has_value() || *viewedPageIndex == CurrentPageIndex()) {
         return;
     }
 
-    document_.SetCurrentPageIndex(*viewedPageIndex);
+    SetViewPageIndex(*viewedPageIndex);
     MarkPdfSidebarCompositionDirty();
     EnsureSidebarCurrentPageVisible();
     InvalidateRect(window_, nullptr, FALSE);
@@ -4313,15 +4318,15 @@ void App::InvalidateSidebarThumbnailCache(std::size_t pageIndex) {
 }
 
 void App::EnsureSidebarThumbnailCache(std::size_t pageIndex, int width, int height) {
-    if (pageIndex >= document_.PageCount() || width <= 0 || height <= 0) {
+    if (pageIndex >= session_->document.PageCount() || width <= 0 || height <= 0) {
         return;
     }
 
     if (pageIndex >= sidebarThumbnailCaches_.size()) {
-        sidebarThumbnailCaches_.resize(document_.PageCount());
+        sidebarThumbnailCaches_.resize(session_->document.PageCount());
     }
 
-    const Page& page = document_.PageAt(pageIndex);
+    const Page& page = session_->document.PageAt(pageIndex);
     SidebarThumbnailCache& cache = sidebarThumbnailCaches_[pageIndex];
     if (cache.valid
         && cache.width == width
@@ -4466,7 +4471,7 @@ void App::BeginStroke(POINT cursor) {
         InvalidateCanvas();
     }
 
-    document_.SetCurrentPageIndex(hitPage->pageIndex);
+    SetViewPageIndex(hitPage->pageIndex);
     MarkPdfSidebarCompositionDirty();
     StartStrokeSegment(hitPage->pageIndex, ScreenToPage(*hitPage, cursor, true));
 }
@@ -4497,7 +4502,7 @@ bool App::ApplyStrokePoint(POINT cursor) {
 
     if (const auto hitPage = HitTestPage(cursor); hitPage.has_value() && hitPage->pageIndex != *activeStrokePageIndex_) {
         EndStroke();
-        document_.SetCurrentPageIndex(hitPage->pageIndex);
+        SetViewPageIndex(hitPage->pageIndex);
         MarkPdfSidebarCompositionDirty();
         StartStrokeSegment(hitPage->pageIndex, ScreenToPage(*hitPage, cursor, true));
         return true;
@@ -4773,7 +4778,7 @@ bool App::ExtendStrokeFromPointerHistory(WPARAM wParam) {
 }
 
 void App::StartStrokeSegment(std::size_t pageIndex, Vec2 pagePoint) {
-    if (pageIndex >= document_.PageCount()) {
+    if (pageIndex >= session_->document.PageCount()) {
         return;
     }
 
@@ -4814,7 +4819,7 @@ void App::EndStroke() {
         }
 
         Stroke finishedStroke = std::move(*activeStroke_);
-        auto& strokes = document_.PageAt(*activeStrokePageIndex_).strokes;
+        auto& strokes = session_->document.PageAt(*activeStrokePageIndex_).strokes;
         const std::size_t insertIndex = strokes.size();
         strokes.push_back(finishedStroke);
         HistoryAction action {};
@@ -4822,9 +4827,9 @@ void App::EndStroke() {
         action.stroke = std::move(finishedStroke);
         action.index = insertIndex;
         action.pageIndex = *activeStrokePageIndex_;
-        undoActions_.push_back(std::move(action));
-        redoActions_.clear();
-        committedStroke = undoActions_.back().stroke;
+        session_->undoActions.push_back(std::move(action));
+        session_->redoActions.clear();
+        committedStroke = session_->undoActions.back().stroke;
         committedPageIndex = *activeStrokePageIndex_;
         if (!TryAppendStrokeToPageSurfaceCache(*committedPageIndex, *committedStroke)) {
             InvalidatePageSurfaceCache(*committedPageIndex);
@@ -4870,7 +4875,7 @@ void App::EndStroke() {
 }
 
 void App::BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, ImageTransformHandle handle, POINT cursor) {
-    if (pageIndex >= document_.PageCount() || imageIndex >= document_.PageAt(pageIndex).images.size()) {
+    if (pageIndex >= session_->document.PageCount() || imageIndex >= session_->document.PageAt(pageIndex).images.size()) {
         return;
     }
 
@@ -4878,7 +4883,7 @@ void App::BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, Ima
     transformingImagePageIndex_ = pageIndex;
     transformingImageIndex_ = imageIndex;
     imageTransformHandle_ = handle;
-    imageTransformInitial_ = document_.PageAt(pageIndex).images[imageIndex];
+    imageTransformInitial_ = session_->document.PageAt(pageIndex).images[imageIndex];
     imageTransformStartPagePoint_ = ScreenToPage(cursor, nullptr);
     const Vec2 center = ImageCenter(imageTransformInitial_);
     imageTransformStartAngleDegrees_ = std::atan2(
@@ -4896,7 +4901,7 @@ void App::BeginImageTransform(std::size_t pageIndex, std::size_t imageIndex, Ima
 }
 
 void App::BeginTextTransform(std::size_t pageIndex, std::size_t textIndex, ImageTransformHandle handle, POINT cursor) {
-    if (pageIndex >= document_.PageCount() || textIndex >= document_.PageAt(pageIndex).texts.size()) {
+    if (pageIndex >= session_->document.PageCount() || textIndex >= session_->document.PageAt(pageIndex).texts.size()) {
         return;
     }
 
@@ -4907,8 +4912,8 @@ void App::BeginTextTransform(std::size_t pageIndex, std::size_t textIndex, Image
     transformingTextPageIndex_ = pageIndex;
     transformingTextIndex_ = textIndex;
     textTransformHandle_ = handle;
-    textTransformInitial_ = document_.PageAt(pageIndex).texts[textIndex];
-    textTransformBefore_ = document_.PageAt(pageIndex).texts[textIndex];
+    textTransformInitial_ = session_->document.PageAt(pageIndex).texts[textIndex];
+    textTransformBefore_ = session_->document.PageAt(pageIndex).texts[textIndex];
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
@@ -4930,7 +4935,7 @@ void App::UpdateTextTransform(POINT cursor) {
 
     const std::size_t pageIndex = *transformingTextPageIndex_;
     const std::size_t textIndex = *transformingTextIndex_;
-    if (pageIndex >= document_.PageCount() || textIndex >= document_.PageAt(pageIndex).texts.size()) {
+    if (pageIndex >= session_->document.PageCount() || textIndex >= session_->document.PageAt(pageIndex).texts.size()) {
         return;
     }
 
@@ -4941,12 +4946,12 @@ void App::UpdateTextTransform(POINT cursor) {
         return;
     }
 
-    std::vector<std::optional<RECT>> previousBounds(document_.PageCount());
-    for (std::size_t index = 0; index < document_.PageCount(); ++index) {
+    std::vector<std::optional<RECT>> previousBounds(session_->document.PageCount());
+    for (std::size_t index = 0; index < session_->document.PageCount(); ++index) {
         previousBounds[index] = InteractionPreviewBoundsForPage(index);
     }
 
-    const Page& page = document_.PageAt(pageIndex);
+    const Page& page = session_->document.PageAt(pageIndex);
     const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     const Vec2 currentPoint = ScreenToPage(pageView, cursor, false);
     const PageTextBounds initialBounds = MeasurePageTextBounds(textTransformInitial_, page.width);
@@ -5165,10 +5170,10 @@ void App::UpdateTextTransform(POINT cursor) {
     }
 
     const PageTextBounds finalBounds = MeasurePageTextBounds(updated, page.width);
-    if (interactionPreviewTexts_.size() != document_.PageCount()) {
+    if (interactionPreviewTexts_.size() != session_->document.PageCount()) {
         EnsureInteractionPreviewStorage();
     }
-    interactionPreviewTexts_.assign(document_.PageCount(), {});
+    interactionPreviewTexts_.assign(session_->document.PageCount(), {});
     interactionPreviewTexts_[pageIndex].push_back({
         pageIndex,
         textIndex,
@@ -5186,19 +5191,19 @@ void App::EndTextTransform() {
 
     const std::size_t pageIndex = *transformingTextPageIndex_;
     const std::size_t textIndex = transformingTextIndex_.value_or(std::numeric_limits<std::size_t>::max());
-    if (pageIndex < document_.PageCount()
-        && textIndex < document_.PageAt(pageIndex).texts.size()
+    if (pageIndex < session_->document.PageCount()
+        && textIndex < session_->document.PageAt(pageIndex).texts.size()
         && pageIndex < interactionPreviewTexts_.size()) {
         for (const InteractionPreviewText& preview : interactionPreviewTexts_[pageIndex]) {
             if (preview.sourcePageIndex == pageIndex && preview.sourceIndex == textIndex) {
-                document_.PageAt(pageIndex).texts[textIndex] = preview.text;
+                session_->document.PageAt(pageIndex).texts[textIndex] = preview.text;
                 break;
             }
         }
     }
-    const bool changed = pageIndex < document_.PageCount()
-        && textIndex < document_.PageAt(pageIndex).texts.size()
-        && !PageTextEqual(textTransformBefore_, document_.PageAt(pageIndex).texts[textIndex]);
+    const bool changed = pageIndex < session_->document.PageCount()
+        && textIndex < session_->document.PageAt(pageIndex).texts.size()
+        && !PageTextEqual(textTransformBefore_, session_->document.PageAt(pageIndex).texts[textIndex]);
 
     isTransformingText_ = false;
     transformingTextPageIndex_.reset();
@@ -5207,14 +5212,14 @@ void App::EndTextTransform() {
     ClearInteractionPreview();
     UpdateCaptureState();
 
-    if (pageIndex < document_.PageCount()) {
+    if (pageIndex < session_->document.PageCount()) {
         if (changed) {
             PushTextHistoryAction(
                 HistoryActionType::UpdateText,
                 pageIndex,
                 textIndex,
                 textTransformBefore_,
-                document_.PageAt(pageIndex).texts[textIndex]);
+                session_->document.PageAt(pageIndex).texts[textIndex]);
         }
         if (changed) {
             NotifyDocumentMutated();
@@ -5226,7 +5231,7 @@ void App::EndTextTransform() {
 }
 
 void App::BeginLatexTransform(std::size_t pageIndex, std::size_t latexIndex, ImageTransformHandle handle, POINT cursor) {
-    if (pageIndex >= document_.PageCount() || latexIndex >= document_.PageAt(pageIndex).latexes.size()) {
+    if (pageIndex >= session_->document.PageCount() || latexIndex >= session_->document.PageAt(pageIndex).latexes.size()) {
         return;
     }
 
@@ -5234,8 +5239,8 @@ void App::BeginLatexTransform(std::size_t pageIndex, std::size_t latexIndex, Ima
     latexTransformPageIndex_ = pageIndex;
     latexTransformIndex_ = latexIndex;
     latexTransformHandle_ = handle;
-    latexTransformInitial_ = document_.PageAt(pageIndex).latexes[latexIndex];
-    latexTransformBefore_ = document_.PageAt(pageIndex).latexes[latexIndex];
+    latexTransformInitial_ = session_->document.PageAt(pageIndex).latexes[latexIndex];
+    latexTransformBefore_ = session_->document.PageAt(pageIndex).latexes[latexIndex];
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
@@ -5256,7 +5261,7 @@ void App::UpdateLatexTransform(POINT cursor) {
 
     const std::size_t pageIndex = *latexTransformPageIndex_;
     const std::size_t latexIndex = *latexTransformIndex_;
-    if (pageIndex >= document_.PageCount() || latexIndex >= document_.PageAt(pageIndex).latexes.size()) {
+    if (pageIndex >= session_->document.PageCount() || latexIndex >= session_->document.PageAt(pageIndex).latexes.size()) {
         return;
     }
 
@@ -5267,12 +5272,12 @@ void App::UpdateLatexTransform(POINT cursor) {
         return;
     }
 
-    std::vector<std::optional<RECT>> previousBounds(document_.PageCount());
-    for (std::size_t index = 0; index < document_.PageCount(); ++index) {
+    std::vector<std::optional<RECT>> previousBounds(session_->document.PageCount());
+    for (std::size_t index = 0; index < session_->document.PageCount(); ++index) {
         previousBounds[index] = InteractionPreviewBoundsForPage(index);
     }
 
-    const Page& page = document_.PageAt(pageIndex);
+    const Page& page = session_->document.PageAt(pageIndex);
     const Vec2 currentPoint = ScreenToPage(pageView, cursor, false);
     const geometry::PageLatexBounds initialBounds = geometry::MeasurePageLatexBounds(latexTransformInitial_, page.width);
     const float initialWidth = std::max(1.0f, initialBounds.right - initialBounds.left);
@@ -5366,10 +5371,10 @@ void App::UpdateLatexTransform(POINT cursor) {
     updated.y = std::clamp(updated.y, 0.0f, std::max(0.0f, page.height - 1.0f));
 
     const geometry::PageLatexBounds finalBounds = geometry::MeasurePageLatexBounds(updated, page.width);
-    if (interactionPreviewLatexes_.size() != document_.PageCount()) {
+    if (interactionPreviewLatexes_.size() != session_->document.PageCount()) {
         EnsureInteractionPreviewStorage();
     }
-    interactionPreviewLatexes_.assign(document_.PageCount(), {});
+    interactionPreviewLatexes_.assign(session_->document.PageCount(), {});
     interactionPreviewLatexes_[pageIndex].push_back({
         pageIndex,
         latexIndex,
@@ -5387,19 +5392,19 @@ void App::EndLatexTransform() {
 
     const std::size_t pageIndex = *latexTransformPageIndex_;
     const std::size_t latexIndex = latexTransformIndex_.value_or(std::numeric_limits<std::size_t>::max());
-    if (pageIndex < document_.PageCount()
-        && latexIndex < document_.PageAt(pageIndex).latexes.size()
+    if (pageIndex < session_->document.PageCount()
+        && latexIndex < session_->document.PageAt(pageIndex).latexes.size()
         && pageIndex < interactionPreviewLatexes_.size()) {
         for (const InteractionPreviewLatex& preview : interactionPreviewLatexes_[pageIndex]) {
             if (preview.sourcePageIndex == pageIndex && preview.sourceIndex == latexIndex) {
-                document_.PageAt(pageIndex).latexes[latexIndex] = preview.latex;
+                session_->document.PageAt(pageIndex).latexes[latexIndex] = preview.latex;
                 break;
             }
         }
     }
-    const bool changed = pageIndex < document_.PageCount()
-        && latexIndex < document_.PageAt(pageIndex).latexes.size()
-        && !PageLatexEqual(latexTransformBefore_, document_.PageAt(pageIndex).latexes[latexIndex]);
+    const bool changed = pageIndex < session_->document.PageCount()
+        && latexIndex < session_->document.PageAt(pageIndex).latexes.size()
+        && !PageLatexEqual(latexTransformBefore_, session_->document.PageAt(pageIndex).latexes[latexIndex]);
 
     isTransformingLatex_ = false;
     latexTransformPageIndex_.reset();
@@ -5408,14 +5413,14 @@ void App::EndLatexTransform() {
     ClearInteractionPreview();
     UpdateCaptureState();
 
-    if (pageIndex < document_.PageCount()) {
+    if (pageIndex < session_->document.PageCount()) {
         if (changed) {
             PushLatexHistoryAction(
                 HistoryActionType::UpdateLatex,
                 pageIndex,
                 latexIndex,
                 latexTransformBefore_,
-                document_.PageAt(pageIndex).latexes[latexIndex]);
+                session_->document.PageAt(pageIndex).latexes[latexIndex]);
             NotifyDocumentMutated();
         }
         InvalidatePageSurfaceCache(pageIndex);
@@ -5425,7 +5430,7 @@ void App::EndLatexTransform() {
 }
 
 void App::BeginStrokeTransform(std::size_t pageIndex, ImageTransformHandle handle, POINT cursor) {
-    if (pageIndex >= document_.PageCount() || pageIndex >= selectedStrokeIndices_.size() || selectedStrokeIndices_[pageIndex].empty()) {
+    if (pageIndex >= session_->document.PageCount() || pageIndex >= selectedStrokeIndices_.size() || selectedStrokeIndices_[pageIndex].empty()) {
         return;
     }
 
@@ -5435,7 +5440,7 @@ void App::BeginStrokeTransform(std::size_t pageIndex, ImageTransformHandle handl
     strokeTransformStartPagePoint_ = ScreenToPage(cursor, nullptr);
     strokeTransformInitials_.clear();
 
-    const Page& page = document_.PageAt(pageIndex);
+    const Page& page = session_->document.PageAt(pageIndex);
     float minX = page.width;
     float minY = page.height;
     float maxX = 0.0f;
@@ -5494,11 +5499,11 @@ void App::EndStrokeTransform() {
 
     std::vector<std::size_t> affectedPageIndices;
     std::vector<Page> beforePages;
-    if (transformingStrokePageIndex_.has_value() && *transformingStrokePageIndex_ < document_.PageCount()) {
+    if (transformingStrokePageIndex_.has_value() && *transformingStrokePageIndex_ < session_->document.PageCount()) {
         affectedPageIndices.push_back(*transformingStrokePageIndex_);
-        beforePages.push_back(document_.PageAt(*transformingStrokePageIndex_));
+        beforePages.push_back(session_->document.PageAt(*transformingStrokePageIndex_));
     }
-    const std::size_t focusPageIndex = std::min(document_.CurrentPageIndex(), document_.PageCount() - 1U);
+    const std::size_t focusPageIndex = std::min(CurrentPageIndex(), session_->document.PageCount() - 1U);
 
     CommitStrokeTransformPreview();
     PushReplacePagesHistoryAction(std::move(affectedPageIndices), std::move(beforePages), focusPageIndex);
@@ -5519,11 +5524,11 @@ void App::EndImageTransform() {
 
     std::vector<std::size_t> affectedPageIndices;
     std::vector<Page> beforePages;
-    if (transformingImagePageIndex_.has_value() && *transformingImagePageIndex_ < document_.PageCount()) {
+    if (transformingImagePageIndex_.has_value() && *transformingImagePageIndex_ < session_->document.PageCount()) {
         affectedPageIndices.push_back(*transformingImagePageIndex_);
-        beforePages.push_back(document_.PageAt(*transformingImagePageIndex_));
+        beforePages.push_back(session_->document.PageAt(*transformingImagePageIndex_));
     }
-    const std::size_t focusPageIndex = std::min(document_.CurrentPageIndex(), document_.PageCount() - 1U);
+    const std::size_t focusPageIndex = std::min(CurrentPageIndex(), session_->document.PageCount() - 1U);
 
     CommitImageTransformPreview();
     PushReplacePagesHistoryAction(std::move(affectedPageIndices), std::move(beforePages), focusPageIndex);
@@ -5565,17 +5570,17 @@ void App::ExtendErase(POINT cursor) {
 }
 
 void App::EnsurePendingEraseStorage() {
-    if (pendingEraseStrokeIndices_.size() != document_.PageCount()) {
-        pendingEraseStrokeIndices_.assign(document_.PageCount(), {});
+    if (pendingEraseStrokeIndices_.size() != session_->document.PageCount()) {
+        pendingEraseStrokeIndices_.assign(session_->document.PageCount(), {});
     }
-    if (pendingEraseImageIndices_.size() != document_.PageCount()) {
-        pendingEraseImageIndices_.assign(document_.PageCount(), {});
+    if (pendingEraseImageIndices_.size() != session_->document.PageCount()) {
+        pendingEraseImageIndices_.assign(session_->document.PageCount(), {});
     }
-    if (pendingEraseTextIndices_.size() != document_.PageCount()) {
-        pendingEraseTextIndices_.assign(document_.PageCount(), {});
+    if (pendingEraseTextIndices_.size() != session_->document.PageCount()) {
+        pendingEraseTextIndices_.assign(session_->document.PageCount(), {});
     }
-    if (pendingEraseLatexIndices_.size() != document_.PageCount()) {
-        pendingEraseLatexIndices_.assign(document_.PageCount(), {});
+    if (pendingEraseLatexIndices_.size() != session_->document.PageCount()) {
+        pendingEraseLatexIndices_.assign(session_->document.PageCount(), {});
     }
 }
 
@@ -5645,7 +5650,7 @@ void App::EndErase() {
     bool removedAny = false;
     std::vector<std::size_t> affectedPageIndices;
     std::vector<Page> beforePages;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         const bool hasPendingStrokes = pageIndex < pendingEraseStrokeIndices_.size() && !pendingEraseStrokeIndices_[pageIndex].empty();
         const bool hasPendingImages = pageIndex < pendingEraseImageIndices_.size() && !pendingEraseImageIndices_[pageIndex].empty();
         const bool hasPendingTexts = pageIndex < pendingEraseTextIndices_.size() && !pendingEraseTextIndices_[pageIndex].empty();
@@ -5654,7 +5659,7 @@ void App::EndErase() {
             continue;
         }
 
-        Page& page = document_.PageAt(pageIndex);
+        Page& page = session_->document.PageAt(pageIndex);
         affectedPageIndices.push_back(pageIndex);
         beforePages.push_back(page);
         bool pageRemovedAny = false;
@@ -5705,7 +5710,7 @@ void App::EndErase() {
 
     ClearPendingEraseObjects();
     if (removedAny) {
-        PushReplacePagesHistoryAction(std::move(affectedPageIndices), std::move(beforePages), document_.CurrentPageIndex());
+        PushReplacePagesHistoryAction(std::move(affectedPageIndices), std::move(beforePages), CurrentPageIndex());
         NotifyDocumentMutated();
     }
     InvalidateCanvas();
@@ -5730,8 +5735,8 @@ bool App::EraseAt(POINT cursor) {
         : center;
     const float eraseRadiusPage = EraserRadiusPixels() / pageView.scale;
     const float eraseRadiusSquared = eraseRadiusPage * eraseRadiusPage;
-    Page& page = document_.PageAt(pageView.pageIndex);
-    if (document_.SetCurrentPageIndex(pageView.pageIndex)) {
+    Page& page = session_->document.PageAt(pageView.pageIndex);
+    if (SetViewPageIndex(pageView.pageIndex)) {
         MarkPdfSidebarCompositionDirty();
     }
     EnsurePendingEraseStorage();
@@ -5875,6 +5880,9 @@ void App::ExecuteCommand(unsigned int commandId) {
     case kCommandFileNewWindow:
         static_cast<void>(OpenNewWindow());
         break;
+    case kCommandFileNewView:
+        static_cast<void>(OpenNewView());
+        break;
     case kCommandFileOpen:
         OpenDocument();
         break;
@@ -5952,6 +5960,7 @@ bool App::HandleToolbarClick(POINT cursor) {
         }
         AppendMenuW(menu, MF_STRING, kCommandFileNew, L"New");
         AppendMenuW(menu, MF_STRING, kCommandFileNewWindow, L"New window");
+        AppendMenuW(menu, MF_STRING, kCommandFileNewView, L"New view of this project");
         AppendMenuW(menu, MF_STRING, kCommandFileSaveCnote, HasSavedCnotePath() ? L"Save Cnote" : L"Save as Cnote...");
         AppendMenuW(menu, MF_STRING, kCommandFileExportPdf, L"Export as PDF...");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -7148,8 +7157,8 @@ void App::PaintPdfSidebarContents(HDC hdc, RECT sidebarRect) {
     const int itemWidth = std::max(1, static_cast<int>(headerLayout.headerRect.right - headerLayout.headerRect.left) - (metrics.itemInset * 2));
     const int left = ((sidebarRect.left + sidebarRect.right) - itemWidth) / 2;
     int top = headerLayout.contentRect.top + metrics.contentPadding - pdfSidebarScrollY_;
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        const Page& page = document_.PageAt(pageIndex);
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+        const Page& page = session_->document.PageAt(pageIndex);
         const float aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
         const int thumbHeight = std::max(metrics.minThumbHeight, static_cast<int>(std::lround(static_cast<float>(itemWidth) * aspect)));
         RECT thumbRect = MakeRect(left, top, left + itemWidth, top + thumbHeight);
@@ -7160,7 +7169,7 @@ void App::PaintPdfSidebarContents(HDC hdc, RECT sidebarRect) {
             continue;
         }
 
-        const bool selected = pageIndex == document_.CurrentPageIndex();
+        const bool selected = pageIndex == CurrentPageIndex();
         if (selected) {
             HBRUSH selectedBrush = CreateSolidBrush(RGB(31, 41, 55));
             FillRect(hdc, &itemRect, selectedBrush);
@@ -7269,7 +7278,7 @@ void App::PaintSelectionOverlay(HDC hdc, RECT canvasRect) const {
 }
 
 void App::PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSelectToolSelectionAffordances) const {
-    if (interactionPreviewMode_ == InteractionPreviewMode::None || pageView.pageIndex >= document_.PageCount()) {
+    if (interactionPreviewMode_ == InteractionPreviewMode::None || pageView.pageIndex >= session_->document.PageCount()) {
         return;
     }
     const UINT dpi = window_ != nullptr ? WindowDpi(window_) : SystemDpi();
@@ -7332,8 +7341,8 @@ void App::PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSe
             && (activeTool_ == Tool::Move || isMovingSelection_ || isTransformingStroke_
                 || (activeTool_ == Tool::Select && showSelectToolSelectionAffordances));
         if (shouldDrawHandles && !interactionPreviewStrokes_[pageView.pageIndex].empty()) {
-            float minX = document_.PageAt(pageView.pageIndex).width;
-            float minY = document_.PageAt(pageView.pageIndex).height;
+            float minX = session_->document.PageAt(pageView.pageIndex).width;
+            float minY = session_->document.PageAt(pageView.pageIndex).height;
             float maxX = 0.0f;
             float maxY = 0.0f;
             for (const InteractionPreviewStroke& entry : interactionPreviewStrokes_[pageView.pageIndex]) {
@@ -7356,7 +7365,7 @@ void App::PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSe
     if (pageView.pageIndex < interactionPreviewLatexes_.size()) {
         for (const InteractionPreviewLatex& entry : interactionPreviewLatexes_[pageView.pageIndex]) {
             PaintLatex(hdc, entry.latex, pageView);
-            if (const auto latexRect = geometry::PageLatexBoundsRect(entry.latex, document_.PageAt(pageView.pageIndex).width, pageView.scale, 4); latexRect.has_value()) {
+            if (const auto latexRect = geometry::PageLatexBoundsRect(entry.latex, session_->document.PageAt(pageView.pageIndex).width, pageView.scale, 4); latexRect.has_value()) {
                 RECT screenRect = *latexRect;
                 OffsetRect(&screenRect, pageView.rect.left, pageView.rect.top);
                 DrawRectangleAA(hdc, screenRect, RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
@@ -7386,7 +7395,7 @@ void App::PaintInteractionPreview(HDC hdc, const PageView& pageView, bool showSe
     if (pageView.pageIndex < interactionPreviewTexts_.size()) {
         for (const InteractionPreviewText& entry : interactionPreviewTexts_[pageView.pageIndex]) {
             PaintText(hdc, entry.text, pageView);
-            if (const auto textRect = PageTextBoundsRect(entry.text, document_.PageAt(pageView.pageIndex).width, pageView.scale, 4); textRect.has_value()) {
+            if (const auto textRect = PageTextBoundsRect(entry.text, session_->document.PageAt(pageView.pageIndex).width, pageView.scale, 4); textRect.has_value()) {
                 RECT screenRect = *textRect;
                 OffsetRect(&screenRect, pageView.rect.left, pageView.rect.top);
                 DrawRectangleAA(hdc, screenRect, RGB(110, 204, 255), 2.0f, Gdiplus::DashStyleDash);
@@ -7429,8 +7438,8 @@ float App::QuickSizePreviewDiameterForTool(Tool tool, RECT clientRect) const {
     }
 
     float pageScale = std::max(0.1f, zoom_);
-    if (document_.PageCount() > 0U) {
-        const std::size_t pageIndex = std::min(document_.CurrentPageIndex(), document_.PageCount() - 1U);
+    if (session_->document.PageCount() > 0U) {
+        const std::size_t pageIndex = std::min(CurrentPageIndex(), session_->document.PageCount() - 1U);
         const PageView pageView = CalculatePageView(clientRect, pageIndex);
         if (pageView.valid && pageView.scale > 0.0f) {
             pageScale = pageView.scale;
@@ -7625,11 +7634,11 @@ void App::PaintTextFormatPopup(HDC hdc, RECT clientRect) const {
     if (!textFormatPopupOpen_ || !editingTextPageIndex_.has_value() || !editingTextIndex_.has_value() || !HasRect(textEditBounds_)) {
         return;
     }
-    if (*editingTextPageIndex_ >= document_.PageCount()) {
+    if (*editingTextPageIndex_ >= session_->document.PageCount()) {
         return;
     }
 
-    const Page& page = document_.PageAt(*editingTextPageIndex_);
+    const Page& page = session_->document.PageAt(*editingTextPageIndex_);
     if (*editingTextIndex_ >= page.texts.size()) {
         return;
     }
@@ -7797,7 +7806,7 @@ bool App::PaintNativePdfBackground(HDC hdc, const Page& page, const RECT& destin
         return false;
     }
 
-    const Document::PdfSource* pdfSource = document_.PdfSourceAtIndex(page.sourcePdfSourceIndex);
+    const Document::PdfSource* pdfSource = session_->document.PdfSourceAtIndex(page.sourcePdfSourceIndex);
     if (pdfSource == nullptr || page.sourcePdfPageIndex < 0) {
         return false;
     }
@@ -7863,7 +7872,7 @@ void App::PaintPdfTextSelection(HDC hdc, const Page& page, const PageView& pageV
         || page.sourcePdfPageIndex < 0) {
         return;
     }
-    const Document::PdfSource* pdfSource = document_.PdfSourceAtIndex(page.sourcePdfSourceIndex);
+    const Document::PdfSource* pdfSource = session_->document.PdfSourceAtIndex(page.sourcePdfSourceIndex);
     if (pdfSource == nullptr) {
         return;
     }
@@ -7908,7 +7917,7 @@ bool App::TryAppendStrokeToPageSurfaceCache(std::size_t pageIndex, const Stroke&
         return false;
     }
 
-    const Page& page = document_.PageAt(pageIndex);
+    const Page& page = session_->document.PageAt(pageIndex);
     PageSurfaceCache& cache = pageSurfaceCaches_[pageIndex];
     if (!cache.valid || cache.pixels.empty() || cache.width <= 0 || cache.height <= 0) {
         return false;
@@ -7996,7 +8005,7 @@ bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect
         return false;
     }
 
-    const Page& page = document_.PageAt(pageIndex);
+    const Page& page = session_->document.PageAt(pageIndex);
     PageSurfaceCache& cache = pageSurfaceCaches_[pageIndex];
     if (!cache.valid
         || cache.pixels.empty()
@@ -8187,10 +8196,10 @@ bool App::TryRefreshPageSurfaceCacheRegion(std::size_t pageIndex, RECT dirtyRect
 
 void App::EnsurePageSurfaceCache(const PageView& pageView) {
     if (pageView.pageIndex >= pageSurfaceCaches_.size()) {
-        pageSurfaceCaches_.resize(document_.PageCount());
+        pageSurfaceCaches_.resize(session_->document.PageCount());
     }
 
-    const Page& page = document_.PageAt(pageView.pageIndex);
+    const Page& page = session_->document.PageAt(pageView.pageIndex);
     PageSurfaceCache& cache = pageSurfaceCaches_[pageView.pageIndex];
     const float cacheScale = std::max(0.1f, pageView.scale);
     const std::uint64_t textSignature = PageTextSurfaceSignature(page);
@@ -8360,13 +8369,13 @@ void App::EnsurePageSurfaceCache(const PageView& pageView) {
 
 
 void App::RebuildMoveSelectionTextCache() {
-    moveSelectionTextCache_.assign(document_.PageCount(), {});
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    moveSelectionTextCache_.assign(session_->document.PageCount(), {});
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         if (pageIndex >= selectedTextIndices_.size()) {
             continue;
         }
 
-        const Page& page = document_.PageAt(pageIndex);
+        const Page& page = session_->document.PageAt(pageIndex);
         auto& pageCache = moveSelectionTextCache_[pageIndex];
         pageCache.reserve(selectedTextIndices_[pageIndex].size());
         for (std::size_t textIndex : selectedTextIndices_[pageIndex]) {
@@ -8460,7 +8469,7 @@ bool App::ShouldSkipLatexInInteractionSnapshot(std::size_t pageIndex, std::size_
 }
 
 void App::BuildInteractionPageSnapshot(const PageView& pageView) {
-    if (!pageView.valid || pageView.pageIndex >= document_.PageCount()) {
+    if (!pageView.valid || pageView.pageIndex >= session_->document.PageCount()) {
         return;
     }
 
@@ -8468,7 +8477,7 @@ void App::BuildInteractionPageSnapshot(const PageView& pageView) {
         return;
     }
 
-    const Page& page = document_.PageAt(pageView.pageIndex);
+    const Page& page = session_->document.PageAt(pageView.pageIndex);
     PageSurfaceCache& cache = interactionPageSnapshots_[pageView.pageIndex];
     const float cacheScale = std::max(0.1f, pageView.scale);
     const int width = std::max(1, static_cast<int>(std::lround(std::max(1.0f, page.width) * cacheScale)));
@@ -8617,7 +8626,7 @@ void App::BuildInteractionPageSnapshot(const PageView& pageView) {
 }
 
 std::optional<RECT> App::InteractionPreviewBoundsForPage(std::size_t pageIndex) const {
-    if (window_ == nullptr || pageIndex >= document_.PageCount()) {
+    if (window_ == nullptr || pageIndex >= session_->document.PageCount()) {
         return std::nullopt;
     }
 
@@ -8684,7 +8693,7 @@ std::optional<RECT> App::InteractionPreviewBoundsForPage(std::size_t pageIndex) 
 
     if (pageIndex < interactionPreviewLatexes_.size()) {
         for (const InteractionPreviewLatex& entry : interactionPreviewLatexes_[pageIndex]) {
-            const auto rect = geometry::PageLatexBoundsRect(entry.latex, document_.PageAt(pageIndex).width, pageView.scale, damagePadding);
+            const auto rect = geometry::PageLatexBoundsRect(entry.latex, session_->document.PageAt(pageIndex).width, pageView.scale, damagePadding);
             if (!rect.has_value()) {
                 continue;
             }
@@ -8702,7 +8711,7 @@ void App::InvalidateInteractionPreviewDelta(const std::vector<std::optional<RECT
         return;
     }
 
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         const std::optional<RECT> currentBounds = InteractionPreviewBoundsForPage(pageIndex);
         if (pageIndex < previousBounds.size() && previousBounds[pageIndex].has_value()) {
             if (currentBounds.has_value()) {
@@ -8722,19 +8731,19 @@ void App::RebuildMoveSelectionPreview(POINT cursor) {
         return;
     }
 
-    std::vector<std::optional<RECT>> previousBounds(document_.PageCount());
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    std::vector<std::optional<RECT>> previousBounds(session_->document.PageCount());
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         previousBounds[pageIndex] = InteractionPreviewBoundsForPage(pageIndex);
     }
-    interactionPreviewStrokes_.assign(document_.PageCount(), {});
-    interactionPreviewTexts_.assign(document_.PageCount(), {});
-    interactionPreviewLatexes_.assign(document_.PageCount(), {});
-    interactionPreviewImages_.assign(document_.PageCount(), {});
+    interactionPreviewStrokes_.assign(session_->document.PageCount(), {});
+    interactionPreviewTexts_.assign(session_->document.PageCount(), {});
+    interactionPreviewLatexes_.assign(session_->document.PageCount(), {});
+    interactionPreviewImages_.assign(session_->document.PageCount(), {});
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
     const std::vector<PageView> pageViews = CalculatePageViews(clientRect);
-    if (pageViews.size() != document_.PageCount()) {
+    if (pageViews.size() != session_->document.PageCount()) {
         return;
     }
 
@@ -8765,9 +8774,9 @@ void App::RebuildMoveSelectionPreview(POINT cursor) {
     const int deltaX = cursor.x - interactionPreviewStartCursor_.x;
     const int deltaY = cursor.y - interactionPreviewStartCursor_.y;
 
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         const PageView& sourceView = pageViews[pageIndex];
-        const Page& page = document_.PageAt(pageIndex);
+        const Page& page = session_->document.PageAt(pageIndex);
 
         if (pageIndex < selectedStrokeIndices_.size()) {
             for (std::size_t strokeIndex : selectedStrokeIndices_[pageIndex]) {
@@ -8896,12 +8905,12 @@ void App::CommitMoveSelectionPreview() {
         return;
     }
 
-    std::vector<bool> affectedPages(document_.PageCount(), false);
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    std::vector<bool> affectedPages(session_->document.PageCount(), false);
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         if (pageIndex < selectedStrokeIndices_.size()) {
             auto strokeIndices = selectedStrokeIndices_[pageIndex];
             std::sort(strokeIndices.rbegin(), strokeIndices.rend());
-            auto& strokes = document_.PageAt(pageIndex).strokes;
+            auto& strokes = session_->document.PageAt(pageIndex).strokes;
             for (std::size_t strokeIndex : strokeIndices) {
                 if (strokeIndex < strokes.size()) {
                     strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(strokeIndex));
@@ -8912,7 +8921,7 @@ void App::CommitMoveSelectionPreview() {
         if (pageIndex < selectedImageIndices_.size()) {
             auto imageIndices = selectedImageIndices_[pageIndex];
             std::sort(imageIndices.rbegin(), imageIndices.rend());
-            auto& images = document_.PageAt(pageIndex).images;
+            auto& images = session_->document.PageAt(pageIndex).images;
             for (std::size_t imageIndex : imageIndices) {
                 if (imageIndex < images.size()) {
                     images.erase(images.begin() + static_cast<std::ptrdiff_t>(imageIndex));
@@ -8923,7 +8932,7 @@ void App::CommitMoveSelectionPreview() {
         if (pageIndex < selectedTextIndices_.size()) {
             auto textIndices = selectedTextIndices_[pageIndex];
             std::sort(textIndices.rbegin(), textIndices.rend());
-            auto& texts = document_.PageAt(pageIndex).texts;
+            auto& texts = session_->document.PageAt(pageIndex).texts;
             for (std::size_t textIndex : textIndices) {
                 if (textIndex < texts.size()) {
                     texts.erase(texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
@@ -8934,8 +8943,8 @@ void App::CommitMoveSelectionPreview() {
     }
 
     ClearSelection();
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
-        auto& page = document_.PageAt(pageIndex);
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+        auto& page = session_->document.PageAt(pageIndex);
         for (const InteractionPreviewStroke& preview : interactionPreviewStrokes_[pageIndex]) {
             page.strokes.push_back(preview.stroke);
             selectedStrokeIndices_[pageIndex].push_back(page.strokes.size() - 1U);
@@ -8965,12 +8974,12 @@ void App::RebuildImageTransformPreview(POINT cursor) {
         return;
     }
 
-    std::vector<std::optional<RECT>> previousBounds(document_.PageCount());
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    std::vector<std::optional<RECT>> previousBounds(session_->document.PageCount());
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         previousBounds[pageIndex] = InteractionPreviewBoundsForPage(pageIndex);
     }
-    interactionPreviewImages_.assign(document_.PageCount(), {});
-    interactionPreviewStrokes_.assign(document_.PageCount(), {});
+    interactionPreviewImages_.assign(session_->document.PageCount(), {});
+    interactionPreviewStrokes_.assign(session_->document.PageCount(), {});
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
@@ -8979,7 +8988,7 @@ void App::RebuildImageTransformPreview(POINT cursor) {
         return;
     }
 
-    const Page& page = document_.PageAt(*transformingImagePageIndex_);
+    const Page& page = session_->document.PageAt(*transformingImagePageIndex_);
     const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     const Vec2 currentPoint {
         std::clamp((static_cast<float>(cursor.x - pageView.rect.left)) / pageView.scale, 0.0f, page.width),
@@ -9125,7 +9134,7 @@ void App::CommitImageTransformPreview() {
         return;
     }
 
-    Page& page = document_.PageAt(*transformingImagePageIndex_);
+    Page& page = session_->document.PageAt(*transformingImagePageIndex_);
     if (*transformingImageIndex_ < page.images.size()) {
         page.images[*transformingImageIndex_] = interactionPreviewImages_[*transformingImagePageIndex_].front().image;
         InvalidatePageSurfaceCache(*transformingImagePageIndex_);
@@ -9137,12 +9146,12 @@ void App::RebuildStrokeTransformPreview(POINT cursor) {
         return;
     }
 
-    std::vector<std::optional<RECT>> previousBounds(document_.PageCount());
-    for (std::size_t pageIndex = 0; pageIndex < document_.PageCount(); ++pageIndex) {
+    std::vector<std::optional<RECT>> previousBounds(session_->document.PageCount());
+    for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
         previousBounds[pageIndex] = InteractionPreviewBoundsForPage(pageIndex);
     }
-    interactionPreviewImages_.assign(document_.PageCount(), {});
-    interactionPreviewStrokes_.assign(document_.PageCount(), {});
+    interactionPreviewImages_.assign(session_->document.PageCount(), {});
+    interactionPreviewStrokes_.assign(session_->document.PageCount(), {});
 
     RECT clientRect {};
     GetClientRect(window_, &clientRect);
@@ -9151,7 +9160,7 @@ void App::RebuildStrokeTransformPreview(POINT cursor) {
         return;
     }
 
-    const Page& page = document_.PageAt(*transformingStrokePageIndex_);
+    const Page& page = session_->document.PageAt(*transformingStrokePageIndex_);
     const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     const Vec2 currentPoint {
         std::clamp((static_cast<float>(cursor.x - pageView.rect.left)) / pageView.scale, 0.0f, page.width),
@@ -9300,7 +9309,7 @@ void App::CommitStrokeTransformPreview() {
         return;
     }
 
-    Page& page = document_.PageAt(*transformingStrokePageIndex_);
+    Page& page = session_->document.PageAt(*transformingStrokePageIndex_);
     for (const InteractionPreviewStroke& preview : interactionPreviewStrokes_[*transformingStrokePageIndex_]) {
         if (preview.sourceIndex < page.strokes.size()) {
             page.strokes[preview.sourceIndex] = preview.stroke;
@@ -9335,7 +9344,7 @@ void App::CaptureZoomPageSnapshot(const PageView& pageView) {
     }
 
     if (pageView.pageIndex >= zoomPageSnapshots_.size()) {
-        zoomPageSnapshots_.resize(document_.PageCount());
+        zoomPageSnapshots_.resize(session_->document.PageCount());
     }
 
     HDC snapshotDc = CreateCompatibleDC(nullptr);
@@ -9401,7 +9410,7 @@ void App::CaptureZoomPageSnapshot(const PageView& pageView) {
 
 void App::CaptureZoomSessionSnapshots() {
     ClearZoomSessionSnapshots();
-    if (window_ == nullptr || document_.PageCount() == 0U) {
+    if (window_ == nullptr || session_->document.PageCount() == 0U) {
         return;
     }
 
@@ -9412,7 +9421,7 @@ void App::CaptureZoomSessionSnapshots() {
     const int viewportHeight = std::max(1, static_cast<int>(canvasRect.bottom - canvasRect.top));
     const int snapshotPadding = std::max(ScaleForDpi(120, dpi), viewportHeight);
 
-    zoomPageSnapshots_.resize(document_.PageCount());
+    zoomPageSnapshots_.resize(session_->document.PageCount());
     for (const PageView& pageView : CalculatePageViews(clientRect)) {
         if (!pageView.valid) {
             continue;
@@ -9440,7 +9449,7 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     SaveDC(hdc);
     IntersectClipRect(hdc, pageView.rect.left, pageView.rect.top, pageView.rect.right, pageView.rect.bottom);
 
-    const Page& page = document_.PageAt(pageView.pageIndex);
+    const Page& page = session_->document.PageAt(pageView.pageIndex);
     const bool pageHasPendingErase = PageHasPendingErase(pageView.pageIndex);
     const bool pageHasLiveStroke = isDrawing_
         && activeStroke_.has_value()
@@ -9621,9 +9630,9 @@ void App::PaintPage(HDC hdc, const PageView& pageView) {
     // cache/snapshot above, so paint its current render directly.
     if (editingLatexPageIndex_.has_value() && *editingLatexPageIndex_ == pageView.pageIndex
         && editingLatexIndex_.has_value()
-        && pageView.pageIndex < document_.PageCount()
-        && *editingLatexIndex_ < document_.PageAt(pageView.pageIndex).latexes.size()) {
-        PaintLatex(hdc, document_.PageAt(pageView.pageIndex).latexes[*editingLatexIndex_], pageView);
+        && pageView.pageIndex < session_->document.PageCount()
+        && *editingLatexIndex_ < session_->document.PageAt(pageView.pageIndex).latexes.size()) {
+        PaintLatex(hdc, session_->document.PageAt(pageView.pageIndex).latexes[*editingLatexIndex_], pageView);
     }
 
     const bool pageHasInteractionPreview = interactionPreviewMode_ != InteractionPreviewMode::None
@@ -10006,18 +10015,18 @@ void App::PaintStroke(HDC hdc, const Stroke& stroke, const PageView& pageView, b
 }
 
 void App::PaintText(HDC hdc, const PageText& text, const PageView& pageView, float opacity) const {
-    if (pageView.pageIndex >= document_.PageCount()) {
+    if (pageView.pageIndex >= session_->document.PageCount()) {
         return;
     }
 
-    const Page& page = document_.PageAt(pageView.pageIndex);
+    const Page& page = session_->document.PageAt(pageView.pageIndex);
     const int left = pageView.rect.left + static_cast<int>(std::lround(text.x * pageView.scale));
     const int top = pageView.rect.top + static_cast<int>(std::lround(text.y * pageView.scale));
     static_cast<void>(text::DrawPageText(hdc, text, page.width, pageView.scale, left, top, opacity));
 }
 
 void App::PaintLatex(HDC hdc, const PageLatex& latexBlock, const PageView& pageView, float opacity) const {
-    if (pageView.pageIndex >= document_.PageCount()) {
+    if (pageView.pageIndex >= session_->document.PageCount()) {
         return;
     }
 
