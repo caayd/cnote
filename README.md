@@ -83,7 +83,9 @@ cmake -S . -B build -G "MinGW Makefiles" `
 cmake --build build
 ```
 
-For an externally acquired platform SDK, pass its absolute root instead:
+The current legacy target is Windows-only. External Linux/macOS SDK roots are
+for the migration targets and dependency probes; pass an absolute root when
+those targets are enabled:
 
 ```text
 cmake -S . -B build -G Ninja -DCNOTE_PDFIUM_ROOT=<pdfium-root>
