@@ -331,19 +331,29 @@ file(WRITE "${_cnote_pdfium_probe_source}"
     "  config.version = 2;\n"
     "  FPDF_InitLibraryWithConfig(&config);\n"
     "  FPDF_DOCUMENT document = FPDF_LoadMemDocument(nullptr, 0, nullptr);\n"
+    "  int page_count = FPDF_GetPageCount(document);\n"
     "  if (document) FPDF_CloseDocument(document);\n"
     "  FPDF_DestroyLibrary();\n"
-    "  return FPDF_GetPageCount(document);\n"
+    "  return page_count;\n"
     "}\n")
-set(_cnote_pdfium_probe_key
-    "${_cnote_pdfium_root}|${_cnote_pdfium_runtime}|${_cnote_pdfium_implib}|${CMAKE_CXX_COMPILER}")
-file(APPEND "${_cnote_pdfium_probe_source}" "// ${_cnote_pdfium_probe_key}\n")
+if(DEFINED CMAKE_TRY_COMPILE_TARGET_TYPE)
+    set(_cnote_pdfium_had_try_compile_type TRUE)
+    set(_cnote_pdfium_saved_try_compile_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+else()
+    set(_cnote_pdfium_had_try_compile_type FALSE)
+endif()
+set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
 try_compile(_cnote_pdfium_link_ok
     "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/cnote_pdfium_link_probe"
     SOURCES "${_cnote_pdfium_probe_source}"
     LINK_LIBRARIES pdfium
     CMAKE_FLAGS "-DCMAKE_CXX_STANDARD=20"
     OUTPUT_VARIABLE _cnote_pdfium_link_output)
+if(_cnote_pdfium_had_try_compile_type)
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_cnote_pdfium_saved_try_compile_type}")
+else()
+    unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+endif()
 if(NOT _cnote_pdfium_link_ok)
     message(FATAL_ERROR
         "PDFium headers/import library do not link with the selected compiler:\n${_cnote_pdfium_link_output}")
