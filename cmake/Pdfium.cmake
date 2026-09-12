@@ -206,8 +206,8 @@ function(_cnote_pdfium_validate_binary _artifact _description)
             elseif(_cnote_pdfium_arch STREQUAL arm64 AND _cnote_pdfium_cpu STREQUAL 0c000001)
                 set(_cnote_pdfium_match TRUE)
             endif()
-    endif()
         endif()
+    endif()
     if(NOT _cnote_pdfium_match)
         message(FATAL_ERROR "PDFium ${_description} architecture does not match ${_cnote_pdfium_arch}: ${_artifact}")
     endif()
@@ -320,6 +320,33 @@ else()
     set_target_properties(pdfium PROPERTIES
         IMPORTED_LOCATION "${_cnote_pdfium_runtime}"
         INTERFACE_INCLUDE_DIRECTORIES "${_cnote_pdfium_include};${_cnote_pdfium_include}/cpp")
+endif()
+
+set(_cnote_pdfium_probe_source "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/cnote_pdfium_link_probe.cpp")
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles")
+file(WRITE "${_cnote_pdfium_probe_source}"
+    "#include <fpdfview.h>\n"
+    "int main() {\n"
+    "  FPDF_LIBRARY_CONFIG config{};\n"
+    "  config.version = 2;\n"
+    "  FPDF_InitLibraryWithConfig(&config);\n"
+    "  FPDF_DOCUMENT document = FPDF_LoadMemDocument(nullptr, 0, nullptr);\n"
+    "  if (document) FPDF_CloseDocument(document);\n"
+    "  FPDF_DestroyLibrary();\n"
+    "  return FPDF_GetPageCount(document);\n"
+    "}\n")
+set(_cnote_pdfium_probe_key
+    "${_cnote_pdfium_root}|${_cnote_pdfium_runtime}|${_cnote_pdfium_implib}|${CMAKE_CXX_COMPILER}")
+file(APPEND "${_cnote_pdfium_probe_source}" "// ${_cnote_pdfium_probe_key}\n")
+try_compile(_cnote_pdfium_link_ok
+    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/cnote_pdfium_link_probe"
+    SOURCES "${_cnote_pdfium_probe_source}"
+    LINK_LIBRARIES pdfium
+    CMAKE_FLAGS "-DCMAKE_CXX_STANDARD=20"
+    OUTPUT_VARIABLE _cnote_pdfium_link_output)
+if(NOT _cnote_pdfium_link_ok)
+    message(FATAL_ERROR
+        "PDFium headers/import library do not link with the selected compiler:\n${_cnote_pdfium_link_output}")
 endif()
 
 set(CNOTE_PDFIUM_VERSION "${CNOTE_PDFIUM_REQUIRED_VERSION}")
