@@ -16,7 +16,17 @@ struct ProjectSessionTests {
 
     static bool QuitPending() {
         MSG message {};
-        return PeekMessageW(&message, nullptr, WM_QUIT, WM_QUIT, PM_NOREMOVE) != FALSE;
+        // WM_QUIT is synthesized only after pending posted messages are drained.
+        // A WM_QUIT-only filter can therefore miss an already requested exit.
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == WM_QUIT) {
+                PostQuitMessage(static_cast<int>(message.wParam));
+                return true;
+            }
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        return false;
     }
 
     static void StrokeOn(App& view, std::size_t page) {
