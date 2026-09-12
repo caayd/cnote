@@ -63,19 +63,36 @@ Shortcuts are editable in the settings window.
 
 Requirements:
 
-- Windows
 - CMake 3.25+
-- MinGW-w64 g++
-- `gendef` and `dlltool` if the bundled PDFium import library needs to be generated
+- A compiler matching the selected platform (MinGW-w64 GCC on Windows,
+  GCC on Linux, or AppleClang on macOS)
+- PDFium **148.0.7749.0** for the target platform and architecture
 
-Build:
+`CNOTE_PDFIUM_ROOT` selects one complete PDFium SDK root and defaults to the
+bundled `third_party/pdfium` Windows SDK. The root must contain
+`PDFiumConfig.cmake`, `VERSION`, the PDFium headers, and the matching runtime
+library. On Windows, MinGW uses `libpdfium.dll.a` when supplied; otherwise
+`gendef` and `dlltool` generate an import library under the build directory
+(never in the source tree). MSVC uses `pdfium.dll.lib`.
+
+For the current legacy Windows build:
 
 ```powershell
-cmake -S . -B build -G "MinGW Makefiles"
+cmake -S . -B build -G "MinGW Makefiles" `
+  -DCNOTE_PDFIUM_ROOT="$pwd/third_party/pdfium"
 cmake --build build
 ```
 
-The repo already includes PDFium binaries under `third_party/pdfium`. The build copies `pdfium.dll` next to the executable automatically.
+For an externally acquired platform SDK, pass its absolute root instead:
+
+```text
+cmake -S . -B build -G Ninja -DCNOTE_PDFIUM_ROOT=<pdfium-root>
+cmake --build build
+```
+
+The configure step fails when the SDK version, binary format, architecture,
+headers, runtime, or compiler does not match. The build copies the imported
+`pdfium` target's runtime next to the executable automatically.
 
 ## Run
 
