@@ -55,8 +55,8 @@ std::optional<Document> LoadDocument(const std::filesystem::path& filePath, std:
         return std::nullopt;
     }
 
-    // Missing/invalid PDF sources fall back to the stored page raster, exactly
-    // as the reference frontend does after a successful decode.
+    // Hydration materializes PDF-backed page rasters and falls back to the
+    // stored page raster for missing/invalid sources, like the reference.
     pdfBackend.HydrateProject(*document);
     return document;
 }
