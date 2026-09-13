@@ -1,8 +1,8 @@
 #include "ProjectFile.h"
-#include "document/XpressCodec.h"
 
 #include <algorithm>
 #include <bit>
+#include <compressapi.h>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -172,6 +172,17 @@ struct ByteReader {
         }
         offset += value.size();
         return true;
+    }
+};
+struct CompressorCloser {
+    void operator()(void* handle) const noexcept {
+        if (handle != nullptr) CloseCompressor(static_cast<COMPRESSOR_HANDLE>(handle));
+    }
+};
+
+struct DecompressorCloser {
+    void operator()(void* handle) const noexcept {
+        if (handle != nullptr) CloseDecompressor(static_cast<DECOMPRESSOR_HANDLE>(handle));
     }
 };
 
@@ -458,20 +469,38 @@ void AppendRaster(std::vector<std::uint8_t>& output, const RasterImage& raster) 
 }
 
 bool ReadRaster(ByteReader& reader, RasterImage& raster) {
-    if (!reader.Read(raster.width) || !reader.Read(raster.height) || !reader.Read(raster.stride) || !reader.Read(raster.scale)) {
-        return false;
-    }
+    if (!reader.Read(raster.width) || !reader.Read(raster.height)
+        || !reader.Read(raster.stride) || !reader.Read(raster.scale)) return false;
     return reader.ReadBlob(raster.pixels);
 }
 
 std::optional<std::vector<std::uint8_t>> CompressPayload(const std::vector<std::uint8_t>& payload) {
-    return CompressXpressBuffer(payload);
+    if (payload.empty()) return std::vector<std::uint8_t>{};
+    COMPRESSOR_HANDLE handle = nullptr;
+    if (!CreateCompressor(COMPRESS_ALGORITHM_XPRESS_HUFF, nullptr, &handle)) return std::nullopt;
+    std::unique_ptr<void, CompressorCloser> compressor(handle);
+    SIZE_T size = 0;
+    if (!Compress(handle, const_cast<std::uint8_t*>(payload.data()), payload.size(), nullptr, 0, &size)
+        && GetLastError() != ERROR_INSUFFICIENT_BUFFER) return std::nullopt;
+    std::vector<std::uint8_t> compressed(size);
+    if (!Compress(handle, const_cast<std::uint8_t*>(payload.data()), payload.size(), compressed.data(), compressed.size(), &size)) return std::nullopt;
+    compressed.resize(size);
+    return compressed;
 }
 
 std::optional<std::vector<std::uint8_t>> DecompressPayload(
     std::span<const std::uint8_t> payload,
     std::uint64_t expectedSize) {
-    return DecompressXpressBuffer(payload, expectedSize);
+    if (expectedSize > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())
+        || expectedSize == 0) return expectedSize == 0 ? std::optional<std::vector<std::uint8_t>>(std::vector<std::uint8_t>{}) : std::nullopt;
+    DECOMPRESSOR_HANDLE handle = nullptr;
+    if (!CreateDecompressor(COMPRESS_ALGORITHM_XPRESS_HUFF, nullptr, &handle)) return std::nullopt;
+    std::unique_ptr<void, DecompressorCloser> decompressor(handle);
+    std::vector<std::uint8_t> decompressed(static_cast<std::size_t>(expectedSize));
+    SIZE_T size = 0;
+    if (!Decompress(handle, const_cast<std::uint8_t*>(payload.data()), payload.size(), decompressed.data(), decompressed.size(), &size)
+        || size != decompressed.size()) return std::nullopt;
+    return decompressed;
 }
 
 std::optional<Document> LoadProjectPayload(
@@ -577,20 +606,10 @@ std::optional<Document> LoadProjectPayload(
         if (version >= 11U && !ReadPaletteProfile(reader, page.paletteProfile)) {
             return std::nullopt;
         }
-        if (!reader.Read(strokeCount)) {
-            return std::nullopt;
-        }
-        if (version >= 5U) {
-            if (!reader.Read(textCount)) {
-                return std::nullopt;
-            }
-        }
-        if (version >= 14U && !reader.Read(latexCount)) {
-            return std::nullopt;
-        }
-        if (!reader.Read(imageCount)) {
-            return std::nullopt;
-        }
+        if (!reader.Read(strokeCount)) return std::nullopt;
+        if (version >= 5U && !reader.Read(textCount)) return std::nullopt;
+        if (version >= 14U && !reader.Read(latexCount)) return std::nullopt;
+        if (!reader.Read(imageCount)) return std::nullopt;
 
         const std::size_t minimumStrokeBytes = 12U + (version >= 9U ? 1U : 0U)
             + (version >= 10U ? 4U : 0U);
@@ -598,13 +617,11 @@ std::optional<Document> LoadProjectPayload(
         page.strokes.reserve(strokeCount);
         for (std::uint32_t strokeIndex = 0; strokeIndex < strokeCount; ++strokeIndex) {
             Stroke stroke {};
-            if (!ReadStroke(reader, version, stroke)) {
-                return std::nullopt;
-            }
+            if (!ReadStroke(reader, version, stroke)) return std::nullopt;
             page.strokes.push_back(std::move(stroke));
         }
 
-        const std::size_t minimumTextBytes = version >= 13U ? 40U
+        const std::size_t minimumTextBytes = version >= 13U ? 44U
             : version >= 8U ? 32U : version >= 7U ? 28U : version >= 6U ? 24U : 20U;
         if (textCount > reader.Remaining() / minimumTextBytes) return std::nullopt;
         page.texts.reserve(textCount);
@@ -650,7 +667,7 @@ std::optional<Document> LoadProjectPayload(
             }
         }
 
-        if (latexCount > reader.Remaining() / 24U) return std::nullopt;
+        if (latexCount > reader.Remaining() / 28U) return std::nullopt;
         page.latexes.reserve(latexCount);
         for (std::uint32_t latexIndex = 0; latexIndex < latexCount; ++latexIndex) {
             PageLatex latex {};
@@ -672,7 +689,6 @@ std::optional<Document> LoadProjectPayload(
 
         savedPages.push_back(std::move(page));
     }
-    if (reader.Remaining() != 0) return std::nullopt;
 
     std::vector<std::optional<Document>> openedSources;
     openedSources.reserve(pdfSources.size());
@@ -727,6 +743,7 @@ std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
     AppendValue(bytes, sourceCount);
     for (std::size_t sourceIndex = 0; sourceIndex < document.PdfSourceCount(); ++sourceIndex) {
         const Document::PdfSource& pdfSource = document.PdfSourceAt(sourceIndex);
+        AppendString(bytes, pdfSource.sourcePath);
         AppendBlob(bytes, pdfSource.pdfData ? *pdfSource.pdfData : std::vector<std::uint8_t> {});
     }
     AppendValue(bytes, document.NewPageDefaults().width);
@@ -767,7 +784,6 @@ std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
             AppendImage(bytes, image);
         }
     }
-
     return bytes;
 }
 
