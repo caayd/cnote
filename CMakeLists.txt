@@ -238,7 +238,7 @@ add_executable(cnote_session_manager_tests
     src/shell/AppManager.cpp
     src/Unicode.cpp
 )
-target_link_libraries(cnote_session_manager_tests PRIVATE cnote_model Qt6::Core)
+target_link_libraries(cnote_session_manager_tests PRIVATE cnote_model cnote_latex_qt Qt6::Core)
 add_test(NAME session_manager_qt COMMAND cnote_session_manager_tests)
 
 # --- Qt canvas and runnable migration frontend (plan steps 3.1/3.2/3.3/3.9) ---
@@ -285,7 +285,7 @@ target_compile_options(cnote_ui PRIVATE
 # cnote_pdf_qt provides PdfiumBackend plus the portable file-loader service.
 target_link_libraries(cnote_ui PUBLIC cnote_model cnote_render_qt cnote_pdf_qt Qt6::Widgets)
 
-add_executable(cnote src/qt/main.cpp)
+add_executable(cnote src/main.cpp)
 target_link_libraries(cnote PRIVATE cnote_ui)
 
 # MicroTeX's font/XML resources ship as real files next to the executable.

@@ -1,5 +1,8 @@
 #include "shell/AppManager.h"
 
+#include "Unicode.h"
+#include "latex/LatexEngine.h"
+
 #include <algorithm>
 #include <cwctype>
 #include <system_error>
@@ -34,6 +37,28 @@ bool ExtensionEquals(const std::filesystem::path& path, std::string_view extensi
 AppManager::AppManager(QObject* parent) : QObject(parent) {}
 
 AppManager::~AppManager() = default;
+
+bool AppManager::InitializeServices(const std::filesystem::path& latexResourceRoot, std::string* error) {
+    if (servicesInitialized_) {
+        return true;
+    }
+    if (latex::Initialize(latexResourceRoot)) {
+        servicesInitialized_ = true;
+        return true;
+    }
+    if (error != nullptr) {
+        *error = "MicroTeX resources not found at " + PathToUtf8(latexResourceRoot);
+    }
+    return false;
+}
+
+void AppManager::ShutdownServices() {
+    if (!servicesInitialized_) {
+        return;
+    }
+    latex::Shutdown();
+    servicesInitialized_ = false;
+}
 
 void AppManager::SetAutoSaveHandler(AutoSaveHandler handler) {
     autoSaveHandler_ = std::move(handler);

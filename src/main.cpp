@@ -1,4 +1,8 @@
-// cnote: Qt desktop frontend (plan steps 3.9, 4-7).
+// cnote: Qt desktop entry point (plan steps 7.1/7.2).
+//
+// Ordinary main(int, char**): QApplication, application identity, the startup
+// file argument, AppManager-owned service lifetime (MicroTeX/LaTeX) and the
+// macOS QFileOpenEvent route through the same open-file path.
 //
 // Startup order matters: QApplication exists before MicroTeX is initialized
 // (the Qt adapter uses QFontDatabase/QPainter), the window and its caches are
@@ -10,16 +14,19 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QEvent>
+#include <QFileOpenEvent>
 #include <QStringList>
 #include <QMessageBox>
 #include <QString>
 
 #include <cstdio>
 #include <filesystem>
+#include <functional>
+#include <optional>
 #include <string>
 
 #include "Unicode.h"
-#include "latex/LatexEngine.h"
 #include "platform/AppResourcePaths.h"
 #include "qt/QtDocumentController.h"
 #include "qt/QtMainWindow.h"
@@ -30,6 +37,49 @@ namespace {
 // Autosave: the manager's initiating view saves its session and only clears the
 // dirty flag when the write succeeded (cnote::QtDocumentController::SaveTo does
 // both).
+// macOS delivers file-open requests (Finder double-click, a file dropped on the
+// dock icon) as QFileOpenEvent; they can arrive before the window exists, so the
+// path is buffered until the window's open handler is registered.  Other
+// platforms never see the event.
+class CnoteApplication : public QApplication {
+public:
+    CnoteApplication(int& argc, char** argv) : QApplication(argc, argv) {}
+
+    void SetOpenHandler(std::function<void(const std::filesystem::path&)> handler) {
+        openHandler_ = std::move(handler);
+        if (pendingOpen_.has_value()) {
+            const std::filesystem::path path = std::move(*pendingOpen_);
+            pendingOpen_.reset();
+            if (openHandler_) {
+                openHandler_(path);
+            }
+        }
+    }
+
+protected:
+    bool event(QEvent* event) override {
+        if (event->type() == QEvent::FileOpen) {
+            auto* openEvent = static_cast<QFileOpenEvent*>(event);
+            const std::filesystem::path path =
+                cnote::Utf8ToPath(openEvent->file().toUtf8().toStdString());
+            if (path.empty()) {
+                return true;
+            }
+            if (openHandler_) {
+                openHandler_(path);
+            } else {
+                pendingOpen_ = path;
+            }
+            return true;
+        }
+        return QApplication::event(event);
+    }
+
+private:
+    std::function<void(const std::filesystem::path&)> openHandler_;
+    std::optional<std::filesystem::path> pendingOpen_;
+};
+
 void AutoSaveSession(const std::shared_ptr<cnote::ProjectSession>& session, QObject* owner) {
     if (session == nullptr || session->document.FilePath().empty()) {
         return;
@@ -45,7 +95,7 @@ void AutoSaveSession(const std::shared_ptr<cnote::ProjectSession>& session, QObj
 }  // namespace
 
 int main(int argc, char** argv) {
-    QApplication app(argc, argv);
+    CnoteApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("cnote"));
     // No organization name: Windows settings keep the %APPDATA%/cnote location
     // (plan step 6.4) and macOS/Linux use the bare application name.
@@ -75,7 +125,9 @@ int main(int argc, char** argv) {
     }
 
     const std::filesystem::path resRoot = cnote::platform::LatexResourceDir();
-    if (!cnote::latex::Initialize(resRoot)) {
+    cnote::AppManager manager;
+    std::string serviceError;
+    if (!manager.InitializeServices(resRoot, &serviceError)) {
         // A missing resource tree is a visible startup error, never silently
         // disabled equations (plan step 3.8).
         if (selfCheck) {
@@ -95,7 +147,6 @@ int main(int argc, char** argv) {
 
     int exitCode = 0;
     {
-        cnote::AppManager manager;
         manager.SetAutoSaveHandler(&AutoSaveSession);
 
         // The self-check runs without an event loop or a shown window, so a
@@ -107,6 +158,11 @@ int main(int argc, char** argv) {
 
         cnote::qt::QtMainWindow window(manager);
         window.resize(1400, 960);
+        // Finder/dock file-open requests use the same load path as the startup
+        // argument (plan step 7.2).
+        app.SetOpenHandler([&window](const std::filesystem::path& path) {
+            static_cast<void>(window.OpenPath(path));
+        });
         if (!selfCheck) {
             window.show();
         }
@@ -124,6 +180,8 @@ int main(int argc, char** argv) {
             exitCode = app.exec();
         }
     }
-    cnote::latex::Shutdown();
+    // The window and its caches are gone before the process-global services
+    // shut down, and both happen before the QApplication object is destroyed.
+    manager.ShutdownServices();
     return exitCode;
 }

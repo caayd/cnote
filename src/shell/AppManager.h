@@ -5,6 +5,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <QObject>
@@ -34,6 +35,17 @@ class AppManager : public QObject {
 public:
     explicit AppManager(QObject* parent = nullptr);
     ~AppManager() override;
+
+    // Process-global service lifetime (plan step 4.1).  The manager owns the
+    // MicroTeX/LaTeX services: InitializeServices must run after the
+    // QApplication exists (the Qt adapter uses QFontDatabase/QPainter) and
+    // ShutdownServices after the last window is destroyed but before the
+    // QApplication object is.  PDFium is reference counted inside
+    // PdfiumBackend, so the first backend to exist initializes it and the last
+    // one destroys it.
+    [[nodiscard]] bool InitializeServices(const std::filesystem::path& latexResourceRoot, std::string* error);
+    void ShutdownServices();
+    [[nodiscard]] bool ServicesInitialized() const { return servicesInitialized_; }
 
     // Called when a session's autosave timer fires; the handler saves and
     // clears dirty only on success.
@@ -77,6 +89,7 @@ private:
     [[nodiscard]] bool AnyInteractionActive(const std::shared_ptr<ProjectSession>& session) const;
     void OnAutoSaveTimeout(ProjectSession* session);
 
+    bool servicesInitialized_ = false;
     AutoSaveHandler autoSaveHandler_;
     std::vector<Entry> entries_;
     std::map<ProjectSession*, std::unique_ptr<QTimer>> timers_;
