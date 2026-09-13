@@ -117,7 +117,20 @@ void PaintLatex(QPainter& painter, const PageLatex& latex, float scale, float op
     latex::Draw(formula, painter, latex.x * scale, latex.y * scale, scale, color);
 }
 
-void PaintStroke(QPainter& painter, const Stroke& stroke, const PageRenderParams& params, float opacity) {
+
+std::uint64_t HashValue(std::uint64_t hash, std::uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ULL;
+    return hash;
+}
+
+std::uint64_t HashFloat(std::uint64_t hash, float value) {
+    return HashValue(hash, std::bit_cast<std::uint32_t>(value));
+}
+
+}  // namespace
+
+void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRenderParams& params, float opacity) {
     if (stroke.points.empty()) {
         return;
     }
@@ -172,18 +185,6 @@ void PaintStroke(QPainter& painter, const Stroke& stroke, const PageRenderParams
     painter.restore();
 }
 
-std::uint64_t HashValue(std::uint64_t hash, std::uint64_t value) {
-    hash ^= value;
-    hash *= 1099511628211ULL;
-    return hash;
-}
-
-std::uint64_t HashFloat(std::uint64_t hash, float value) {
-    return HashValue(hash, std::bit_cast<std::uint32_t>(value));
-}
-
-}  // namespace
-
 QImage WrapBgraImage(const std::uint8_t* pixels, int width, int height, int stride) {
     if (pixels == nullptr || width <= 0 || height <= 0) {
         return {};
@@ -223,7 +224,7 @@ void PaintPage(QPainter& painter, const Page& page, const QPointF& pageOrigin, c
         if (params.excludedStrokeIndex.has_value() && *params.excludedStrokeIndex == index) {
             continue;
         }
-        PaintStroke(painter, page.strokes[index], params, 1.0f);
+        PaintStrokePreview(painter, page.strokes[index], params, 1.0f);
     }
 
     painter.restore();
