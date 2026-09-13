@@ -77,10 +77,6 @@ void AppendStrokePointWithResampling(Stroke& stroke, Vec2 point, float spacing) 
     }
 }
 
-QString ToQString(std::u16string_view value) {
-    return QString::fromUtf16(value.data(), static_cast<qsizetype>(value.size()));
-}
-
 }  // namespace
 
 QtDocumentController::QtDocumentController(AppManager& manager, QObject* parent)

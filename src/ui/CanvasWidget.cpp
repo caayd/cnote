@@ -14,6 +14,7 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QScreen>
 #include <QPen>
 #include <QPlainTextEdit>
 #include <QScrollBar>
@@ -188,6 +189,21 @@ void CanvasWidget::CenterOnPage(std::size_t pageIndex) {
     NotifyViewportChanged();
 }
 
+float CanvasWidget::ZoomReferenceCanvasWidth() const {
+    // Plan step 3.2 keeps fit-to-monitor: the reference uses
+    // MaximizedCanvasWidthForZoom(window, canvasWidth, sidebarWidth=0, dpi)
+    // = work-area width - 2 * ScaleForDpi(8, dpi); the sidebar is a sibling
+    // widget here, so it does not narrow the canvas widget's reference band.
+    const QScreen* widgetScreen = screen();
+    if (widgetScreen != nullptr) {
+        const QRect available = widgetScreen->availableGeometry();
+        if (available.width() > 0) {
+            return std::max(1.0f, static_cast<float>(available.width()) - 16.0f);
+        }
+    }
+    return std::max(1.0f, static_cast<float>(width()));
+}
+
 QRectF CanvasWidget::VisibleCanvasRect() const {
     // The Qt canvas is its own widget, so the reference frontend's reserved
     // toolbar height and maximized-frame insets do not apply here.
@@ -212,7 +228,7 @@ void CanvasWidget::ClampViewportPan() {
         totalPageHeight += page.height;
     }
 
-    const float fitScale = (canvasWidth - static_cast<float>(kZoomReferenceInset)) / widestPage;
+    const float fitScale = (ZoomReferenceCanvasWidth() - static_cast<float>(kZoomReferenceInset)) / widestPage;
     const float scale = std::max(kMinimumPageScale, fitScale * zoom_);
     const float scaledDocumentWidth = widestPage * scale;
     const float scaledDocumentHeight = (totalPageHeight * scale)
@@ -255,7 +271,8 @@ std::vector<CanvasPageView> CanvasWidget::CalculatePageViews() const {
         widestPage = std::max(widestPage, document.PageAt(index).width);
     }
 
-    const float fitScale = (canvasWidth - static_cast<float>(kZoomReferenceInset)) / widestPage;
+    const float referenceWidth = ZoomReferenceCanvasWidth();
+    const float fitScale = (referenceWidth - static_cast<float>(kZoomReferenceInset)) / widestPage;
     const float scale = std::max(kMinimumPageScale, fitScale * zoom_);
     const float canvasCenterX = static_cast<float>(canvasRect.left()) + (canvasWidth / 2.0f);
     float top = static_cast<float>(canvasRect.top()) + static_cast<float>(kTopInset)

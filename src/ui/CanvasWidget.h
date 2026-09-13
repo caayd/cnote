@@ -246,6 +246,9 @@ private:
     void NotifyViewportChanged();
     void ClampViewportPan();
     [[nodiscard]] QRectF VisibleCanvasRect() const;
+    // Reference MaximizedCanvasWidthForZoom (Viewport.cpp:36-52): the fit scale
+    // is derived from the monitor work area, not from the window/canvas width.
+    [[nodiscard]] float ZoomReferenceCanvasWidth() const;
 
     // Overlay plumbing.
     void EnsureTextEditor();

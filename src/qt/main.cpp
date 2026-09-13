@@ -39,7 +39,7 @@ void AutoSaveSession(const std::shared_ptr<cnote::ProjectSession>& session, QObj
         return;
     }
     std::string error;
-    controller->SaveTo(session->document.FilePath(), &error);
+    static_cast<void>(controller->SaveTo(session->document.FilePath(), &error));
 }
 
 }  // namespace

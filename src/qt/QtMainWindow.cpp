@@ -109,8 +109,7 @@ bool QtMainWindow::OpenPath(const std::filesystem::path& path) {
     if (const std::shared_ptr<ProjectSession> existing = manager_.FindOpenSession(path); existing != nullptr) {
         controller_.AttachSession(existing);
         canvas_->SetPdfBackgroundProvider(controller_.PdfBackground());
-        canvas_->ResetView();
-        canvas_->CenterOnPage(controller_.DocumentRef().CurrentPageIndex());
+        canvas_->ResetView();  // reference open: zoom 1.0 with panY_ 0
         UpdateChrome();
         return true;
     }
@@ -126,8 +125,9 @@ bool QtMainWindow::OpenPath(const std::filesystem::path& path) {
     }
 
     canvas_->SetPdfBackgroundProvider(controller_.PdfBackground());
+    // Reference open: zoom 1.0 and panY_ 0, i.e. the current page's top sits
+    // kTopInset below the canvas top; the view is not centred on open.
     canvas_->ResetView();
-    canvas_->CenterOnPage(controller_.DocumentRef().CurrentPageIndex());
     UpdateChrome();
     return true;
 }
@@ -139,7 +139,7 @@ void QtMainWindow::OpenFileDialog() {
         QString(),
         QStringLiteral("cnote projects and PDFs (*.cnote *.pdf);;All files (*)"));
     if (!selected.isEmpty()) {
-        OpenPath(std::filesystem::path(selected.toStdString()));
+        static_cast<void>(OpenPath(std::filesystem::path(selected.toStdString())));
     }
 }
 
@@ -266,16 +266,54 @@ void QtMainWindow::closeEvent(QCloseEvent* event) {
     if (canvas_->EditOverlayActive()) {
         canvas_->CommitActiveEdit();
     }
-    if (manager_.ShouldSaveOnLastViewClose(controller_.Session()) && controller_.HasSavedPath()) {
+
+    if (controller_.Dirty()) {
+        const std::shared_ptr<ProjectSession>& session = controller_.Session();
+        const std::size_t viewCount = manager_.ViewsForSession(session).size();
+        const bool lastView = viewCount <= 1U;
+
         std::string error;
-        if (!controller_.SaveTo(controller_.FilePath(), &error)) {
-            QMessageBox::critical(
-                this, QStringLiteral("cnote"),
-                QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
-            event->ignore();
-            return;
+        if (lastView && controller_.HasSavedPath()) {
+            // Plan 4.5: the last view auto-saves an already-saved project.
+            if (!controller_.SaveTo(controller_.FilePath(), &error)) {
+                QMessageBox::critical(
+                    this, QStringLiteral("cnote"),
+                    QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
+                event->ignore();
+                return;
+            }
+        } else {
+            // Reference WM_CLOSE -> ConfirmCloseWithUnsavedChanges
+            // (MessageLoop.cpp:1083): Save / Don't Save / Cancel, and cancelling
+            // keeps this window (and the process) alive.  Applies to untitled
+            // projects and to closing one view while others stay open.
+            const QMessageBox::StandardButton choice = QMessageBox::warning(
+                this,
+                QStringLiteral("cnote"),
+                QStringLiteral("Save this cnote?"),
+                QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+                QMessageBox::Save);
+            if (choice == QMessageBox::Cancel) {
+                event->ignore();
+                return;
+            }
+            if (choice == QMessageBox::Save) {
+                const bool saved = controller_.HasSavedPath()
+                    ? controller_.SaveTo(controller_.FilePath(), &error)
+                    : SaveAs();
+                if (!saved) {
+                    if (!error.empty()) {
+                        QMessageBox::critical(
+                            this, QStringLiteral("cnote"),
+                            QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
+                    }
+                    event->ignore();
+                    return;
+                }
+            }
         }
     }
+
     QMainWindow::closeEvent(event);
 }
 
