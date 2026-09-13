@@ -1,5 +1,7 @@
+#include <cstring>
 #include <iostream>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -7,6 +9,7 @@
 #include "PdfBackend.h"
 #include "ProjectFile.h"
 #include "Unicode.h"
+#include "document/SelectionClipboardCodec.h"
 #include "text/TextGeometry.h"
 
 namespace {
@@ -172,6 +175,84 @@ int main() {
     }
     if (!Require(cnote::Utf16ToUtf8(std::u16string(1, static_cast<char16_t>(0xD800))).empty(),
             "unpaired surrogate emitted invalid UTF-8")) {
+        return 1;
+    }
+
+    // CTS selection codec: CTS8 round trip with UTF-16LE text, and rejection of
+    // malformed payloads so callers leave the document untouched.
+    cnote::SelectionClipboardData clipboardData;
+    cnote::Stroke clipboardStroke {};
+    clipboardStroke.style.color = 0xFF112233U;
+    clipboardStroke.style.width = 4.0f;
+    clipboardStroke.style.dotted = true;
+    clipboardStroke.smoothing = 0.4f;
+    clipboardStroke.points = { { 1.0f, 2.0f }, { 3.0f, 4.0f } };
+    clipboardData.strokes.push_back(clipboardStroke);
+    cnote::PageText clipboardText {};
+    clipboardText.x = 5.0f;
+    clipboardText.y = 6.0f;
+    clipboardText.width = 100.0f;
+    clipboardText.height = 20.0f;
+    clipboardText.fontSize = 18.0f;
+    clipboardText.color = 0xFF445566U;
+    clipboardText.bold = true;
+    clipboardText.content = u"A\U0001F600";
+    clipboardText.styleSpans.push_back({ 1U, 2U, {} });
+    clipboardData.texts.push_back(clipboardText);
+    cnote::PageLatex clipboardLatex {};
+    clipboardLatex.x = 7.0f;
+    clipboardLatex.y = 8.0f;
+    clipboardLatex.fontSize = 24.0f;
+    clipboardLatex.color = 0xFF778899U;
+    clipboardLatex.content = u"\\frac{a}{b}";
+    clipboardData.latexes.push_back(clipboardLatex);
+    cnote::PageImage clipboardImage {};
+    clipboardImage.x = 9.0f;
+    clipboardImage.y = 10.0f;
+    clipboardImage.width = 11.0f;
+    clipboardImage.height = 12.0f;
+    clipboardImage.rotationDegrees = 13.0f;
+    clipboardImage.pixelWidth = 2;
+    clipboardImage.pixelHeight = 1;
+    clipboardImage.stride = 8;
+    clipboardImage.pixels = { 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U };
+    clipboardData.images.push_back(clipboardImage);
+    clipboardData.minX = 1.0f;
+    clipboardData.minY = 2.0f;
+    clipboardData.maxX = 20.0f;
+    clipboardData.maxY = 30.0f;
+
+    const std::vector<std::uint8_t> clipboardBytes = cnote::EncodeSelectionClipboard(clipboardData);
+    if (!Require(clipboardBytes.size() > 4U && std::memcmp(clipboardBytes.data(), "CTS8", 4) == 0,
+            "selection payload is not CTS8")) {
+        return 1;
+    }
+    const auto decodedClipboard = cnote::DecodeSelectionClipboard(clipboardBytes);
+    if (!Require(decodedClipboard.has_value(), "selection payload did not decode")
+        || !Require(decodedClipboard->strokes.size() == 1U && decodedClipboard->texts.size() == 1U
+            && decodedClipboard->latexes.size() == 1U && decodedClipboard->images.size() == 1U,
+            "selection counts changed")
+        || !Require(decodedClipboard->strokes.front().style.dotted
+            && decodedClipboard->strokes.front().points.size() == 2U, "selection stroke changed")
+        || !Require(decodedClipboard->texts.front().content == u"A\U0001F600", "selection text changed")
+        || !Require(decodedClipboard->texts.front().styleSpans.size() == 1U
+            && decodedClipboard->texts.front().styleSpans.front().start == 1U
+            && decodedClipboard->texts.front().styleSpans.front().length == 2U, "selection span changed")
+        || !Require(decodedClipboard->latexes.front().content == u"\\frac{a}{b}", "selection latex changed")
+        || !Require(decodedClipboard->images.front().pixels == clipboardImage.pixels, "selection image changed")
+        || !Require(decodedClipboard->minX == 1.0f && decodedClipboard->maxY == 30.0f, "selection bounds changed")) {
+        return 1;
+    }
+    if (!Require(!cnote::DecodeSelectionClipboard(std::span<const std::uint8_t>(clipboardBytes.data(), 3U)).has_value(),
+            "truncated selection header was accepted")
+        || !Require(!cnote::DecodeSelectionClipboard(
+                std::span<const std::uint8_t>(clipboardBytes.data(), clipboardBytes.size() - 1U)).has_value(),
+            "truncated selection payload was accepted")) {
+        return 1;
+    }
+    const std::uint8_t unknownMagic[4] = { 'X', 'T', 'S', '8' };
+    if (!Require(!cnote::DecodeSelectionClipboard(std::span<const std::uint8_t>(unknownMagic, 4U)).has_value(),
+            "unknown selection magic was accepted")) {
         return 1;
     }
 

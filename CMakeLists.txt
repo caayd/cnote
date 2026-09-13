@@ -34,6 +34,7 @@ add_library(cnote_core STATIC
     src/document/FileIO.cpp
     src/document/History.cpp
     src/document/Pages.cpp
+    src/document/SelectionClipboardCodec.cpp
     src/document/Session.cpp
     src/latex/LatexEditing.cpp
     src/latex/LatexCompletion.cpp
@@ -215,6 +216,7 @@ add_executable(cnote_text_model_tests
     tests/TextModelTests.cpp
     src/DpiUtil.cpp
     src/Unicode.cpp
+    src/document/SelectionClipboardCodec.cpp
     src/latex/LatexEngine.cpp
     src/PdfBackend.cpp
     src/ProjectFile.cpp

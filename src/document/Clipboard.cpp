@@ -2,8 +2,12 @@
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
+#include <span>
 #include <string>
+#include <vector>
 
+#include "document/SelectionClipboardCodec.h"
 #include "text/TextGeometry.h"
 #include "latex/LatexEngine.h"
 
@@ -192,107 +196,16 @@ bool App::CopySelectionToClipboard() {
         return false;
     }
 
-    std::vector<std::uint8_t> bytes;
-    const auto appendBytes = [&](const void* data, std::size_t size) {
-        const auto* source = static_cast<const std::uint8_t*>(data);
-        bytes.insert(bytes.end(), source, source + size);
-    };
-    const auto appendUint32 = [&](std::uint32_t value) { appendBytes(&value, sizeof(value)); };
-    const auto appendFloat = [&](float value) { appendBytes(&value, sizeof(value)); };
-    const auto appendUtf16 = [&](std::u16string_view value) {
-        for (char16_t unit : value) {
-            bytes.push_back(static_cast<std::uint8_t>(unit & 0xFFU));
-            bytes.push_back(static_cast<std::uint8_t>((unit >> 8U) & 0xFFU));
-        }
-    };
-
-    constexpr std::uint32_t kClipboardStrokeFlagDotted = 1U << 0U;
-    const char magic[] = { 'C', 'T', 'S', '8' };
-    appendBytes(magic, sizeof(magic));
-    appendUint32(static_cast<std::uint32_t>(strokes.size()));
-    appendUint32(static_cast<std::uint32_t>(texts.size()));
-    appendUint32(static_cast<std::uint32_t>(images.size()));
-    appendFloat(minX);
-    appendFloat(minY);
-    appendFloat(maxX);
-    appendFloat(maxY);
-
-    for (const Stroke& stroke : strokes) {
-        std::uint32_t strokeFlags = 0;
-        if (stroke.style.dotted) {
-            strokeFlags |= kClipboardStrokeFlagDotted;
-        }
-        appendUint32(stroke.style.color);
-        appendFloat(stroke.style.width);
-        appendUint32(strokeFlags);
-        appendFloat(stroke.smoothing);
-        appendUint32(static_cast<std::uint32_t>(stroke.points.size()));
-        for (const Vec2& point : stroke.points) {
-            appendFloat(point.x);
-            appendFloat(point.y);
-        }
-    }
-
-    for (const PageText& text : texts) {
-        std::uint32_t flags = 0;
-        flags |= static_cast<std::uint32_t>(text.alignment);
-        flags |= static_cast<std::uint32_t>(text.fontFamily) << 8U;
-        if (text.bold) {
-            flags |= 1U << 16U;
-        }
-        if (text.italic) {
-            flags |= 1U << 17U;
-        }
-        if (text.underline) {
-            flags |= 1U << 18U;
-        }
-        appendFloat(text.x);
-        appendFloat(text.y);
-        appendFloat(text.width);
-        appendFloat(text.height);
-        appendFloat(text.fontSize);
-        appendUint32(text.color);
-        appendUint32(flags);
-        appendUint32(static_cast<std::uint32_t>(text.content.size()));
-        appendUtf16(text.content);
-        appendUint32(static_cast<std::uint32_t>(text.styleSpans.size()));
-        for (const PageTextStyleSpan& span : text.styleSpans) {
-            std::uint32_t spanFlags = static_cast<std::uint32_t>(span.style.fontFamily);
-            spanFlags |= span.style.bold ? 1U << 8U : 0U;
-            spanFlags |= span.style.italic ? 1U << 9U : 0U;
-            spanFlags |= span.style.underline ? 1U << 10U : 0U;
-            appendUint32(span.start);
-            appendUint32(span.length);
-            appendFloat(span.style.fontSize);
-            appendUint32(span.style.color);
-            appendUint32(spanFlags);
-        }
-    }
-
-    for (const PageImage& image : images) {
-        appendFloat(image.x);
-        appendFloat(image.y);
-        appendFloat(image.width);
-        appendFloat(image.height);
-        appendFloat(image.rotationDegrees);
-        appendUint32(static_cast<std::uint32_t>(image.pixelWidth));
-        appendUint32(static_cast<std::uint32_t>(image.pixelHeight));
-        appendUint32(static_cast<std::uint32_t>(image.stride));
-        appendUint32(static_cast<std::uint32_t>(image.pixels.size()));
-        if (!image.pixels.empty()) {
-            appendBytes(image.pixels.data(), image.pixels.size());
-        }
-    }
-
-    appendUint32(static_cast<std::uint32_t>(latexes.size()));
-    for (const PageLatex& latex : latexes) {
-        appendFloat(latex.x);
-        appendFloat(latex.y);
-        appendFloat(latex.fontSize);
-        appendUint32(latex.color);
-        appendUint32(static_cast<std::uint32_t>(latex.content.size()));
-        appendUtf16(latex.content);
-    }
+    SelectionClipboardData data;
+    data.strokes = std::move(strokes);
+    data.texts = std::move(texts);
+    data.latexes = std::move(latexes);
+    data.images = std::move(images);
+    data.minX = minX;
+    data.minY = minY;
+    data.maxX = maxX;
+    data.maxY = maxY;
+    const std::vector<std::uint8_t> bytes = EncodeSelectionClipboard(data);
 
     EmptyClipboard();
     HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes.size());
@@ -340,218 +253,25 @@ bool App::PasteSelectionFromClipboard() {
         return false;
     }
 
-    SIZE_T size = GlobalSize(clipboardData);
-    const auto readExact = [&](std::size_t offset, void* output, std::size_t length) -> bool {
-        if (offset + length > static_cast<std::size_t>(size)) {
-            return false;
-        }
-        std::memcpy(output, data + offset, length);
-        return true;
-    };
-
-    std::size_t offset = 0;
-    char magic[4] {};
-    if (!readExact(offset, magic, sizeof(magic))
-        || (std::memcmp(magic, "CTS1", 4) != 0
-            && std::memcmp(magic, "CTS2", 4) != 0
-            && std::memcmp(magic, "CTS3", 4) != 0
-            && std::memcmp(magic, "CTS4", 4) != 0
-            && std::memcmp(magic, "CTS5", 4) != 0
-            && std::memcmp(magic, "CTS6", 4) != 0
-            && std::memcmp(magic, "CTS7", 4) != 0
-            && std::memcmp(magic, "CTS8", 4) != 0)) {
-        GlobalUnlock(clipboardData);
-        CloseClipboard();
-        return false;
-    }
-    offset += sizeof(magic);
-
-    auto readUint32 = [&](std::uint32_t& value) -> bool {
-        const bool ok = readExact(offset, &value, sizeof(value));
-        offset += ok ? sizeof(value) : 0U;
-        return ok;
-    };
-    auto readFloat = [&](float& value) -> bool {
-        const bool ok = readExact(offset, &value, sizeof(value));
-        offset += ok ? sizeof(value) : 0U;
-        return ok;
-    };
-    const auto readUtf16 = [&](std::uint32_t charCount, std::u16string& value) -> bool {
-        const std::size_t byteCount = static_cast<std::size_t>(charCount) * 2U;
-        if (offset + byteCount > static_cast<std::size_t>(size)) {
-            return false;
-        }
-        value.resize(charCount);
-        for (std::size_t index = 0; index < charCount; ++index) {
-            value[index] = static_cast<char16_t>(
-                static_cast<std::uint16_t>(data[offset + (index * 2U)])
-                | static_cast<std::uint16_t>(static_cast<std::uint16_t>(data[offset + (index * 2U) + 1U]) << 8U));
-        }
-        offset += byteCount;
-        return true;
-    };
-
-    std::uint32_t strokeCount = 0;
-    std::uint32_t textCount = 0;
-    std::uint32_t imageCount = 0;
-    std::uint32_t latexCount = 0;
-    float minX = 0.0f;
-    float minY = 0.0f;
-    float maxX = 0.0f;
-    float maxY = 0.0f;
-    bool headerOk = readUint32(strokeCount);
-    if (headerOk && (std::memcmp(magic, "CTS2", 4) == 0 || std::memcmp(magic, "CTS3", 4) == 0
-        || std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0
-        || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0
-        || std::memcmp(magic, "CTS8", 4) == 0)) {
-        headerOk = readUint32(textCount);
-    }
-    headerOk = headerOk && readUint32(imageCount)
-        && readFloat(minX) && readFloat(minY) && readFloat(maxX) && readFloat(maxY);
-    if (!headerOk) {
-        GlobalUnlock(clipboardData);
-        CloseClipboard();
-        return false;
-    }
-
-    std::vector<Stroke> strokes;
-    std::vector<PageText> texts;
-    std::vector<PageLatex> latexes;
-    std::vector<PageImage> images;
-    strokes.reserve(strokeCount);
-    texts.reserve(textCount);
-    images.reserve(imageCount);
-
-    bool ok = true;
-    constexpr std::uint32_t kClipboardStrokeFlagDotted = 1U << 0U;
-    for (std::uint32_t strokeIndex = 0; ok && strokeIndex < strokeCount; ++strokeIndex) {
-        Stroke stroke {};
-        std::uint32_t pointCount = 0;
-        std::uint32_t strokeFlags = 0;
-        ok = readUint32(stroke.style.color) && readFloat(stroke.style.width);
-        if (ok && (std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0 || std::memcmp(magic, "CTS8", 4) == 0)) {
-            ok = readUint32(strokeFlags);
-        }
-        stroke.style.dotted = (strokeFlags & kClipboardStrokeFlagDotted) != 0U;
-        if (ok && (std::memcmp(magic, "CTS7", 4) == 0 || std::memcmp(magic, "CTS8", 4) == 0)) {
-            ok = readFloat(stroke.smoothing);
-        }
-        ok = ok && readUint32(pointCount);
-        stroke.points.reserve(pointCount);
-        for (std::uint32_t pointIndex = 0; ok && pointIndex < pointCount; ++pointIndex) {
-            Vec2 point {};
-            ok = readFloat(point.x) && readFloat(point.y);
-            if (ok) {
-                stroke.points.push_back(point);
-            }
-        }
-        if (ok) {
-            strokes.push_back(std::move(stroke));
-        }
-    }
-
-    for (std::uint32_t textIndex = 0; ok && textIndex < textCount; ++textIndex) {
-        PageText text {};
-        std::uint32_t charCount = 0;
-        std::uint32_t flags = 0;
-        ok = readFloat(text.x) && readFloat(text.y);
-        if (ok && (std::memcmp(magic, "CTS3", 4) == 0 || std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0 || std::memcmp(magic, "CTS8", 4) == 0)) {
-            ok = readFloat(text.width);
-        } else {
-            text.width = 0.0f;
-        }
-        if (ok && (std::memcmp(magic, "CTS4", 4) == 0 || std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0 || std::memcmp(magic, "CTS8", 4) == 0)) {
-            ok = readFloat(text.height);
-        } else {
-            text.height = 0.0f;
-        }
-        ok = ok && readFloat(text.fontSize) && readUint32(text.color);
-        if (ok && (std::memcmp(magic, "CTS5", 4) == 0 || std::memcmp(magic, "CTS6", 4) == 0 || std::memcmp(magic, "CTS7", 4) == 0 || std::memcmp(magic, "CTS8", 4) == 0)) {
-            ok = readUint32(flags);
-        }
-        ok = ok && readUint32(charCount);
-        if (ok) {
-            ok = readUtf16(charCount, text.content);
-        }
-        text.alignment = static_cast<TextAlignment>(std::min<std::uint32_t>(flags & 0xFFU, 2U));
-        text.fontFamily = static_cast<TextFontFamily>(std::min<std::uint32_t>((flags >> 8U) & 0xFFU, 2U));
-        text.bold = (flags & (1U << 16U)) != 0;
-        text.italic = (flags & (1U << 17U)) != 0;
-        text.underline = (flags & (1U << 18U)) != 0;
-        if (ok && std::memcmp(magic, "CTS8", 4) == 0) {
-            std::uint32_t spanCount = 0;
-            ok = readUint32(spanCount) && spanCount <= text.content.size() + 1U;
-            for (std::uint32_t spanIndex = 0; ok && spanIndex < spanCount; ++spanIndex) {
-                PageTextStyleSpan span {};
-                std::uint32_t spanFlags = 0;
-                ok = readUint32(span.start)
-                    && readUint32(span.length)
-                    && readFloat(span.style.fontSize)
-                    && readUint32(span.style.color)
-                    && readUint32(spanFlags)
-                    && span.start <= text.content.size()
-                    && span.length <= text.content.size() - span.start;
-                span.style.fontFamily = static_cast<TextFontFamily>(std::min<std::uint32_t>(spanFlags & 0xFFU, 2U));
-                span.style.bold = (spanFlags & (1U << 8U)) != 0U;
-                span.style.italic = (spanFlags & (1U << 9U)) != 0U;
-                span.style.underline = (spanFlags & (1U << 10U)) != 0U;
-                if (ok) {
-                    text.styleSpans.push_back(std::move(span));
-                }
-            }
-        }
-        if (ok) {
-            texts.push_back(std::move(text));
-        }
-    }
-
-    for (std::uint32_t imageIndex = 0; ok && imageIndex < imageCount; ++imageIndex) {
-        PageImage image {};
-        std::uint32_t pixelWidth = 0;
-        std::uint32_t pixelHeight = 0;
-        std::uint32_t stride = 0;
-        std::uint32_t dataSize = 0;
-        ok = readFloat(image.x) && readFloat(image.y) && readFloat(image.width) && readFloat(image.height)
-            && readFloat(image.rotationDegrees)
-            && readUint32(pixelWidth) && readUint32(pixelHeight) && readUint32(stride) && readUint32(dataSize);
-        image.pixelWidth = static_cast<int>(pixelWidth);
-        image.pixelHeight = static_cast<int>(pixelHeight);
-        image.stride = static_cast<int>(stride);
-        if (ok) {
-            image.pixels.resize(dataSize);
-            ok = readExact(offset, image.pixels.data(), dataSize);
-            offset += ok ? dataSize : 0U;
-        }
-        if (ok) {
-            images.push_back(std::move(image));
-        }
-    }
-    if (ok && std::memcmp(magic, "CTS8", 4) == 0
-        && offset + sizeof(std::uint32_t) <= static_cast<std::size_t>(size)) {
-        ok = readUint32(latexCount);
-        latexes.reserve(latexCount);
-        for (std::uint32_t latexIndex = 0; ok && latexIndex < latexCount; ++latexIndex) {
-            PageLatex latex {};
-            std::uint32_t charCount = 0;
-            ok = readFloat(latex.x)
-                && readFloat(latex.y)
-                && readFloat(latex.fontSize)
-                && readUint32(latex.color)
-                && readUint32(charCount);
-            if (ok) {
-                ok = readUtf16(charCount, latex.content);
-            }
-            if (ok) {
-                latexes.push_back(std::move(latex));
-            }
-        }
-    }
-
+    const std::span<const std::uint8_t> clipboardBytes(
+        data,
+        static_cast<std::size_t>(GlobalSize(clipboardData)));
+    const std::optional<SelectionClipboardData> decoded = DecodeSelectionClipboard(clipboardBytes);
     GlobalUnlock(clipboardData);
     CloseClipboard();
-    if (!ok) {
+    if (!decoded.has_value()) {
         return false;
     }
+
+    SelectionClipboardData selection = std::move(*decoded);
+    std::vector<Stroke> strokes = std::move(selection.strokes);
+    std::vector<PageText> texts = std::move(selection.texts);
+    std::vector<PageLatex> latexes = std::move(selection.latexes);
+    std::vector<PageImage> images = std::move(selection.images);
+    const float minX = selection.minX;
+    const float minY = selection.minY;
+    const float maxX = selection.maxX;
+    const float maxY = selection.maxY;
 
     const std::size_t targetPageIndex = CurrentPageIndex();
     if (targetPageIndex >= session_->document.PageCount()) {
