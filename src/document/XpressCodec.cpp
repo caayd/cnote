@@ -5,11 +5,11 @@
 #include <array>
 #include <bit>
 #include <cstddef>
-#include <cstdint>
 #include <limits>
+#include <new>
 #include <queue>
+#include <stdexcept>
 #include <utility>
-
 namespace cnote {
 namespace {
 
@@ -142,7 +142,9 @@ public:
         if (!primed_) Prime();
         const std::size_t required = cumBits_ <= 16U ? 2U : 2U + (cumBits_ - 16U + 15U) / 16U;
         while (slots_.size() < required) {
-            slots_.push_back(bytes_.size()); bytes_.push_back(0); bytes_.push_back(0);
+            slots_.push_back(bytes_.size());
+            bytes_.push_back(0);
+            bytes_.push_back(0);
         }
         bytes_.push_back(value);
     }
@@ -161,10 +163,14 @@ public:
             }
             Patch(slots_[nextSlot_++], static_cast<std::uint16_t>(acc_ >> 16U));
         }
-        bytes_.push_back(0); bytes_.push_back(0);
+        const std::size_t required = cumBits_ <= 16U ? 2U : 2U + (cumBits_ - 16U + 15U) / 16U;
+        while (slots_.size() < required) {
+            slots_.push_back(bytes_.size());
+            bytes_.push_back(0);
+            bytes_.push_back(0);
+        }
         return std::move(bytes_);
     }
-private:
     void Prime() {
         primed_ = true;
         for (unsigned i = 0; i != 2; ++i) {
@@ -190,65 +196,89 @@ struct Token {
 };
 
 std::optional<std::vector<std::uint8_t>> EncodeLiteralStream(std::span<const std::uint8_t> input) {
-    std::vector<Token> tokens;
-    tokens.reserve(input.size());
-    std::unordered_map<std::uint32_t, std::size_t> last;
-    for (std::size_t position = 0; position < input.size();) {
-        std::size_t matchLength = 0;
-        std::size_t matchOffset = 0;
-        if (position + 3 <= input.size()) {
-            const std::uint32_t key = (static_cast<std::uint32_t>(input[position]) << 16U)
-                | (static_cast<std::uint32_t>(input[position + 1]) << 8U) | input[position + 2];
-            const auto found = last.find(key);
-            if (found != last.end() && position - found->second <= 65535U) {
-                const std::size_t candidate = found->second;
-                while (matchLength < input.size() - position
-                    && input[candidate + matchLength] == input[position + matchLength]) ++matchLength;
-                if (matchLength >= 3) matchOffset = position - candidate;
-            }
-            last[key] = position;
-        }
-        if (matchLength >= 3) {
-            const std::size_t limited = std::min<std::size_t>(matchLength, 0xFFFFFFFFU - 3U);
-            const unsigned offsetBits = std::bit_width(static_cast<unsigned>(matchOffset)) - 1U;
-            tokens.push_back({static_cast<std::uint16_t>(256U + (offsetBits << 4U)
-                + std::min<std::size_t>(limited - 3U, 15U)), static_cast<std::uint32_t>(limited), static_cast<std::uint32_t>(matchOffset)});
-            for (std::size_t i = 1; i < limited && position + i + 2 < input.size(); ++i) {
-                const auto key = (static_cast<std::uint32_t>(input[position + i]) << 16U)
-                    | (static_cast<std::uint32_t>(input[position + i + 1]) << 8U) | input[position + i + 2];
-                last[key] = position + i;
-            }
-            position += limited;
-        } else {
-            tokens.push_back({input[position], 1, 0});
-            ++position;
-        }
-    }
-    std::array<std::uint64_t, kSymbolCount> frequencies{};
-    for (const Token& token : tokens) ++frequencies[token.symbol];
-    std::array<std::uint8_t, kSymbolCount> lengths{};
-    const auto codes = BuildCodes(frequencies, lengths);
-    if (!codes) return std::nullopt;
     std::vector<std::uint8_t> result;
-    result.reserve(kTableBytes + input.size());
-    for (std::size_t symbol = 0; symbol != kSymbolCount; symbol += 2)
-        result.push_back(static_cast<std::uint8_t>(lengths[symbol] | (lengths[symbol + 1] << 4U)));
-    BitWriter writer;
-    for (const Token& token : tokens) {
-        writer.Write((*codes)[token.symbol].bits, (*codes)[token.symbol].length);
-        if (token.symbol >= 256U) {
-            const std::uint32_t length = token.length - 3U;
-            if ((token.symbol & 15U) == 15U) {
-                if (length < 270U) writer.WriteRawByte(static_cast<std::uint8_t>(length - 15U));
-                else if (length <= 65535U) { writer.WriteRawByte(255); writer.WriteRaw16(length); }
-                else { writer.WriteRawByte(255); writer.WriteRaw16(0); writer.WriteRaw32(length); }
+    constexpr std::size_t kBlockSize = 65536U;
+    constexpr std::size_t kHashSize = 65536U;
+    constexpr std::size_t kMissing = std::numeric_limits<std::size_t>::max();
+    for (std::size_t blockOffset = 0; blockOffset < input.size();) {
+        const std::size_t blockSize = std::min(kBlockSize, input.size() - blockOffset);
+        const auto block = input.subspan(blockOffset, blockSize);
+        std::vector<Token> tokens;
+        tokens.reserve(blockSize);
+        std::array<std::size_t, kHashSize> last;
+        last.fill(kMissing);
+        const auto hash = [](std::uint32_t key) {
+            return static_cast<std::size_t>((key * 2654435761U) >> 16U);
+        };
+        for (std::size_t position = 0; position < block.size();) {
+            std::size_t matchLength = 0;
+            std::size_t matchOffset = 0;
+            if (position + 3 <= block.size()) {
+                const std::uint32_t key = (static_cast<std::uint32_t>(block[position]) << 16U)
+                    | (static_cast<std::uint32_t>(block[position + 1]) << 8U) | block[position + 2];
+                const std::size_t slot = hash(key);
+                const std::size_t candidate = last[slot];
+                if (candidate != kMissing && position - candidate <= 65535U) {
+                    while (matchLength < block.size() - position
+                        && block[candidate + matchLength] == block[position + matchLength]) ++matchLength;
+                    if (matchLength >= 3) matchOffset = position - candidate;
+                }
+                last[slot] = position;
             }
-            const unsigned offsetBits = (token.symbol - 256U) >> 4U;
-            if (offsetBits != 0) writer.Write(token.offset - (1U << offsetBits), offsetBits);
+            if (matchLength >= 3) {
+                const std::size_t limited = std::min<std::size_t>(matchLength, 0xFFFFFFFFU - 3U);
+                const unsigned offsetBits = std::bit_width(static_cast<unsigned>(matchOffset)) - 1U;
+                tokens.push_back({static_cast<std::uint16_t>(256U + (offsetBits << 4U)
+                    + std::min<std::size_t>(limited - 3U, 15U)), static_cast<std::uint32_t>(limited),
+                    static_cast<std::uint32_t>(matchOffset)});
+                for (std::size_t i = 1; i < limited && position + i + 2 < block.size(); ++i) {
+                    const auto key = (static_cast<std::uint32_t>(block[position + i]) << 16U)
+                        | (static_cast<std::uint32_t>(block[position + i + 1]) << 8U)
+                        | block[position + i + 2];
+                    last[hash(key)] = position + i;
+                }
+                position += limited;
+            } else {
+                tokens.push_back({block[position], 1, 0});
+                ++position;
+            }
         }
+        std::array<std::uint64_t, kSymbolCount> frequencies{};
+        for (const Token& token : tokens) ++frequencies[token.symbol];
+        std::array<std::uint8_t, kSymbolCount> lengths{};
+        auto codes = BuildCodes(frequencies, lengths);
+        if (!codes) {
+            tokens.clear();
+            tokens.reserve(block.size());
+            frequencies.fill(0);
+            for (const std::uint8_t value : block) {
+                tokens.push_back({value, 1, 0});
+                ++frequencies[value];
+            }
+            lengths.fill(0);
+            codes = BuildCodes(frequencies, lengths);
+        }
+        if (!codes) return std::nullopt;
+        for (std::size_t symbol = 0; symbol != kSymbolCount; symbol += 2)
+            result.push_back(static_cast<std::uint8_t>(lengths[symbol] | (lengths[symbol + 1] << 4U)));
+        BitWriter writer;
+        for (const Token& token : tokens) {
+            writer.Write((*codes)[token.symbol].bits, (*codes)[token.symbol].length);
+            if (token.symbol >= 256U) {
+                const std::uint32_t length = token.length - 3U;
+                if ((token.symbol & 15U) == 15U) {
+                    if (length < 270U) writer.WriteRawByte(static_cast<std::uint8_t>(length - 15U));
+                    else if (length <= 65535U) { writer.WriteRawByte(255); writer.WriteRaw16(length); }
+                    else { writer.WriteRawByte(255); writer.WriteRaw16(0); writer.WriteRaw32(length); }
+                }
+                const unsigned offsetBits = (token.symbol - 256U) >> 4U;
+                if (offsetBits != 0) writer.Write(token.offset - (1U << offsetBits), offsetBits);
+            }
+        }
+        const auto encodedBlock = writer.Finish();
+        result.insert(result.end(), encodedBlock.begin(), encodedBlock.end());
+        blockOffset += blockSize;
     }
-    const auto bits = writer.Finish();
-    result.insert(result.end(), bits.begin(), bits.end());
     return result;
 }
 
@@ -295,6 +325,9 @@ public:
         return true;
     }
     [[nodiscard]] std::size_t Position() const noexcept { return position_; }
+    [[nodiscard]] std::size_t BoundaryPosition() const noexcept {
+        return position_;
+    }
 private:
     std::span<const std::uint8_t> bytes_;
     std::size_t position_ = 0;
@@ -342,13 +375,19 @@ std::optional<std::vector<DecodeNode>> BuildTree(std::span<const std::uint8_t> t
     }
     return tree;
 }
-
 std::optional<std::vector<std::uint8_t>> DecodeStream(
     std::span<const std::uint8_t> stream,
     std::uint64_t expectedSize) {
     if (expectedSize > std::numeric_limits<std::size_t>::max()) return std::nullopt;
     std::vector<std::uint8_t> output;
-    output.reserve(static_cast<std::size_t>(expectedSize));
+    if (expectedSize > output.max_size()) return std::nullopt;
+    try {
+        output.reserve(static_cast<std::size_t>(expectedSize));
+    } catch (const std::bad_alloc&) {
+        return std::nullopt;
+    } catch (const std::length_error&) {
+        return std::nullopt;
+    }
     std::size_t tableOffset = 0;
     while (output.size() < expectedSize) {
         if (stream.size() < tableOffset || stream.size() - tableOffset < kTableBytes) return std::nullopt;
@@ -393,12 +432,13 @@ std::optional<std::vector<std::uint8_t>> DecodeStream(
                 }
             }
             const std::uint64_t length = static_cast<std::uint64_t>(lengthCode) + 3U;
+            if (offset == 0 || offset > output.size()
+                || length > expectedSize - output.size()) return std::nullopt;
             if (!bits.ReadBits(offsetBits, value)) return std::nullopt;
-            if (offset == 0 || offset > output.size() || length > expectedSize - output.size()) return std::nullopt;
             for (std::uint64_t i = 0; i != length; ++i) output.push_back(output[output.size() - offset]);
             producedInBlock += static_cast<std::size_t>(length);
         }
-        tableOffset += bits.Position();
+        tableOffset += bits.BoundaryPosition();
     }
     return output;
 }
