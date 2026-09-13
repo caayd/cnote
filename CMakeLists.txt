@@ -298,3 +298,22 @@ target_include_directories(cnote_latex_qt PUBLIC src)
 target_compile_features(cnote_latex_qt PUBLIC cxx_std_20)
 target_compile_definitions(cnote_latex_qt PUBLIC CNOTE_LATEX_QT_BACKEND)
 target_link_libraries(cnote_latex_qt PUBLIC cnote_model microtex_qt Qt6::Gui)
+
+# --- Qt canvas services (migration plan steps 3.1/3.3/3.6) --------------------
+# Portable rendering layer: QTextDocument/QTextLayout text layout and the
+# QPainter/QImage committed-object page renderer. No widgets, no App/HWND/HDC.
+add_library(cnote_render_qt STATIC
+    src/text/TextLayoutQt.cpp
+    src/render/PageRenderer.cpp
+)
+target_include_directories(cnote_render_qt PUBLIC src)
+target_compile_features(cnote_render_qt PUBLIC cxx_std_20)
+target_link_libraries(cnote_render_qt PUBLIC cnote_model cnote_latex_qt Qt6::Gui)
+
+# Throwaway render harness: renders a synthetic Document offscreen and checks
+# layer order, transparent text backgrounds, span application, clipping, cache
+# reuse and geometry stability. Not a CTest.
+add_executable(cnote_render_harness tests/RenderHarness.cpp)
+target_compile_definitions(cnote_render_harness PRIVATE
+    CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
+target_link_libraries(cnote_render_harness PRIVATE cnote_render_qt)
