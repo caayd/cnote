@@ -61,7 +61,6 @@ public:
     [[nodiscard]] float Zoom() const { return zoom_; }
     void SetZoom(float zoom, std::optional<QPointF> anchor = std::nullopt);
     void ZoomBySteps(int steps, const QPointF& anchor);
-    void SetZoomAt(const QPointF& anchor, float zoom);
     // Reference fit: zoom 1.0 makes the widest page fit the canvas minus the
     // zoom reference inset (App::ApplyZoomPreset of its fit preset).
     void FitToWindow();
@@ -69,7 +68,6 @@ public:
 
     void PanBy(const QPointF& delta);
     void CenterOnPage(std::size_t pageIndex);
-    void FocusPage(std::size_t pageIndex) { CenterOnPage(pageIndex); }
 
     // --- geometry ---------------------------------------------------------
     [[nodiscard]] std::vector<CanvasPageView> CalculatePageViews() const;
@@ -94,7 +92,6 @@ public:
     bool ExtendStrokeTo(const QPointF& logical);
     void EndStroke();
     void CancelStroke();
-    [[nodiscard]] bool HasActiveStroke() const;
 
     // Diagnostics used by the smoke harness/timings.
     [[nodiscard]] std::size_t CachedSurfaceCount() const;
@@ -162,7 +159,6 @@ private:
     std::unordered_map<std::size_t, PageSurfaces> surfaces_;
     render::PdfBackgroundProvider* pdfBackground_ = nullptr;
     float cachedDevicePixelRatio_ = 0.0f;
-    std::uint64_t cachedRevision_ = 0;
     std::size_t lastPaintPageCount_ = 0;
 
     static constexpr std::size_t kScalesPerPage = 3;

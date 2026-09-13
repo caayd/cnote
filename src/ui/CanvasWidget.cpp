@@ -95,10 +95,6 @@ void CanvasWidget::ZoomBySteps(int steps, const QPointF& anchor) {
     SetZoom(zoom_ * factor, anchor);
 }
 
-void CanvasWidget::SetZoomAt(const QPointF& anchor, float zoom) {
-    SetZoom(zoom, anchor);
-}
-
 void CanvasWidget::FitToWindow() {
     SetZoom(1.0f);
 }
@@ -577,10 +573,6 @@ void CanvasWidget::CancelStroke() {
         }
     }
     update();
-}
-
-bool CanvasWidget::HasActiveStroke() const {
-    return drawing_;
 }
 
 void CanvasWidget::mousePressEvent(QMouseEvent* event) {
