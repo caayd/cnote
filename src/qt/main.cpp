@@ -10,6 +10,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QStringList>
 #include <QMessageBox>
 #include <QString>
 
@@ -17,6 +18,7 @@
 #include <filesystem>
 #include <string>
 
+#include "Unicode.h"
 #include "latex/LatexEngine.h"
 #include "platform/AppResourcePaths.h"
 #include "qt/QtDocumentController.h"
@@ -52,16 +54,20 @@ int main(int argc, char** argv) {
     bool selfCheck = false;
     std::filesystem::path selfCheckFixture;
     std::filesystem::path startupFile;
-    for (int index = 1; index < argc; ++index) {
-        const std::string argument = argv[index];
+    // Qt's argument list is the wide command line; argv is code-page encoded and
+    // std::filesystem::path(narrow) decodes as UTF-8 on MinGW, which throws for
+    // non-ASCII paths (a double-clicked project with an accented name).
+    const QStringList argumentList = QCoreApplication::arguments();
+    for (int index = 1; index < argumentList.size(); ++index) {
+        const std::string argument = argumentList.at(index).toUtf8().toStdString();
         constexpr const char* kSelfCheck = "--self-check=";
         if (argument == "--self-check") {
             selfCheck = true;
         } else if (argument.rfind(kSelfCheck, 0) == 0) {
             selfCheck = true;
-            selfCheckFixture = std::filesystem::path(argument.substr(std::char_traits<char>::length(kSelfCheck)));
+            selfCheckFixture = cnote::Utf8ToPath(argument.substr(std::char_traits<char>::length(kSelfCheck)));
         } else if (argument.rfind("--", 0) != 0 && startupFile.empty()) {
-            startupFile = std::filesystem::path(argument);
+            startupFile = cnote::Utf8ToPath(argument);
         }
     }
     if (selfCheck && selfCheckFixture.empty()) {
@@ -73,7 +79,7 @@ int main(int argc, char** argv) {
         // A missing resource tree is a visible startup error, never silently
         // disabled equations (plan step 3.8).
         if (selfCheck) {
-            std::fprintf(stderr, "self-check: MicroTeX resources not found at %s\n", resRoot.string().c_str());
+            std::fprintf(stderr, "self-check: MicroTeX resources not found at %s\n", cnote::PathToUtf8(resRoot).c_str());
         } else {
             QMessageBox::critical(
                 nullptr,
@@ -99,7 +105,7 @@ int main(int argc, char** argv) {
         if (!fileToOpen.empty()) {
             if (!window.OpenPath(fileToOpen)) {
                 if (selfCheck) {
-                    std::fprintf(stderr, "self-check: cannot open %s\n", fileToOpen.string().c_str());
+                    std::fprintf(stderr, "self-check: cannot open %s\n", cnote::PathToUtf8(fileToOpen).c_str());
                 }
                 exitCode = 3;
             }
