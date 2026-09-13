@@ -20,6 +20,10 @@ target_compile_options(cnote_model PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
 
+# The legacy Win32 frontend is Windows-only.  The migration configuration must
+# configure and build on Linux/macOS without any legacy Win32 target or test
+# (migration plan step 1.5); `cnote` keeps building on Windows until cutover.
+if(WIN32)
 add_library(cnote_core STATIC
     src/App.cpp
     src/AppSettings.cpp
@@ -80,6 +84,7 @@ target_compile_definitions(cnote_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEA
 target_compile_options(cnote_core PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
+endif()  # legacy Win32 frontend
 
 # Vendored tinyxml2 10.0.0 (zlib license), required by MicroTeX's XML parsers.
 add_library(tinyxml2 STATIC third_party/tinyxml2/tinyxml2.cpp)
@@ -91,7 +96,11 @@ target_include_directories(tinyxml2 PUBLIC third_party/tinyxml2)
 # from the compiled-in Computer Modern metrics below.
 # Source list mirrors upstream CMakeLists.txt (their target also builds a
 # sample exe and requires pkg-config; we want neither).
-add_library(microtex STATIC
+#
+# The engine sources are shared by the legacy Windows GDI target (`microtex`,
+# Windows only) and the Qt target (`microtex_qt`, all platforms).  The two
+# platform backends must never be compiled into one target (plan step 1.5).
+set(CNOTE_MICROTEX_ENGINE_SOURCES
     third_party/microtex/src/atom/atom_basic.cpp
     third_party/microtex/src/atom/atom_char.cpp
     third_party/microtex/src/atom/atom_impl.cpp
@@ -170,41 +179,60 @@ add_library(microtex STATIC
     third_party/microtex/src/res/sym/symspecial.def.cpp
     third_party/microtex/src/latex.cpp
     third_party/microtex/src/render.cpp
-    third_party/microtex/src/platform/gdi_win/graphic_win32.cpp
 )
-target_include_directories(microtex PUBLIC third_party/microtex/src)
-target_compile_definitions(microtex PUBLIC BUILD_WIN32)
-# _HAS_STD_BYTE=0 is only needed while compiling MicroTeX's own sources; it must
-# not leak to consumers, where Qt requires std::byte.
-target_compile_definitions(microtex PRIVATE _HAS_STD_BYTE=0)
-target_link_libraries(microtex PUBLIC tinyxml2 gdiplus)
 
-target_link_libraries(cnote_core PUBLIC
-    comdlg32
-    comctl32
-    d3d11
-    dcomp
-    dwmapi
-    dxgi
-    gdi32
-    gdiplus
-    microtex
-    msimg32
-    pdfium
-    uxtheme
-    user32
-    winmm
-)
+# Legacy Windows GDI backend, used by the Win32 frontend and its tests until
+# cutover.  It exists only on Windows so the migration configuration has no
+# legacy platform target (plan step 1.5).
+if(WIN32)
+    add_library(microtex STATIC
+        ${CNOTE_MICROTEX_ENGINE_SOURCES}
+        third_party/microtex/src/platform/gdi_win/graphic_win32.cpp
+    )
+    target_include_directories(microtex PUBLIC third_party/microtex/src)
+    target_compile_definitions(microtex PUBLIC BUILD_WIN32)
+    # _HAS_STD_BYTE=0 is only needed while compiling MicroTeX's own sources; it
+    # must not leak to consumers, where Qt requires std::byte.
+    target_compile_definitions(microtex PRIVATE _HAS_STD_BYTE=0)
+    target_link_libraries(microtex PUBLIC tinyxml2 gdiplus)
+endif()
+
+if(WIN32)
+    # Legacy Win32 system libraries, linked only by the Win32 frontend (the Qt
+    # application links none of these; plan step 7.1 removes them at cutover).
+    target_link_libraries(cnote_core PUBLIC
+        comdlg32
+        comctl32
+        d3d11
+        dcomp
+        dwmapi
+        dxgi
+        gdi32
+        gdiplus
+        microtex
+        msimg32
+        pdfium
+        uxtheme
+        user32
+        winmm
+    )
+endif()
 
 # The MicroTeX font TTFs are external files; stage them next to the app.
-add_custom_command(TARGET cnote POST_BUILD
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res"
-        "$<TARGET_FILE_DIR:cnote>/latex-res"
-)
+if(WIN32)
+    add_custom_command(TARGET cnote POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res"
+            "$<TARGET_FILE_DIR:cnote>/latex-res"
+    )
+endif()
 
 enable_testing()
 
+# Legacy Win32 tests: they compile the GDI text/PDF backends and the Win32
+# frontend, so they exist only on Windows.  The portable replacements are the Qt
+# tests below (plan step 7.5).
+if(WIN32)
 add_executable(cnote_latex_engine_tests
     tests/LatexEngineTests.cpp
     src/latex/LatexEngine.cpp
@@ -261,6 +289,7 @@ add_custom_command(TARGET cnote POST_BUILD
 add_executable(cnote_project_session_tests tests/ProjectSessionTests.cpp)
 target_link_libraries(cnote_project_session_tests PRIVATE cnote_core)
 add_test(NAME project_sessions COMMAND cnote_project_session_tests)
+endif()  # legacy Win32 tests
 
 # --- Qt MicroTeX backend (migration plan step 3.8) ----------------------------
 # `microtex_qt` is built from the same engine sources as `microtex`, but with the
@@ -278,11 +307,8 @@ add_test(NAME project_sessions COMMAND cnote_project_session_tests)
 # directories stay stripped.
 find_package(Qt6 6.11.2 REQUIRED COMPONENTS Gui)
 
-get_target_property(_cnote_microtex_sources microtex SOURCES)
-list(FILTER _cnote_microtex_sources EXCLUDE REGEX "platform/gdi_win/graphic_win32\\.cpp$")
-
 add_library(microtex_qt STATIC
-    ${_cnote_microtex_sources}
+    ${CNOTE_MICROTEX_ENGINE_SOURCES}
     third_party/microtex/src/platform/qt/graphic_qt.cpp
 )
 target_include_directories(microtex_qt PUBLIC third_party/microtex/src)
@@ -408,6 +434,8 @@ add_library(cnote_qt_ui STATIC
     src/document/XpressCodec.cpp
     src/document/LoadDocumentFile.cpp
     src/Unicode.cpp
+    # Shared session/view registry and autosave timers (Qt Core only).
+    src/shell/AppManager.cpp
 )
 set_target_properties(cnote_qt_ui PROPERTIES AUTOMOC ON)
 target_include_directories(cnote_qt_ui PUBLIC src)
@@ -588,6 +616,193 @@ else()
     set_tests_properties(layout_parity_qt PROPERTIES TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
 endif()
+# --- Qt packaging: installed resources, deployment and CPack ------------------
+# Migration plan steps 7.3/7.4.
+#
+# The Qt application is the packaging product from here on.  The legacy Win32
+# `cnote` target keeps building on Windows but is neither installed nor
+# packaged; the final target rename happens at cutover, not here.
+#
+# Layout produced by `cmake --install <prefix>` and by CPack:
+#   Windows: <prefix>/bin/cnote_qt.exe, Qt DLLs, the MinGW compiler runtime and
+#            platform/image plugins under <prefix>/plugins, pdfium.dll and
+#            latex-res/ beside the executable (windeployqt layout).
+#   Linux:   <prefix>/bin/cnote_qt + bin/latex-res, <prefix>/lib/libQt6*.so and
+#            libpdfium.so, <prefix>/plugins/..., <prefix>/bin/qt.conf.  RPATHs
+#            are $ORIGIN-relative, so the tree can be extracted anywhere.
+#   macOS:   <prefix>/cnote_qt.app with Contents/Resources/latex-res and
+#            Contents/Frameworks/libpdfium.dylib.  Present but UNVERIFIED: there
+#            is no macOS machine in this environment (see the packaging report).
+#
+# `include(CPack)` must remain the last statement of this project: it captures
+# the install rules above.
+if(TARGET cnote_qt)
+    include(GNUInstallDirs)
+
+    # -- installed-location resource lookup and packaged application icon -----
+    # The helper resolves latex-res from the installed application directory
+    # (Contents/Resources inside a macOS bundle) instead of the current working
+    # directory; main.cpp calls it, and tests may link it too.
+    add_library(cnote_platform_qt STATIC
+        src/platform/AppResourcePaths.cpp
+    )
+    target_include_directories(cnote_platform_qt PUBLIC src)
+    target_compile_features(cnote_platform_qt PUBLIC cxx_std_20)
+    target_compile_options(cnote_platform_qt PRIVATE
+        $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+    )
+    target_link_libraries(cnote_platform_qt PUBLIC Qt6::Gui)
+    # The same artwork as the Windows .rc icon and the macOS bundle icon, made
+    # available to Qt on every platform.
+    qt_add_resources(cnote_platform_qt "cnote_app_icons"
+        PREFIX "/cnote"
+        BASE "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+        FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/cnote.ico"
+    )
+    target_link_libraries(cnote_qt_ui PUBLIC cnote_platform_qt)
+
+    # The Windows icon resource stays conditional; no other platform compiles it.
+    if(WIN32)
+        target_sources(cnote_qt PRIVATE src/cnote.rc)
+    endif()
+
+    # -- install layout -------------------------------------------------------
+    get_target_property(_cnote_qt_output_name cnote_qt OUTPUT_NAME)
+    if(NOT _cnote_qt_output_name)
+        set(_cnote_qt_output_name "cnote_qt")
+    endif()
+    set(_cnote_qt_app_bundle "${_cnote_qt_output_name}.app")
+    if(APPLE)
+        set(_cnote_qt_resource_dest "${_cnote_qt_app_bundle}/Contents/Resources")
+    else()
+        set(_cnote_qt_resource_dest "${CMAKE_INSTALL_BINDIR}")
+    endif()
+
+    install(TARGETS cnote_qt
+        BUNDLE DESTINATION .
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+    )
+
+    # MicroTeX's XML/TTF resources must remain real files (plan step 3.8): stage
+    # them beside the executable, or in Contents/Resources inside a bundle.
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res/"
+        DESTINATION "${_cnote_qt_resource_dest}/latex-res"
+    )
+
+    # PDFium: the exact runtime library the build linked, installed where the
+    # installed application loads it without any developer PATH entry.
+    if(APPLE)
+        install(FILES "$<TARGET_FILE:pdfium>"
+            DESTINATION "${_cnote_qt_app_bundle}/Contents/Frameworks")
+    elseif(WIN32)
+        install(FILES "$<TARGET_FILE:pdfium>" DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    else()
+        install(FILES "$<TARGET_FILE:pdfium>" DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+    endif()
+
+    # Relocatable runtime paths: the installed executable finds the deployed
+    # libraries relative to itself, never through a build-machine path.
+    if(APPLE)
+        set_target_properties(cnote_qt PROPERTIES
+            INSTALL_RPATH "@executable_path/../Frameworks")
+    elseif(UNIX)
+        set_target_properties(cnote_qt PROPERTIES
+            INSTALL_RPATH "$ORIGIN/../lib")
+    endif()
+
+    # -- macOS bundle (configured, explicitly unverified) ---------------------
+    if(APPLE)
+        set_target_properties(cnote_qt PROPERTIES
+            MACOSX_BUNDLE TRUE
+            MACOSX_BUNDLE_BUNDLE_NAME "cnote"
+            # Placeholder reverse-DNS identifier: macOS signing/notarization and
+            # the real distribution identifier are release prerequisites that
+            # cannot be verified or chosen without a macOS machine.
+            MACOSX_BUNDLE_GUI_IDENTIFIER "org.cnote.app"
+            MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        )
+        # Bundle icon generated from the same assets/cnote.ico artwork.  The
+        # generator is only needed on macOS; skipping it (no Python) leaves the
+        # bundle without CFBundleIconFile rather than failing the build.
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            set(_cnote_qt_icns "${CMAKE_CURRENT_BINARY_DIR}/cnote.icns")
+            add_custom_command(OUTPUT "${_cnote_qt_icns}"
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-icns.py"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/assets/cnote.ico"
+                    "${_cnote_qt_icns}"
+                DEPENDS
+                    "${CMAKE_CURRENT_SOURCE_DIR}/assets/cnote.ico"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-icns.py"
+                COMMENT "Generating cnote.icns from assets/cnote.ico"
+                VERBATIM
+            )
+            add_custom_target(cnote_qt_bundle_icon ALL DEPENDS "${_cnote_qt_icns}")
+            install(FILES "${_cnote_qt_icns}"
+                DESTINATION "${_cnote_qt_app_bundle}/Contents/Resources")
+            set_target_properties(cnote_qt PROPERTIES
+                MACOSX_BUNDLE_ICON_FILE "cnote.icns")
+        endif()
+    endif()
+
+    # -- Qt runtime deployment (plan step 7.3) --------------------------------
+    # Windows: windeployqt (Qt DLLs, platform/image plugins, MinGW compiler
+    # runtime).  Linux/macOS: the Qt deploy tool copies the Qt libraries (and
+    # plugins on Linux) and writes a relative qt.conf.  Libraries that cannot be
+    # resolved are left to the verification script, which fails loudly.
+    #
+    # On Linux the offscreen platform plugin ships too: it lets the packaged
+    # application (and tools/verify-package.cmake) run the real binary headless
+    # on a machine without a display.  Windows' default windeployqt set already
+    # carries everything the verifier requires; macOS is handled by macdeployqt.
+    set(_cnote_qt_deploy_plugin_args "")
+    if(UNIX AND NOT APPLE)
+        set(_cnote_qt_deploy_plugin_args INCLUDE_PLUGINS offscreen)
+    endif()
+    qt_generate_deploy_app_script(
+        TARGET cnote_qt
+        OUTPUT_SCRIPT _cnote_qt_deploy_script
+        NO_UNSUPPORTED_PLATFORM_ERROR
+        ${_cnote_qt_deploy_plugin_args}
+    )
+    install(SCRIPT "${_cnote_qt_deploy_script}")
+
+    # -- CPack: Windows x64 ZIP, Linux x64 relocatable TGZ --------------------
+    set(CPACK_PACKAGE_NAME "cnote")
+    set(CPACK_PACKAGE_VENDOR "cnote")
+    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+        "cnote note-taking application (Qt ${Qt6_VERSION} build)")
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        if(APPLE AND CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
+            set(_cnote_qt_package_arch "arm64")
+        else()
+            set(_cnote_qt_package_arch "x64")
+        endif()
+    else()
+        set(_cnote_qt_package_arch "x86")
+    endif()
+    # Deterministic artifact name; the archive gets the same name as its
+    # top-level directory (CPACK_INCLUDE_TOPLEVEL_DIRECTORY below).
+    set(CPACK_PACKAGE_FILE_NAME
+        "cnote_qt-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}-${_cnote_qt_package_arch}")
+    set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
+    set(CPACK_PACKAGE_CHECKSUM "SHA256")
+    if(WIN32)
+        set(CPACK_GENERATOR "ZIP")
+    elseif(APPLE)
+        # Configured but unverified: drag-and-drop DMG for the (unsigned,
+        # un-notarized) bundle.  macOS artifacts are not produced here.
+        set(CPACK_GENERATOR "DragNDrop")
+        set(CPACK_DMG_VOLUME_NAME "cnote")
+    else()
+        set(CPACK_GENERATOR "TGZ")
+    endif()
+    include(CPack)
+endif()
+
 # --- Qt settings dialogs (migration plan step 6.2) ----------------------------
 # QDialog ports of SettingsWindow and NewPageSettingsWindow driven by the
 # portable settings service: same categories, controls, draft/apply semantics
@@ -645,105 +860,3 @@ if(WIN32)
         endforeach()
     endforeach()
 endif()
-
-# --- Qt compact chrome widgets (migration plan steps 6.1/6.2/6.3) -------------
-# ToolbarWidget reproduces the reference compact toolbar (34 logical-pixel base
-# height, 30 icon buttons, 22 color swatch, palette swatch menu and palette/tool
-# wheel, quick-size and text-format popups, 120 ms auto-hide) and SidebarWidget
-# reproduces the left-edge PDF sidebar (176 logical pixels, lazily composed page
-# thumbnails, bottom header, local wheel scrolling, 150 ms slide).  Both take
-# model/settings data and report navigation/command intents as signals; neither
-# contains App/HWND/HDC state or command logic.  Reference SVG artwork is shipped
-# through Qt resources with a filesystem fallback for out-of-tree harnesses;
-# the SVGs are parsed with the ported reference path parser, so the chrome needs
-# only Qt Core/Gui/Widgets (plan step 1.3), never the optional Qt SVG module.
-
-add_library(cnote_chrome_qt STATIC
-    src/ui/ChromeAssetsQt.cpp
-    src/ui/ToolbarWidget.cpp
-    src/ui/SidebarWidget.cpp
-)
-set_target_properties(cnote_chrome_qt PROPERTIES AUTOMOC ON)
-target_include_directories(cnote_chrome_qt PUBLIC src)
-target_compile_features(cnote_chrome_qt PUBLIC cxx_std_20)
-target_compile_options(cnote_chrome_qt PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-qt_add_resources(cnote_chrome_qt "cnote_chrome_assets"
-    PREFIX "/cnote"
-    BASE "assets"
-    FILES
-        assets/icons/zoom.svg
-        assets/icons/text.svg
-        assets/icons/new-page.svg
-        assets/icons/pan.svg
-        assets/icons/settings.svg
-        assets/icons/cursor.svg
-        assets/icons/draw.svg
-        assets/icons/erase.svg
-        assets/icons/lasso.svg
-        assets/icons/redo.svg
-        assets/icons/undo.svg
-        assets/icons/text/bold.svg
-        assets/icons/text/italics.svg
-        assets/icons/text/underline.svg
-        assets/icons/text/left-or.svg
-        assets/icons/text/cent-or.svg
-        assets/icons/text/right-or.svg
-)
-target_link_libraries(cnote_chrome_qt PUBLIC
-    cnote_layout_qt cnote_settings_qt cnote_render_qt Qt6::Widgets)
-
-# The Qt shell is the product consumer of the chrome widgets.
-if(TARGET cnote_qt_ui)
-    target_link_libraries(cnote_qt_ui PUBLIC cnote_chrome_qt)
-endif()
-
-# Deterministic offscreen contract test (plan step 6.1): toolbar control rects
-# and hit regions against cnote::appui::qt for a width matrix including compact
-# widths, hover state, palette-wheel color/tool intents, popup-edge clamping,
-# sidebar page count/highlight/navigation intent, sidebar-local wheel isolation
-# and elapsed-time auto-hide/slide transitions.  Every wait is bounded, so the
-# test cannot block the suite.
-add_executable(cnote_chrome_tests tests/ChromeWidgetTests.cpp)
-target_compile_options(cnote_chrome_tests PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-target_link_libraries(cnote_chrome_tests PRIVATE cnote_chrome_qt cnote_model Qt6::Widgets)
-add_test(NAME chrome_qt COMMAND cnote_chrome_tests)
-set_tests_properties(chrome_qt PROPERTIES TIMEOUT 120
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
-
-# --- Qt interaction router (migration plan steps 5.1-5.3) ---------------------
-# Widget-free pointer/tool routing ported from src/shell/MessageLoop.cpp (tool
-# routing, drag state, capture) and the App interaction methods it calls.  Qt
-# Gui plus the model's Vec2 only: no QWidget, App, HWND or HDC.  The canvas
-# adopts it; src/ui/CanvasWidget.cpp stays with the canvas slice.
-add_library(cnote_interaction_qt STATIC
-    src/ui/InteractionRouter.cpp
-)
-target_include_directories(cnote_interaction_qt PUBLIC src)
-target_compile_features(cnote_interaction_qt PUBLIC cxx_std_20)
-target_compile_options(cnote_interaction_qt PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-target_link_libraries(cnote_interaction_qt PUBLIC cnote_model Qt6::Gui)
-
-# The Qt shell is the consumer; linking the library here is the single
-# preparation step the canvas slice needs before it adopts the router.
-if(TARGET cnote_qt_ui)
-    target_link_libraries(cnote_qt_ui PUBLIC cnote_interaction_qt)
-endif()
-
-# Deterministic behavior test over PointerSample sequences: tool routing,
-# precedence, modifier changes, page-boundary segmentation, pending-erase
-# commit-once, click-versus-drag thresholds and cancel-once.  Plain computation
-# over model types - no Qt platform or window is created.
-add_executable(cnote_interaction_router_tests tests/InteractionRouterTests.cpp)
-target_compile_features(cnote_interaction_router_tests PRIVATE cxx_std_20)
-target_compile_options(cnote_interaction_router_tests PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-target_link_libraries(cnote_interaction_router_tests PRIVATE cnote_interaction_qt)
-add_test(NAME interaction_router_qt COMMAND cnote_interaction_router_tests)
-set_tests_properties(interaction_router_qt PROPERTIES TIMEOUT 120)

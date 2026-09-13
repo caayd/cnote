@@ -113,6 +113,49 @@ does not inherit the legacy UI's Windows or Qt definitions. The legacy
 `cnote_core` and existing tests consume this target while the Windows product
 remains unchanged.
 
+## Package (Qt migration build)
+
+The Qt application (`cnote_qt`, migration target) installs and packages through
+Qt's CMake deploy API. The legacy Windows `cnote` target keeps building but is
+neither installed nor packaged; it is renamed at cutover.
+
+```text
+cmake -S . -B build-qt -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=<qt-root> -DCNOTE_PDFIUM_ROOT=<pdfium-root>
+cmake --build build-qt --target cnote_qt
+cmake --install build-qt --prefix <stage-directory>
+cpack --config build-qt/CPackConfig.cmake
+```
+
+CPack produces `cnote_qt-<version>-Windows-x64.zip`, a relocatable
+`cnote_qt-<version>-Linux-x64.tar.gz` (extract anywhere; the executable and
+plugins carry `$ORIGIN`-relative RPATHs), and a `DragNDrop` disk image on macOS.
+The macOS configuration is present but unverified: no macOS machine is
+available. CPack writes a `.sha256` checksum next to each artifact.
+
+Each package carries the MicroTeX `latex-res` tree beside the executable
+(`Contents/Resources` inside a macOS bundle), PDFium, the Qt platform and
+image-format plugins, and - on Windows - the MinGW compiler runtime. The
+application resolves `latex-res` relative to its installed location through
+`cnote::platform::LatexResourceDir()`, not the working directory.
+
+Verify a package before shipping it:
+
+```text
+cmake -DARTIFACT=<zip|tgz|install-directory> -DPLATFORM=windows|linux|macos \
+  -DFIXTURE=tools/fixtures/blank.cnote \
+  -DDEVELOPER_PREFIX=<build-machine SDK path> -DWORK_DIR=<scratch-directory> \
+  [-DQT_QPA_PLATFORM=offscreen] -P tools/verify-package.cmake
+```
+
+The check fails loudly on any missing runtime piece. It asserts the Qt
+libraries, platform/image plugins, PDFium, the MicroTeX resources (marker file
+and fonts) and the Windows compiler runtime are present, that the executable and
+`qt.conf` embed no build-machine path, and then launches the packaged
+application from an unrelated working directory with a sanitized environment
+(`--self-check=<fixture>`), requiring it to resolve its resources and open the
+project.
+
 ## Run
 
 ```powershell
