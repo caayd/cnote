@@ -20,71 +20,6 @@ target_compile_options(cnote_model PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
 
-# The legacy Win32 frontend is Windows-only.  The migration configuration must
-# configure and build on Linux/macOS without any legacy Win32 target or test
-# (migration plan step 1.5); `cnote` keeps building on Windows until cutover.
-if(WIN32)
-add_library(cnote_core STATIC
-    src/App.cpp
-    src/AppSettings.cpp
-    src/Unicode.cpp
-    src/ui/Layout.cpp
-    src/DpiUtil.cpp
-    src/NewPageSettingsWindow.cpp
-    src/PdfBackend.cpp
-    src/ProjectFile.cpp
-    src/SettingsWindow.cpp
-    src/ShortcutConfig.cpp
-    src/document/Clipboard.cpp
-    src/document/FileIO.cpp
-    src/document/History.cpp
-    src/document/LoadDocumentFile.cpp
-    src/document/Pages.cpp
-    src/document/SelectionClipboardCodec.cpp
-    src/document/Session.cpp
-    src/document/XpressCodec.cpp
-    src/latex/LatexEditing.cpp
-    src/latex/LatexCompletion.cpp
-    src/latex/LatexEngine.cpp
-    src/latex/LatexEngineGdi.cpp
-    src/PdfOverlayGdi.cpp
-    src/render/Paint.cpp
-    src/selection/Selection.cpp
-    src/selection/Geometry.cpp
-    src/selection/StrokeSmoothing.cpp
-    src/selection/Transforms.cpp
-    src/shell/Startup.cpp
-    src/shell/AppManager.cpp
-    src/ui/UiUtil.cpp
-    src/shell/MessageLoop.cpp
-    src/shell/ToolbarState.cpp
-    src/text/TextEditing.cpp
-    src/text/TextGeometry.cpp
-    src/viewport/Viewport.cpp
-)
-if(WIN32)
-    target_sources(cnote_core PRIVATE src/platform/windows/PrecisionTouchpad.cpp)
-endif()
-
-if(MINGW)
-    set_source_files_properties(
-        src/platform/windows/PrecisionTouchpad.cpp
-        PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/include")
-endif()
-
-
-add_executable(cnote WIN32 src/main.cpp src/cnote.rc)
-target_link_libraries(cnote PRIVATE cnote_core)
-
-target_include_directories(cnote_core PUBLIC src)
-target_link_libraries(cnote_core PUBLIC cnote_model Qt6::Core)
-
-target_compile_definitions(cnote_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
-
-target_compile_options(cnote_core PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-endif()  # legacy Win32 frontend
 
 # Vendored tinyxml2 10.0.0 (zlib license), required by MicroTeX's XML parsers.
 add_library(tinyxml2 STATIC third_party/tinyxml2/tinyxml2.cpp)
@@ -181,121 +116,15 @@ set(CNOTE_MICROTEX_ENGINE_SOURCES
     third_party/microtex/src/render.cpp
 )
 
-# Legacy Windows GDI backend, used by the Win32 frontend and its tests until
-# cutover.  It exists only on Windows so the migration configuration has no
-# legacy platform target (plan step 1.5).
-if(WIN32)
-    add_library(microtex STATIC
-        ${CNOTE_MICROTEX_ENGINE_SOURCES}
-        third_party/microtex/src/platform/gdi_win/graphic_win32.cpp
-    )
-    target_include_directories(microtex PUBLIC third_party/microtex/src)
-    target_compile_definitions(microtex PUBLIC BUILD_WIN32)
-    # _HAS_STD_BYTE=0 is only needed while compiling MicroTeX's own sources; it
-    # must not leak to consumers, where Qt requires std::byte.
-    target_compile_definitions(microtex PRIVATE _HAS_STD_BYTE=0)
-    target_link_libraries(microtex PUBLIC tinyxml2 gdiplus)
-endif()
 
-if(WIN32)
-    # Legacy Win32 system libraries, linked only by the Win32 frontend (the Qt
-    # application links none of these; plan step 7.1 removes them at cutover).
-    target_link_libraries(cnote_core PUBLIC
-        comdlg32
-        comctl32
-        d3d11
-        dcomp
-        dwmapi
-        dxgi
-        gdi32
-        gdiplus
-        microtex
-        msimg32
-        pdfium
-        uxtheme
-        user32
-        winmm
-    )
-endif()
 
-# The MicroTeX font TTFs are external files; stage them next to the app.
-if(WIN32)
-    add_custom_command(TARGET cnote POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res"
-            "$<TARGET_FILE_DIR:cnote>/latex-res"
-    )
-endif()
 
 enable_testing()
 
-# Legacy Win32 tests: they compile the GDI text/PDF backends and the Win32
-# frontend, so they exist only on Windows.  The portable replacements are the Qt
-# tests below (plan step 7.5).
-if(WIN32)
-add_executable(cnote_latex_engine_tests
-    tests/LatexEngineTests.cpp
-    src/latex/LatexEngine.cpp
-    src/latex/LatexEngineGdi.cpp
-    src/latex/LatexCompletion.cpp
-)
-target_include_directories(cnote_latex_engine_tests PRIVATE src)
-target_compile_definitions(cnote_latex_engine_tests PRIVATE
-    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602
-    LATEX_RES_ROOT=L"${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res"
-)
-target_link_libraries(cnote_latex_engine_tests PRIVATE cnote_model microtex gdiplus)
-add_test(NAME latex_engine COMMAND cnote_latex_engine_tests)
-
-add_executable(cnote_text_model_tests
-    tests/TextModelTests.cpp
-    src/DpiUtil.cpp
-    src/Unicode.cpp
-    src/document/SelectionClipboardCodec.cpp
-    src/latex/LatexEngine.cpp
-    src/latex/LatexEngineGdi.cpp
-    src/PdfBackend.cpp
-    src/PdfOverlayGdi.cpp
-    src/ProjectFile.cpp
-    src/selection/Geometry.cpp
-    src/selection/StrokeSmoothing.cpp
-    src/text/TextGeometry.cpp
-    src/ui/UiUtil.cpp
-    src/document/XpressCodec.cpp
-)
-target_include_directories(cnote_text_model_tests PRIVATE src)
-target_compile_definitions(cnote_text_model_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
-target_compile_options(cnote_text_model_tests PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-target_link_libraries(cnote_text_model_tests PRIVATE
-    comctl32
-    gdi32
-    gdiplus
-    microtex
-    msimg32
-    pdfium
-    user32
-)
-target_link_libraries(cnote_text_model_tests PRIVATE cnote_model Qt6::Core)
-add_test(NAME text_model_round_trip COMMAND cnote_text_model_tests)
-
-add_custom_command(TARGET cnote POST_BUILD
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-        "$<TARGET_FILE:pdfium>"
-        "$<TARGET_FILE_DIR:cnote>/pdfium.dll"
-)
-
-add_executable(cnote_project_session_tests tests/ProjectSessionTests.cpp)
-target_link_libraries(cnote_project_session_tests PRIVATE cnote_core)
-add_test(NAME project_sessions COMMAND cnote_project_session_tests)
-endif()  # legacy Win32 tests
 
 # --- Qt MicroTeX backend (migration plan step 3.8) ----------------------------
-# `microtex_qt` is built from the same engine sources as `microtex`, but with the
-# Qt platform adapter instead of the GDI one.  The two platform backends must
-# never be compiled into one target (plan step 1.5), so nothing links both
-# `microtex` and `microtex_qt`.
+# `microtex_qt` carries the MicroTeX engine sources plus the Qt platform
+# adapter; the GDI backend was removed at cutover (plan step 7.1).
 #
 # third_party/microtex/src/platform/qt/graphic_qt.{h,cpp} are vendored from
 # NanoMichael/MicroTeX @ 0e3707f6 (MIT; third_party/microtex/LICENSE) with local
@@ -313,16 +142,13 @@ add_library(microtex_qt STATIC
 )
 target_include_directories(microtex_qt PUBLIC third_party/microtex/src)
 target_compile_definitions(microtex_qt PUBLIC BUILD_QT)
-# The legacy `microtex` target sets _HAS_STD_BYTE=0 for MicroTeX's own sources
-# (an MSVC workaround for its `using namespace std;` headers).  This target's
-# Qt adapter TU includes Qt headers, which require std::byte, so the define
-# stays off here; it is unnecessary for MinGW/GCC/AppleClang.
+# _HAS_STD_BYTE=0 (an MSVC workaround for MicroTeX's `using namespace std;`
+# headers) is not needed here: this target's Qt adapter TU includes Qt headers,
+# which require std::byte.
 target_link_libraries(microtex_qt PUBLIC tinyxml2 Qt6::Gui)
 
-# Portable MicroTeX core plus the Qt QPainter drawing backend: the Qt
-# counterpart of the legacy `microtex` usage in cnote_core.  This is the home of
-# cnote::latex::Draw(FormulaHandle, QPainter&, ...) until the services layer
-# (plan steps 3-4) absorbs it.
+# Portable MicroTeX core plus the Qt QPainter drawing backend
+# (cnote::latex::Draw(FormulaHandle, QPainter&, ...)).
 add_library(cnote_latex_qt STATIC
     src/latex/LatexEngine.cpp
     src/latex/LatexEngineQt.cpp
@@ -346,9 +172,7 @@ target_include_directories(cnote_render_qt PUBLIC src)
 target_compile_features(cnote_render_qt PUBLIC cxx_std_20)
 target_link_libraries(cnote_render_qt PUBLIC cnote_model cnote_latex_qt Qt6::Gui)
 
-# Qt PDF export: the portable PDFium core plus the Qt overlay composition. The
-# legacy cnote_core keeps the GDI+ overlay (src/PdfOverlayGdi.cpp) until
-# cutover; the two overlay TUs are never linked into one target.
+# Qt PDF export: the portable PDFium core plus the Qt overlay composition.
 add_library(cnote_pdf_qt STATIC
     src/PdfBackend.cpp
     src/render/PdfExportQt.cpp
@@ -509,37 +333,13 @@ add_test(NAME settings_qt COMMAND cnote_settings_tests)
 set_tests_properties(settings_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
 
-# Windows-only parity harness: runs the real legacy App::LoadAppSettings and the
-# Qt parser over the same payload and diffs every parsed field, checks the Qt
-# shortcut table against src/ShortcutConfig.cpp, and compares both writers.
-if(WIN32 AND TARGET cnote_core)
-    add_executable(cnote_settings_parity_tests tests/SettingsParityTests.cpp)
-    target_compile_options(cnote_settings_parity_tests PRIVATE
-        $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-    )
-    target_link_libraries(cnote_settings_parity_tests PRIVATE cnote_core cnote_settings_qt)
-    add_test(NAME settings_parity_qt COMMAND cnote_settings_parity_tests)
-    set_tests_properties(settings_parity_qt PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
-    # The harness links cnote_core, so its Qt and PDFium runtime must sit next
-    # to the executable in a fresh build directory.
-    foreach(_cnote_parity_runtime Qt6::Core Qt6::Gui pdfium)
-        add_custom_command(TARGET cnote_settings_parity_tests POST_BUILD
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "$<TARGET_FILE:${_cnote_parity_runtime}>"
-                "$<TARGET_FILE_DIR:cnote_settings_parity_tests>"
-        )
-    endforeach()
-endif()
-
 # --- Qt clipboard bridge (migration plan step 2.6) ----------------------------
 # Platform-neutral CTS selection codec plus the QClipboard bridge: structured
 # selections travel as application/x-cnote-selection and, on Windows, through
 # Qt's Windows MIME bridge under the legacy registered format
 # cnote.selection.v1.  Ordinary image data and plain text are the paste
 # fallbacks in that order.  Qt Gui only - no widgets, no App/HWND/HDC - and
-# nothing here mutates a document.  The legacy Win32 clipboard path
-# (src/document/Clipboard.cpp) stays in cnote_core until cutover.
+# nothing here mutates a document.
 add_library(cnote_clipboard_qt STATIC
     src/document/SelectionClipboardCodec.cpp
     src/document/SelectionClipboardQt.cpp
@@ -575,8 +375,7 @@ endif()
 # Qt logical-pixel port of the reference chrome geometry (toolbar, toolbar
 # title/zoom, sidebar metrics and header, quick-size and text-format popups,
 # palette menu/wheel, toolbar auto-hide).  Qt Gui only - no widgets, no
-# App/HWND/HDC - so the Win32 frontend keeps src/ui/Layout.cpp until cutover
-# while the Qt shell consumes this one.  Every constant in src/ui/LayoutQt.cpp
+# App/HWND/HDC.  Every constant in src/ui/LayoutQt.cpp
 # records the call path it came from; the duplicate appui/App.cpp definitions
 # and their single disagreement (palette-wheel hover grow) are resolved in the
 # header comment.
@@ -616,10 +415,6 @@ target_compile_options(cnote_layout_parity_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
 target_link_libraries(cnote_layout_parity_tests PRIVATE cnote_layout_qt Qt6::Gui)
-if(WIN32 AND TARGET cnote_core)
-    target_link_libraries(cnote_layout_parity_tests PRIVATE cnote_core)
-    target_compile_definitions(cnote_layout_parity_tests PRIVATE CNOTE_LAYOUT_LEGACY_PARITY)
-endif()
 add_test(NAME layout_parity_qt COMMAND cnote_layout_parity_tests)
 # Windows needs the native platform: the offscreen plugin's font database
 # returns placeholder metrics there, while the harness compares real text
@@ -635,9 +430,7 @@ endif()
 # --- Qt packaging: installed resources, deployment and CPack ------------------
 # Migration plan steps 7.3/7.4.
 #
-# The Qt application is the packaging product from here on.  The legacy Win32
-# `cnote` target keeps building on Windows but is neither installed nor
-# packaged; the final target rename happens at cutover, not here.
+# The Qt application is the only product target; it is installed and packaged.
 #
 # Layout produced by `cmake --install <prefix>` and by CPack:
 #   Windows: <prefix>/bin/cnote_qt.exe, Qt DLLs, the MinGW compiler runtime and
@@ -916,9 +709,8 @@ set_tests_properties(new_page_dialog_qt PROPERTIES
 
 # --- Qt precision input: Windows touchpad and native gestures (plan 5.3/5.4) --
 # Portable decision core plus the Qt event filter the canvas installs on itself,
-# and the Windows-only QAbstractNativeEventFilter that reuses the existing
-# PrecisionTouchpad adapter (the legacy message-loop wiring stays in cnote_core
-# untouched).  Qt Gui/Core only for the portable half; no widgets, no App.
+# and the Windows-only QAbstractNativeEventFilter that reuses the touchpad
+# context adapter.  Qt Gui/Core only for the portable half; no widgets, no App.
 add_library(cnote_precision_input_qt STATIC
     src/ui/PrecisionInputRouter.cpp
     src/ui/PrecisionInputFilterQt.cpp
@@ -1123,17 +915,6 @@ target_compile_features(cnote_selection_math_tests PRIVATE cxx_std_20)
 target_compile_definitions(cnote_selection_math_tests PRIVATE
     CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
 target_link_libraries(cnote_selection_math_tests PRIVATE cnote_model cnote_latex_qt cnote_render_qt)
-if(WIN32)
-    target_sources(cnote_selection_math_tests PRIVATE
-        src/selection/Geometry.cpp
-        src/ui/UiUtil.cpp
-        src/DpiUtil.cpp
-    )
-    target_link_libraries(cnote_selection_math_tests PRIVATE gdiplus gdi32 user32 comctl32)
-    target_compile_definitions(cnote_selection_math_tests PRIVATE
-        CNOTE_SELECTION_LEGACY_REFERENCE=1
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
-endif()
 add_test(NAME selection_math_qt COMMAND cnote_selection_math_tests)
 set_tests_properties(selection_math_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
