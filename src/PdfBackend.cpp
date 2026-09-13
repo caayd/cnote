@@ -34,6 +34,17 @@ namespace text = cnote::text;
 
 namespace {
 
+// GDI+ text drawing is temporary Win32 code; model UTF-16 maps one 16-bit code
+// unit per wchar until the Qt renderer replaces it.
+std::wstring WideFromUtf16(std::u16string_view value) {
+    std::wstring wide;
+    wide.reserve(value.size());
+    for (char16_t unit : value) {
+        wide.push_back(static_cast<wchar_t>(unit));
+    }
+    return wide;
+}
+
 using geometry::BuildSmoothedPoints;
 using geometry::DistanceSquared;
 using geometry::StrokeRenderSmoothing;
@@ -370,7 +381,7 @@ void DrawPageText(Gdiplus::Graphics& graphics, const PageText& text, float pageW
         }
         return result;
     };
-    const auto measureSegment = [&](const std::wstring& value, const PageTextStyle& style) {
+    const auto measureSegment = [&](std::u16string_view value, const PageTextStyle& style) {
         Gdiplus::FontFamily family(PageTextFontFace(style.fontFamily));
         Gdiplus::Font font(
             &family,
@@ -378,17 +389,18 @@ void DrawPageText(Gdiplus::Graphics& graphics, const PageText& text, float pageW
             fontStyleFor(style),
             Gdiplus::UnitPixel);
         Gdiplus::RectF bounds;
-        graphics.MeasureString(value.c_str(), static_cast<INT>(value.size()), &font, Gdiplus::PointF(0.0f, 0.0f), &format, &bounds);
+        const std::wstring wideValue = WideFromUtf16(value);
+        graphics.MeasureString(wideValue.c_str(), static_cast<INT>(wideValue.size()), &font, Gdiplus::PointF(0.0f, 0.0f), &format, &bounds);
         return bounds.Width;
     };
 
     for (std::size_t lineIndex = 0; lineIndex < layout.lines.size(); ++lineIndex) {
-        const std::wstring& line = layout.lines[lineIndex];
+        const std::u16string& line = layout.lines[lineIndex];
         const std::size_t sourceStart = lineIndex < layout.lineStarts.size() ? layout.lineStarts[lineIndex] : 0U;
         const Gdiplus::REAL lineTop = top + (lineHeight * static_cast<Gdiplus::REAL>(lineIndex));
 
         struct Segment {
-            std::wstring value;
+            std::u16string value;
             PageTextStyle style;
             Gdiplus::REAL width = 0.0f;
         };
@@ -428,9 +440,10 @@ void DrawPageText(Gdiplus::Graphics& graphics, const PageText& text, float pageW
                 fontStyleFor(segment.style),
                 Gdiplus::UnitPixel);
             Gdiplus::SolidBrush brush(Gdiplus::Color(alpha, red, green, blue));
+            const std::wstring segmentWide = WideFromUtf16(segment.value);
             graphics.DrawString(
-                segment.value.c_str(),
-                static_cast<INT>(segment.value.size()),
+                segmentWide.c_str(),
+                static_cast<INT>(segmentWide.size()),
                 &font,
                 Gdiplus::PointF(drawX, lineTop),
                 &format,

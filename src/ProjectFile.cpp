@@ -16,37 +16,9 @@
 
 #include <windows.h>
 
+#include "Unicode.h"
+
 namespace cnote {
-
-std::string WideToUtf8(std::wstring_view value) {
-    if (value.empty()) {
-        return {};
-    }
-
-    const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
-    if (size <= 0) {
-        return {};
-    }
-
-    std::string utf8(static_cast<std::size_t>(size), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), utf8.data(), size, nullptr, nullptr);
-    return utf8;
-}
-
-std::wstring Utf8ToWide(std::string_view value) {
-    if (value.empty()) {
-        return {};
-    }
-
-    const int size = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
-    if (size <= 0) {
-        return {};
-    }
-
-    std::wstring wide(static_cast<std::size_t>(size), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), wide.data(), size);
-    return wide;
-}
 
 bool HasExtension(const std::wstring& path, const wchar_t* extension) {
     const std::filesystem::path filePath(path);
@@ -54,6 +26,26 @@ bool HasExtension(const std::wstring& path, const wchar_t* extension) {
 }
 
 namespace {
+
+// Transitional: Document path fields are still native wide until the path
+// migration; model UTF-16 maps one 16-bit code unit per wchar.
+std::wstring WideFromUtf16(std::u16string_view value) {
+    std::wstring wide;
+    wide.reserve(value.size());
+    for (char16_t unit : value) {
+        wide.push_back(static_cast<wchar_t>(unit));
+    }
+    return wide;
+}
+
+std::u16string Utf16FromWide(std::wstring_view value) {
+    std::u16string text;
+    text.reserve(value.size());
+    for (wchar_t unit : value) {
+        text.push_back(static_cast<char16_t>(unit));
+    }
+    return text;
+}
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
@@ -143,7 +135,7 @@ struct ByteReader {
         return true;
     }
 
-    [[nodiscard]] bool ReadString(std::wstring& value) {
+    [[nodiscard]] bool ReadString(std::u16string& value) {
         std::uint32_t size = 0;
         if (!Read(size)) {
             return false;
@@ -153,7 +145,7 @@ struct ByteReader {
         }
         const auto* begin = reinterpret_cast<const char*>(bytes.data() + offset);
         const std::string_view utf8(begin, size);
-        value = Utf8ToWide(utf8);
+        value = Utf8ToUtf16(utf8);
         offset += size;
         return true;
     }
@@ -209,8 +201,8 @@ void AppendValue(std::vector<std::uint8_t>& output, const T& value) {
     }
 }
 
-void AppendString(std::vector<std::uint8_t>& output, const std::wstring& value) {
-    const std::string utf8 = WideToUtf8(value);
+void AppendString(std::vector<std::uint8_t>& output, const std::u16string& value) {
+    const std::string utf8 = Utf16ToUtf8(value);
     const auto size = static_cast<std::uint32_t>(utf8.size());
     AppendValue(output, size);
     if (!utf8.empty()) {
@@ -525,13 +517,13 @@ std::optional<Document> LoadProjectPayload(
         }
         pdfSources.reserve(sourceCount);
         for (std::uint32_t sourceIndex = 0; sourceIndex < sourceCount; ++sourceIndex) {
-            std::wstring sourcePath;
+            std::u16string sourcePath;
             std::vector<std::uint8_t> pdfBytes;
             if (!reader.ReadString(sourcePath) || !reader.ReadBlob(pdfBytes)) {
                 return std::nullopt;
             }
             pdfSources.push_back({
-                std::move(sourcePath),
+                WideFromUtf16(sourcePath),
                 std::make_shared<std::vector<std::uint8_t>>(std::move(pdfBytes)),
             });
         }
@@ -544,7 +536,7 @@ std::optional<Document> LoadProjectPayload(
             return std::nullopt;
         }
     } else {
-        std::wstring sourcePath;
+        std::u16string sourcePath;
         std::vector<std::uint8_t> pdfBytes;
         if (!reader.ReadString(sourcePath) || !reader.ReadBlob(pdfBytes)) {
             return std::nullopt;
@@ -557,7 +549,7 @@ std::optional<Document> LoadProjectPayload(
         }
         if ((flags & kProjectFlagHasPdf) != 0U && !pdfBytes.empty()) {
             pdfSources.push_back({
-                std::move(sourcePath),
+                WideFromUtf16(sourcePath),
                 std::make_shared<std::vector<std::uint8_t>>(std::move(pdfBytes)),
             });
         }
@@ -743,7 +735,7 @@ std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
     AppendValue(bytes, sourceCount);
     for (std::size_t sourceIndex = 0; sourceIndex < document.PdfSourceCount(); ++sourceIndex) {
         const Document::PdfSource& pdfSource = document.PdfSourceAt(sourceIndex);
-        AppendString(bytes, pdfSource.sourcePath);
+        AppendString(bytes, Utf16FromWide(pdfSource.sourcePath));
         AppendBlob(bytes, pdfSource.pdfData ? *pdfSource.pdfData : std::vector<std::uint8_t> {});
     }
     AppendValue(bytes, document.NewPageDefaults().width);

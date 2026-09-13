@@ -63,6 +63,24 @@ void FillTrackWithColorFunction(HDC hdc, const RECT& trackRect, ColorFn&& colorF
 
 }  // namespace
 
+std::wstring WideFromUtf16(std::u16string_view value) {
+    std::wstring wide;
+    wide.reserve(value.size());
+    for (char16_t unit : value) {
+        wide.push_back(static_cast<wchar_t>(unit));
+    }
+    return wide;
+}
+
+std::u16string Utf16FromWide(std::wstring_view value) {
+    std::u16string text;
+    text.reserve(value.size());
+    for (wchar_t unit : value) {
+        text.push_back(static_cast<char16_t>(unit));
+    }
+    return text;
+}
+
 RECT MakeRect(int left, int top, int right, int bottom) {
     RECT rect { left, top, right, bottom };
     return rect;

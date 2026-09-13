@@ -33,6 +33,17 @@ struct CacheEntry {
 std::deque<CacheEntry> g_cache;
 bool g_initialized = false;
 
+// MicroTeX's parser is code-unit oriented: each model UTF-16 unit maps to one
+// wchar, on every platform. Never reinterpret surrogate units as scalar values.
+std::wstring WideFromUtf16(std::u16string_view value) {
+    std::wstring wide;
+    wide.reserve(value.size());
+    for (char16_t unit : value) {
+        wide.push_back(static_cast<wchar_t>(unit));
+    }
+    return wide;
+}
+
 void HashValue(std::uint64_t& hash, std::uint64_t value) {
     hash ^= value;
     hash *= 1099511628211ULL;
@@ -152,15 +163,18 @@ bool IsInitialized() {
     return g_initialized;
 }
 
-FormulaHandle Parse(const std::wstring& source, float fontSize, bool display) {
+FormulaHandle Parse(std::u16string_view source, float fontSize, bool display) {
     if (!g_initialized
         || source.empty()
-        || fontSize <= 0.0f
-        || HasUnmatchedClosingGroup(source)
-        || HasEmptyFractionArgument(source)) {
+        || fontSize <= 0.0f) {
         return nullptr;
     }
-    const std::uint64_t key = FormulaKey(source, fontSize, display);
+    const std::wstring wideSource = WideFromUtf16(source);
+    if (HasUnmatchedClosingGroup(wideSource)
+        || HasEmptyFractionArgument(wideSource)) {
+        return nullptr;
+    }
+    const std::uint64_t key = FormulaKey(wideSource, fontSize, display);
     const auto existing = std::find_if(g_cache.begin(), g_cache.end(), [&](const CacheEntry& entry) {
         return entry.key == key;
     });
@@ -171,7 +185,7 @@ FormulaHandle Parse(const std::wstring& source, float fontSize, bool display) {
         return formula;
     }
 
-    std::wstring effective = source;
+    std::wstring effective = wideSource;
     if (display
         && effective.compare(0, 2, L"$$") != 0
         && effective.compare(0, 2, L"\\[") != 0) {

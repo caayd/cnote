@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/Pdfium.cmake")
 
+find_package(Qt6 6.11.2 REQUIRED COMPONENTS Core)
+
 
 add_library(cnote_model STATIC
     src/Document.cpp
@@ -20,6 +22,7 @@ target_compile_options(cnote_model PRIVATE
 add_library(cnote_core STATIC
     src/App.cpp
     src/AppSettings.cpp
+    src/Unicode.cpp
     src/ui/Layout.cpp
     src/DpiUtil.cpp
     src/NewPageSettingsWindow.cpp
@@ -52,7 +55,9 @@ if(WIN32)
 endif()
 
 if(MINGW)
-    target_include_directories(cnote_core PRIVATE third_party/mingw-w64/include)
+    set_source_files_properties(
+        src/platform/windows/PrecisionTouchpad.cpp
+        PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/include")
 endif()
 
 
@@ -60,7 +65,7 @@ add_executable(cnote WIN32 src/main.cpp src/cnote.rc)
 target_link_libraries(cnote PRIVATE cnote_core)
 
 target_include_directories(cnote_core PUBLIC src)
-target_link_libraries(cnote_core PUBLIC cnote_model)
+target_link_libraries(cnote_core PUBLIC cnote_model Qt6::Core)
 
 target_compile_definitions(cnote_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
 
@@ -160,7 +165,10 @@ add_library(microtex STATIC
     third_party/microtex/src/platform/gdi_win/graphic_win32.cpp
 )
 target_include_directories(microtex PUBLIC third_party/microtex/src)
-target_compile_definitions(microtex PUBLIC BUILD_WIN32 _HAS_STD_BYTE=0)
+target_compile_definitions(microtex PUBLIC BUILD_WIN32)
+# _HAS_STD_BYTE=0 is only needed while compiling MicroTeX's own sources; it must
+# not leak to consumers, where Qt requires std::byte.
+target_compile_definitions(microtex PRIVATE _HAS_STD_BYTE=0)
 target_link_libraries(microtex PUBLIC tinyxml2 gdiplus)
 
 target_link_libraries(cnote_core PUBLIC
@@ -206,6 +214,7 @@ add_test(NAME latex_engine COMMAND cnote_latex_engine_tests)
 add_executable(cnote_text_model_tests
     tests/TextModelTests.cpp
     src/DpiUtil.cpp
+    src/Unicode.cpp
     src/latex/LatexEngine.cpp
     src/PdfBackend.cpp
     src/ProjectFile.cpp
@@ -228,7 +237,7 @@ target_link_libraries(cnote_text_model_tests PRIVATE
     pdfium
     user32
 )
-target_link_libraries(cnote_text_model_tests PRIVATE cnote_model)
+target_link_libraries(cnote_text_model_tests PRIVATE cnote_model Qt6::Core)
 add_test(NAME text_model_round_trip COMMAND cnote_text_model_tests)
 
 add_custom_command(TARGET cnote POST_BUILD

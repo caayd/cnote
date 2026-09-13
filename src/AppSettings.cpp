@@ -21,16 +21,29 @@
 #include "ProjectFile.h"
 #include "SettingsWindow.h"
 #include "ShortcutConfig.h"
+#include "Unicode.h"
 #include "ui/UiUtil.h"
 
 using cnote::HasExtension;
 using cnote::ui::ParseHexColor;
 using cnote::ui::TrimAscii;
 using cnote::ui::TrimWide;
+using cnote::ui::Utf16FromWide;
+using cnote::ui::WideFromUtf16;
 
 namespace cnote {
 
 namespace {
+
+// Settings text stays native wide in the Win32 frontend; convert through the
+// shared UTF-8/UTF-16 utility.
+std::wstring Utf8ToWide(std::string_view value) {
+    return WideFromUtf16(Utf8ToUtf16(value));
+}
+
+std::string WideToUtf8(std::wstring_view value) {
+    return Utf16ToUtf8(Utf16FromWide(value));
+}
 
 std::filesystem::path AppSettingsPath() {
     const wchar_t* appData = _wgetenv(L"APPDATA");

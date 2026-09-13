@@ -13,8 +13,6 @@ namespace cnote {
 
 inline constexpr wchar_t kCnoteFileExtension[] = L".cnote";
 
-[[nodiscard]] std::string WideToUtf8(std::wstring_view value);
-[[nodiscard]] std::wstring Utf8ToWide(std::string_view value);
 [[nodiscard]] bool HasExtension(const std::wstring& path, const wchar_t* extension);
 
 class ProjectFile {

@@ -374,7 +374,7 @@ std::uint64_t PageTextSurfaceSignature(const Page& page) {
         HashValue(hash, text.underline);
         HashValue(hash, text.content.size());
         if (!text.content.empty()) {
-            HashBytes(hash, text.content.data(), text.content.size() * sizeof(wchar_t));
+            HashBytes(hash, text.content.data(), text.content.size() * sizeof(char16_t));
         }
         HashValue(hash, text.styleSpans.size());
         for (const PageTextStyleSpan& span : text.styleSpans) {
@@ -402,7 +402,7 @@ std::uint64_t PageLatexSurfaceSignature(const Page& page) {
         HashValue(hash, latex.color);
         HashValue(hash, latex.content.size());
         if (!latex.content.empty()) {
-            HashBytes(hash, latex.content.data(), latex.content.size() * sizeof(wchar_t));
+            HashBytes(hash, latex.content.data(), latex.content.size() * sizeof(char16_t));
         }
     }
     return hash;

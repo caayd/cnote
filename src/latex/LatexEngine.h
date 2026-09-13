@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <windows.h>
 
@@ -47,7 +48,7 @@ bool IsInitialized();
 // wraps the source as display math (\[ ... \]) unless it already is; display
 // equations take their natural width. Parsed formulae are cached (LRU) keyed
 // by source+fontSize+display; color is applied at draw time, not parse time.
-[[nodiscard]] FormulaHandle Parse(const std::wstring& source, float fontSize, bool display);
+[[nodiscard]] FormulaHandle Parse(std::u16string_view source, float fontSize, bool display);
 
 [[nodiscard]] FormulaMetrics Measure(const FormulaHandle& formula);
 

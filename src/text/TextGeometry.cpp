@@ -8,7 +8,11 @@
 
 #include <richedit.h>
 
+#include "ui/UiUtil.h"
+
 namespace cnote::text {
+
+using ui::WideFromUtf16;
 
 constexpr float kTextLayoutScale = 8.0f;
 
@@ -30,7 +34,7 @@ std::uint64_t TextLayoutSignature(const PageText& text, float pageWidth) {
     HashLayoutValue(hash, text.bold);
     HashLayoutValue(hash, text.italic);
     HashLayoutValue(hash, text.underline);
-    for (wchar_t ch : text.content) {
+    for (char16_t ch : text.content) {
         HashLayoutValue(hash, static_cast<std::uint16_t>(ch));
     }
     for (const PageTextStyleSpan& span : text.styleSpans) {
@@ -146,8 +150,8 @@ int PageTextRenderPaddingPixels(const PageText& text, float scale) {
     return std::max(2, static_cast<int>(std::ceil(std::max(1.0f, text.fontSize) * std::max(0.1f, scale) * 0.12f)));
 }
 
-std::wstring TrimTrailingLayoutWhitespace(std::wstring value) {
-    while (!value.empty() && (value.back() == L' ' || value.back() == L'\t')) {
+std::u16string TrimTrailingLayoutWhitespace(std::u16string value) {
+    while (!value.empty() && (value.back() == u' ' || value.back() == u'\t')) {
         value.pop_back();
     }
     return value;
@@ -357,7 +361,7 @@ float ResolvedPageTextWidth(const PageText& text, float pageWidth) {
         return std::max(1.0f, text.width);
     }
 
-    const std::wstring measureText = TrimTrailingLayoutWhitespace(text.content);
+    const std::u16string measureText = TrimTrailingLayoutWhitespace(text.content);
     const int fontHeight = PageTextFontPixelHeight(text, 1.0f);
     HDC dc = GetDC(nullptr);
     if (dc == nullptr) {
@@ -371,7 +375,8 @@ float ResolvedPageTextWidth(const PageText& text, float pageWidth) {
     HGDIOBJ previousFont = font != nullptr ? SelectObject(dc, font) : nullptr;
     RECT measureRect = MakeRect(0, 0, 32767, 0);
     if (!measureText.empty()) {
-        DrawTextW(dc, measureText.c_str(), -1, &measureRect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX);
+        const std::wstring measureWide = WideFromUtf16(measureText);
+        DrawTextW(dc, measureWide.c_str(), -1, &measureRect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX);
     }
     if (previousFont != nullptr) {
         SelectObject(dc, previousFont);
@@ -403,7 +408,7 @@ WrappedTextLayout BuildPageTextLayout(const PageText& text, float pageWidth) {
         SetWindowPos(layoutWindow, nullptr, 0, 0, layout.wrapWidth, 32767, SWP_NOACTIVATE | SWP_NOZORDER);
         RECT formatRect { 0, 0, layout.wrapWidth, 32767 };
         SendMessageW(layoutWindow, EM_SETRECT, 0, reinterpret_cast<LPARAM>(&formatRect));
-        SetWindowTextW(layoutWindow, text.content.c_str());
+        SetWindowTextW(layoutWindow, WideFromUtf16(text.content).c_str());
         ApplyPageTextFormatting(layoutWindow, text, kTextLayoutScale);
 
         HDC dc = GetDC(layoutWindow);
@@ -528,7 +533,7 @@ bool DrawPageText(HDC dc, const PageText& text, float pageWidth, float scale, in
     SetWindowPos(layoutWindow, nullptr, 0, 0, width, 32767, SWP_NOACTIVATE | SWP_NOZORDER);
     RECT layoutRect { 0, 0, width, 32767 };
     SendMessageW(layoutWindow, EM_SETRECT, 0, reinterpret_cast<LPARAM>(&layoutRect));
-    SetWindowTextW(layoutWindow, text.content.c_str());
+    SetWindowTextW(layoutWindow, WideFromUtf16(text.content).c_str());
     ApplyPageTextFormatting(layoutWindow, text, renderScale, 1.0f);
 
     PARAFORMAT paragraphFormat {};

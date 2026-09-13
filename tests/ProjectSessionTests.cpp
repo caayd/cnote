@@ -98,16 +98,16 @@ struct ProjectSessionTests {
         text.id = 1;
         text.x = 30;
         text.y = 30;
-        text.content = L"original";
+        text.content = u"original";
         root.session_->document.PageAt(0).texts.push_back(text);
         root.BeginTextEdit(0, 0, text);
         Require(root.textEditWindow_ != nullptr, "begin text edit");
         SetWindowTextW(root.textEditWindow_, L"edited in first view");
         SendMessageW(second.window_, WM_ACTIVATE, WA_ACTIVE, 0);
         Require(root.textEditWindow_ == nullptr, "view switch commits text editor");
-        Require(second.session_->document.PageAt(0).texts[0].content == L"edited in first view", "text commit shared");
+        Require(second.session_->document.PageAt(0).texts[0].content == u"edited in first view", "text commit shared");
         second.Undo();
-        Require(root.session_->document.PageAt(0).texts[0].content == L"original", "cross-view text undo");
+        Require(root.session_->document.PageAt(0).texts[0].content == u"original", "cross-view text undo");
         root.Redo();
 
         const auto projectPath = (scratch / L"linked.cnote").wstring();
@@ -119,7 +119,7 @@ struct ProjectSessionTests {
         Require(root.session_->autoSaveIntervalSeconds == 15 && root.settings_.autoSaveIntervalSeconds == 15,
                 "autosave interval changes reach the owning view");
         auto saved = ProjectFile::Load(projectPath, root.pdfBackend_);
-        Require(saved && saved->PageAt(0).texts[0].content == L"edited in first view", "shared edits round trip");
+        Require(saved && saved->PageAt(0).texts[0].content == u"edited in first view", "shared edits round trip");
         Require(!second.SaveCnoteToPath((scratch / L"missing" / L"failure.cnote").wstring(), false), "save failure reported");
 
         auto defaults = root.session_->document.NewPageDefaults();
@@ -155,7 +155,7 @@ struct ProjectSessionTests {
         Require(second.CanAutoSaveCurrentDocument(), "remaining view can autosave dirty project");
         Require(second.pdfBackend_.ExportPdf(second.session_->document, (scratch / L"after-close.pdf").wstring(),
                     1.0f, 0.55f, 3, 2, false), "PDF rendering survives another window's destruction");
-        Require(latex::Parse(L"x^2", 24, true) != nullptr, "LaTeX survives another window's destruction");
+        Require(latex::Parse(u"x^2", 24, true) != nullptr, "LaTeX survives another window's destruction");
         Require(second.CreateAdditionalWindow(true, SW_HIDE), "surviving view can create another linked view");
         App& fourth = *root.childWindows_.back();
         SendMessageW(fourth.window_, WM_CLOSE, 0, 0);

@@ -20,6 +20,8 @@ namespace ui = cnote::ui;
 namespace {
 
 using cnote::PageTextEqual;
+using ui::Utf16FromWide;
+using ui::WideFromUtf16;
 using ui::HasRect;
 using ui::MakeRect;
 using ui::UnionRectangles;
@@ -94,7 +96,7 @@ std::optional<PageText> App::CurrentEditingTextLayout() const {
     if (editLength > 0) {
         std::vector<wchar_t> buffer(static_cast<std::size_t>(editLength) + 1U, L'\0');
         GetWindowTextW(textEditWindow_, buffer.data(), editLength + 1);
-        layoutText.content.assign(buffer.data(), static_cast<std::size_t>(editLength));
+        layoutText.content = Utf16FromWide(std::wstring_view(buffer.data(), static_cast<std::size_t>(editLength)));
     } else {
         layoutText.content.clear();
     }
@@ -172,11 +174,11 @@ void App::SyncTextEditModel() {
     }
 
     const int textLength = GetWindowTextLengthW(textEditWindow_);
-    std::wstring content;
+    std::u16string content;
     if (textLength > 0) {
         std::vector<wchar_t> buffer(static_cast<std::size_t>(textLength) + 1U, L'\0');
         GetWindowTextW(textEditWindow_, buffer.data(), textLength + 1);
-        content.assign(buffer.data(), static_cast<std::size_t>(textLength));
+        content = Utf16FromWide(std::wstring_view(buffer.data(), static_cast<std::size_t>(textLength)));
     }
     if (page.texts[*editingTextIndex_].content == content) {
         return;
@@ -650,7 +652,7 @@ bool App::EnsureTextEditWindow(TextAlignment alignment) {
         && *editingTextPageIndex_ < session_->document.PageCount()) {
         Page& page = session_->document.PageAt(*editingTextPageIndex_);
         if (*editingTextIndex_ < page.texts.size()) {
-            page.texts[*editingTextIndex_].content = text;
+            page.texts[*editingTextIndex_].content = Utf16FromWide(text);
             RECT clientRect {};
             GetClientRect(window_, &clientRect);
             const PageView pageView = CalculatePageView(clientRect, *editingTextPageIndex_);
@@ -962,11 +964,11 @@ void App::CommitTextEdit() {
 
     if (pageIndex < session_->document.PageCount() && textIndex < session_->document.PageAt(pageIndex).texts.size()) {
         const int textLength = GetWindowTextLengthW(textEditWindow_);
-        std::wstring content(static_cast<std::size_t>(textLength), L'\0');
+        std::u16string content;
         if (textLength > 0) {
             std::vector<wchar_t> buffer(static_cast<std::size_t>(textLength) + 1U, L'\0');
             GetWindowTextW(textEditWindow_, buffer.data(), textLength + 1);
-            content.assign(buffer.data(), static_cast<std::size_t>(textLength));
+            content = Utf16FromWide(std::wstring_view(buffer.data(), static_cast<std::size_t>(textLength)));
         }
         Page& page = session_->document.PageAt(pageIndex);
         page.texts[textIndex].content = std::move(content);
@@ -1051,7 +1053,7 @@ void App::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex, std::optio
         return;
     }
     textEditSyncSuppressed_ = true;
-    SetWindowTextW(textEditWindow_, text.content.c_str());
+    SetWindowTextW(textEditWindow_, WideFromUtf16(text.content).c_str());
     textEditSyncSuppressed_ = false;
     InvalidatePageSurfaceCache(pageIndex);
     RefreshTextEditControl();

@@ -38,6 +38,10 @@ RECT MakeRectFromFloatBounds(float left, float top, float right, float bottom);
 bool HasRect(const RECT& rect);
 std::wstring TrimWide(std::wstring_view value);
 std::string TrimAscii(std::string_view value);
+// Temporary native-wide boundary for the Win32 frontend. Model UTF-16 maps one
+// 16-bit code unit per wchar; these disappear with the Win32 frontend.
+std::wstring WideFromUtf16(std::u16string_view value);
+std::u16string Utf16FromWide(std::wstring_view value);
 std::wstring FormatHexColor(std::uint32_t color);
 std::optional<std::uint32_t> ParseHexColor(std::wstring value);
 HslColor RgbToHsl(std::uint32_t color);

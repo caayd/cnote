@@ -6,6 +6,7 @@
 #include "Document.h"
 #include "PdfBackend.h"
 #include "ProjectFile.h"
+#include "Unicode.h"
 #include "text/TextGeometry.h"
 
 namespace {
@@ -55,7 +56,7 @@ int main() {
     text.y = 36.0f;
     text.width = 240.0f;
     text.fontSize = 18.0f;
-    text.content = L"Styled text\r\nsecond line";
+    text.content = u"Styled text\r\nsecond line";
     text.styleSpans.push_back({
         0,
         6,
@@ -74,7 +75,7 @@ int main() {
     latex.x = 48.0f;
     latex.y = 72.0f;
     latex.fontSize = 30.0f;
-    latex.content = L"\\frac{a}{b}";
+    latex.content = u"\\frac{a}{b}";
     document.CurrentPage().latexes.push_back(latex);
     const std::vector<std::uint8_t> bytes = cnote::ProjectFile::Serialize(document);
     if (!Require(!bytes.empty(), "serialized project is empty")) {
@@ -115,8 +116,64 @@ int main() {
     }
 
     cnote::PageLatex changedLatex = latex;
-    changedLatex.content = L"\\sqrt{a}";
+    changedLatex.content = u"\\sqrt{a}";
     if (!Require(!cnote::PageLatexEqual(latex, changedLatex), "latex block changes are not detected")) {
+        return 1;
+    }
+
+    // Unicode contract: offsets are UTF-16 code units, embedded NUL survives,
+    // malformed input is replaced, and CRLF survives save/reopen unedited.
+    cnote::PageText unicodeText {};
+    unicodeText.id = 44;
+    unicodeText.width = 240.0f;
+    unicodeText.fontSize = 18.0f;
+    unicodeText.content = u"A\U0001F600B\r\n\u03B1";
+    unicodeText.styleSpans.push_back({ 3U, 1U, {} });
+    cnote::Document unicodeDocument = cnote::Document::CreateBlank();
+    unicodeDocument.CurrentPage().texts.push_back(unicodeText);
+    const auto unicodeLoaded = cnote::ProjectFile::LoadFromBytes(
+        cnote::ProjectFile::Serialize(unicodeDocument),
+        L"unicode-test.cnote",
+        pdfBackend);
+    if (!Require(unicodeLoaded.has_value(), "unicode project did not load")
+        || !Require(unicodeLoaded->CurrentPage().texts.size() == 1U, "unicode text count changed")) {
+        return 1;
+    }
+    const cnote::PageText& roundTripped = unicodeLoaded->CurrentPage().texts.front();
+    if (!Require(roundTripped.content == u"A\U0001F600B\r\n\u03B1", "unicode content changed during round trip")
+        || !Require(roundTripped.content.size() == 7U, "unicode content is not 7 UTF-16 code units")
+        || !Require(roundTripped.content[4] == u'\r' && roundTripped.content[5] == u'\n', "CRLF was not preserved")
+        || !Require(roundTripped.styleSpans.size() == 1U, "unicode span count changed")
+        || !Require(roundTripped.styleSpans.front().start == 3U, "span start is not UTF-16 code unit 3")
+        || !Require(roundTripped.styleSpans.front().length == 1U, "span length is not 1 code unit")) {
+        return 1;
+    }
+
+    cnote::PageText nulText = unicodeText;
+    nulText.content.assign(u"A\0B", 3U);
+    nulText.styleSpans.clear();
+    cnote::Document nulDocument = cnote::Document::CreateBlank();
+    nulDocument.CurrentPage().texts.push_back(nulText);
+    const auto nulLoaded = cnote::ProjectFile::LoadFromBytes(
+        cnote::ProjectFile::Serialize(nulDocument),
+        L"nul-test.cnote",
+        pdfBackend);
+    if (!Require(nulLoaded.has_value() && nulLoaded->CurrentPage().texts.size() == 1U, "embedded NUL project did not load")
+        || !Require(nulLoaded->CurrentPage().texts.front().content.size() == 3U, "embedded NUL was truncated")
+        || !Require(nulLoaded->CurrentPage().texts.front().content[1] == u'\0', "embedded NUL was not preserved")) {
+        return 1;
+    }
+
+    // Malformed input is handled without failure: invalid UTF-8 decodes to
+    // U+FFFD, and an unpaired surrogate never emits invalid UTF-8 (Qt drops it).
+    const std::u16string replaced = cnote::Utf8ToUtf16(std::string("\xC3\x28", 2));
+    if (!Require(replaced.size() == 2U, "invalid UTF-8 length changed")
+        || !Require(replaced[0] == u'\uFFFD', "invalid UTF-8 was not replaced with U+FFFD")
+        || !Require(replaced[1] == u'(', "valid byte after an invalid sequence was dropped")) {
+        return 1;
+    }
+    if (!Require(cnote::Utf16ToUtf8(std::u16string(1, static_cast<char16_t>(0xD800))).empty(),
+            "unpaired surrogate emitted invalid UTF-8")) {
         return 1;
     }
 
@@ -129,7 +186,7 @@ int main() {
     cnote::PageText wrappingText {};
     wrappingText.width = 90.0f;
     wrappingText.fontSize = 12.0f;
-    wrappingText.content = L"the quick brown fox jumps over the lazy dog several times without adding a line";
+    wrappingText.content = u"the quick brown fox jumps over the lazy dog several times without adding a line";
     const cnote::text::WrappedTextLayout narrowLayout = cnote::text::LayoutPageText(
         wrappingText,
         document.CurrentPage().width);
@@ -162,7 +219,7 @@ int main() {
     FillRect(renderDc, &surfaceRect, background);
     DeleteObject(background);
     cnote::PageText transparencyText = text;
-    transparencyText.content = L"Text";
+    transparencyText.content = u"Text";
     transparencyText.styleSpans.clear();
     transparencyText.width = 280.0f;
     static_cast<void>(cnote::text::DrawPageText(renderDc, transparencyText, 320.0f, 1.0f, 0, 0));

@@ -20,15 +20,15 @@ UINT SelectionClipboardFormat() {
 
 }  // namespace
 
-void AppendPdfUnicode(std::wstring& text, std::uint32_t unicode) {
+void AppendPdfUnicode(std::u16string& text, std::uint32_t unicode) {
     if (unicode <= 0xFFFFU) {
-        text.push_back(static_cast<wchar_t>(unicode));
+        text.push_back(static_cast<char16_t>(unicode));
         return;
     }
     if (unicode <= 0x10FFFFU) {
         const std::uint32_t codePoint = unicode - 0x10000U;
-        text.push_back(static_cast<wchar_t>(0xD800U + (codePoint >> 10U)));
-        text.push_back(static_cast<wchar_t>(0xDC00U + (codePoint & 0x3FFU)));
+        text.push_back(static_cast<char16_t>(0xD800U + (codePoint >> 10U)));
+        text.push_back(static_cast<char16_t>(0xDC00U + (codePoint & 0x3FFU)));
     }
 }
 
@@ -67,7 +67,7 @@ std::optional<Vec2> App::DefaultPasteOrigin(std::size_t pageIndex) const {
 }
 
 bool App::CopyPdfTextSelectionToClipboard() {
-    std::wstring text;
+    std::u16string text;
     const PdfTextCharBox* previousBox = nullptr;
     for (const std::vector<PdfTextCharBox>& boxes : selectedPdfTextBoxes_) {
         for (const PdfTextCharBox& box : boxes) {
@@ -89,7 +89,7 @@ bool App::CopyPdfTextSelectionToClipboard() {
     }
 
     EmptyClipboard();
-    const SIZE_T bytes = (text.size() + 1U) * sizeof(wchar_t);
+    const SIZE_T bytes = (text.size() + 1U) * sizeof(char16_t);
     HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
     if (memory == nullptr) {
         CloseClipboard();
@@ -199,6 +199,12 @@ bool App::CopySelectionToClipboard() {
     };
     const auto appendUint32 = [&](std::uint32_t value) { appendBytes(&value, sizeof(value)); };
     const auto appendFloat = [&](float value) { appendBytes(&value, sizeof(value)); };
+    const auto appendUtf16 = [&](std::u16string_view value) {
+        for (char16_t unit : value) {
+            bytes.push_back(static_cast<std::uint8_t>(unit & 0xFFU));
+            bytes.push_back(static_cast<std::uint8_t>((unit >> 8U) & 0xFFU));
+        }
+    };
 
     constexpr std::uint32_t kClipboardStrokeFlagDotted = 1U << 0U;
     const char magic[] = { 'C', 'T', 'S', '8' };
@@ -248,7 +254,7 @@ bool App::CopySelectionToClipboard() {
         appendUint32(text.color);
         appendUint32(flags);
         appendUint32(static_cast<std::uint32_t>(text.content.size()));
-        appendBytes(text.content.data(), text.content.size() * sizeof(wchar_t));
+        appendUtf16(text.content);
         appendUint32(static_cast<std::uint32_t>(text.styleSpans.size()));
         for (const PageTextStyleSpan& span : text.styleSpans) {
             std::uint32_t spanFlags = static_cast<std::uint32_t>(span.style.fontFamily);
@@ -285,9 +291,7 @@ bool App::CopySelectionToClipboard() {
         appendFloat(latex.fontSize);
         appendUint32(latex.color);
         appendUint32(static_cast<std::uint32_t>(latex.content.size()));
-        if (!latex.content.empty()) {
-            appendBytes(latex.content.data(), latex.content.size() * sizeof(wchar_t));
-        }
+        appendUtf16(latex.content);
     }
 
     EmptyClipboard();
@@ -372,6 +376,20 @@ bool App::PasteSelectionFromClipboard() {
         offset += ok ? sizeof(value) : 0U;
         return ok;
     };
+    const auto readUtf16 = [&](std::uint32_t charCount, std::u16string& value) -> bool {
+        const std::size_t byteCount = static_cast<std::size_t>(charCount) * 2U;
+        if (offset + byteCount > static_cast<std::size_t>(size)) {
+            return false;
+        }
+        value.resize(charCount);
+        for (std::size_t index = 0; index < charCount; ++index) {
+            value[index] = static_cast<char16_t>(
+                static_cast<std::uint16_t>(data[offset + (index * 2U)])
+                | static_cast<std::uint16_t>(static_cast<std::uint16_t>(data[offset + (index * 2U) + 1U]) << 8U));
+        }
+        offset += byteCount;
+        return true;
+    };
 
     std::uint32_t strokeCount = 0;
     std::uint32_t textCount = 0;
@@ -453,10 +471,7 @@ bool App::PasteSelectionFromClipboard() {
         }
         ok = ok && readUint32(charCount);
         if (ok) {
-            const std::size_t byteCount = static_cast<std::size_t>(charCount) * sizeof(wchar_t);
-            text.content.resize(charCount);
-            ok = readExact(offset, text.content.data(), byteCount);
-            offset += ok ? byteCount : 0U;
+            ok = readUtf16(charCount, text.content);
         }
         text.alignment = static_cast<TextAlignment>(std::min<std::uint32_t>(flags & 0xFFU, 2U));
         text.fontFamily = static_cast<TextFontFamily>(std::min<std::uint32_t>((flags >> 8U) & 0xFFU, 2U));
@@ -524,10 +539,7 @@ bool App::PasteSelectionFromClipboard() {
                 && readUint32(latex.color)
                 && readUint32(charCount);
             if (ok) {
-                const std::size_t byteCount = static_cast<std::size_t>(charCount) * sizeof(wchar_t);
-                latex.content.resize(charCount);
-                ok = readExact(offset, latex.content.data(), byteCount);
-                offset += ok ? byteCount : 0U;
+                ok = readUtf16(charCount, latex.content);
             }
             if (ok) {
                 latexes.push_back(std::move(latex));

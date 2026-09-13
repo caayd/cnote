@@ -23,6 +23,8 @@ namespace {
 using ui::HasRect;
 using ui::MakeRect;
 using ui::UnionRectangles;
+using ui::Utf16FromWide;
+using ui::WideFromUtf16;
 
 constexpr int kLatexEditControlId = 4001;
 constexpr int kLatexSuggestionControlId = 4002;
@@ -288,7 +290,7 @@ void App::UpdateLatexSuggestions() {
     }
 
     const auto context = latex::FindCompletionContext(
-        text,
+        Utf16FromWide(text),
         static_cast<std::size_t>(std::max<LONG>(0, selection.cpMin)));
     if (!context.has_value()) {
         HideLatexSuggestions();
@@ -301,10 +303,10 @@ void App::UpdateLatexSuggestions() {
     }
 
     latexSuggestionUpdating_ = true;
-    const std::wstring selectedCommand = (latexSuggestionWindow_ != nullptr
+    const std::u16string selectedCommand = (latexSuggestionWindow_ != nullptr
             && latexSuggestionSelection_ < latexSuggestionEntries_.size())
         ? latexSuggestionEntries_[latexSuggestionSelection_].command
-        : std::wstring {};
+        : std::u16string {};
     latexSuggestionEntries_ = suggestions;
     latexSuggestionSelection_ = 0;
     if (!selectedCommand.empty()) {
@@ -343,7 +345,7 @@ void App::UpdateLatexSuggestions() {
             latexSuggestionWindow_,
             LB_ADDSTRING,
             0,
-            reinterpret_cast<LPARAM>(item.command.c_str()));
+            reinterpret_cast<LPARAM>(WideFromUtf16(item.command).c_str()));
     }
     const UINT dpi = WindowDpi(window_);
     const int itemHeight = std::max(ScaleForDpi(22, dpi), textEditFontPixelHeight_ + ScaleForDpi(6, dpi));
@@ -415,7 +417,7 @@ void App::AcceptLatexSuggestion() {
         return;
     }
     const auto context = latex::FindCompletionContext(
-        text,
+        Utf16FromWide(text),
         static_cast<std::size_t>(selection.cpMin));
     if (!context.has_value()) {
         HideLatexSuggestions();
@@ -423,7 +425,7 @@ void App::AcceptLatexSuggestion() {
     }
 
     const latex::CompletionItem item = latexSuggestionEntries_[latexSuggestionSelection_];
-    const std::wstring insertion = item.insertion.empty() ? item.command : item.insertion;
+    const std::u16string insertion = item.insertion.empty() ? item.command : item.insertion;
     const std::size_t cursorOffset = std::min(item.cursorOffset, insertion.size());
     latexSuggestionUpdating_ = true;
     const bool wasSyncSuppressed = textEditSyncSuppressed_;
@@ -437,7 +439,7 @@ void App::AcceptLatexSuggestion() {
         textEditWindow_,
         EM_REPLACESEL,
         TRUE,
-        reinterpret_cast<LPARAM>(insertion.c_str()));
+        reinterpret_cast<LPARAM>(WideFromUtf16(insertion).c_str()));
     textEditSyncSuppressed_ = wasSyncSuppressed;
     const LONG cursorPosition = static_cast<LONG>(context->start + cursorOffset);
     CHARRANGE cursor { cursorPosition, cursorPosition };
@@ -458,7 +460,7 @@ bool App::HandleLatexSuggestionKey(WPARAM key) {
                 return false;
             }
             const auto context = latex::FindCompletionContext(
-                text,
+                Utf16FromWide(text),
                 static_cast<std::size_t>(selection.cpMin));
             if (!context.has_value()) {
                 return false;
@@ -558,8 +560,8 @@ void App::RefreshLatexEditControl() {
     const int editMargin = std::max(1, ScaleForDpi(6, dpi));
 
     int sourceLines = 1;
-    for (const wchar_t ch : block.content) {
-        if (ch == L'\n') {
+    for (const char16_t ch : block.content) {
+        if (ch == u'\n') {
             ++sourceLines;
         }
     }
@@ -643,11 +645,11 @@ void App::SyncLatexEditModel() {
     }
 
     const int textLength = GetWindowTextLengthW(textEditWindow_);
-    std::wstring content;
+    std::u16string content;
     if (textLength > 0) {
         std::vector<wchar_t> buffer(static_cast<std::size_t>(textLength) + 1U, L'\0');
         GetWindowTextW(textEditWindow_, buffer.data(), textLength + 1);
-        content.assign(buffer.data(), static_cast<std::size_t>(textLength));
+        content = Utf16FromWide(std::wstring_view(buffer.data(), static_cast<std::size_t>(textLength)));
     }
     page.latexes[*editingLatexIndex_].content = std::move(content);
     // Live preview repaints directly (the editing block is excluded from the
@@ -681,7 +683,7 @@ void App::BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex, std::opt
         return;
     }
     textEditSyncSuppressed_ = true;
-    SetWindowTextW(textEditWindow_, block.content.c_str());
+    SetWindowTextW(textEditWindow_, WideFromUtf16(block.content).c_str());
     textEditSyncSuppressed_ = false;
     InvalidatePageSurfaceCache(pageIndex);
     RefreshLatexEditControl();
@@ -705,11 +707,11 @@ void App::CommitLatexEdit() {
 
     if (pageIndex < session_->document.PageCount() && latexIndex < session_->document.PageAt(pageIndex).latexes.size()) {
         const int textLength = GetWindowTextLengthW(textEditWindow_);
-        std::wstring content;
+        std::u16string content;
         if (textLength > 0) {
             std::vector<wchar_t> buffer(static_cast<std::size_t>(textLength) + 1U, L'\0');
             GetWindowTextW(textEditWindow_, buffer.data(), textLength + 1);
-            content.assign(buffer.data(), static_cast<std::size_t>(textLength));
+            content = Utf16FromWide(std::wstring_view(buffer.data(), static_cast<std::size_t>(textLength)));
         }
         Page& page = session_->document.PageAt(pageIndex);
         page.latexes[latexIndex].content = std::move(content);

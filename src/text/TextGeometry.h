@@ -23,7 +23,7 @@ struct TextPixelMetrics {
 };
 
 struct WrappedTextLayout {
-    std::vector<std::wstring> lines;
+    std::vector<std::u16string> lines;
     std::vector<std::uint32_t> lineStarts;
     int wrapWidth = 0;
     int lineHeight = 0;
@@ -49,6 +49,6 @@ std::optional<RECT> PageTextCachedBoundsRect(const PageText& text, float boundsW
 bool TextHitsPoint(const PageText& text, float pageWidth, Vec2 point);
 bool TextIntersectsRectSelection(const PageText& text, float pageWidth, Vec2 anchor, Vec2 current);
 bool TextIntersectsPolygonSelection(const PageText& text, float pageWidth, const std::vector<Vec2>& polygon);
-std::wstring TrimTrailingLayoutWhitespace(std::wstring value);
+std::u16string TrimTrailingLayoutWhitespace(std::u16string value);
 
 }  // namespace cnote::text

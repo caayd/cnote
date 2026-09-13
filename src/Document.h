@@ -76,7 +76,7 @@ struct PageText {
     bool bold = false;
     bool italic = false;
     bool underline = false;
-    std::wstring content {};
+    std::u16string content {};
     std::vector<PageTextStyleSpan> styleSpans {};
 };
 
@@ -90,7 +90,7 @@ struct PageLatex {
     float y = 0.0f;
     float fontSize = 24.0f;
     std::uint32_t color = 0xFF111827;
-    std::wstring content {};
+    std::u16string content {};
 };
 
 struct RasterImage {
