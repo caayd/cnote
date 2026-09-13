@@ -860,3 +860,72 @@ if(WIN32)
         endforeach()
     endforeach()
 endif()
+
+# --- Qt compact chrome widgets (migration plan steps 6.1/6.2/6.3) -------------
+# ToolbarWidget reproduces the reference compact toolbar (34 logical-pixel base
+# height, 30 icon buttons, 22 color swatch, palette swatch menu and palette/tool
+# wheel, quick-size and text-format popups, 120 ms auto-hide) and SidebarWidget
+# reproduces the left-edge PDF sidebar (176 logical pixels, lazily composed page
+# thumbnails, bottom header, local wheel scrolling, 150 ms slide).  Both take
+# model/settings data and report navigation/command intents as signals; neither
+# contains App/HWND/HDC state or command logic.  Reference SVG artwork is shipped
+# through Qt resources with a filesystem fallback for out-of-tree harnesses;
+# the SVGs are parsed with the ported reference path parser, so the chrome needs
+# only Qt Core/Gui/Widgets (plan step 1.3), never the optional Qt SVG module.
+
+add_library(cnote_chrome_qt STATIC
+    src/ui/ChromeAssetsQt.cpp
+    src/ui/ToolbarWidget.cpp
+    src/ui/SidebarWidget.cpp
+)
+set_target_properties(cnote_chrome_qt PROPERTIES AUTOMOC ON)
+target_include_directories(cnote_chrome_qt PUBLIC src)
+target_compile_features(cnote_chrome_qt PUBLIC cxx_std_20)
+target_compile_options(cnote_chrome_qt PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+qt_add_resources(cnote_chrome_qt "cnote_chrome_assets"
+    PREFIX "/cnote"
+    BASE "assets"
+    FILES
+        assets/icons/zoom.svg
+        assets/icons/text.svg
+        assets/icons/new-page.svg
+        assets/icons/pan.svg
+        assets/icons/settings.svg
+        assets/icons/cursor.svg
+        assets/icons/draw.svg
+        assets/icons/erase.svg
+        assets/icons/lasso.svg
+        assets/icons/redo.svg
+        assets/icons/undo.svg
+        assets/icons/text/bold.svg
+        assets/icons/text/italics.svg
+        assets/icons/text/underline.svg
+        assets/icons/text/left-or.svg
+        assets/icons/text/cent-or.svg
+        assets/icons/text/right-or.svg
+)
+target_link_libraries(cnote_chrome_qt PUBLIC
+    cnote_layout_qt cnote_settings_qt cnote_render_qt Qt6::Widgets)
+
+# The Qt shell is the product consumer of the chrome widgets.
+if(TARGET cnote_qt_ui)
+    target_link_libraries(cnote_qt_ui PUBLIC cnote_chrome_qt)
+endif()
+
+# Deterministic offscreen contract test (plan step 6.1): toolbar control rects
+# and hit regions against cnote::appui::qt for a width matrix including compact
+# widths, hover state, palette-wheel color/tool intents, popup-edge clamping,
+# sidebar page count/highlight/navigation intent, sidebar-local wheel isolation
+# and elapsed-time auto-hide/slide transitions.  Every wait is bounded, so the
+# test cannot block the suite.
+add_executable(cnote_chrome_tests tests/ChromeWidgetTests.cpp)
+target_compile_options(cnote_chrome_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_chrome_tests PRIVATE cnote_chrome_qt cnote_model Qt6::Widgets)
+add_test(NAME chrome_qt COMMAND cnote_chrome_tests)
+set_tests_properties(chrome_qt PROPERTIES TIMEOUT 120
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+
