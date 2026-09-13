@@ -40,6 +40,7 @@ add_library(cnote_core STATIC
     src/latex/LatexEditing.cpp
     src/latex/LatexCompletion.cpp
     src/latex/LatexEngine.cpp
+    src/latex/LatexEngineGdi.cpp
     src/render/Paint.cpp
     src/selection/Selection.cpp
     src/selection/Geometry.cpp
@@ -202,6 +203,7 @@ enable_testing()
 add_executable(cnote_latex_engine_tests
     tests/LatexEngineTests.cpp
     src/latex/LatexEngine.cpp
+    src/latex/LatexEngineGdi.cpp
     src/latex/LatexCompletion.cpp
 )
 target_include_directories(cnote_latex_engine_tests PRIVATE src)
@@ -218,6 +220,7 @@ add_executable(cnote_text_model_tests
     src/Unicode.cpp
     src/document/SelectionClipboardCodec.cpp
     src/latex/LatexEngine.cpp
+    src/latex/LatexEngineGdi.cpp
     src/PdfBackend.cpp
     src/ProjectFile.cpp
     src/selection/Geometry.cpp
@@ -251,3 +254,47 @@ add_custom_command(TARGET cnote POST_BUILD
 add_executable(cnote_project_session_tests tests/ProjectSessionTests.cpp)
 target_link_libraries(cnote_project_session_tests PRIVATE cnote_core)
 add_test(NAME project_sessions COMMAND cnote_project_session_tests)
+
+# --- Qt MicroTeX backend (migration plan step 3.8) ----------------------------
+# `microtex_qt` is built from the same engine sources as `microtex`, but with the
+# Qt platform adapter instead of the GDI one.  The two platform backends must
+# never be compiled into one target (plan step 1.5), so nothing links both
+# `microtex` and `microtex_qt`.
+#
+# third_party/microtex/src/platform/qt/graphic_qt.{h,cpp} are vendored from
+# NanoMichael/MicroTeX @ 0e3707f6 (MIT; third_party/microtex/LICENSE) with local
+# cnote changes recorded in the file headers.
+#
+# Resource notes (unchanged from the legacy target): tinyxml2 is retained, the
+# MicroTeX res/ tree - including its `.clatexmath-res_root` marker - is staged as
+# real files next to the executable, and the GPLv3 res/greek + res/cyrillic
+# directories stay stripped.
+find_package(Qt6 6.11.2 REQUIRED COMPONENTS Gui)
+
+get_target_property(_cnote_microtex_sources microtex SOURCES)
+list(FILTER _cnote_microtex_sources EXCLUDE REGEX "platform/gdi_win/graphic_win32\\.cpp$")
+
+add_library(microtex_qt STATIC
+    ${_cnote_microtex_sources}
+    third_party/microtex/src/platform/qt/graphic_qt.cpp
+)
+target_include_directories(microtex_qt PUBLIC third_party/microtex/src)
+target_compile_definitions(microtex_qt PUBLIC BUILD_QT)
+# The legacy `microtex` target sets _HAS_STD_BYTE=0 for MicroTeX's own sources
+# (an MSVC workaround for its `using namespace std;` headers).  This target's
+# Qt adapter TU includes Qt headers, which require std::byte, so the define
+# stays off here; it is unnecessary for MinGW/GCC/AppleClang.
+target_link_libraries(microtex_qt PUBLIC tinyxml2 Qt6::Gui)
+
+# Portable MicroTeX core plus the Qt QPainter drawing backend: the Qt
+# counterpart of the legacy `microtex` usage in cnote_core.  This is the home of
+# cnote::latex::Draw(FormulaHandle, QPainter&, ...) until the services layer
+# (plan steps 3-4) absorbs it.
+add_library(cnote_latex_qt STATIC
+    src/latex/LatexEngine.cpp
+    src/latex/LatexEngineQt.cpp
+)
+target_include_directories(cnote_latex_qt PUBLIC src)
+target_compile_features(cnote_latex_qt PUBLIC cxx_std_20)
+target_compile_definitions(cnote_latex_qt PUBLIC CNOTE_LATEX_QT_BACKEND)
+target_link_libraries(cnote_latex_qt PUBLIC cnote_model microtex_qt Qt6::Gui)

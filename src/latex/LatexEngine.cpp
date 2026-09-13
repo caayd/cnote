@@ -5,14 +5,15 @@
 #include <cwchar>
 #include <cwctype>
 #include <deque>
+#include <string>
 #include <string_view>
 
-#include <objidl.h>
-#include <gdiplus.h>
-
 #include "latex.h"
-#include "platform/gdi_win/graphic_win32.h"
 #include "render.h"
+
+// Backend-independent MicroTeX core: lifetime, LRU formula cache, source
+// validation and natural metrics.  Drawing lives in the platform translation
+// units (LatexEngineQt.cpp / LatexEngineGdi.cpp); see LatexEngine.h.
 
 namespace cnote::latex {
 
@@ -134,18 +135,18 @@ bool HasEmptyFractionArgument(const std::wstring& source) {
 
 }  // namespace
 
-bool Initialize(const std::wstring& resRoot) {
+bool Initialize(const std::filesystem::path& resRoot) {
     if (g_initialized) {
         return true;
     }
-    // LaTeX::init takes a UTF-8 path.
-    const int utf8Length = WideCharToMultiByte(CP_UTF8, 0, resRoot.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (utf8Length <= 1) {
+    // tex::LaTeX::init takes a UTF-8 path and locates the resource tree through
+    // the `.clatexmath-res_root` marker inside that directory. u8string() is the
+    // portable wide/native-to-UTF-8 conversion on every supported platform.
+    const std::u8string utf8 = resRoot.u8string();
+    if (utf8.empty()) {
         return false;
     }
-    std::string utf8(static_cast<std::size_t>(utf8Length - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, resRoot.c_str(), -1, utf8.data(), utf8Length, nullptr, nullptr);
-    tex::LaTeX::init(utf8);
+    tex::LaTeX::init(std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size()));
     g_initialized = true;
     return true;
 }
@@ -226,32 +227,16 @@ FormulaMetrics Measure(const PageLatex& latex) {
     return Measure(Parse(latex));
 }
 
-void Draw(const FormulaHandle& formula, Gdiplus::Graphics& graphics, float x, float y, float scale, std::uint32_t argb) {
-    if (formula == nullptr || formula->render == nullptr || scale <= 0.0f) {
+namespace detail {
+
+void DrawRender(const FormulaHandle& formula, tex::Graphics2D& graphics, std::uint32_t argb) {
+    if (formula == nullptr || formula->render == nullptr) {
         return;
     }
-    const Gdiplus::GraphicsState state = graphics.Save();
-    // The Graphics2D_win32 constructor resets the transform, so it must wrap
-    // the graphics before we apply ours.
-    tex::Graphics2D_win32 g2(&graphics);
-    graphics.TranslateTransform(x, y);
-    graphics.ScaleTransform(scale, scale);
     formula->render->setForeground(argb);
-    formula->render->draw(g2, 0, 0);
-    // TeXRender::draw() ends with g2.reset(); restore our caller's state.
-    graphics.Restore(state);
+    formula->render->draw(graphics, 0, 0);
 }
 
-void Draw(const FormulaHandle& formula, HDC dc, float x, float y, float scale, std::uint32_t argb) {
-    if (dc == nullptr) {
-        return;
-    }
-    Gdiplus::Graphics graphics(dc);
-    Draw(formula, graphics, x, y, scale, argb);
-}
-
-void Draw(const PageLatex& latex, HDC dc, float x, float y, float scale) {
-    Draw(Parse(latex), dc, x, y, scale, latex.color);
-}
+}  // namespace detail
 
 }  // namespace cnote::latex
