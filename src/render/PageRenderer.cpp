@@ -96,15 +96,16 @@ void PaintImage(QPainter& painter, const PageImage& image, const PageRenderParam
 
     painter.save();
     painter.setOpacity(painter.opacity() * std::clamp(opacity, 0.0f, 1.0f));
-    // Reference parity: page images are drawn with nearest-neighbour sampling
-    // (GDI+ InterpolationModeNearestNeighbor), so a 2x2 translucent test image
-    // shows four hard quadrants instead of a smoothed gradient.
-    const bool smooth = painter.testRenderHint(QPainter::SmoothPixmapTransform);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    // The legacy renderer leaves GDI+'s default interpolation in place, which
+    // blends when a page image is scaled up: the frozen reference (exe
+    // 0f62092d) renders the 2x2 translucent test image in representative.cnote
+    // with blended quadrant centres ((247,155,155) and (112,207,90) sampled at
+    // 175%) and a gradient scanline, while nearest-neighbour produced the pure
+    // quadrant colours (255,127,127) / (127,255,127). Keep the painter's
+    // smoothing for page images; only the cached page-surface blit turns it off.
     painter.translate(centerX, centerY);
     painter.rotate(static_cast<qreal>(image.rotationDegrees));
     painter.drawImage(QRectF(-drawWidth * 0.5, -drawHeight * 0.5, drawWidth, drawHeight), view);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, smooth);
     painter.restore();
 }
 
