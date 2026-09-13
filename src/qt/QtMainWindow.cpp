@@ -287,17 +287,25 @@ void QtMainWindow::closeEvent(QCloseEvent* event) {
             // (MessageLoop.cpp:1083): Save / Don't Save / Cancel, and cancelling
             // keeps this window (and the process) alive.  Applies to untitled
             // projects and to closing one view while others stay open.
-            const QMessageBox::StandardButton choice = QMessageBox::warning(
-                this,
-                QStringLiteral("cnote"),
-                QStringLiteral("Save this cnote?"),
-                QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
-                QMessageBox::Save);
-            if (choice == QMessageBox::Cancel) {
+            CloseDecision decision = CloseDecision::Cancel;
+            if (closeDecision_) {
+                decision = closeDecision_();
+            } else {
+                const QMessageBox::StandardButton choice = QMessageBox::warning(
+                    this,
+                    QStringLiteral("cnote"),
+                    QStringLiteral("Save this cnote?"),
+                    QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+                    QMessageBox::Save);
+                decision = choice == QMessageBox::Save
+                    ? CloseDecision::Save
+                    : (choice == QMessageBox::Discard ? CloseDecision::Discard : CloseDecision::Cancel);
+            }
+            if (decision == CloseDecision::Cancel) {
                 event->ignore();
                 return;
             }
-            if (choice == QMessageBox::Save) {
+            if (decision == CloseDecision::Save) {
                 const bool saved = controller_.HasSavedPath()
                     ? controller_.SaveTo(controller_.FilePath(), &error)
                     : SaveAs();
@@ -315,6 +323,10 @@ void QtMainWindow::closeEvent(QCloseEvent* event) {
     }
 
     QMainWindow::closeEvent(event);
+}
+
+void QtMainWindow::SetCloseDecisionProvider(std::function<CloseDecision()> provider) {
+    closeDecision_ = std::move(provider);
 }
 
 void QtMainWindow::UpdateChrome() {

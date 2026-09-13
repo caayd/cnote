@@ -54,6 +54,9 @@ public:
 
     [[nodiscard]] render::PdfBackgroundProvider* PdfBackground() const { return pdfBackground_.get(); }
     [[nodiscard]] bool Dirty() const { return session_ != nullptr && session_->dirty; }
+    // Diagnostics: Saved changes broadcast by this view's controller (plan 6.6);
+    // a successful save is exactly one, a failed save none.
+    [[nodiscard]] std::uint64_t SavedChangeCount() const { return savedChangeCount_; }
     [[nodiscard]] bool HasSavedPath() const;
     [[nodiscard]] const std::filesystem::path& FilePath() const;
 
@@ -169,6 +172,7 @@ private:
     std::optional<std::size_t> gesturePage_ {};
     Page gestureBefore_ {};
     bool gestureChanged_ = false;
+    std::uint64_t savedChangeCount_ = 0;
 
     // Text edit state: the object snapshot the overlay was filled from.
     std::optional<std::size_t> editingTextPage_ {};

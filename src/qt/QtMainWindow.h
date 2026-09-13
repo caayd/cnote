@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <string>
 
 #include <QMainWindow>
@@ -20,6 +21,13 @@ class CanvasWidget;
 
 namespace cnote::qt {
 
+// What the close-confirmation seam answers for an unsaved document.
+enum class CloseDecision {
+    Save,
+    Discard,
+    Cancel,
+};
+
 // Shell for the runnable Qt slice: window, canvas, session registration with the
 // AppManager and the file/editing commands the canvas gate exercises.  Chrome,
 // settings dialogs and session/AppManager parity for the full app are later
@@ -34,6 +42,12 @@ public:
     // Loads a project or PDF, joining an already-open session for the same file.
     // Returns false without touching the current document when it cannot load.
     [[nodiscard]] bool OpenPath(const std::filesystem::path& path);
+
+    // Close-confirmation policy seam: the default shows the real
+    // Save/Don't Save/Cancel dialog, while tests/harness runs inject a
+    // deterministic answer so a headless run can never construct a modal
+    // dialog (plan 6.6 close semantics are covered by tests either way).
+    void SetCloseDecisionProvider(std::function<CloseDecision()> provider);
 
     [[nodiscard]] ui::CanvasWidget* Canvas() const { return canvas_; }
     [[nodiscard]] QtDocumentController& Controller() { return controller_; }
@@ -69,6 +83,7 @@ private:
     QAction* redoAction_ = nullptr;
     QAction* addTextAction_ = nullptr;
     QAction* addLatexAction_ = nullptr;
+    std::function<CloseDecision()> closeDecision_;
 };
 
 }  // namespace cnote::qt

@@ -166,6 +166,9 @@ void QtDocumentController::BroadcastChange(ProjectChange::Kind kind) {
     if (session_ == nullptr) {
         return;
     }
+    if (kind == ProjectChange::Kind::Saved) {
+        ++savedChangeCount_;
+    }
     ProjectChange change;
     change.kind = kind;
     change.revision = session_->revision;
