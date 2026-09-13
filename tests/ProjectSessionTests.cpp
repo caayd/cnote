@@ -164,6 +164,37 @@ struct ProjectSessionTests {
         SendMessageW(second.window_, WM_CLOSE, 0, 0);
         Require(QuitPending(), "last window posts quit");
         Require(originalSession->views.empty() && !originalSession->dirty, "last close saves once and detaches");
+
+        VerifyDeactivationAutoSave(scratch);
+    }
+
+    // Positive control for the WM_ACTIVATEAPP guard in MessageLoop: a visible
+    // window must still autosave on app deactivation, and a minimized window
+    // (which keeps WS_VISIBLE) must keep doing so.
+    static void VerifyDeactivationAutoSave(const std::filesystem::path& scratch) {
+        App probe(GetModuleHandleW(nullptr));
+        Require(probe.CreateMainWindow(SW_HIDE), "create auto-save probe window");
+        ShowWindow(probe.window_, SW_SHOWNA);
+        Require(IsWindowVisible(probe.window_) != 0, "probe window is visible");
+        probe.CreateBlankDocument();
+        const std::filesystem::path path = scratch / L"deactivation-autosave.cnote";
+        Require(probe.SaveCnoteToPath(path, false), "save auto-save probe project");
+        Require(!probe.session_->dirty, "probe project starts clean");
+        StrokeOn(probe, 0);
+        Require(probe.session_->dirty, "probe project dirty after stroke");
+        SendMessageW(probe.window_, WM_ACTIVATEAPP, FALSE, 0);
+        Require(!probe.session_->dirty, "deactivation autosave fires for a visible window");
+        const auto reloaded = ProjectFile::Load(path);
+        Require(reloaded && reloaded->PageAt(0).strokes.size() == 1,
+            "deactivation autosave wrote the committed stroke");
+
+        StrokeOn(probe, 0);
+        Require(probe.session_->dirty, "probe project dirty again");
+        ShowWindow(probe.window_, SW_MINIMIZE);
+        Require(IsWindowVisible(probe.window_) != 0, "minimized window keeps WS_VISIBLE");
+        SendMessageW(probe.window_, WM_ACTIVATEAPP, FALSE, 0);
+        Require(!probe.session_->dirty, "deactivation autosave fires for a minimized window");
+        SendMessageW(probe.window_, WM_CLOSE, 0, 0);
     }
 };
 

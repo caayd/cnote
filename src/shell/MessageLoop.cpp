@@ -543,7 +543,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         if (LOWORD(wParam) != WA_INACTIVE) FinishOtherViewInteractions();
         break;
     case WM_ACTIVATEAPP:
-        if (wParam == FALSE) {
+        // Windows delivers WM_ACTIVATEAPP(FALSE) to every top-level window of
+        // the process, including hidden ones (test harnesses, windows not yet
+        // shown), so the deactivation autosave is limited to real user-visible
+        // windows. Minimized windows keep WS_VISIBLE and still autosave.
+        if (wParam == FALSE && IsWindowVisible(window_)) {
             if (CanAutoSaveCurrentDocument() && !IsSessionInteractionActive()) {
                 static_cast<void>(SaveCnoteToPath(session_->document.FilePath(), false));
             } else {
