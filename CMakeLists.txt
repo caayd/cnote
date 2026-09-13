@@ -962,3 +962,33 @@ target_compile_options(cnote_interaction_router_tests PRIVATE
 target_link_libraries(cnote_interaction_router_tests PRIVATE cnote_interaction_qt)
 add_test(NAME interaction_router_qt COMMAND cnote_interaction_router_tests)
 set_tests_properties(interaction_router_qt PROPERTIES TIMEOUT 120)
+
+# --- Portable selection math (plan steps 5.2/5.3) ----------------------------
+# src/selection/Geometry.cpp is bound to App/POINT/RECT and cannot be linked
+# into Qt targets, so the Qt canvas uses this portable port.  On Windows the
+# test also links the legacy translation unit and compares every case against
+# it live; other platforms compare against the frozen table captured from that
+# same legacy run.
+add_executable(cnote_selection_math_tests
+    tests/SelectionMathTests.cpp
+    src/ui/SelectionMath.cpp
+)
+target_include_directories(cnote_selection_math_tests PRIVATE src)
+target_compile_features(cnote_selection_math_tests PRIVATE cxx_std_20)
+target_compile_definitions(cnote_selection_math_tests PRIVATE
+    CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
+target_link_libraries(cnote_selection_math_tests PRIVATE cnote_model cnote_latex_qt cnote_render_qt)
+if(WIN32)
+    target_sources(cnote_selection_math_tests PRIVATE
+        src/selection/Geometry.cpp
+        src/ui/UiUtil.cpp
+        src/DpiUtil.cpp
+    )
+    target_link_libraries(cnote_selection_math_tests PRIVATE gdiplus gdi32 user32 comctl32)
+    target_compile_definitions(cnote_selection_math_tests PRIVATE
+        CNOTE_SELECTION_LEGACY_REFERENCE=1
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
+endif()
+add_test(NAME selection_math_qt COMMAND cnote_selection_math_tests)
+set_tests_properties(selection_math_qt PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
