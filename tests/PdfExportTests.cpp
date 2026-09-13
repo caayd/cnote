@@ -173,13 +173,14 @@ int main(int argc, char** argv) {
             "embedded export keeps strokes");
     }
 
-    // PDF-backed pages must carry a materialized raster for the Qt canvas.
+    // PDF-backed pages keep no eager raster; the Qt canvas gets them lazily
+    // through PdfBackgroundProvider (covered by pdf_background_qt).
     {
         auto pdfOnly = backend.OpenFromMemory(
             dir / "raster-source.pdf",
             std::make_shared<std::vector<std::uint8_t>>(BuildTextPdf()));
-        Check(pdfOnly.has_value() && !pdfOnly->PageAt(0).raster.pixels.empty(),
-            "PDF-only document materializes page rasters");
+        Check(pdfOnly.has_value() && pdfOnly->PageAt(0).raster.pixels.empty(),
+            "PDF-only document does not materialize page rasters eagerly");
     }
 
     auto reopenedFlat = cnote::LoadDocumentFile(dir / "flat.pdf", backend);

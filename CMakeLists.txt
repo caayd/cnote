@@ -325,6 +325,7 @@ target_link_libraries(cnote_render_qt PUBLIC cnote_model cnote_latex_qt Qt6::Gui
 add_library(cnote_pdf_qt STATIC
     src/PdfBackend.cpp
     src/render/PdfExportQt.cpp
+    src/render/PdfiumBackgroundProvider.cpp
 )
 target_include_directories(cnote_pdf_qt PUBLIC src)
 target_compile_features(cnote_pdf_qt PUBLIC cxx_std_20)
@@ -371,6 +372,15 @@ add_test(NAME text_editing_qt COMMAND cnote_text_editing_tests)
 set_tests_properties(text_editing_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
 
+# Self-contained lazy PDF-background provider test.
+add_executable(cnote_pdf_background_tests
+    tests/PdfBackgroundTests.cpp
+)
+target_link_libraries(cnote_pdf_background_tests PRIVATE cnote_pdf_qt)
+add_test(NAME pdf_background_qt COMMAND cnote_pdf_background_tests)
+set_tests_properties(pdf_background_qt PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+
 # --- Qt canvas and runnable migration frontend (plan steps 3.1/3.2/3.3/3.9) ---
 # CanvasWidget owns per-view viewport/transient state and its raster caches and
 # delegates all committed-object drawing to cnote_render_qt; the controller owns
@@ -413,4 +423,49 @@ if(WIN32)
             "$<TARGET_FILE:pdfium>"
             "$<TARGET_FILE_DIR:cnote_qt>/pdfium.dll"
     )
+endif()
+
+# --- Qt settings store and key bindings (migration plan steps 6.4/6.5) --------
+# Portable settings storage: same keys, defaults, clamping, saved-palette
+# semantics, zoom presets and recent files as src/AppSettings.cpp; the Windows
+# %APPDATA%/cnote/settings.ini rule plus the working-directory fallback are kept
+# and non-Windows resolves QStandardPaths::AppConfigLocation for "cnote".
+# Persistence goes through QSaveFile and never touches document state.
+add_library(cnote_settings_qt STATIC
+    src/settings/SettingsStoreQt.cpp
+    src/settings/KeyBindingQt.cpp
+    src/Unicode.cpp
+)
+target_include_directories(cnote_settings_qt PUBLIC src)
+target_compile_features(cnote_settings_qt PUBLIC cxx_std_20)
+target_compile_options(cnote_settings_qt PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_settings_qt PUBLIC Qt6::Gui)
+
+# Self-contained contract test: legacy-record -> QKeySequence -> PortableText
+# round trips for every capturable action, malformed/unknown-record fallback to
+# the action default, real payload parsing, Windows/XDG path resolution and
+# failed-persist behavior.
+add_executable(cnote_settings_tests tests/SettingsStoreQtTests.cpp)
+target_compile_options(cnote_settings_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_settings_tests PRIVATE cnote_settings_qt)
+add_test(NAME settings_qt COMMAND cnote_settings_tests)
+set_tests_properties(settings_qt PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+
+# Windows-only parity harness: runs the real legacy App::LoadAppSettings and the
+# Qt parser over the same payload and diffs every parsed field, checks the Qt
+# shortcut table against src/ShortcutConfig.cpp, and compares both writers.
+if(WIN32 AND TARGET cnote_core)
+    add_executable(cnote_settings_parity_tests tests/SettingsParityTests.cpp)
+    target_compile_options(cnote_settings_parity_tests PRIVATE
+        $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+    )
+    target_link_libraries(cnote_settings_parity_tests PRIVATE cnote_core cnote_settings_qt)
+    add_test(NAME settings_parity_qt COMMAND cnote_settings_parity_tests)
+    set_tests_properties(settings_parity_qt PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
 endif()

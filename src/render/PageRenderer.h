@@ -13,6 +13,8 @@ class QPainter;
 
 namespace cnote::render {
 
+class PdfBackgroundProvider;
+
 // Committed-object render parameters. `scale` maps page units to painter units;
 // `devicePixelRatio` is applied only when allocating a raster surface.
 struct PageRenderParams {
@@ -21,6 +23,9 @@ struct PageRenderParams {
     float strokeSmoothing = 0.55f;
     float dashLength = 3.0f;
     float dashGap = 2.0f;
+    // Optional lazy PDF page background. When set, pages with a PDF source and
+    // no stored raster draw their background from the provider at `scale`.
+    PdfBackgroundProvider* pdfBackground = nullptr;
     // Committed objects excluded from this render (e.g. the object being
     // edited). Excluded objects are also excluded from cache signatures.
     std::optional<std::size_t> excludedTextIndex;

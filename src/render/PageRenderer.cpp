@@ -11,6 +11,7 @@
 #include <QPen>
 
 #include "latex/LatexEngine.h"
+#include "render/PdfBackgroundProvider.h"
 #include "selection/StrokeSmoothing.h"
 #include "text/TextLayoutQt.h"
 
@@ -27,7 +28,8 @@ QColor StrokeColor(const Stroke& stroke, float opacity) {
     return color;
 }
 
-void PaintPageBackground(QPainter& painter, const Page& page, float scale) {
+void PaintPageBackground(QPainter& painter, const Page& page, const PageRenderParams& params) {
+    const float scale = std::max(0.01f, params.scale);
     const QRectF pageRect(0.0, 0.0, static_cast<qreal>(page.width * scale), static_cast<qreal>(page.height * scale));
     painter.fillRect(pageRect, Qt::white);
     if (!page.raster.pixels.empty() && page.raster.width > 0 && page.raster.height > 0) {
@@ -37,6 +39,16 @@ void PaintPageBackground(QPainter& painter, const Page& page, float scale) {
             page.raster.height,
             page.raster.stride);
         painter.drawImage(pageRect, view);
+        return;
+    }
+    if (params.pdfBackground != nullptr && page.sourcePdfSourceIndex >= 0 && page.sourcePdfPageIndex >= 0) {
+        const QImage background = params.pdfBackground->PageBackground(
+            page.sourcePdfSourceIndex,
+            page.sourcePdfPageIndex,
+            scale);
+        if (!background.isNull()) {
+            painter.drawImage(pageRect, background);
+        }
     }
 }
 
@@ -160,7 +172,7 @@ void PaintPage(QPainter& painter, const Page& page, const QPointF& pageOrigin, c
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
-    PaintPageBackground(painter, page, scale);
+    PaintPageBackground(painter, page, params);
 
     for (const PageImage& image : page.images) {
         PaintImage(painter, image, params, 1.0f);
