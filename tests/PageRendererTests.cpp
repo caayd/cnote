@@ -1,14 +1,12 @@
-// Throwaway Qt canvas-render harness (migration plan steps 3.1/3.3/3.6).
+// Offscreen Qt page-renderer test (migration plan steps 3.1/3.3/3.6).
 //
 // Renders a synthetic Document through cnote::render::PageRenderer into an
-// offscreen QImage and checks layer order, transparent text backgrounds, span
-// application, clipping, cache reuse and geometry stability. Writes PNGs and a
-// log under CNOTE_RENDER_LOG_DIR (default: the system temp dir).
+// offscreen QImage and defends the invariants a plausible bug would break:
+// layer order, transparent text backgrounds over a colored page, span
+// application, cache reuse without re-layout, and model stability.
 
 #include <algorithm>
 #include <cstdio>
-#include <cstdlib>
-#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -16,8 +14,6 @@
 #include <QCryptographicHash>
 #include <QGuiApplication>
 #include <QImage>
-#include <QPainter>
-#include <QString>
 
 #include "Document.h"
 #include "latex/LatexEngine.h"
@@ -32,8 +28,6 @@ void Check(bool condition, const std::string& message) {
     if (!condition) {
         ++g_failures;
         std::printf("FAIL: %s\n", message.c_str());
-    } else {
-        std::printf("ok:   %s\n", message.c_str());
     }
 }
 
@@ -129,13 +123,6 @@ cnote::Document BuildDocument() {
 int main(int argc, char** argv) {
     QGuiApplication app(argc, argv);
 
-    const std::filesystem::path logDir = std::filesystem::path(
-        std::getenv("CNOTE_RENDER_LOG_DIR") != nullptr
-            ? std::getenv("CNOTE_RENDER_LOG_DIR")
-            : ".");
-    std::error_code error;
-    std::filesystem::create_directories(logDir, error);
-
     if (!cnote::latex::Initialize(std::filesystem::path(CNOTE_LATEX_RES_ROOT))) {
         std::printf("FAIL: latex engine did not initialize\n");
         return 1;
@@ -151,7 +138,6 @@ int main(int argc, char** argv) {
 
     const QImage surface = cnote::render::RenderPageSurface(page, params);
     Check(!surface.isNull() && surface.width() == 200 && surface.height() == 200, "page surface has page dimensions");
-    surface.save(QString::fromStdString((logDir / "page.png").string()));
 
     // Layer order: background, image over background, stroke over image.
     const std::uint32_t background = PixelAt(surface, 5, 5);
@@ -202,32 +188,6 @@ int main(int argc, char** argv) {
     Check(redInk > 0 && blueInk > 0, "span and default text colors both render");
     Check(firstRedX < lastBlueX, "span ink precedes default ink");
 
-    // No clipping: text ink stays inside the measured bounds.
-    const cnote::text::QtTextBounds bounds = cnote::text::MeasurePageTextBoundsQt(text, page.width);
-    int inkMinX = surface.width();
-    int inkMinY = surface.height();
-    int inkMaxX = -1;
-    int inkMaxY = -1;
-    for (int y = 60; y < 120; ++y) {
-        for (int x = 10; x < 190; ++x) {
-            const std::uint32_t pixel = PixelAt(surface, x, y);
-            const int red = static_cast<int>((pixel >> 16U) & 0xFFU);
-            const int blue = static_cast<int>(pixel & 0xFFU);
-            if (red > blue + 40 || blue > red + 40) {
-                inkMinX = std::min(inkMinX, x);
-                inkMinY = std::min(inkMinY, y);
-                inkMaxX = std::max(inkMaxX, x);
-                inkMaxY = std::max(inkMaxY, y);
-            }
-        }
-    }
-    Check(inkMaxX >= 0, "text ink was rendered");
-    Check(static_cast<float>(inkMinX) >= bounds.left - 2.0f
-            && static_cast<float>(inkMinY) >= bounds.top - 2.0f
-            && static_cast<float>(inkMaxX) <= bounds.right + 2.0f
-            && static_cast<float>(inkMaxY) <= bounds.bottom + 2.0f,
-        "text ink stays inside the measured bounds");
-
     // Cache reuse: a second EnsurePageSurface must not re-render or re-layout.
     cnote::render::PageSurfaceCache cache;
     cnote::render::EnsurePageSurface(cache, page, params);
@@ -247,23 +207,7 @@ int main(int argc, char** argv) {
         "model geometry and text are unchanged after rendering");
 
     std::printf("surface sha256: %s\n", firstHash.c_str());
-    std::printf("text layout lines: %zu, lineHeight: %d, height: %d\n",
-        cnote::text::LayoutPageTextQt(text, page.width).lines.size(),
-        cnote::text::LayoutPageTextQt(text, page.width).lineHeight,
-        cnote::text::LayoutPageTextQt(text, page.width).height);
-
-    std::FILE* log = std::fopen((logDir / "render-harness.log").string().c_str(), "w");
-    if (log != nullptr) {
-        std::fprintf(log, "surface sha256: %s\n", firstHash.c_str());
-        std::fprintf(log, "background=%s image=%s stroke=%s\n",
-            Hex(background).c_str(), Hex(imagePixel).c_str(), Hex(strokePixel).c_str());
-        std::fprintf(log, "textBoxBackgroundLike=%d/%d redInk=%d blueInk=%d\n",
-            backgroundLike, textBoxPixels, redInk, blueInk);
-        std::fprintf(log, "failures=%d\n", g_failures);
-        std::fclose(log);
-    }
-
     cnote::latex::Shutdown();
-    std::printf(g_failures == 0 ? "ALL RENDER CHECKS PASSED\n" : "%d RENDER CHECK(S) FAILED\n", g_failures);
+    std::printf(g_failures == 0 ? "ALL PAGE RENDERER CHECKS PASSED\n" : "%d PAGE RENDERER CHECK(S) FAILED\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

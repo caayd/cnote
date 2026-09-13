@@ -310,10 +310,17 @@ target_include_directories(cnote_render_qt PUBLIC src)
 target_compile_features(cnote_render_qt PUBLIC cxx_std_20)
 target_link_libraries(cnote_render_qt PUBLIC cnote_model cnote_latex_qt Qt6::Gui)
 
-# Throwaway render harness: renders a synthetic Document offscreen and checks
-# layer order, transparent text backgrounds, span application, clipping, cache
-# reuse and geometry stability. Not a CTest.
-add_executable(cnote_render_harness tests/RenderHarness.cpp)
-target_compile_definitions(cnote_render_harness PRIVATE
+# Offscreen Qt page-renderer test: layer order, transparent text backgrounds,
+# span application, cache reuse without re-layout, model stability.
+add_executable(cnote_page_renderer_tests tests/PageRendererTests.cpp)
+target_compile_definitions(cnote_page_renderer_tests PRIVATE
     CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
-target_link_libraries(cnote_render_harness PRIVATE cnote_render_qt)
+target_link_libraries(cnote_page_renderer_tests PRIVATE cnote_render_qt)
+add_test(NAME render_qt_offscreen COMMAND cnote_page_renderer_tests)
+get_target_property(_cnote_qmake Qt6::qmake IMPORTED_LOCATION)
+execute_process(
+    COMMAND "${_cnote_qmake}" -query QT_INSTALL_PLUGINS
+    OUTPUT_VARIABLE _cnote_qt_plugins
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+set_tests_properties(render_qt_offscreen PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
