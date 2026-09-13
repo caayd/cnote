@@ -144,6 +144,9 @@ signals:
 
 private:
     void NotifySessionChanged(bool originating);
+    // Committed vs Saved change broadcast (plan 6.6: commit before broadcasting
+    // Saved); a failed save broadcasts nothing.
+    void BroadcastChange(ProjectChange::Kind kind);
     void RebuildPdfBackground();
     [[nodiscard]] std::uint64_t NextObjectId() const;
     [[nodiscard]] Page* PageAt(std::size_t pageIndex);

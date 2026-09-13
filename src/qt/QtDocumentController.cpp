@@ -1,11 +1,14 @@
 #include "qt/QtDocumentController.h"
 
+#include <QSaveFile>
+
 #include <algorithm>
 #include <cmath>
 #include <utility>
 #include <vector>
 
 #include "PdfBackend.h"
+#include "Unicode.h"
 #include "ProjectFile.h"
 #include "document/HistoryReducer.h"
 #include "qt/QtDocumentIo.h"
@@ -128,9 +131,26 @@ bool QtDocumentController::SaveTo(const std::filesystem::path& path, std::string
     if (session_ == nullptr || path.empty()) {
         return false;
     }
-    if (!ProjectFile::Save(session_->document, path)) {
+
+    // Serialize once and commit through QSaveFile (plan 6.6): a failure must
+    // never leave a truncated project behind, and dirty/FilePath only change
+    // after the destination is committed.
+    const std::vector<std::uint8_t> bytes = ProjectFile::Serialize(session_->document);
+    QSaveFile file(QString::fromStdU16String(path.u16string()));
+    file.setDirectWriteFallback(false);
+    if (!file.open(QIODevice::WriteOnly)) {
         if (error != nullptr) {
-            *error = "cannot write " + path.string();
+            *error = "cannot write " + PathToUtf8(path);
+        }
+        return false;
+    }
+    const qint64 expected = static_cast<qint64>(bytes.size());
+    const bool written = bytes.empty()
+        || file.write(reinterpret_cast<const char*>(bytes.data()), expected) == expected;
+    if (!written || !file.commit()) {
+        file.cancelWriting();
+        if (error != nullptr) {
+            *error = "cannot write " + PathToUtf8(path);
         }
         return false;
     }
@@ -138,8 +158,22 @@ bool QtDocumentController::SaveTo(const std::filesystem::path& path, std::string
     session_->document.SetFilePath(path);
     session_->dirty = false;
     manager_.NotifySessionSaved(session_);
-    NotifySessionChanged(true);
+    BroadcastChange(ProjectChange::Kind::Saved);
     return true;
+}
+
+void QtDocumentController::BroadcastChange(ProjectChange::Kind kind) {
+    if (session_ == nullptr) {
+        return;
+    }
+    ProjectChange change;
+    change.kind = kind;
+    change.revision = session_->revision;
+    for (QObject* owner : manager_.ViewsForSession(session_)) {
+        if (auto* view = qobject_cast<QtDocumentController*>(owner); view != nullptr) {
+            view->OnSessionChanged(change, view == this);
+        }
+    }
 }
 
 bool QtDocumentController::ExportPdf(const std::filesystem::path& path, bool embedProject, std::string* error) {
@@ -238,13 +272,16 @@ void QtDocumentController::FinishInteraction() {
     }
 }
 
-void QtDocumentController::OnSessionChanged(const ProjectChange&, bool originating) {
-    if (!originating) {
+void QtDocumentController::OnSessionChanged(const ProjectChange& change, bool originating) {
+    if (originating) {
+        return;
+    }
+    if (change.kind == ProjectChange::Kind::Committed) {
         // Another view committed: drop the pending preview and refresh caches.
         pendingStroke_.reset();
         pendingStrokePage_.reset();
-        emit SessionChanged();
     }
+    emit SessionChanged();
 }
 
 void QtDocumentController::SetCurrentPageIndex(std::size_t index) {
