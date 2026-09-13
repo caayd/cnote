@@ -12,6 +12,7 @@ find_package(Qt6 6.11.2 REQUIRED COMPONENTS Core)
 
 add_library(cnote_model STATIC
     src/Document.cpp
+    src/document/HistoryReducer.cpp
 )
 target_include_directories(cnote_model PUBLIC src)
 target_compile_features(cnote_model PUBLIC cxx_std_20)

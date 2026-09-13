@@ -1,5 +1,7 @@
 #include "App.h"
 
+#include "document/HistoryReducer.h"
+
 #include <algorithm>
 
 #include <commctrl.h>
@@ -15,21 +17,17 @@ using cnote::Vec2Equal;
 
 namespace {
 
-std::optional<std::size_t> FindTextIndexById(const Page& page, std::uint64_t textId) {
-    for (std::size_t index = 0; index < page.texts.size(); ++index) {
-        if (page.texts[index].id == textId) {
-            return index;
-        }
-    }
-    return std::nullopt;
+bool IsPageHistoryAction(HistoryActionType type) {
+    return type == HistoryActionType::AddPages || type == HistoryActionType::RemovePages;
 }
-std::optional<std::size_t> FindLatexIndexById(const Page& page, std::uint64_t latexId) {
-    for (std::size_t index = 0; index < page.latexes.size(); ++index) {
-        if (page.latexes[index].id == latexId) {
-            return index;
-        }
+
+// Pages a sequential removal at a fixed index can actually delete: bounded by
+// the request, the pages from `index` to the end, and the one-page minimum.
+std::size_t PageRemovalCount(const Document& document, std::size_t index, std::size_t requested) {
+    if (document.PageCount() == 0U || index >= document.PageCount()) {
+        return 0U;
     }
-    return std::nullopt;
+    return std::min({ requested, document.PageCount() - index, document.PageCount() - 1U });
 }
 
 int ShowUnsavedCloseDialog(HWND owner, HINSTANCE instance) {
@@ -98,121 +96,19 @@ void App::Undo() {
     }
 
     HistoryAction action = session_->undoActions.back();
-    session_->undoActions.pop_back();
-    bool cacheUpdated = false;
+    const bool pageAction = IsPageHistoryAction(action.type);
+    const bool removingPages = action.type == HistoryActionType::AddPages;
+    const std::size_t changedPages = !pageAction ? 0U
+        : (removingPages ? PageRemovalCount(session_->document, action.index, action.pages.size())
+                         : action.pages.size());
+    const auto anchors = pageAction ? CaptureViewPageAnchors() : std::vector<std::pair<App*, int>> {};
+    if (!ApplyHistoryAction(session_->document, action, true)) {
+        return;
+    }
 
-    switch (action.type) {
-    case HistoryActionType::AddStroke:
-    case HistoryActionType::RemoveStroke: {
-        auto& strokes = session_->document.PageAt(action.pageIndex).strokes;
-        SetViewPageIndex(action.pageIndex);
-        MarkPdfSidebarCompositionDirty();
-        if (action.type == HistoryActionType::AddStroke) {
-            if (action.index < strokes.size()) {
-                strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(action.index));
-                AdjustSelectionForRemoval(action.pageIndex, action.index);
-                cacheUpdated = TryRefreshPageSurfaceCacheForStroke(action.pageIndex, action.stroke);
-            }
-        } else if (action.index <= strokes.size()) {
-            AdjustSelectionForInsertion(action.pageIndex, action.index);
-            strokes.insert(strokes.begin() + static_cast<std::ptrdiff_t>(action.index), action.stroke);
-            if (action.index + 1U == strokes.size()) {
-                cacheUpdated = TryAppendStrokeToPageSurfaceCache(action.pageIndex, action.stroke);
-            }
-        }
-        session_->redoActions.push_back(std::move(action));
-        if (!cacheUpdated) {
-            InvalidatePageSurfaceCache(session_->redoActions.back().pageIndex);
-        }
-        NotifyDocumentMutated();
-        InvalidateStrokeRegion(session_->redoActions.back().stroke, session_->redoActions.back().pageIndex, false);
-        return;
-    }
-    case HistoryActionType::AddText:
-    case HistoryActionType::RemoveText:
-    case HistoryActionType::UpdateText: {
-        if (action.pageIndex >= session_->document.PageCount()) {
-            return;
-        }
-        Page& page = session_->document.PageAt(action.pageIndex);
-        if (action.type == HistoryActionType::AddText) {
-            if (const auto textIndex = FindTextIndexById(page, action.text.id); textIndex.has_value()) {
-                page.texts.erase(page.texts.begin() + static_cast<std::ptrdiff_t>(*textIndex));
-            }
-        } else if (action.type == HistoryActionType::RemoveText) {
-            const std::size_t insertIndex = std::min(action.index, page.texts.size());
-            page.texts.insert(page.texts.begin() + static_cast<std::ptrdiff_t>(insertIndex), action.text);
-        } else if (const auto textIndex = FindTextIndexById(page, action.replacementText.id); textIndex.has_value()) {
-            page.texts[*textIndex] = action.text;
-        }
-        session_->redoActions.push_back(std::move(action));
-        RestoreAfterContentHistoryChange({ session_->redoActions.back().pageIndex }, session_->redoActions.back().pageIndex);
-        NotifyDocumentMutated();
-        InvalidateCanvas();
-        return;
-    }
-    case HistoryActionType::AddLatex:
-    case HistoryActionType::RemoveLatex:
-    case HistoryActionType::UpdateLatex: {
-        if (action.pageIndex >= session_->document.PageCount()) {
-            return;
-        }
-        Page& page = session_->document.PageAt(action.pageIndex);
-        if (action.type == HistoryActionType::AddLatex) {
-            if (const auto latexIndex = FindLatexIndexById(page, action.latex.id); latexIndex.has_value()) {
-                page.latexes.erase(page.latexes.begin() + static_cast<std::ptrdiff_t>(*latexIndex));
-            }
-        } else if (action.type == HistoryActionType::RemoveLatex) {
-            const std::size_t insertIndex = std::min(action.index, page.latexes.size());
-            page.latexes.insert(page.latexes.begin() + static_cast<std::ptrdiff_t>(insertIndex), action.latex);
-        } else if (const auto latexIndex = FindLatexIndexById(page, action.replacementLatex.id); latexIndex.has_value()) {
-            page.latexes[*latexIndex] = action.latex;
-        }
-        session_->redoActions.push_back(std::move(action));
-        RestoreAfterContentHistoryChange({ session_->redoActions.back().pageIndex }, session_->redoActions.back().pageIndex);
-        NotifyDocumentMutated();
-        InvalidateCanvas();
-        return;
-    }
-    case HistoryActionType::AddPages: {
-        const std::size_t removeCount = std::min(action.pages.size(), session_->document.PageCount() > action.index ? session_->document.PageCount() - action.index : 0U);
-        for (std::size_t offset = 0; offset < removeCount; ++offset) {
-            RemoveDocumentPage(action.index);
-        }
-        session_->redoActions.push_back(std::move(action));
-        RestoreAfterPageHistoryChange(session_->redoActions.back().previousPageIndex);
-        NotifyDocumentMutated();
-        return;
-    }
-    case HistoryActionType::RemovePages: {
-        std::size_t insertIndex = action.index;
-        for (const Page& page : action.pages) {
-            InsertDocumentPage(insertIndex++, page);
-        }
-        session_->redoActions.push_back(std::move(action));
-        RestoreAfterPageHistoryChange(session_->redoActions.back().previousPageIndex);
-        NotifyDocumentMutated();
-        return;
-    }
-    case HistoryActionType::ReplacePages: {
-        if (action.pageIndices.size() != action.pages.size()) {
-            return;
-        }
-        for (std::size_t index = 0; index < action.pageIndices.size(); ++index) {
-            const std::size_t pageIndex = action.pageIndices[index];
-            if (pageIndex < session_->document.PageCount()) {
-                session_->document.PageAt(pageIndex) = action.pages[index];
-            }
-        }
-        session_->redoActions.push_back(std::move(action));
-        RestoreAfterContentHistoryChange(session_->redoActions.back().pageIndices, session_->redoActions.back().focusPageIndex);
-        NotifyDocumentMutated();
-        InvalidateCanvas();
-        return;
-    }
-    default:
-        return;
-    }
+    session_->undoActions.pop_back();
+    session_->redoActions.push_back(std::move(action));
+    ApplyHistorySideEffects(session_->redoActions.back(), true, removingPages, changedPages, anchors);
 }
 
 void App::Redo() {
@@ -224,55 +120,55 @@ void App::Redo() {
     }
 
     HistoryAction action = session_->redoActions.back();
-    session_->redoActions.pop_back();
-    bool cacheUpdated = false;
+    const bool pageAction = IsPageHistoryAction(action.type);
+    const bool removingPages = action.type == HistoryActionType::RemovePages;
+    const std::size_t changedPages = !pageAction ? 0U
+        : (removingPages ? PageRemovalCount(session_->document, action.index, action.pages.size())
+                         : action.pages.size());
+    const auto anchors = pageAction ? CaptureViewPageAnchors() : std::vector<std::pair<App*, int>> {};
+    if (!ApplyHistoryAction(session_->document, action, false)) {
+        return;
+    }
 
+    session_->redoActions.pop_back();
+    session_->undoActions.push_back(std::move(action));
+    ApplyHistorySideEffects(session_->undoActions.back(), false, removingPages, changedPages, anchors);
+}
+
+void App::ApplyHistorySideEffects(
+    const HistoryAction& action,
+    bool undo,
+    bool removingPages,
+    std::size_t changedPages,
+    const std::vector<std::pair<App*, int>>& anchors) {
     switch (action.type) {
     case HistoryActionType::AddStroke:
     case HistoryActionType::RemoveStroke: {
-        auto& strokes = session_->document.PageAt(action.pageIndex).strokes;
+        const bool removed = undo == (action.type == HistoryActionType::AddStroke);
         SetViewPageIndex(action.pageIndex);
         MarkPdfSidebarCompositionDirty();
-        if (action.type == HistoryActionType::AddStroke) {
-            if (action.index <= strokes.size()) {
-                AdjustSelectionForInsertion(action.pageIndex, action.index);
-                strokes.insert(strokes.begin() + static_cast<std::ptrdiff_t>(action.index), action.stroke);
-                if (action.index + 1U == strokes.size()) {
-                    cacheUpdated = TryAppendStrokeToPageSurfaceCache(action.pageIndex, action.stroke);
-                }
-            }
-        } else if (action.index < strokes.size()) {
-            strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(action.index));
+        bool cacheUpdated = false;
+        if (removed) {
             AdjustSelectionForRemoval(action.pageIndex, action.index);
             cacheUpdated = TryRefreshPageSurfaceCacheForStroke(action.pageIndex, action.stroke);
+        } else {
+            AdjustSelectionForInsertion(action.pageIndex, action.index);
+            const auto& strokes = session_->document.PageAt(action.pageIndex).strokes;
+            if (action.index + 1U == strokes.size()) {
+                cacheUpdated = TryAppendStrokeToPageSurfaceCache(action.pageIndex, action.stroke);
+            }
         }
-        session_->undoActions.push_back(std::move(action));
         if (!cacheUpdated) {
-            InvalidatePageSurfaceCache(session_->undoActions.back().pageIndex);
+            InvalidatePageSurfaceCache(action.pageIndex);
         }
         NotifyDocumentMutated();
-        InvalidateStrokeRegion(session_->undoActions.back().stroke, session_->undoActions.back().pageIndex, false);
+        InvalidateStrokeRegion(action.stroke, action.pageIndex, false);
         return;
     }
     case HistoryActionType::AddText:
     case HistoryActionType::RemoveText:
     case HistoryActionType::UpdateText: {
-        if (action.pageIndex >= session_->document.PageCount()) {
-            return;
-        }
-        Page& page = session_->document.PageAt(action.pageIndex);
-        if (action.type == HistoryActionType::AddText) {
-            const std::size_t insertIndex = std::min(action.index, page.texts.size());
-            page.texts.insert(page.texts.begin() + static_cast<std::ptrdiff_t>(insertIndex), action.text);
-        } else if (action.type == HistoryActionType::RemoveText) {
-            if (const auto textIndex = FindTextIndexById(page, action.text.id); textIndex.has_value()) {
-                page.texts.erase(page.texts.begin() + static_cast<std::ptrdiff_t>(*textIndex));
-            }
-        } else if (const auto textIndex = FindTextIndexById(page, action.text.id); textIndex.has_value()) {
-            page.texts[*textIndex] = action.replacementText;
-        }
-        session_->undoActions.push_back(std::move(action));
-        RestoreAfterContentHistoryChange({ session_->undoActions.back().pageIndex }, session_->undoActions.back().pageIndex);
+        RestoreAfterContentHistoryChange({ action.pageIndex }, action.pageIndex);
         NotifyDocumentMutated();
         InvalidateCanvas();
         return;
@@ -280,64 +176,51 @@ void App::Redo() {
     case HistoryActionType::AddLatex:
     case HistoryActionType::RemoveLatex:
     case HistoryActionType::UpdateLatex: {
-        if (action.pageIndex >= session_->document.PageCount()) {
-            return;
-        }
-        Page& page = session_->document.PageAt(action.pageIndex);
-        if (action.type == HistoryActionType::AddLatex) {
-            const std::size_t insertIndex = std::min(action.index, page.latexes.size());
-            page.latexes.insert(page.latexes.begin() + static_cast<std::ptrdiff_t>(insertIndex), action.latex);
-        } else if (action.type == HistoryActionType::RemoveLatex) {
-            if (const auto latexIndex = FindLatexIndexById(page, action.latex.id); latexIndex.has_value()) {
-                page.latexes.erase(page.latexes.begin() + static_cast<std::ptrdiff_t>(*latexIndex));
-            }
-        } else if (const auto latexIndex = FindLatexIndexById(page, action.latex.id); latexIndex.has_value()) {
-            page.latexes[*latexIndex] = action.replacementLatex;
-        }
-        session_->undoActions.push_back(std::move(action));
-        RestoreAfterContentHistoryChange({ session_->undoActions.back().pageIndex }, session_->undoActions.back().pageIndex);
+        RestoreAfterContentHistoryChange({ action.pageIndex }, action.pageIndex);
         NotifyDocumentMutated();
         InvalidateCanvas();
         return;
     }
-    case HistoryActionType::AddPages: {
-        std::size_t insertIndex = action.index;
-        for (const Page& page : action.pages) {
-            InsertDocumentPage(insertIndex++, page);
-        }
-        session_->undoActions.push_back(std::move(action));
-        RestoreAfterPageHistoryChange(session_->undoActions.back().pageIndex);
-        NotifyDocumentMutated();
-        return;
-    }
+    case HistoryActionType::AddPages:
     case HistoryActionType::RemovePages: {
-        const std::size_t removeCount = std::min(action.pages.size(), session_->document.PageCount() > action.index ? session_->document.PageCount() - action.index : 0U);
-        for (std::size_t offset = 0; offset < removeCount; ++offset) {
-            RemoveDocumentPage(action.index);
+        if (removingPages) {
+            RemapViewsForPageRemovals(action.index, changedPages);
+        } else {
+            RemapViewsForPageInsertions(action.index, changedPages);
         }
-        session_->undoActions.push_back(std::move(action));
-        RestoreAfterPageHistoryChange(session_->undoActions.back().pageIndex);
+        RestoreViewPageAnchors(anchors);
+        RestoreAfterPageHistoryChange(undo ? action.previousPageIndex : action.pageIndex);
         NotifyDocumentMutated();
         return;
     }
     case HistoryActionType::ReplacePages: {
-        if (action.pageIndices.size() != action.replacementPages.size()) {
-            return;
-        }
-        for (std::size_t index = 0; index < action.pageIndices.size(); ++index) {
-            const std::size_t pageIndex = action.pageIndices[index];
-            if (pageIndex < session_->document.PageCount()) {
-                session_->document.PageAt(pageIndex) = action.replacementPages[index];
-            }
-        }
-        session_->undoActions.push_back(std::move(action));
-        RestoreAfterContentHistoryChange(session_->undoActions.back().pageIndices, session_->undoActions.back().focusPageIndex);
+        RestoreAfterContentHistoryChange(action.pageIndices, action.focusPageIndex);
         NotifyDocumentMutated();
         InvalidateCanvas();
         return;
     }
-    default:
-        return;
+    }
+}
+
+void App::RemapViewsForPageInsertions(std::size_t index, std::size_t count) {
+    for (std::size_t offset = 0; offset < count; ++offset) {
+        const std::size_t inserted = index + offset;
+        for (App* view : session_->views) {
+            if (view->currentPageIndex_ >= inserted) {
+                ++view->currentPageIndex_;
+            }
+        }
+    }
+}
+
+void App::RemapViewsForPageRemovals(std::size_t index, std::size_t count) {
+    for (std::size_t offset = 0; offset < count; ++offset) {
+        for (App* view : session_->views) {
+            if (view->currentPageIndex_ > index) {
+                --view->currentPageIndex_;
+            }
+            view->currentPageIndex_ = view->CurrentPageIndex();
+        }
     }
 }
 

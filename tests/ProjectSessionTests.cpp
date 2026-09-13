@@ -166,6 +166,53 @@ struct ProjectSessionTests {
         Require(originalSession->views.empty() && !originalSession->dirty, "last close saves once and detaches");
 
         VerifyDeactivationAutoSave(scratch);
+        VerifyStaleHistoryAction();
+    }
+
+    // A recorded action whose target no longer exists must not mutate the
+    // document, move either history stack or bump the revision.
+    static void VerifyStaleHistoryAction() {
+        static_cast<void>(QuitPending());
+        App probe(GetModuleHandleW(nullptr));
+        Require(probe.CreateMainWindow(SW_HIDE), "create stale-history probe window");
+        probe.CreateBlankDocument();
+        probe.session_->undoActions.clear();
+        probe.session_->redoActions.clear();
+
+        HistoryAction staleStroke {};
+        staleStroke.type = HistoryActionType::AddStroke;
+        staleStroke.pageIndex = 0;
+        staleStroke.index = 999;
+        probe.session_->undoActions.push_back(staleStroke);
+        const std::uint64_t revision = probe.session_->revision;
+        Require(probe.CanUndo(), "stale action is on the undo stack");
+        probe.Undo();
+        Require(probe.session_->undoActions.size() == 1 && probe.session_->redoActions.empty(),
+            "stale stroke index leaves both history stacks unchanged");
+        Require(probe.session_->revision == revision, "stale stroke index leaves revision unchanged");
+        Require(probe.session_->document.PageAt(0).strokes.empty(), "stale stroke index does not mutate document");
+
+        probe.session_->undoActions.clear();
+        HistoryAction staleText {};
+        staleText.type = HistoryActionType::AddText;
+        staleText.pageIndex = 99;
+        probe.session_->undoActions.push_back(staleText);
+        probe.Undo();
+        Require(probe.session_->undoActions.size() == 1 && probe.session_->redoActions.empty(),
+            "stale page index leaves both history stacks unchanged");
+        Require(probe.session_->revision == revision, "stale page index leaves revision unchanged");
+
+        // Positive control: a valid recorded action still applies and moves
+        // exactly one action between the stacks.
+        StrokeOn(probe, 0);
+        const std::size_t strokeCount = probe.session_->document.PageAt(0).strokes.size();
+        const std::size_t undoBefore = probe.session_->undoActions.size();
+        probe.Undo();
+        Require(probe.session_->document.PageAt(0).strokes.size() == strokeCount - 1
+                && probe.session_->undoActions.size() == undoBefore - 1
+                && probe.session_->redoActions.size() == 1,
+            "valid action applies and moves one action to the redo stack");
+        SendMessageW(probe.window_, WM_CLOSE, 0, 0);
     }
 
     // Positive control for the WM_ACTIVATEAPP guard in MessageLoop: a visible

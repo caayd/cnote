@@ -326,6 +326,9 @@ private:
     void TogglePdfSidebar();
     void Undo();
     void Redo();
+    void ApplyHistorySideEffects(const HistoryAction& action, bool undo, bool removingPages, std::size_t changedPages, const std::vector<std::pair<App*, int>>& anchors);
+    void RemapViewsForPageInsertions(std::size_t index, std::size_t count);
+    void RemapViewsForPageRemovals(std::size_t index, std::size_t count);
     [[nodiscard]] bool CanUndo() const;
     [[nodiscard]] bool CanRedo() const;
     [[nodiscard]] bool CanGoToPreviousPage() const;
