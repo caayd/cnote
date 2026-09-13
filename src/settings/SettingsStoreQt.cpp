@@ -140,14 +140,6 @@ void WritePaletteColors(std::ostream& output, const std::vector<std::uint32_t>& 
     }
 }
 
-float SnapBrushSize(float size) {
-    constexpr float kMinBrushSize = 0.5f;
-    constexpr float kBrushSizeStep = 0.25f;
-    const float clamped = std::clamp(size, kMinBrushSize, kMaxBrushSize);
-    const float steps = std::round((clamped - kMinBrushSize) / kBrushSizeStep);
-    return kMinBrushSize + (steps * kBrushSizeStep);
-}
-
 std::string FormatBrushSizePresetValue(float size) {
     char buffer[16] = {};
     std::snprintf(buffer, sizeof(buffer), "%.2f", static_cast<double>(SnapBrushSize(size)));
@@ -174,48 +166,6 @@ std::vector<float> NormalizeBrushSizePresets(std::vector<float> presets) {
         presets.resize(16U);
     }
     return presets;
-}
-
-std::string FormatBrushSizePresets(const std::vector<float>& presets) {
-    const std::vector<float> normalized = NormalizeBrushSizePresets(presets);
-    std::string formatted;
-    for (std::size_t index = 0; index < normalized.size(); ++index) {
-        if (index > 0U) {
-            formatted += ", ";
-        }
-        formatted += FormatBrushSizePresetValue(normalized[index]);
-    }
-    return formatted;
-}
-
-bool TryParseBrushSizePresets(std::string_view value, std::vector<float>& presets) {
-    const QString text = value.empty()
-        ? QString()
-        : QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size())).trimmed();
-    if (text.isEmpty()) {
-        presets.clear();
-        return true;
-    }
-
-    std::vector<float> parsedPresets;
-    const QStringList tokens = text.split(QLatin1Char(','));
-    for (const QString& rawToken : tokens) {
-        const QString token = rawToken.trimmed();
-        if (token.isEmpty()) {
-            return false;
-        }
-
-        const QByteArray utf8 = token.toUtf8();
-        char* parseEnd = nullptr;
-        const float parsedValue = std::strtof(utf8.constData(), &parseEnd);
-        if (parseEnd == utf8.constData() || *parseEnd != '\0' || parsedValue <= 0.0f) {
-            return false;
-        }
-        parsedPresets.push_back(parsedValue);
-    }
-
-    presets = NormalizeBrushSizePresets(std::move(parsedPresets));
-    return true;
 }
 
 const char* DrawCursorKindConfigName(DrawCursorKind kind) {
@@ -425,6 +375,69 @@ ShortcutBinding* FindBinding(std::array<ShortcutBinding, kShortcutActionCount>& 
 }
 
 }  // namespace
+
+float SnapBrushSize(float size) {
+    constexpr float kMinBrushSize = 0.5f;
+    constexpr float kBrushSizeStep = 0.25f;
+    const float clamped = std::clamp(size, kMinBrushSize, kMaxBrushSize);
+    const float steps = std::round((clamped - kMinBrushSize) / kBrushSizeStep);
+    return kMinBrushSize + (steps * kBrushSizeStep);
+}
+
+bool TryParseBrushSizePresets(std::string_view value, std::vector<float>& presets) {
+    const QString text = value.empty()
+        ? QString()
+        : QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size())).trimmed();
+    if (text.isEmpty()) {
+        presets.clear();
+        return true;
+    }
+
+    std::vector<float> parsedPresets;
+    const QStringList tokens = text.split(QLatin1Char(','));
+    for (const QString& rawToken : tokens) {
+        const QString token = rawToken.trimmed();
+        if (token.isEmpty()) {
+            return false;
+        }
+
+        const QByteArray utf8 = token.toUtf8();
+        char* parseEnd = nullptr;
+        const float parsedValue = std::strtof(utf8.constData(), &parseEnd);
+        if (parseEnd == utf8.constData() || *parseEnd != '\0' || parsedValue <= 0.0f) {
+            return false;
+        }
+        parsedPresets.push_back(parsedValue);
+    }
+
+    presets = NormalizeBrushSizePresets(std::move(parsedPresets));
+    return true;
+}
+
+std::string FormatBrushSizePresets(const std::vector<float>& presets) {
+    const std::vector<float> normalized = NormalizeBrushSizePresets(presets);
+    std::string formatted;
+    for (std::size_t index = 0; index < normalized.size(); ++index) {
+        if (index > 0U) {
+            formatted += ", ";
+        }
+        formatted += FormatBrushSizePresetValue(normalized[index]);
+    }
+    return formatted;
+}
+
+std::string FormatBrushSizeValue(float size) {
+    char buffer[16] = {};
+    std::snprintf(buffer, sizeof(buffer), "%.2f", static_cast<double>(size));
+    std::string value = buffer;
+    while (!value.empty() && value.back() == '0') {
+        value.pop_back();
+    }
+    if (!value.empty() && value.back() == '.') {
+        value.pop_back();
+    }
+    return value;
+}
 
 std::vector<std::uint32_t> DefaultPalette() {
     return std::vector<std::uint32_t>(kDefaultPalette.begin(), kDefaultPalette.end());

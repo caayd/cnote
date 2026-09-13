@@ -579,3 +579,60 @@ else()
     set_tests_properties(layout_parity_qt PROPERTIES TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
 endif()
+# --- Qt settings dialogs (migration plan step 6.2) ----------------------------
+# QDialog ports of SettingsWindow and NewPageSettingsWindow driven by the
+# portable settings service: same categories, controls, draft/apply semantics
+# and palette-remapping policy as the legacy windows.  Widgets only, no
+# App/HWND/HDC.
+add_library(cnote_dialogs_qt STATIC
+    src/ui/SettingsFormatQt.cpp
+    src/ui/PageDefaultsQt.cpp
+    src/ui/SettingsDialogQt.cpp
+    src/ui/NewPageDialogQt.cpp
+)
+set_target_properties(cnote_dialogs_qt PROPERTIES AUTOMOC ON)
+target_include_directories(cnote_dialogs_qt PUBLIC src)
+target_compile_features(cnote_dialogs_qt PUBLIC cxx_std_20)
+target_compile_options(cnote_dialogs_qt PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_dialogs_qt PUBLIC cnote_model cnote_settings_qt Qt6::Widgets)
+
+# Self-contained offscreen evidence for the settings dialog: control inventory,
+# palette/quick-size/brush-preset/zoom clamps, shortcut capture, persistence,
+# refresh-on-open, modeless ownership, tab order and grab() screenshots.
+add_executable(cnote_settings_dialog_tests tests/SettingsDialogQtTests.cpp)
+target_compile_options(cnote_settings_dialog_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_settings_dialog_tests PRIVATE cnote_dialogs_qt)
+add_test(NAME settings_dialog_qt COMMAND cnote_settings_dialog_tests)
+set_tests_properties(settings_dialog_qt PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+
+# Self-contained offscreen evidence for the new-page dialog: draft clamping and
+# presets, swatch/hex/HSL colour edits, profile selection, remap toggle,
+# current/all/future apply semantics, recent-colour bookkeeping, reset, refresh
+# on open, cancel-discards-draft, tab order and grab() screenshots.
+add_executable(cnote_new_page_dialog_tests tests/NewPageDialogQtTests.cpp)
+target_compile_options(cnote_new_page_dialog_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_new_page_dialog_tests PRIVATE cnote_dialogs_qt)
+add_test(NAME new_page_dialog_qt COMMAND cnote_new_page_dialog_tests)
+set_tests_properties(new_page_dialog_qt PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+
+# The dialog tests need QtWidgets at runtime; stage the Qt runtime next to the
+# executables on Windows (the other Qt test targets rely on a manual copy).
+if(WIN32)
+    foreach(_cnote_dialog_test cnote_settings_dialog_tests cnote_new_page_dialog_tests)
+        foreach(_cnote_qt_runtime Qt6::Core Qt6::Gui Qt6::Widgets)
+            add_custom_command(TARGET ${_cnote_dialog_test} POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:${_cnote_qt_runtime}>"
+                    "$<TARGET_FILE_DIR:${_cnote_dialog_test}>"
+            )
+        endforeach()
+    endforeach()
+endif()

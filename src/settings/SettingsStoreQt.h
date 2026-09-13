@@ -16,6 +16,7 @@ namespace cnote::settings {
 
 inline constexpr std::size_t kZoomPresetCount = 5;
 inline constexpr std::size_t kMaxRecentDocuments = 10;
+inline constexpr std::size_t kMaxPaletteColors = 12;
 inline constexpr float kMinZoom = 0.35f;
 inline constexpr float kMaxZoom = 4.0f;
 inline constexpr float kMaxBrushSize = 20.0f;
@@ -62,6 +63,13 @@ struct ShortcutBinding {
 
 std::vector<std::uint32_t> DefaultPalette();
 std::array<ShortcutBinding, kShortcutActionCount> DefaultShortcutBindings();
+
+// Brush-size value codecs shared by the settings file and the dialogs, so no
+// snapping/formatting rule is duplicated between the store and the UI.
+[[nodiscard]] float SnapBrushSize(float size);
+bool TryParseBrushSizePresets(std::string_view value, std::vector<float>& presets);
+[[nodiscard]] std::string FormatBrushSizePresets(const std::vector<float>& presets);
+[[nodiscard]] std::string FormatBrushSizeValue(float size);
 
 // In-memory image of `settings.ini`; the defaults are the legacy member
 // initializers in src/App.h, so a missing file or unparsable field keeps them.
