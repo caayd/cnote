@@ -117,8 +117,6 @@ set(CNOTE_MICROTEX_ENGINE_SOURCES
 )
 
 
-
-
 enable_testing()
 
 
@@ -147,47 +145,13 @@ target_compile_definitions(microtex_qt PUBLIC BUILD_QT)
 # which require std::byte.
 target_link_libraries(microtex_qt PUBLIC tinyxml2 Qt6::Gui)
 
-# Portable MicroTeX core plus the Qt QPainter drawing backend
-# (cnote::latex::Draw(FormulaHandle, QPainter&, ...)).
-add_library(cnote_latex_qt STATIC
-    src/latex/LatexEngine.cpp
-    src/latex/LatexEngineQt.cpp
-)
-target_include_directories(cnote_latex_qt PUBLIC src)
-target_compile_features(cnote_latex_qt PUBLIC cxx_std_20)
-target_compile_definitions(cnote_latex_qt PUBLIC CNOTE_LATEX_QT_BACKEND)
-target_link_libraries(cnote_latex_qt PUBLIC cnote_model microtex_qt Qt6::Gui)
-
-# --- Qt canvas services (migration plan steps 3.1/3.3/3.6) --------------------
-# Portable rendering layer: QTextDocument/QTextLayout text layout and the
-# QPainter/QImage committed-object page renderer. No widgets, no App/HWND/HDC.
-add_library(cnote_render_qt STATIC
-    src/text/TextLayoutQt.cpp
-    src/text/TextEditingQt.cpp
-    src/latex/LatexCompletion.cpp
-    src/render/PageRenderer.cpp
-    src/selection/StrokeSmoothing.cpp
-)
-target_include_directories(cnote_render_qt PUBLIC src)
-target_compile_features(cnote_render_qt PUBLIC cxx_std_20)
-target_link_libraries(cnote_render_qt PUBLIC cnote_model cnote_latex_qt Qt6::Gui)
-
-# Qt PDF export: the portable PDFium core plus the Qt overlay composition.
-add_library(cnote_pdf_qt STATIC
-    src/PdfBackend.cpp
-    src/render/PdfExportQt.cpp
-    src/render/PdfiumBackgroundProvider.cpp
-)
-target_include_directories(cnote_pdf_qt PUBLIC src)
-target_compile_features(cnote_pdf_qt PUBLIC cxx_std_20)
-target_link_libraries(cnote_pdf_qt PUBLIC cnote_render_qt pdfium)
 
 # Offscreen Qt page-renderer test: layer order, transparent text backgrounds,
 # span application, cache reuse without re-layout, model stability.
 add_executable(cnote_page_renderer_tests tests/PageRendererTests.cpp)
 target_compile_definitions(cnote_page_renderer_tests PRIVATE
     CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
-target_link_libraries(cnote_page_renderer_tests PRIVATE cnote_render_qt)
+target_link_libraries(cnote_page_renderer_tests PRIVATE cnote_services)
 add_test(NAME render_qt_offscreen COMMAND cnote_page_renderer_tests)
 get_target_property(_cnote_qmake Qt6::qmake IMPORTED_LOCATION)
 execute_process(
@@ -200,14 +164,10 @@ set_tests_properties(render_qt_offscreen PROPERTIES
 # Self-contained Qt PDF-export contract test (no external fixtures).
 add_executable(cnote_pdf_export_tests
     tests/PdfExportTests.cpp
-    src/ProjectFile.cpp
-    src/document/LoadDocumentFile.cpp
-    src/document/XpressCodec.cpp
-    src/Unicode.cpp
 )
 target_compile_definitions(cnote_pdf_export_tests PRIVATE
     CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
-target_link_libraries(cnote_pdf_export_tests PRIVATE cnote_pdf_qt Qt6::Core)
+target_link_libraries(cnote_pdf_export_tests PRIVATE cnote_services Qt6::Core)
 add_test(NAME pdf_export_qt COMMAND cnote_pdf_export_tests)
 set_tests_properties(pdf_export_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
@@ -218,7 +178,7 @@ add_executable(cnote_text_editing_tests
 )
 target_compile_definitions(cnote_text_editing_tests PRIVATE
     CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
-target_link_libraries(cnote_text_editing_tests PRIVATE cnote_render_qt)
+target_link_libraries(cnote_text_editing_tests PRIVATE cnote_services)
 add_test(NAME text_editing_qt COMMAND cnote_text_editing_tests)
 set_tests_properties(text_editing_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
@@ -227,7 +187,7 @@ set_tests_properties(text_editing_qt PROPERTIES
 add_executable(cnote_pdf_background_tests
     tests/PdfBackgroundTests.cpp
 )
-target_link_libraries(cnote_pdf_background_tests PRIVATE cnote_pdf_qt)
+target_link_libraries(cnote_pdf_background_tests PRIVATE cnote_services)
 add_test(NAME pdf_background_qt COMMAND cnote_pdf_background_tests)
 set_tests_properties(pdf_background_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
@@ -236,45 +196,35 @@ set_tests_properties(pdf_background_qt PROPERTIES
 add_executable(cnote_session_manager_tests
     tests/SessionManagerTests.cpp
     src/shell/AppManager.cpp
-    src/Unicode.cpp
 )
-target_link_libraries(cnote_session_manager_tests PRIVATE cnote_model cnote_latex_qt Qt6::Core)
+target_link_libraries(cnote_session_manager_tests PRIVATE cnote_model cnote_services Qt6::Core)
 add_test(NAME session_manager_qt COMMAND cnote_session_manager_tests)
 
 # --- Qt canvas and runnable migration frontend (plan steps 3.1/3.2/3.3/3.9) ---
 # CanvasWidget owns per-view viewport/transient state and its raster caches and
-# delegates all committed-object drawing to cnote_render_qt; the controller owns
+# delegates all committed-object drawing to cnote_services; the controller owns
 # the shared ProjectSession (document + undo/redo) behind ui::CanvasController.
 # No App/HWND/HDC and no second rendering or text path.
 find_package(Qt6 6.11.2 REQUIRED COMPONENTS Widgets)
 
 add_library(cnote_ui STATIC
     src/ui/CanvasWidget.cpp
+    src/ui/LayoutQt.cpp
+    src/ui/ChromeAssetsQt.cpp
+    src/ui/ToolbarWidget.cpp
+    src/ui/SidebarWidget.cpp
+    src/ui/SettingsFormatQt.cpp
+    src/ui/PageDefaultsQt.cpp
+    src/ui/SettingsDialogQt.cpp
+    src/ui/NewPageDialogQt.cpp
+    src/ui/InteractionRouter.cpp
+    src/ui/PrecisionInputRouter.cpp
+    src/ui/PrecisionInputFilterQt.cpp
     src/qt/QtDocumentController.cpp
     src/qt/QtDocumentIo.cpp
     src/qt/QtMainWindow.cpp
-    # Portable project decode used by the Qt file service.
-    src/ProjectFile.cpp
-    src/document/XpressCodec.cpp
-    src/document/LoadDocumentFile.cpp
-    src/Unicode.cpp
-    # Shared session/view registry and autosave timers (Qt Core only).
     src/shell/AppManager.cpp
-    # New-page draft/defaults model used by the window's page commands (the
-    # dialogs that also use it are separate targets).
-    src/ui/PageDefaultsQt.cpp
-    # Ported chrome widgets instantiated by the window (plan 6.1-6.3).
-    src/ui/ToolbarWidget.cpp
-    src/ui/SidebarWidget.cpp
-    src/ui/ChromeAssetsQt.cpp
-    src/settings/KeyBindingQt.cpp
-    # Clipboard flavors for the selection commands (Ctrl+C/X/V).
-    src/document/SelectionClipboardQt.cpp
-    src/document/SelectionClipboardCodec.cpp
     # Settings and new-page dialogs the window owns (modeless, live model).
-    src/ui/SettingsDialogQt.cpp
-    src/ui/SettingsFormatQt.cpp
-    src/ui/NewPageDialogQt.cpp
 )
 set_target_properties(cnote_ui PROPERTIES AUTOMOC ON)
 target_include_directories(cnote_ui PUBLIC src)
@@ -282,8 +232,47 @@ target_compile_features(cnote_ui PUBLIC cxx_std_20)
 target_compile_options(cnote_ui PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-# cnote_pdf_qt provides PdfiumBackend plus the portable file-loader service.
-target_link_libraries(cnote_ui PUBLIC cnote_model cnote_render_qt cnote_pdf_qt Qt6::Widgets)
+# cnote_services provides PdfiumBackend plus the portable file-loader service.
+target_link_libraries(cnote_ui PUBLIC cnote_services Qt6::Widgets)
+
+qt_add_resources(cnote_ui "cnote_chrome_assets"
+    PREFIX "/cnote"
+    BASE "assets"
+    FILES
+        assets/icons/zoom.svg
+        assets/icons/text.svg
+        assets/icons/new-page.svg
+        assets/icons/pan.svg
+        assets/icons/settings.svg
+        assets/icons/cursor.svg
+        assets/icons/draw.svg
+        assets/icons/erase.svg
+        assets/icons/lasso.svg
+        assets/icons/redo.svg
+        assets/icons/undo.svg
+        assets/icons/text/bold.svg
+        assets/icons/text/italics.svg
+        assets/icons/text/underline.svg
+        assets/icons/text/left-or.svg
+        assets/icons/text/cent-or.svg
+        assets/icons/text/right-or.svg
+)
+if(WIN32)
+    # Windows-only precision-touchpad adapter (plan 5.4).
+    target_sources(cnote_ui PRIVATE
+        src/platform/windows/PrecisionTouchpadQt.cpp
+        src/platform/windows/PrecisionTouchpad.cpp
+    )
+    target_compile_definitions(cnote_ui PUBLIC
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
+    target_link_libraries(cnote_ui PUBLIC user32)
+endif()
+if(MINGW)
+    set_source_files_properties(
+        src/platform/windows/PrecisionTouchpad.cpp
+        src/platform/windows/PrecisionTouchpadQt.cpp
+        PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/include")
+endif()
 
 add_executable(cnote src/main.cpp)
 target_link_libraries(cnote PRIVATE cnote_ui)
@@ -302,23 +291,39 @@ if(WIN32)
     )
 endif()
 
-# --- Qt settings store and key bindings (migration plan steps 6.4/6.5) --------
-# Portable settings storage: same keys, defaults, clamping, saved-palette
-# semantics, zoom presets and recent files as src/AppSettings.cpp; the Windows
-# %APPDATA%/cnote/settings.ini rule plus the working-directory fallback are kept
-# and non-Windows resolves QStandardPaths::AppConfigLocation for "cnote".
-# Persistence goes through QSaveFile and never touches document state.
-add_library(cnote_settings_qt STATIC
+
+# --- cnote_services: project codecs, settings, text layout, LaTeX, PDFium and
+# page rendering (plan step 1.5).  Qt Core/Gui only: no widgets, no window
+# handles, no App state.
+add_library(cnote_services STATIC
+    # Project codecs and file loading (moved out of the cnote_ui list at cutover).
+    src/ProjectFile.cpp
+    src/document/LoadDocumentFile.cpp
+    src/document/XpressCodec.cpp
+    src/latex/LatexEngine.cpp
+    src/latex/LatexEngineQt.cpp
+    src/text/TextLayoutQt.cpp
+    src/text/TextEditingQt.cpp
+    src/latex/LatexCompletion.cpp
+    src/render/PageRenderer.cpp
+    src/selection/StrokeSmoothing.cpp
+    src/PdfBackend.cpp
+    src/render/PdfExportQt.cpp
+    src/render/PdfiumBackgroundProvider.cpp
     src/settings/SettingsStoreQt.cpp
     src/settings/KeyBindingQt.cpp
     src/Unicode.cpp
+    src/document/SelectionClipboardCodec.cpp
+    src/document/SelectionClipboardQt.cpp
+    src/platform/AppResourcePaths.cpp
 )
-target_include_directories(cnote_settings_qt PUBLIC src)
-target_compile_features(cnote_settings_qt PUBLIC cxx_std_20)
-target_compile_options(cnote_settings_qt PRIVATE
+target_include_directories(cnote_services PUBLIC src)
+target_compile_features(cnote_services PUBLIC cxx_std_20)
+target_compile_definitions(cnote_services PUBLIC CNOTE_LATEX_QT_BACKEND)
+target_compile_options(cnote_services PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_settings_qt PUBLIC Qt6::Gui)
+target_link_libraries(cnote_services PUBLIC cnote_model microtex_qt pdfium Qt6::Core Qt6::Gui)
 
 # Self-contained contract test: legacy-record -> QKeySequence -> PortableText
 # round trips for every capturable action, malformed/unknown-record fallback to
@@ -328,28 +333,11 @@ add_executable(cnote_settings_tests tests/SettingsStoreQtTests.cpp)
 target_compile_options(cnote_settings_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_settings_tests PRIVATE cnote_settings_qt)
+target_link_libraries(cnote_settings_tests PRIVATE cnote_services)
 add_test(NAME settings_qt COMMAND cnote_settings_tests)
 set_tests_properties(settings_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
-# --- Qt clipboard bridge (migration plan step 2.6) ----------------------------
-# Platform-neutral CTS selection codec plus the QClipboard bridge: structured
-# selections travel as application/x-cnote-selection and, on Windows, through
-# Qt's Windows MIME bridge under the legacy registered format
-# cnote.selection.v1.  Ordinary image data and plain text are the paste
-# fallbacks in that order.  Qt Gui only - no widgets, no App/HWND/HDC - and
-# nothing here mutates a document.
-add_library(cnote_clipboard_qt STATIC
-    src/document/SelectionClipboardCodec.cpp
-    src/document/SelectionClipboardQt.cpp
-)
-target_include_directories(cnote_clipboard_qt PUBLIC src)
-target_compile_features(cnote_clipboard_qt PUBLIC cxx_std_20)
-target_compile_options(cnote_clipboard_qt PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-target_link_libraries(cnote_clipboard_qt PUBLIC cnote_model Qt6::Gui)
 
 # Self-contained contract test over the real OS clipboard: CTS round trip,
 # structured > image > text priority, invalid/empty payloads and - on Windows -
@@ -358,7 +346,7 @@ add_executable(cnote_selection_clipboard_tests tests/SelectionClipboardQtTests.c
 target_compile_options(cnote_selection_clipboard_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_selection_clipboard_tests PRIVATE cnote_clipboard_qt)
+target_link_libraries(cnote_selection_clipboard_tests PRIVATE cnote_services)
 add_test(NAME selection_clipboard_qt COMMAND cnote_selection_clipboard_tests)
 # The Windows bridge evidence needs the real (non-offscreen) platform; the
 # other platforms run this service test on the offscreen platform like the
@@ -377,28 +365,8 @@ else()
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 endif()
 
-# --- Qt layout consolidation (migration plan step 6.1) ------------------------
-# Qt logical-pixel port of the reference chrome geometry (toolbar, toolbar
-# title/zoom, sidebar metrics and header, quick-size and text-format popups,
-# palette menu/wheel, toolbar auto-hide).  Qt Gui only - no widgets, no
-# App/HWND/HDC.  Every constant in src/ui/LayoutQt.cpp
-# records the call path it came from; the duplicate appui/App.cpp definitions
-# and their single disagreement (palette-wheel hover grow) are resolved in the
-# header comment.
-add_library(cnote_layout_qt STATIC
-    src/ui/LayoutQt.cpp
-)
-target_include_directories(cnote_layout_qt PUBLIC src)
-target_compile_features(cnote_layout_qt PUBLIC cxx_std_20)
-target_compile_options(cnote_layout_qt PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-target_link_libraries(cnote_layout_qt PUBLIC Qt6::Gui)
 
 # The Qt shell is the product consumer of the consolidated layout.
-if(TARGET cnote_ui)
-    target_link_libraries(cnote_ui PUBLIC cnote_layout_qt)
-endif()
 
 # Layout parity evidence (plan step 6.1): one input matrix (client sizes
 # including compact widths, palette sizes, maximized states, tool variants,
@@ -420,7 +388,7 @@ target_compile_definitions(cnote_layout_parity_tests PRIVATE
 target_compile_options(cnote_layout_parity_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_layout_parity_tests PRIVATE cnote_layout_qt Qt6::Gui)
+target_link_libraries(cnote_layout_parity_tests PRIVATE cnote_ui Qt6::Gui)
 add_test(NAME layout_parity_qt COMMAND cnote_layout_parity_tests)
 # Windows needs the native platform: the offscreen plugin's font database
 # returns placeholder metrics there, while the harness compares real text
@@ -454,27 +422,13 @@ endif()
 if(TARGET cnote)
     include(GNUInstallDirs)
 
-    # -- installed-location resource lookup and packaged application icon -----
-    # The helper resolves latex-res from the installed application directory
-    # (Contents/Resources inside a macOS bundle) instead of the current working
-    # directory; main.cpp calls it, and tests may link it too.
-    add_library(cnote_platform_qt STATIC
-        src/platform/AppResourcePaths.cpp
-    )
-    target_include_directories(cnote_platform_qt PUBLIC src)
-    target_compile_features(cnote_platform_qt PUBLIC cxx_std_20)
-    target_compile_options(cnote_platform_qt PRIVATE
-        $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-    )
-    target_link_libraries(cnote_platform_qt PUBLIC Qt6::Gui)
     # The same artwork as the Windows .rc icon and the macOS bundle icon, made
     # available to Qt on every platform.
-    qt_add_resources(cnote_platform_qt "cnote_app_icons"
+    qt_add_resources(cnote_services "cnote_app_icons"
         PREFIX "/cnote"
         BASE "${CMAKE_CURRENT_SOURCE_DIR}/assets"
         FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/cnote.ico"
     )
-    target_link_libraries(cnote_ui PUBLIC cnote_platform_qt)
 
     # The Windows icon resource stays conditional; no other platform compiles it.
     if(WIN32)
@@ -669,24 +623,6 @@ if(TARGET cnote)
     include(CPack)
 endif()
 
-# --- Qt settings dialogs (migration plan step 6.2) ----------------------------
-# QDialog ports of SettingsWindow and NewPageSettingsWindow driven by the
-# portable settings service: same categories, controls, draft/apply semantics
-# and palette-remapping policy as the legacy windows.  Widgets only, no
-# App/HWND/HDC.
-add_library(cnote_dialogs_qt STATIC
-    src/ui/SettingsFormatQt.cpp
-    src/ui/PageDefaultsQt.cpp
-    src/ui/SettingsDialogQt.cpp
-    src/ui/NewPageDialogQt.cpp
-)
-set_target_properties(cnote_dialogs_qt PROPERTIES AUTOMOC ON)
-target_include_directories(cnote_dialogs_qt PUBLIC src)
-target_compile_features(cnote_dialogs_qt PUBLIC cxx_std_20)
-target_compile_options(cnote_dialogs_qt PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-target_link_libraries(cnote_dialogs_qt PUBLIC cnote_model cnote_settings_qt Qt6::Widgets)
 
 # Self-contained offscreen evidence for the settings dialog: control inventory,
 # palette/quick-size/brush-preset/zoom clamps, shortcut capture, persistence,
@@ -695,7 +631,7 @@ add_executable(cnote_settings_dialog_tests tests/SettingsDialogQtTests.cpp)
 target_compile_options(cnote_settings_dialog_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_settings_dialog_tests PRIVATE cnote_dialogs_qt)
+target_link_libraries(cnote_settings_dialog_tests PRIVATE cnote_ui)
 add_test(NAME settings_dialog_qt COMMAND cnote_settings_dialog_tests)
 set_tests_properties(settings_dialog_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
@@ -708,44 +644,11 @@ add_executable(cnote_new_page_dialog_tests tests/NewPageDialogQtTests.cpp)
 target_compile_options(cnote_new_page_dialog_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_new_page_dialog_tests PRIVATE cnote_dialogs_qt)
+target_link_libraries(cnote_new_page_dialog_tests PRIVATE cnote_ui)
 add_test(NAME new_page_dialog_qt COMMAND cnote_new_page_dialog_tests)
 set_tests_properties(new_page_dialog_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
-# --- Qt precision input: Windows touchpad and native gestures (plan 5.3/5.4) --
-# Portable decision core plus the Qt event filter the canvas installs on itself,
-# and the Windows-only QAbstractNativeEventFilter that reuses the touchpad
-# context adapter.  Qt Gui/Core only for the portable half; no widgets, no App.
-add_library(cnote_precision_input_qt STATIC
-    src/ui/PrecisionInputRouter.cpp
-    src/ui/PrecisionInputFilterQt.cpp
-)
-set_target_properties(cnote_precision_input_qt PROPERTIES AUTOMOC ON)
-target_include_directories(cnote_precision_input_qt PUBLIC src)
-target_compile_features(cnote_precision_input_qt PUBLIC cxx_std_20)
-target_compile_options(cnote_precision_input_qt PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-target_link_libraries(cnote_precision_input_qt PUBLIC Qt6::Gui)
-if(WIN32)
-    target_sources(cnote_precision_input_qt PRIVATE
-        src/platform/windows/PrecisionTouchpadQt.cpp
-        src/platform/windows/PrecisionTouchpad.cpp
-    )
-    target_compile_definitions(cnote_precision_input_qt PUBLIC
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
-    target_link_libraries(cnote_precision_input_qt PUBLIC user32)
-endif()
-if(MINGW)
-    # The adapter uses touchpad declarations newer than the default MinGW SDK.
-    set_source_files_properties(
-        src/platform/windows/PrecisionTouchpad.cpp
-        PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/include")
-    set_source_files_properties(
-        src/platform/windows/PrecisionTouchpadQt.cpp
-        PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/include")
-endif()
 
 # Portable decision-core evidence: routing, consume/pass-through, duplicate
 # suppression, availability fallback, inertia transitions and thresholds.
@@ -753,7 +656,7 @@ add_executable(cnote_precision_router_tests tests/PrecisionInputRouterTests.cpp)
 target_compile_options(cnote_precision_router_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_precision_router_tests PRIVATE cnote_precision_input_qt)
+target_link_libraries(cnote_precision_router_tests PRIVATE cnote_ui)
 add_test(NAME precision_input_router_qt COMMAND cnote_precision_router_tests)
 
 # Widget-level harness: real QWidget + real Qt events through the installed
@@ -763,7 +666,7 @@ add_executable(cnote_precision_filter_tests tests/PrecisionInputFilterTests.cpp)
 target_compile_options(cnote_precision_filter_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_precision_filter_tests PRIVATE cnote_precision_input_qt Qt6::Widgets)
+target_link_libraries(cnote_precision_filter_tests PRIVATE cnote_ui Qt6::Widgets)
 add_test(NAME precision_input_filter_qt COMMAND cnote_precision_filter_tests)
 set_tests_properties(precision_input_filter_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
@@ -774,7 +677,7 @@ if(WIN32)
     target_compile_options(cnote_precision_touchpad_tests PRIVATE
         $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
     )
-    target_link_libraries(cnote_precision_touchpad_tests PRIVATE cnote_precision_input_qt Qt6::Widgets)
+    target_link_libraries(cnote_precision_touchpad_tests PRIVATE cnote_ui Qt6::Widgets)
     add_test(NAME precision_touchpad_qt COMMAND cnote_precision_touchpad_tests)
     set_tests_properties(precision_touchpad_qt PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
@@ -816,46 +719,8 @@ endif()
 # the SVGs are parsed with the ported reference path parser, so the chrome needs
 # only Qt Core/Gui/Widgets (plan step 1.3), never the optional Qt SVG module.
 
-add_library(cnote_chrome_qt STATIC
-    src/ui/ChromeAssetsQt.cpp
-    src/ui/ToolbarWidget.cpp
-    src/ui/SidebarWidget.cpp
-)
-set_target_properties(cnote_chrome_qt PROPERTIES AUTOMOC ON)
-target_include_directories(cnote_chrome_qt PUBLIC src)
-target_compile_features(cnote_chrome_qt PUBLIC cxx_std_20)
-target_compile_options(cnote_chrome_qt PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-qt_add_resources(cnote_chrome_qt "cnote_chrome_assets"
-    PREFIX "/cnote"
-    BASE "assets"
-    FILES
-        assets/icons/zoom.svg
-        assets/icons/text.svg
-        assets/icons/new-page.svg
-        assets/icons/pan.svg
-        assets/icons/settings.svg
-        assets/icons/cursor.svg
-        assets/icons/draw.svg
-        assets/icons/erase.svg
-        assets/icons/lasso.svg
-        assets/icons/redo.svg
-        assets/icons/undo.svg
-        assets/icons/text/bold.svg
-        assets/icons/text/italics.svg
-        assets/icons/text/underline.svg
-        assets/icons/text/left-or.svg
-        assets/icons/text/cent-or.svg
-        assets/icons/text/right-or.svg
-)
-target_link_libraries(cnote_chrome_qt PUBLIC
-    cnote_layout_qt cnote_settings_qt cnote_render_qt Qt6::Widgets)
 
 # The Qt shell is the product consumer of the chrome widgets.
-if(TARGET cnote_ui)
-    target_link_libraries(cnote_ui PUBLIC cnote_chrome_qt)
-endif()
 
 # Deterministic offscreen contract test (plan step 6.1): toolbar control rects
 # and hit regions against cnote::appui::qt for a width matrix including compact
@@ -867,31 +732,14 @@ add_executable(cnote_chrome_tests tests/ChromeWidgetTests.cpp)
 target_compile_options(cnote_chrome_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_chrome_tests PRIVATE cnote_chrome_qt cnote_model Qt6::Widgets)
+target_link_libraries(cnote_chrome_tests PRIVATE cnote_ui cnote_model Qt6::Widgets)
 add_test(NAME chrome_qt COMMAND cnote_chrome_tests)
 set_tests_properties(chrome_qt PROPERTIES TIMEOUT 120
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
-# --- Qt interaction router (migration plan steps 5.1-5.3) ---------------------
-# Widget-free pointer/tool routing ported from src/shell/MessageLoop.cpp (tool
-# routing, drag state, capture) and the App interaction methods it calls.  Qt
-# Gui plus the model's Vec2 only: no QWidget, App, HWND or HDC.  The canvas
-# adopts it; src/ui/CanvasWidget.cpp stays with the canvas slice.
-add_library(cnote_interaction_qt STATIC
-    src/ui/InteractionRouter.cpp
-)
-target_include_directories(cnote_interaction_qt PUBLIC src)
-target_compile_features(cnote_interaction_qt PUBLIC cxx_std_20)
-target_compile_options(cnote_interaction_qt PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-target_link_libraries(cnote_interaction_qt PUBLIC cnote_model Qt6::Gui)
 
 # The Qt shell is the consumer; linking the library here is the single
 # preparation step the canvas slice needs before it adopts the router.
-if(TARGET cnote_ui)
-    target_link_libraries(cnote_ui PUBLIC cnote_interaction_qt)
-endif()
 
 # Deterministic behavior test over PointerSample sequences: tool routing,
 # precedence, modifier changes, page-boundary segmentation, pending-erase
@@ -902,7 +750,7 @@ target_compile_features(cnote_interaction_router_tests PRIVATE cxx_std_20)
 target_compile_options(cnote_interaction_router_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_interaction_router_tests PRIVATE cnote_interaction_qt)
+target_link_libraries(cnote_interaction_router_tests PRIVATE cnote_ui)
 add_test(NAME interaction_router_qt COMMAND cnote_interaction_router_tests)
 set_tests_properties(interaction_router_qt PROPERTIES TIMEOUT 120)
 
@@ -920,7 +768,7 @@ target_include_directories(cnote_selection_math_tests PRIVATE src)
 target_compile_features(cnote_selection_math_tests PRIVATE cxx_std_20)
 target_compile_definitions(cnote_selection_math_tests PRIVATE
     CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
-target_link_libraries(cnote_selection_math_tests PRIVATE cnote_model cnote_latex_qt cnote_render_qt)
+target_link_libraries(cnote_selection_math_tests PRIVATE cnote_model cnote_services cnote_services)
 add_test(NAME selection_math_qt COMMAND cnote_selection_math_tests)
 set_tests_properties(selection_math_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
@@ -933,16 +781,13 @@ set_tests_properties(selection_math_qt PROPERTIES
 add_executable(cnote_portability_tests
     tests/PortabilityPathTests.cpp
     src/shell/AppManager.cpp
-    src/ProjectFile.cpp
-    src/document/XpressCodec.cpp
-    src/document/LoadDocumentFile.cpp
 )
 target_include_directories(cnote_portability_tests PRIVATE src)
 target_compile_features(cnote_portability_tests PRIVATE cxx_std_20)
 target_compile_options(cnote_portability_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_portability_tests PRIVATE cnote_pdf_qt cnote_settings_qt Qt6::Core)
+target_link_libraries(cnote_portability_tests PRIVATE cnote_services cnote_services Qt6::Core)
 add_test(NAME portability_paths_qt COMMAND cnote_portability_tests)
 set_tests_properties(portability_paths_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
@@ -963,7 +808,7 @@ add_executable(cnote_font_fallback_tests tests/FontFallbackTests.cpp)
 target_compile_options(cnote_font_fallback_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_font_fallback_tests PRIVATE cnote_render_qt)
+target_link_libraries(cnote_font_fallback_tests PRIVATE cnote_services)
 add_test(NAME font_fallback_qt COMMAND cnote_font_fallback_tests)
 # Windows runs this on the native platform: the offscreen plugin's font
 # database there returns placeholder metrics with no installed families, so it
@@ -1002,7 +847,7 @@ target_compile_features(cnote_persistence_tests PRIVATE cxx_std_20)
 target_compile_options(cnote_persistence_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_persistence_tests PRIVATE cnote_ui cnote_settings_qt)
+target_link_libraries(cnote_persistence_tests PRIVATE cnote_ui cnote_services)
 add_test(NAME persistence_semantics_qt COMMAND cnote_persistence_tests)
 set_tests_properties(persistence_semantics_qt PROPERTIES TIMEOUT 180
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
