@@ -28,6 +28,8 @@ namespace {
 constexpr float kMinimumStrokeRenderWidth = 1.25f;
 constexpr float kStrokeRenderWidthDivisor = 2.15f;
 constexpr float kTextLayoutScale = 8.0f;
+// Matches the stored-raster convention (representative 612x792 -> 918x1188).
+constexpr float kHydratedPdfRasterScale = 1.5f;
 constexpr char16_t kEmbeddedCnoteAttachmentName[] = u"cnote-edit-data.cnote";
 
 // PDFium wide strings are UTF-16 code units; build a null-terminated
@@ -414,6 +416,12 @@ std::optional<Document> PdfiumBackend::OpenFromMemory(
         page.height = std::max(1.0f, FPDF_GetPageHeightF(pageHandle));
         page.sourcePdfSourceIndex = 0;
         page.sourcePdfPageIndex = pageIndex;
+        // Materialize the page background so renderers that paint Page::raster
+        // (the Qt canvas) can draw PDF-backed pages; the legacy frontend still
+        // draws the vector page directly.
+        if (const auto raster = RenderPageBitmap(pageHandle, kHydratedPdfRasterScale); raster.has_value()) {
+            page.raster = *raster;
+        }
 
         pages.push_back(std::move(page));
         FPDF_ClosePage(pageHandle);
@@ -454,6 +462,20 @@ void PdfiumBackend::HydrateProject(Document& document) const {
             page.width = sourcePage.width;
             page.height = sourcePage.height;
             page.raster = sourcePage.raster;
+            if (page.raster.pixels.empty()) {
+                // Materialize the PDF page background for renderers that paint
+                // Page::raster (the Qt canvas). The legacy frontend still draws
+                // the vector page directly, so this only adds a fallback.
+                const Document::PdfSource& pdfSource = document.PdfSourceAt(
+                    static_cast<std::size_t>(page.sourcePdfSourceIndex));
+                if (const auto rendered = RenderPage(
+                        pdfSource.pdfData,
+                        static_cast<std::size_t>(page.sourcePdfPageIndex),
+                        kHydratedPdfRasterScale);
+                    rendered.has_value()) {
+                    page.raster = *rendered;
+                }
+            }
         } else {
             page.sourcePdfSourceIndex = -1;
             page.sourcePdfPageIndex = -1;

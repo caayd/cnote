@@ -173,6 +173,15 @@ int main(int argc, char** argv) {
             "embedded export keeps strokes");
     }
 
+    // PDF-backed pages must carry a materialized raster for the Qt canvas.
+    {
+        auto pdfOnly = backend.OpenFromMemory(
+            dir / "raster-source.pdf",
+            std::make_shared<std::vector<std::uint8_t>>(BuildTextPdf()));
+        Check(pdfOnly.has_value() && !pdfOnly->PageAt(0).raster.pixels.empty(),
+            "PDF-only document materializes page rasters");
+    }
+
     auto reopenedFlat = cnote::LoadDocumentFile(dir / "flat.pdf", backend);
     Check(reopenedFlat.has_value(), "attachment-free export reopens as a readable PDF");
     Check(reopenedFlat.has_value() && reopenedFlat->PageCount() == document.PageCount(),
