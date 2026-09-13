@@ -18,6 +18,9 @@ struct PrecisionTouchpadGesture {
     float cumulativeScale = 1.0f;
     float translationX = 0.0f;
     float translationY = 0.0f;
+    bool begin = false;
+    bool end = false;
+    bool cancel = false;
     bool inertiaActive = false;
 };
 
@@ -35,18 +38,14 @@ public:
     PrecisionTouchpad(const PrecisionTouchpad&) = delete;
     PrecisionTouchpad& operator=(const PrecisionTouchpad&) = delete;
 
-    void Initialize(HWND window);
+    [[nodiscard]] bool Initialize(HWND window);
     void Shutdown();
     [[nodiscard]] bool HandlePointerMessage(UINT message, WPARAM wParam);
     [[nodiscard]] bool ProcessInertia();
 
 private:
     struct State;
-    struct StateDeleter {
-        void operator()(State* state) const;
-    };
-
-    std::unique_ptr<State, StateDeleter> state_;
+    std::unique_ptr<State> state_;
 };
 
 }  // namespace cnote

@@ -1139,14 +1139,14 @@ void App::InitializePrecisionTouchpadSupport() {
             &App::PrecisionTouchpadRouteCallback,
             this);
     }
-    precisionTouchpad_->Initialize(window_);
+    static_cast<void>(precisionTouchpad_->Initialize(window_));
 }
 
 void App::ShutdownPrecisionTouchpadSupport() {
-    if (window_ != nullptr) {
+    if (window_ != nullptr && precisionTouchpadInertiaTimerActive_) {
         KillTimer(window_, kPrecisionTouchpadInertiaTimerId);
     }
-    precisionTouchpadManipulationActive_ = false;
+    precisionTouchpadInertiaTimerActive_ = false;
     precisionTouchpadManipulationStartZoom_ = zoom_;
     if (precisionTouchpad_ != nullptr) {
         precisionTouchpad_->Shutdown();
@@ -1159,26 +1159,27 @@ bool App::HandlePrecisionTouchpadPointerMessage(UINT message, WPARAM wParam, LPA
 
 void App::ProcessPrecisionTouchpadInertia() {
     if (precisionTouchpad_ == nullptr || !precisionTouchpad_->ProcessInertia()) {
-        if (window_ != nullptr) {
+        if (window_ != nullptr && precisionTouchpadInertiaTimerActive_) {
             KillTimer(window_, kPrecisionTouchpadInertiaTimerId);
         }
+        precisionTouchpadInertiaTimerActive_ = false;
     }
 }
 
 void App::HandlePrecisionTouchpadGesture(const PrecisionTouchpadGesture& gesture) {
     if (window_ != nullptr) {
-        if (gesture.inertiaActive) {
+        if (gesture.inertiaActive && !precisionTouchpadInertiaTimerActive_) {
             SetTimer(window_, kPrecisionTouchpadInertiaTimerId, 15U, nullptr);
-        } else {
+            precisionTouchpadInertiaTimerActive_ = true;
+        } else if (!gesture.inertiaActive && precisionTouchpadInertiaTimerActive_) {
             KillTimer(window_, kPrecisionTouchpadInertiaTimerId);
+            precisionTouchpadInertiaTimerActive_ = false;
         }
     }
-    if (gesture.phase == PrecisionTouchpadGesture::Phase::Begin) {
-        precisionTouchpadManipulationActive_ = true;
+    if (gesture.begin) {
         precisionTouchpadManipulationStartZoom_ = zoom_;
     }
-    if (gesture.phase == PrecisionTouchpadGesture::Phase::Cancel) {
-        precisionTouchpadManipulationActive_ = false;
+    if (gesture.cancel) {
         precisionTouchpadManipulationStartZoom_ = zoom_;
         return;
     }
@@ -1193,8 +1194,7 @@ void App::HandlePrecisionTouchpadGesture(const PrecisionTouchpadGesture& gesture
     if (std::abs(gesture.translationX) > 0.001f || std::abs(gesture.translationY) > 0.001f) {
         PanBy(gesture.translationX, gesture.translationY);
     }
-    if (gesture.phase == PrecisionTouchpadGesture::Phase::End) {
-        precisionTouchpadManipulationActive_ = false;
+    if (gesture.end) {
         precisionTouchpadManipulationStartZoom_ = zoom_;
     }
 }

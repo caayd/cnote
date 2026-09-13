@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 #include <interactioncontext.h>
@@ -14,7 +15,6 @@ namespace {
 constexpr UINT32 kInteractionMeasurementUnitsScreen = 1U;
 constexpr UINT32 kInteractionUiFeedbackOff = 0U;
 constexpr UINT32 kInteractionFilterPointersOff = 0U;
-constexpr UINT kPrecisionTouchpadInertiaFrameMs = 15U;
 constexpr POINTER_INPUT_TYPE kPointerInputTypeTouchpad = static_cast<POINTER_INPUT_TYPE>(5);
 
 #if defined(__GNUC__)
@@ -156,7 +156,10 @@ struct PrecisionTouchpad::State {
         if ((output.interactionFlags & INTERACTION_FLAG_CANCEL) != 0) {
             StopManipulation();
             StopInertia(true);
-            Emit(PrecisionTouchpadGesture { .phase = PrecisionTouchpadGesture::Phase::Cancel });
+            Emit(PrecisionTouchpadGesture {
+                .phase = PrecisionTouchpadGesture::Phase::Cancel,
+                .cancel = true,
+            });
             return;
         }
 
@@ -172,12 +175,12 @@ struct PrecisionTouchpad::State {
         }
 
         const INTERACTION_ARGUMENTS_MANIPULATION& manipulation = output.arguments.manipulation;
+        const bool begin = (output.interactionFlags & INTERACTION_FLAG_BEGIN) != 0;
+        const bool end = (output.interactionFlags & INTERACTION_FLAG_END) != 0;
         PrecisionTouchpadGesture gesture {
-            .phase = (output.interactionFlags & INTERACTION_FLAG_END) != 0
+            .phase = end
                 ? PrecisionTouchpadGesture::Phase::End
-                : ((output.interactionFlags & INTERACTION_FLAG_BEGIN) != 0
-                    ? PrecisionTouchpadGesture::Phase::Begin
-                    : PrecisionTouchpadGesture::Phase::Update),
+                : (begin ? PrecisionTouchpadGesture::Phase::Begin : PrecisionTouchpadGesture::Phase::Update),
             .screenAnchor {
                 static_cast<int>(std::lround(output.x)),
                 static_cast<int>(std::lround(output.y)),
@@ -185,6 +188,8 @@ struct PrecisionTouchpad::State {
             .cumulativeScale = manipulation.cumulative.scale,
             .translationX = manipulation.delta.translationX,
             .translationY = manipulation.delta.translationY,
+            .begin = begin,
+            .end = end,
         };
 
         if ((output.interactionFlags & INTERACTION_FLAG_END) != 0) {
@@ -221,20 +226,24 @@ struct PrecisionTouchpad::State {
         if (api.getPointerFrameTouchpadInfoHistory == nullptr
             || api.getPointerFrameTouchpadInfoHistory(pointerId, &entriesCount, &pointerCount, nullptr) == FALSE
             || entriesCount == 0U
-            || pointerCount == 0U) {
+            || pointerCount == 0U
+            || static_cast<std::size_t>(entriesCount) > std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(pointerCount)) {
             return false;
         }
 
-        std::vector<POINTER_TOUCH_INFO> touchInfo(entriesCount * pointerCount);
+        const std::size_t sampleCount = static_cast<std::size_t>(entriesCount) * static_cast<std::size_t>(pointerCount);
+        touchInfo.resize(sampleCount);
         if (api.getPointerFrameTouchpadInfoHistory(pointerId, &entriesCount, &pointerCount, touchInfo.data()) == FALSE
             || entriesCount == 0U
-            || pointerCount == 0U) {
+            || pointerCount == 0U
+            || static_cast<std::size_t>(entriesCount) > std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(pointerCount)) {
             return false;
         }
 
-        touchInfo.resize(entriesCount * pointerCount);
-        std::vector<POINTER_TYPE_INFO> typeInfo(touchInfo.size());
-        for (std::size_t index = 0; index < touchInfo.size(); ++index) {
+        const std::size_t updatedSampleCount = static_cast<std::size_t>(entriesCount) * static_cast<std::size_t>(pointerCount);
+        touchInfo.resize(updatedSampleCount);
+        typeInfo.resize(updatedSampleCount);
+        for (std::size_t index = 0; index < updatedSampleCount; ++index) {
             typeInfo[index].type = kPointerInputTypeTouchpad;
             typeInfo[index].touchInfo = touchInfo[index];
         }
@@ -265,15 +274,13 @@ struct PrecisionTouchpad::State {
     PrecisionTouchpadApi api {};
     HWND window = nullptr;
     HINTERACTIONCONTEXT interactionContext = nullptr;
+    std::vector<POINTER_TOUCH_INFO> touchInfo {};
+    std::vector<POINTER_TYPE_INFO> typeInfo {};
     bool enabled = false;
     bool canvasGestureActive = false;
     bool manipulationActive = false;
     bool inertiaActive = false;
 };
-
-void PrecisionTouchpad::StateDeleter::operator()(State* state) const {
-    delete state;
-}
 
 PrecisionTouchpad::PrecisionTouchpad(
     PrecisionTouchpadGestureCallback gestureCallback,
@@ -284,7 +291,7 @@ PrecisionTouchpad::PrecisionTouchpad(
 
 PrecisionTouchpad::~PrecisionTouchpad() = default;
 
-void PrecisionTouchpad::Initialize(HWND window) {
+[[nodiscard]] bool PrecisionTouchpad::Initialize(HWND window) {
     State& state = *state_;
     state.Shutdown();
     state.window = window;
@@ -298,12 +305,12 @@ void PrecisionTouchpad::Initialize(HWND window) {
         || state.api.registerTouchpadCapableWindow == nullptr
         || state.api.getPointerFrameTouchpadInfoHistory == nullptr
         || state.api.processPointerFramesInteractionContext2 == nullptr) {
-        return;
+        return false;
     }
 
     if (FAILED(state.api.createInteractionContext(&state.interactionContext)) || state.interactionContext == nullptr) {
         state.interactionContext = nullptr;
-        return;
+        return false;
     }
 
     const HRESULT callbackHr = state.api.registerOutputCallbackInteractionContext(
@@ -348,12 +355,13 @@ void PrecisionTouchpad::Initialize(HWND window) {
         : E_FAIL;
     if (FAILED(filterHr) || state.api.registerTouchpadCapableWindow(window, TRUE) == FALSE) {
         state.Shutdown();
-        return;
+        return false;
     }
 
     state.enabled = true;
-}
+    return true;
 
+}
 void PrecisionTouchpad::Shutdown() {
     state_->Shutdown();
 }

@@ -835,8 +835,8 @@ private:
     std::uint64_t paletteWheelPixelCacheSignature_ = 0;
     bool smoothScrollActive_ = false;
     std::unique_ptr<PrecisionTouchpad> precisionTouchpad_;
-    bool precisionTouchpadManipulationActive_ = false;
     float precisionTouchpadManipulationStartZoom_ = 1.0f;
+    bool precisionTouchpadInertiaTimerActive_ = false;
     SettingsState settings_ {};
     NewPageSettingsState newPageSettings_ {};
     HCURSOR eraserCursor_ = nullptr;
