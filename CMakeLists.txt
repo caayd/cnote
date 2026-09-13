@@ -1069,6 +1069,58 @@ if(WIN32)
     endforeach()
 endif()
 
+# --- Cross-platform portability tests (plan 7.1/7.6, assumptions section) -----
+# Path/file-name behavior the Windows build alone cannot catch: case-only path
+# differences (same file on Windows, different files on POSIX), non-ASCII
+# project names through save/open/export, extension case folding, a destination
+# directory created after startup, and the platform settings location rule.
+add_executable(cnote_portability_tests
+    tests/PortabilityPathTests.cpp
+    src/shell/AppManager.cpp
+    src/ProjectFile.cpp
+    src/document/XpressCodec.cpp
+    src/document/LoadDocumentFile.cpp
+)
+target_include_directories(cnote_portability_tests PRIVATE src)
+target_compile_features(cnote_portability_tests PRIVATE cxx_std_20)
+target_compile_options(cnote_portability_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_portability_tests PRIVATE cnote_pdf_qt cnote_settings_qt Qt6::Core)
+add_test(NAME portability_paths_qt COMMAND cnote_portability_tests)
+set_tests_properties(portability_paths_qt PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+if(WIN32)
+    # PDFium is a runtime dependency of the export path; stage it next to the
+    # test executable so a clean build directory can run this test directly.
+    add_custom_command(TARGET cnote_portability_tests POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:pdfium>"
+            "$<TARGET_FILE_DIR:cnote_portability_tests>/pdfium.dll"
+    )
+endif()
+
+# Font fallback (plan 3.7): none of the reference Windows families is installed
+# on Linux, so the style-hint substitution must keep every paragraph, every span
+# and a non-empty measured box, and the metrics are printed for comparison.
+add_executable(cnote_font_fallback_tests tests/FontFallbackTests.cpp)
+target_compile_options(cnote_font_fallback_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_font_fallback_tests PRIVATE cnote_render_qt)
+add_test(NAME font_fallback_qt COMMAND cnote_font_fallback_tests)
+# Windows runs this on the native platform: the offscreen plugin's font
+# database there returns placeholder metrics with no installed families, so it
+# could not prove anything about the real font substitution.  Other platforms
+# have a real font database offscreen.
+if(WIN32)
+    set_tests_properties(font_fallback_qt PROPERTIES TIMEOUT 120
+        ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+else()
+    set_tests_properties(font_fallback_qt PROPERTIES TIMEOUT 120
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+endif()
+
 # --- Portable XPRESS codec tests (plan step 2.4) ------------------------------
 # tests/XpressCodecTests.cpp existed but was registered nowhere; the codec is
 # load-bearing for v14 project compatibility (Windows cabinet buffer framing plus

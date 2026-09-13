@@ -285,6 +285,36 @@ if(SELF_CHECK)
         else()
             cnote_fail("packaged executable exited with ${_result} (see stdout/stderr above)")
         endif()
+
+        # Second launch with a non-ASCII project name: that is the path a user
+        # takes by opening an associated file, and on Windows it exercises the
+        # application's command-line argument handling.  MinGW libstdc++ decodes
+        # narrow path input as UTF-8 and throws filesystem_error on code-page
+        # bytes, so a code-page-encoded argv used to abort here; the wide Qt
+        # argument list must be what feeds the path construction.
+        file(RENAME "${_fixture_copy}" "${_fixture_dir}/nöte-α-日本.cnote")
+        set(_utf8_fixture "${_fixture_dir}/nöte-α-日本.cnote")
+        message(STATUS "  launching ${APP_EXE} --self-check=<non-ASCII fixture>")
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E env ${_env_args}
+                "${APP_EXE}" "--self-check=${_utf8_fixture}"
+            WORKING_DIRECTORY "${_run_dir}"
+            RESULT_VARIABLE _utf8_result
+            OUTPUT_VARIABLE _utf8_stdout
+            ERROR_VARIABLE _utf8_stderr
+            TIMEOUT 180
+        )
+        if(_utf8_stdout)
+            message(STATUS "  stdout: ${_utf8_stdout}")
+        endif()
+        if(_utf8_stderr)
+            message(STATUS "  stderr: ${_utf8_stderr}")
+        endif()
+        if(_utf8_result EQUAL 0)
+            cnote_ok("packaged executable opened a project whose path contains non-ASCII characters")
+        else()
+            cnote_fail("non-ASCII project path launch exited with ${_utf8_result} (see stdout/stderr above)")
+        endif()
     endif()
 endif()
 
