@@ -372,6 +372,20 @@ const render::PageSurfaceCache* CanvasWidget::FindSurface(
     return nullptr;
 }
 
+render::PageSurfaceCache* CanvasWidget::MutableSurface(
+    std::size_t pageIndex, float scale, float devicePixelRatio) {
+    const auto page = surfaces_.find(pageIndex);
+    if (page == surfaces_.end()) {
+        return nullptr;
+    }
+    for (SurfaceEntry& entry : page->second.entries) {
+        if (entry.scale == scale && entry.devicePixelRatio == devicePixelRatio && entry.cache.valid) {
+            return &entry.cache;
+        }
+    }
+    return nullptr;
+}
+
 const render::PageSurfaceCache* CanvasWidget::NewestSurface(std::size_t pageIndex) const {
     const auto page = surfaces_.find(pageIndex);
     if (page == surfaces_.end()) {
@@ -391,16 +405,29 @@ const render::PageSurfaceCache& CanvasWidget::EnsureSurface(const CanvasPageView
 
     for (SurfaceEntry& entry : perPage.entries) {
         if (entry.scale == view.scale && entry.devicePixelRatio == devicePixelRatio) {
+            const std::uint64_t before = entry.cache.signature;
             render::EnsurePageSurface(entry.cache, page, RenderParamsFor(view));
+            if (entry.cache.signature != before) {
+                ++surfaceRenders_;
+            }
+            // The surface is rendered at scale * DPR pixels; stamping the DPR
+            // lets the paint path blit it 1:1 in device pixels.
+            if (!entry.cache.image.isNull()) {
+                entry.cache.image.setDevicePixelRatio(devicePixelRatio);
+            }
             return entry.cache;
         }
     }
 
+    ++surfaceScaleMisses_;
     perPage.entries.insert(perPage.entries.begin(), SurfaceEntry { view.scale, devicePixelRatio, {} });
     if (perPage.entries.size() > kScalesPerPage) {
         perPage.entries.resize(kScalesPerPage);
     }
     render::EnsurePageSurface(perPage.entries.front().cache, page, RenderParamsFor(view));
+    if (!perPage.entries.front().cache.image.isNull()) {
+        perPage.entries.front().cache.image.setDevicePixelRatio(devicePixelRatio);
+    }
     return perPage.entries.front().cache;
 }
 
@@ -453,10 +480,19 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 
     const Document& document = controller_.DocumentRef();
     const QRectF clip = QRectF(event->rect());
+    const std::vector<CanvasPageView> views = CalculatePageViews();
+    // Caches are keyed to pages the user can see, not to this paint's clip: a
+    // clipped repaint (live stroke segment, partial update) must never evict the
+    // page raster it just drew from, or the next full paint re-renders it.
     std::vector<std::size_t> visiblePages;
+    for (const CanvasPageView& candidate : views) {
+        if (candidate.valid && candidate.rect.intersects(QRectF(rect()))) {
+            visiblePages.push_back(candidate.pageIndex);
+        }
+    }
     std::size_t paintedPages = 0;
 
-    for (const CanvasPageView& view : CalculatePageViews()) {
+    for (const CanvasPageView& view : views) {
         if (!view.valid || view.pageIndex >= document.PageCount()) {
             continue;
         }
@@ -492,7 +528,18 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 
         painter.save();
         painter.setClipRect(view.rect);
-        painter.drawImage(view.rect, surface->image);
+        // The cached surface already has this scale * DPR resolution and carries
+        // its device pixel ratio, so blit it 1:1: drawing it into a target rect
+        // would resample the whole (up to ~8 MP) image every frame, which is what
+        // made dense-page panning and drawing crawl.  Snapshots at another scale
+        // still take the scaled path.
+        if (!surface->image.isNull()
+            && std::abs(surface->image.devicePixelRatio() - cachedDevicePixelRatio_) < 0.001) {
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+            painter.drawImage(view.rect.topLeft(), surface->image);
+        } else {
+            painter.drawImage(view.rect, surface->image);
+        }
 
         if (liveStrokeOnPage) {
             if (const Stroke* pending = controller_.PendingStroke(); pending != nullptr) {
@@ -528,7 +575,6 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
         painter.drawRect(view.rect.adjusted(0.5, 0.5, -0.5, -0.5));
         painter.restore();
 
-        visiblePages.push_back(view.pageIndex);
         ++paintedPages;
     }
 
@@ -1405,7 +1451,10 @@ void CanvasWidget::SetCursor(CursorKind cursor) {
 }
 
 void CanvasWidget::InvalidateCanvas() {
-    surfaces_.clear();
+    // Repaint request, not a cache drop. The page rasters are keyed and
+    // signature-checked by the renderer, so a content change re-renders on its
+    // own; the interaction router calls this for every pointer sample, and
+    // clearing the rasters here re-rendered a dense page (~1 s) per sample.
     update();
 }
 
@@ -1454,23 +1503,55 @@ void CanvasWidget::ReplaceStrokePoints(const std::vector<Vec2>& points, bool dot
 
 void CanvasWidget::CommitStroke() {
     const std::size_t pageIndex = controller_.PendingStrokePage();
+    const Stroke* pending = controller_.PendingStroke();
+    const Document& document = controller_.DocumentRef();
+    const Page* pendingPage = pageIndex < document.PageCount() ? &document.PageAt(pageIndex) : nullptr;
+    const bool hasPending = pending != nullptr && pendingPage != nullptr;
+    Stroke committed;
+    if (hasPending) {
+        committed = *pending;
+    }
     controller_.EndStroke();
+
+    const CanvasPageView view = CalculatePageView(pageIndex);
+    const float devicePixelRatio = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
+    render::PageSurfaceCache* cache = MutableSurface(pageIndex, view.scale, devicePixelRatio);
+
+    // Composite the finished stroke into the cached page raster instead of
+    // dropping it: a dense page costs about a second to re-render from scratch,
+    // while the reference keeps drawing at refresh rate on the same fixture
+    // (its incremental stroke commit). The cached raster is page-space, so the
+    // stroke is drawn with the device-space params RenderPageSurface uses.
+    if (hasPending && view.valid && cache != nullptr && !cache->image.isNull()
+        && cache->image.size() == QSize(
+            std::max(1, static_cast<int>(std::lround(pendingPage->width * view.scale * devicePixelRatio))),
+            std::max(1, static_cast<int>(std::lround(pendingPage->height * view.scale * devicePixelRatio))))) {
+        render::PageRenderParams params = RenderParamsFor(view);
+        params.scale = view.scale * devicePixelRatio;
+        params.devicePixelRatio = 1.0f;
+        QPainter painter(&cache->image);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        render::PaintStrokePreview(painter, committed, params, 1.0f);
+        painter.end();
+        cache->signature = render::PageSurfaceSignature(*pendingPage, RenderParamsFor(view));
+        update(view.rect.toAlignedRect());
+        NotifyViewportChanged();
+        return;
+    }
+
     const auto page = surfaces_.find(pageIndex);
     if (page != surfaces_.end()) {
         surfaces_.erase(page);
     }
-    const CanvasPageView view = CalculatePageView(pageIndex);
     update(view.valid ? view.rect.toAlignedRect() : rect());
 }
 
 void CanvasWidget::DiscardStroke() {
     const std::size_t pageIndex = controller_.PendingStrokePage();
     controller_.CancelStroke();
-    const auto page = surfaces_.find(pageIndex);
-    if (page != surfaces_.end()) {
-        surfaces_.erase(page);
-    }
-    update();
+    const CanvasPageView view = CalculatePageView(pageIndex);
+    update(view.valid ? view.rect.toAlignedRect() : rect());
 }
 
 void CanvasWidget::ClearSelection() {

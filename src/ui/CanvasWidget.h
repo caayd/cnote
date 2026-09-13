@@ -192,6 +192,9 @@ public:
     [[nodiscard]] QString CaptureEditedLatexSource() const override;
 
     // Diagnostics used by the gate harness/timings.
+    // Page-surface re-renders (a signature change) and scale/DPR cache misses.
+    [[nodiscard]] std::uint64_t SurfaceRenderCount() const { return surfaceRenders_; }
+    [[nodiscard]] std::uint64_t SurfaceScaleMissCount() const { return surfaceScaleMisses_; }
     [[nodiscard]] std::size_t CachedSurfaceCount() const;
     [[nodiscard]] std::size_t LastPaintPageCount() const { return lastPaintPageCount_; }
 
@@ -222,6 +225,8 @@ private:
     };
 
     [[nodiscard]] render::PageRenderParams RenderParamsFor(const CanvasPageView& view) const;
+    // Mutable cache lookup for incremental stroke commits (same key as FindSurface).
+    render::PageSurfaceCache* MutableSurface(std::size_t pageIndex, float scale, float devicePixelRatio);
     const render::PageSurfaceCache* FindSurface(std::size_t pageIndex, float scale, float devicePixelRatio) const;
     const render::PageSurfaceCache* NewestSurface(std::size_t pageIndex) const;
     const render::PageSurfaceCache& EnsureSurface(const CanvasPageView& view, const Page& page);
@@ -312,6 +317,8 @@ private:
     render::PdfBackgroundProvider* pdfBackground_ = nullptr;
     float cachedDevicePixelRatio_ = 0.0f;
     std::size_t lastPaintPageCount_ = 0;
+    std::uint64_t surfaceRenders_ = 0;
+    std::uint64_t surfaceScaleMisses_ = 0;
 
     static constexpr std::size_t kScalesPerPage = 3;
 };
