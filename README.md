@@ -214,19 +214,22 @@ project. It is invoked this way by `.github/workflows/package.yml`.
 
 ## Run
 
-From the build tree (Qt application):
+From the build tree (Qt application) - the build stages Qt's platform,
+image-format and style plugins beside the executable, so no environment
+variables are needed:
 
 ```powershell
-.\build-qt\cnote.exe path\to\document.pdf
+.\build\cnote.exe path\to\document.pdf
 ```
 
 ```bash
-./build-qt/cnote path/to/document.pdf
+./build/cnote path/to/document.pdf
 ```
 
 From a package, run `bin/cnote.exe` (Windows) or extract the TGZ anywhere and
-run `bin/cnote` - resources are resolved relative to the executable, so the
-working directory does not matter.
+run `bin/cnote` - resources and plugins are resolved relative to the
+executable, so the working directory does not matter and no environment
+variables are needed.
 
 ## Release status
 

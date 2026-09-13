@@ -291,6 +291,46 @@ if(WIN32)
     )
 endif()
 
+# -- Build-tree Qt plugin staging ---------------------------------------------
+# A bare launch of the freshly built executable must find Qt's platform plugin
+# without QT_PLUGIN_PATH.  Qt resolves its plugin root relative to the Qt6Core
+# library it loads; with the runtime staged beside the executable that is
+# <exe-dir>/plugins - the same relative layout the installed package produces
+# through qt.conf.  Only the groups an interactive run needs are copied:
+# platforms (qwindows/qxcb plus qoffscreen for headless runs), imageformats and
+# styles (without the native style plugin Qt falls back to Fusion).
+# platforminputcontexts is not staged: nothing in the run path requires an IME
+# plugin.  This is deliberately not windeployqt: the install/deploy script
+# below stays authoritative for the packaged layout.
+foreach(_cnote_plugin_dir platforms imageformats styles)
+    if(EXISTS "${_cnote_plugins}/${_cnote_plugin_dir}")
+        add_custom_command(TARGET cnote POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                "${_cnote_plugins}/${_cnote_plugin_dir}"
+                "$<TARGET_FILE_DIR:cnote>/plugins/${_cnote_plugin_dir}")
+    endif()
+endforeach()
+if(WIN32)
+    # The Qt runtime DLLs are copied next to the executable so a `--target
+    # cnote` build is self-contained (the test targets stage the same files
+    # for themselves below).  Qt6Svg is included because the staged qsvg
+    # imageformats plugin links it.
+    get_target_property(_cnote_qt_core_location Qt6::Core IMPORTED_LOCATION)
+    get_filename_component(_cnote_qt_bin_dir "${_cnote_qt_core_location}" DIRECTORY)
+    foreach(_cnote_runtime Qt6::Core Qt6::Gui Qt6::Widgets)
+        add_custom_command(TARGET cnote POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:${_cnote_runtime}>"
+                "$<TARGET_FILE_DIR:cnote>")
+    endforeach()
+    if(EXISTS "${_cnote_qt_bin_dir}/Qt6Svg.dll")
+        add_custom_command(TARGET cnote POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${_cnote_qt_bin_dir}/Qt6Svg.dll"
+                "$<TARGET_FILE_DIR:cnote>/Qt6Svg.dll")
+    endif()
+endif()
+
 
 # --- cnote_services: project codecs, settings, text layout, LaTeX, PDFium and
 # page rendering (plan step 1.5).  Qt Core/Gui only: no widgets, no window
