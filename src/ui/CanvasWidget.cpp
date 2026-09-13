@@ -3,16 +3,30 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include <QColor>
 #include <QImage>
+#include <QKeyEvent>
+#include <QListView>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPen>
+#include <QPlainTextEdit>
+#include <QScrollBar>
+#include <QSignalBlocker>
+#include <QStringListModel>
+#include <QTextBlock>
+#include <QTextCursor>
+#include <QTextEdit>
 #include <QTimer>
 #include <QWheelEvent>
+
+#include "latex/LatexEngine.h"
+#include "text/TextEditingQt.h"
+#include "text/TextLayoutQt.h"
 
 namespace cnote::ui {
 
@@ -35,8 +49,19 @@ constexpr float kMinimumPageScale = 0.1f;
 // Page units of extra repaint margin around a live stroke segment.
 constexpr float kStrokeDirtyMarginPixels = 12.0f;
 
-qreal RoundToPixels(float value) {
-    return static_cast<qreal>(std::lround(value));
+// LaTeX source box and completion popup metrics (logical pixels).
+constexpr int kLatexSourceBoxHeight = 120;
+constexpr int kLatexSourceBoxGap = 6;
+constexpr int kLatexPopupWidth = 260;
+constexpr int kLatexPopupHeight = 140;
+constexpr int kLatexPopupPageStep = 8;
+
+QString FromUtf16(const std::u16string& value) {
+    return QString::fromUtf16(value.data(), static_cast<qsizetype>(value.size()));
+}
+
+std::u16string ToUtf16(const QString& value) {
+    return value.toStdU16String();
 }
 
 }  // namespace
@@ -209,6 +234,7 @@ void CanvasWidget::ClampViewportPan() {
 }
 
 void CanvasWidget::NotifyViewportChanged() {
+    PositionOverlays();
     update();
     emit ViewportChanged();
 }
@@ -303,16 +329,12 @@ render::PageRenderParams CanvasWidget::RenderParamsFor(const CanvasPageView& vie
     // Lazy PDF page backgrounds for pages that have a PDF source and no stored
     // raster; PageRenderer asks the provider at the current raster scale.
     params.pdfBackground = pdfBackground_;
-    return params;
-}
-
-void CanvasWidget::SetPdfBackgroundProvider(render::PdfBackgroundProvider* provider) {
-    if (pdfBackground_ == provider) {
-        return;
+    // Objects being edited stay out of the committed raster cache.
+    if (controller_.EditingPageIndex() == view.pageIndex) {
+        params.excludedTextIndex = controller_.EditingTextIndex();
+        params.excludedLatexIndex = controller_.EditingLatexIndex();
     }
-    pdfBackground_ = provider;
-    surfaces_.clear();
-    update();
+    return params;
 }
 
 const render::PageSurfaceCache* CanvasWidget::FindSurface(
@@ -372,6 +394,15 @@ void CanvasWidget::PruneSurfaces(const std::vector<std::size_t>& visiblePages) {
 }
 
 void CanvasWidget::NotifyDocumentChanged() {
+    surfaces_.clear();
+    update();
+}
+
+void CanvasWidget::SetPdfBackgroundProvider(render::PdfBackgroundProvider* provider) {
+    if (pdfBackground_ == provider) {
+        return;
+    }
+    pdfBackground_ = provider;
     surfaces_.clear();
     update();
 }
@@ -450,6 +481,22 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                 painter.restore();
             }
         }
+
+        // Live LaTeX preview while the source box is open.
+        if (latexEditor_ != nullptr && latexEditor_->isVisible()
+            && overlayPageIndex_.has_value() && *overlayPageIndex_ == view.pageIndex
+            && overlayLatexIndex_.has_value()) {
+            if (const PageLatex* object = controller_.EditingLatexObject(); object != nullptr) {
+                PageLatex preview = *object;
+                preview.content = ToUtf16(latexEditor_->toPlainText());
+                if (const latex::FormulaHandle formula = latex::Parse(preview); formula != nullptr) {
+                    painter.save();
+                    painter.translate(view.rect.topLeft());
+                    latex::Draw(formula, painter, preview.x * view.scale, preview.y * view.scale, view.scale, preview.color);
+                    painter.restore();
+                }
+            }
+        }
         painter.restore();
 
         // Page border, drawn on top of the page edge like the reference.
@@ -465,12 +512,14 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 
     lastPaintPageCount_ = paintedPages;
     PruneSurfaces(visiblePages);
+    PositionOverlays();
 }
 
 void CanvasWidget::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
     // The fit scale depends on the canvas width, so the page layout changes with
     // the widget; the reference frontend re-derives it on every paint as well.
+    PositionOverlays();
     update();
 }
 
@@ -575,6 +624,481 @@ void CanvasWidget::CancelStroke() {
     update();
 }
 
+// --- editing overlay -------------------------------------------------------
+
+bool CanvasWidget::EditOverlayActive() const {
+    return overlayTextIndex_.has_value() || overlayLatexIndex_.has_value();
+}
+
+bool CanvasWidget::BeginEditAt(const QPointF& logical) {
+    const std::optional<CanvasPageView> hit = HitTestPage(logical);
+    if (!hit.has_value()) {
+        return false;
+    }
+    const Document& document = controller_.DocumentRef();
+    const Page& page = document.PageAt(hit->pageIndex);
+    const Vec2 pagePoint = ScreenToPage(*hit, logical, false);
+
+    // Topmost first: LaTeX renders above text, which renders above strokes.
+    for (std::size_t index = page.latexes.size(); index-- > 0U;) {
+        const PageLatex& object = page.latexes[index];
+        const latex::FormulaMetrics metrics = latex::Measure(latex::Parse(object));
+        if (pagePoint.x >= object.x && pagePoint.x <= object.x + metrics.width
+            && pagePoint.y >= object.y && pagePoint.y <= object.y + metrics.height) {
+            if (controller_.BeginLatexEdit(hit->pageIndex, index)) {
+                overlayPageIndex_ = hit->pageIndex;
+                overlayTextIndex_.reset();
+                overlayLatexIndex_ = index;
+                ShowLatexOverlay(object);
+                return true;
+            }
+        }
+    }
+    for (std::size_t index = page.texts.size(); index-- > 0U;) {
+        const PageText& object = page.texts[index];
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(object, page.width);
+        if (pagePoint.x >= bounds.left && pagePoint.x <= bounds.right
+            && pagePoint.y >= bounds.top && pagePoint.y <= bounds.bottom) {
+            if (controller_.BeginTextEdit(hit->pageIndex, index)) {
+                overlayPageIndex_ = hit->pageIndex;
+                overlayLatexIndex_.reset();
+                overlayTextIndex_ = index;
+                ShowTextOverlay(object);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void CanvasWidget::SyncEditOverlay() {
+    if (controller_.EditingTextIndex().has_value() && controller_.EditingTextObject() != nullptr) {
+        if (overlayTextIndex_ == controller_.EditingTextIndex()
+            && overlayPageIndex_ == controller_.EditingPageIndex()
+            && textEditor_ != nullptr && textEditor_->isVisible()) {
+            return;
+        }
+        overlayPageIndex_ = controller_.EditingPageIndex();
+        overlayTextIndex_ = controller_.EditingTextIndex();
+        overlayLatexIndex_.reset();
+        ShowTextOverlay(*controller_.EditingTextObject());
+        return;
+    }
+    if (controller_.EditingLatexIndex().has_value() && controller_.EditingLatexObject() != nullptr) {
+        if (overlayLatexIndex_ == controller_.EditingLatexIndex()
+            && overlayPageIndex_ == controller_.EditingPageIndex()
+            && latexEditor_ != nullptr && latexEditor_->isVisible()) {
+            return;
+        }
+        overlayPageIndex_ = controller_.EditingPageIndex();
+        overlayLatexIndex_ = controller_.EditingLatexIndex();
+        overlayTextIndex_.reset();
+        ShowLatexOverlay(*controller_.EditingLatexObject());
+        return;
+    }
+    HideOverlays();
+}
+
+void CanvasWidget::CommitActiveEdit() {
+    if (textEditor_ != nullptr && controller_.EditingTextIndex().has_value()) {
+        PageText edited = controller_.EditingTextObject() != nullptr ? *controller_.EditingTextObject() : PageText {};
+        edited.content = ToUtf16(textEditor_->toPlainText());
+        edited.styleSpans = text::CapturePageTextFormatting(*textEditor_->document(), edited);
+        controller_.CommitTextEdit(std::move(edited));
+    } else if (latexEditor_ != nullptr && controller_.EditingLatexIndex().has_value()) {
+        controller_.CommitLatexEdit(latexEditor_->toPlainText());
+    }
+    HideOverlays();
+    update();
+}
+
+void CanvasWidget::CancelActiveEdit() {
+    if (controller_.EditingTextIndex().has_value()) {
+        controller_.CancelTextEdit();
+    }
+    if (controller_.EditingLatexIndex().has_value()) {
+        controller_.CancelLatexEdit();
+    }
+    HideOverlays();
+    update();
+}
+
+void CanvasWidget::EnsureTextEditor() {
+    if (textEditor_ != nullptr) {
+        return;
+    }
+    textEditor_ = new QTextEdit(this);
+    textEditor_->setAcceptRichText(false);
+    textEditor_->setFrameShape(QFrame::Box);
+    textEditor_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    textEditor_->installEventFilter(this);
+    textEditor_->hide();
+    connect(textEditor_, &QTextEdit::textChanged, this, [this]() { PositionOverlays(); });
+}
+
+void CanvasWidget::EnsureLatexEditor() {
+    if (latexEditor_ == nullptr) {
+        latexEditor_ = new QPlainTextEdit(this);
+        latexEditor_->setFrameShape(QFrame::Box);
+        latexEditor_->installEventFilter(this);
+        latexEditor_->hide();
+        connect(latexEditor_, &QPlainTextEdit::textChanged, this, [this]() {
+            RefreshLatexPopup();
+            update();
+        });
+        connect(latexEditor_, &QPlainTextEdit::cursorPositionChanged, this, [this]() { RefreshLatexPopup(); });
+    }
+    if (latexPopup_ == nullptr) {
+        latexPopup_ = new QListView(this);
+        latexPopupModel_ = new QStringListModel(latexPopup_);
+        latexPopup_->setModel(latexPopupModel_);
+        latexPopup_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        latexPopup_->setUniformItemSizes(true);
+        latexPopup_->hide();
+    }
+}
+
+void CanvasWidget::ShowTextOverlay(const PageText& text) {
+    EnsureTextEditor();
+    const text::TextOffsetMap map = text::BuildTextOffsetMap(text.content);
+    textEditor_->document()->setDocumentMargin(0.0);
+    {
+        QSignalBlocker blocker(textEditor_);
+        textEditor_->setPlainText(FromUtf16(map.normalized));
+        text::ApplyPageTextFormatting(*textEditor_->document(), text);
+    }
+    textEditor_->show();
+    textEditor_->raise();
+    textEditor_->setFocus(Qt::OtherFocusReason);
+    PositionOverlays();
+    update();
+}
+
+void CanvasWidget::ShowLatexOverlay(const PageLatex& object) {
+    EnsureLatexEditor();
+    {
+        QSignalBlocker blocker(latexEditor_);
+        latexEditor_->setPlainText(FromUtf16(object.content));
+        QTextCursor cursor = latexEditor_->textCursor();
+        cursor.setPosition(static_cast<int>(object.content.size()));
+        latexEditor_->setTextCursor(cursor);
+    }
+    latexEditor_->show();
+    latexEditor_->raise();
+    latexEditor_->setFocus(Qt::OtherFocusReason);
+    RefreshLatexPopup();
+    PositionOverlays();
+    update();
+}
+
+void CanvasWidget::HideOverlays() {
+    overlayPageIndex_.reset();
+    overlayTextIndex_.reset();
+    overlayLatexIndex_.reset();
+    if (latexPopup_ != nullptr) {
+        latexPopup_->hide();
+    }
+    if (textEditor_ != nullptr) {
+        textEditor_->hide();
+    }
+    if (latexEditor_ != nullptr) {
+        latexEditor_->hide();
+    }
+    setFocus(Qt::OtherFocusReason);
+}
+
+void CanvasWidget::PositionOverlays() {
+    if (!overlayPageIndex_.has_value()) {
+        return;
+    }
+    const Document& document = controller_.DocumentRef();
+    if (*overlayPageIndex_ >= document.PageCount()) {
+        return;
+    }
+    const CanvasPageView view = CalculatePageView(*overlayPageIndex_);
+    if (!view.valid || view.scale <= 0.0f) {
+        return;
+    }
+    const Page& page = document.PageAt(*overlayPageIndex_);
+
+    if (textEditor_ != nullptr && textEditor_->isVisible() && controller_.EditingTextObject() != nullptr) {
+        const PageText& object = *controller_.EditingTextObject();
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(object, page.width);
+        const qreal left = view.rect.left() + (static_cast<qreal>(std::max(bounds.left, object.x)) * view.scale);
+        const qreal top = view.rect.top() + (static_cast<qreal>(object.y) * view.scale);
+        const qreal width = std::max<qreal>(kTextEditorMinWidth, static_cast<qreal>(std::max(bounds.right - bounds.left, object.width)) * view.scale);
+        const qreal height = std::max<qreal>(
+            kTextEditorMinHeight,
+            textEditor_->document()->size().height() + 8.0);
+        const QRect geometry(QPoint(static_cast<int>(std::lround(left)), static_cast<int>(std::lround(top))),
+                             QSize(static_cast<int>(std::lround(width)), static_cast<int>(std::lround(height))));
+        if (textEditor_->geometry() != geometry) {
+            textEditor_->setGeometry(geometry);
+        }
+    }
+
+    if (latexEditor_ != nullptr && latexEditor_->isVisible() && controller_.EditingLatexObject() != nullptr) {
+        const PageLatex& object = *controller_.EditingLatexObject();
+        const latex::FormulaMetrics metrics = latex::Measure(latex::Parse(object));
+        const qreal objectLeft = view.rect.left() + (static_cast<qreal>(object.x) * view.scale);
+        const qreal objectTop = view.rect.top() + (static_cast<qreal>(object.y) * view.scale);
+        const qreal objectHeight = std::max<qreal>(8.0, static_cast<qreal>(metrics.height) * view.scale);
+        const qreal width = std::max<qreal>(kTextEditorMinWidth, static_cast<qreal>(metrics.width) * view.scale);
+
+        // Source box below the equation, or above it when there is no room.
+        const int belowTop = static_cast<int>(std::lround(objectTop + objectHeight + kLatexSourceBoxGap));
+        const bool placeBelow = belowTop + kLatexSourceBoxHeight <= height();
+        const int top = placeBelow
+            ? belowTop
+            : static_cast<int>(std::lround(objectTop)) - kLatexSourceBoxHeight - kLatexSourceBoxGap;
+        const QRect geometry(QPoint(static_cast<int>(std::lround(objectLeft)), top),
+                             QSize(static_cast<int>(std::lround(width)), kLatexSourceBoxHeight));
+        if (latexEditor_->geometry() != geometry) {
+            latexEditor_->setGeometry(geometry);
+        }
+
+        if (latexPopup_ != nullptr && latexPopup_->isVisible()) {
+            const int popupTop = placeBelow ? geometry.bottom() + 2 : geometry.top() - kLatexPopupHeight - 2;
+            latexPopup_->setGeometry(QRect(geometry.left(), popupTop, kLatexPopupWidth, kLatexPopupHeight));
+            latexPopup_->raise();
+        }
+    }
+}
+
+void CanvasWidget::ApplyTextFormatToSelection(const PageTextStyle& style) {
+    if (textEditor_ == nullptr) {
+        return;
+    }
+    QTextCursor cursor = textEditor_->textCursor();
+    if (!cursor.hasSelection()) {
+        return;
+    }
+    const QTextCharFormat format = text::CharFormatForStyle(style);
+    cursor.mergeCharFormat(format);
+    textEditor_->mergeCurrentCharFormat(format);
+    PositionOverlays();
+}
+
+PageText CanvasWidget::CaptureEditedText() const {
+    PageText edited = controller_.EditingTextObject() != nullptr ? *controller_.EditingTextObject() : PageText {};
+    if (textEditor_ != nullptr) {
+        edited.content = ToUtf16(textEditor_->toPlainText());
+        edited.styleSpans = text::CapturePageTextFormatting(*textEditor_->document(), edited);
+    }
+    return edited;
+}
+
+QString CanvasWidget::CaptureEditedLatexSource() const {
+    return latexEditor_ != nullptr ? latexEditor_->toPlainText() : QString();
+}
+
+void CanvasWidget::SetLatexSource(const QString& source, int cursorPosition) {
+    if (latexEditor_ == nullptr) {
+        return;
+    }
+    QSignalBlocker blocker(latexEditor_);
+    latexEditor_->setPlainText(source);
+    QTextCursor cursor = latexEditor_->textCursor();
+    cursor.setPosition(std::min(cursorPosition, static_cast<int>(source.size())));
+    latexEditor_->setTextCursor(cursor);
+    RefreshLatexPopup();
+    update();
+}
+
+QString CanvasWidget::LatexSource() const {
+    return latexEditor_ != nullptr ? latexEditor_->toPlainText() : QString();
+}
+
+bool CanvasWidget::LatexPopupVisible() const {
+    return latexPopup_ != nullptr && latexPopup_->isVisible();
+}
+
+QStringList CanvasWidget::LatexPopupItems() const {
+    return latexPopupModel_ != nullptr ? latexPopupModel_->stringList() : QStringList();
+}
+
+int CanvasWidget::LatexPopupRow() const {
+    return latexPopup_ != nullptr ? latexPopup_->currentIndex().row() : -1;
+}
+
+void CanvasWidget::SetLatexPopupRow(int row) {
+    if (latexPopup_ == nullptr || latexPopupModel_ == nullptr || latexPopupModel_->rowCount() == 0) {
+        return;
+    }
+    const int wrapped = ((row % latexPopupModel_->rowCount()) + latexPopupModel_->rowCount()) % latexPopupModel_->rowCount();
+    const QModelIndex index = latexPopupModel_->index(wrapped, 0);
+    latexPopup_->setCurrentIndex(index);
+    latexPopup_->scrollTo(index);
+}
+
+void CanvasWidget::RefreshLatexPopup() {
+    if (latexEditor_ == nullptr || latexPopup_ == nullptr || !latexEditor_->isVisible()) {
+        return;
+    }
+
+    const std::u16string content = ToUtf16(latexEditor_->toPlainText());
+    const std::size_t cursor = static_cast<std::size_t>(latexEditor_->textCursor().position());
+    const text::LatexCompletionDecision decision = text::LatexCompletionFor(content, cursor);
+    latexSuggestions_ = decision.suggestions;
+
+    if (!decision.show || latexSuggestions_.empty()) {
+        latexPopup_->hide();
+        return;
+    }
+
+    QStringList items;
+    items.reserve(static_cast<qsizetype>(latexSuggestions_.size()));
+    for (const latex::CompletionItem& item : latexSuggestions_) {
+        items.append(FromUtf16(item.command));
+    }
+    latexPopupModel_->setStringList(items);
+    SetLatexPopupRow(0);
+    latexPopup_->show();
+    PositionOverlays();
+    latexPopup_->raise();
+}
+
+bool CanvasWidget::AcceptLatexSuggestion() {
+    if (!LatexPopupVisible() || latexEditor_ == nullptr) {
+        return false;
+    }
+    const int row = LatexPopupRow();
+    if (row < 0 || static_cast<std::size_t>(row) >= latexSuggestions_.size()) {
+        return false;
+    }
+
+    const std::u16string content = ToUtf16(latexEditor_->toPlainText());
+    const std::size_t cursor = static_cast<std::size_t>(latexEditor_->textCursor().position());
+    const std::optional<text::LatexEditResult> result =
+        text::ApplyLatexCompletion(content, cursor, latexSuggestions_[static_cast<std::size_t>(row)]);
+    if (!result.has_value()) {
+        return false;
+    }
+
+    SetLatexSource(FromUtf16(result->content), static_cast<int>(result->cursor));
+    RefreshLatexPopup();
+    return true;
+}
+
+// --- editor events ---------------------------------------------------------
+
+bool CanvasWidget::HandleLatexPairKey(QPlainTextEdit& editor, const QString& text) {
+    if (text.size() != 1) {
+        return false;
+    }
+    const char16_t typed = static_cast<char16_t>(text.at(0).unicode());
+    if (typed > 0x7FU) {
+        return false;
+    }
+
+    const std::u16string content = ToUtf16(editor.toPlainText());
+    const QTextCursor cursor = editor.textCursor();
+    const std::optional<text::LatexEditResult> result = text::ApplyLatexAutoPair(
+        content,
+        static_cast<std::uint32_t>(cursor.selectionStart()),
+        static_cast<std::uint32_t>(cursor.selectionEnd()),
+        typed);
+    if (!result.has_value()) {
+        return false;
+    }
+
+    SetLatexSource(FromUtf16(result->content), static_cast<int>(result->cursor));
+    return true;
+}
+
+bool CanvasWidget::HandleEditorKey(QObject* watched, QKeyEvent* event) {
+    if (watched != textEditor_ && watched != latexEditor_) {
+        return false;
+    }
+    const bool latex = watched == latexEditor_;
+
+    // Pair characters arrive with Shift on most layouts ("{", "(", "$"), so
+    // only the modifiers that mean "not a plain insertion" are excluded.
+    const Qt::KeyboardModifiers chord = event->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier);
+    if (latex && latexEditor_ != nullptr
+        && !event->text().isEmpty()
+        && chord == Qt::NoModifier) {
+        // Pair characters take precedence over the popup: "{" still wraps.
+        if (HandleLatexPairKey(*latexEditor_, event->text())) {
+            return true;
+        }
+    }
+
+    if (latex && LatexPopupVisible()) {
+        switch (text::LatexSuggestionActionForKey(static_cast<Qt::Key>(event->key()))) {
+        case text::LatexSuggestionKeyAction::Accept:
+            if (AcceptLatexSuggestion()) {
+                return true;
+            }
+            break;
+        case text::LatexSuggestionKeyAction::SelectPrevious:
+            SetLatexPopupRow(LatexPopupRow() - 1);
+            return true;
+        case text::LatexSuggestionKeyAction::SelectNext:
+            SetLatexPopupRow(LatexPopupRow() + 1);
+            return true;
+        case text::LatexSuggestionKeyAction::PageUp:
+            SetLatexPopupRow(LatexPopupRow() - kLatexPopupPageStep);
+            return true;
+        case text::LatexSuggestionKeyAction::PageDown:
+            SetLatexPopupRow(LatexPopupRow() + kLatexPopupPageStep);
+            return true;
+        case text::LatexSuggestionKeyAction::Dismiss:
+            latexPopup_->hide();
+            return true;
+        case text::LatexSuggestionKeyAction::None:
+            break;
+        }
+    }
+
+    const bool commitChord = (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
+        && event->modifiers().testFlag(Qt::ControlModifier);
+    if (commitChord) {
+        CommitActiveEdit();
+        return true;
+    }
+    if (event->key() == Qt::Key_Escape) {
+        CancelActiveEdit();
+        return true;
+    }
+
+    if (event->key() == Qt::Key_Backspace && event->modifiers().testFlag(Qt::ControlModifier)) {
+        auto* editor = latex ? static_cast<QPlainTextEdit*>(latexEditor_) : static_cast<QPlainTextEdit*>(nullptr);
+        QTextCursor cursor = latex ? editor->textCursor() : textEditor_->textCursor();
+        const std::u16string content = latex
+            ? ToUtf16(editor->toPlainText())
+            : ToUtf16(textEditor_->toPlainText());
+        const text::TextRange range = text::WordDeletionRange(content, static_cast<std::uint32_t>(cursor.position()));
+        if (range.end > range.start) {
+            cursor.setPosition(static_cast<int>(range.start));
+            cursor.setPosition(static_cast<int>(range.end), QTextCursor::KeepAnchor);
+            cursor.removeSelectedText();
+            return true;
+        }
+    }
+    return false;
+}
+
+bool CanvasWidget::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == textEditor_ || watched == latexEditor_) {
+        if (event->type() == QEvent::KeyPress) {
+            if (HandleEditorKey(watched, static_cast<QKeyEvent*>(event))) {
+                return true;
+            }
+        }
+        if (event->type() == QEvent::Wheel) {
+            // Ctrl-wheel belongs to the editor (font zoom) and must not reach the
+            // canvas as a page zoom (plan step 5.3).
+            auto* wheel = static_cast<QWheelEvent*>(event);
+            if (wheel->modifiers().testFlag(Qt::ControlModifier)) {
+                wheel->accept();
+                return true;
+            }
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 void CanvasWidget::mousePressEvent(QMouseEvent* event) {
     setFocus(Qt::MouseFocusReason);
 
@@ -586,6 +1110,20 @@ void CanvasWidget::mousePressEvent(QMouseEvent* event) {
         return;
     }
     if (event->button() == Qt::LeftButton) {
+        // Clicking another object commits the active edit first; clicking the
+        // edited object keeps it open.
+        if (EditOverlayActive()) {
+            const std::optional<CanvasPageView> hit = HitTestPage(event->position());
+            if (!hit.has_value()) {
+                CommitActiveEdit();
+                event->accept();
+                return;
+            }
+        }
+        if (BeginEditAt(event->position())) {
+            event->accept();
+            return;
+        }
         BeginStrokeAt(event->position());
         event->accept();
         return;

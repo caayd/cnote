@@ -6,8 +6,11 @@
 #include <vector>
 
 #include "PdfBackend.h"
+#include "ProjectFile.h"
+#include "document/HistoryReducer.h"
 #include "qt/QtDocumentIo.h"
 #include "render/PdfiumBackgroundProvider.h"
+#include "text/TextEditingQt.h"
 
 namespace cnote::qt {
 
@@ -19,6 +22,12 @@ namespace {
 constexpr float kMinScreenSpacing = 1.75f;
 constexpr float kMaxScreenSpacing = 3.0f;
 constexpr int kMaxInterpolatedPoints = 64;
+
+// Lazily rendered PDF page rasters kept alive by the background provider.
+constexpr std::size_t kPdfBackgroundCapacity = 8;
+
+// Reference App::ExportPdf fallback scale for pages without a raster.
+constexpr float kPdfExportRenderScale = 4.0f;
 
 float DistanceSquared(Vec2 a, Vec2 b) {
     const float dx = a.x - b.x;
@@ -66,52 +75,233 @@ void AppendStrokePointWithResampling(Stroke& stroke, Vec2 point, float spacing) 
     }
 }
 
-}  // namespace
-
-namespace {
-
-// Keeps at most this many lazily rendered PDF page rasters alive; the canvas
-// asks for the pages it actually paints.
-constexpr std::size_t kPdfBackgroundCapacity = 8;
+QString ToQString(std::u16string_view value) {
+    return QString::fromUtf16(value.data(), static_cast<qsizetype>(value.size()));
+}
 
 }  // namespace
 
-QtDocumentController::QtDocumentController()
-    : pdfBackend_(std::make_unique<PdfiumBackend>()) {}
-QtDocumentController::~QtDocumentController() = default;
+QtDocumentController::QtDocumentController(AppManager& manager, QObject* parent)
+    : QObject(parent),
+      manager_(manager),
+      pdfBackend_(std::make_unique<PdfiumBackend>()) {}
 
-void QtDocumentController::ResetToBlank() {
-    session_ = ProjectSession {};
-    pdfBackground_.reset();
-    pendingStroke_.reset();
-    pendingPage_.reset();
+QtDocumentController::~QtDocumentController() {
+    manager_.UnregisterView(this);
+}
+
+// --- session ---------------------------------------------------------------
+
+void QtDocumentController::AttachSession(std::shared_ptr<ProjectSession> session) {
+    CancelStroke();
+    CancelTextEdit();
+    CancelLatexEdit();
+    manager_.UnregisterView(this);
+    session_ = std::move(session);
+    if (session_ != nullptr) {
+        manager_.RegisterView(this, this, session_);
+    }
+    currentPage_ = 0;
+    RebuildPdfBackground();
+    emit SessionChanged();
+    emit EditStateChanged();
 }
 
 bool QtDocumentController::OpenFile(const std::filesystem::path& path, std::string* error) {
+    // Same-file joins are the shell's decision (AppManager::FindOpenSession);
+    // this entry point always loads a fresh session for the view.
     std::optional<Document> document = LoadDocument(path, *pdfBackend_, error);
     if (!document.has_value()) {
         return false;
     }
-    AdoptDocument(std::move(*document));
+
+    auto session = std::make_shared<ProjectSession>();
+    session->document = std::move(*document);
+    AttachSession(std::move(session));
     return true;
 }
 
-void QtDocumentController::AdoptDocument(Document document) {
-    // A new document starts with empty history and no pending stroke; the
-    // controller's stroke style and input settings belong to the view.
-    session_ = ProjectSession {};
-    session_.document = std::move(document);
-    pdfBackground_ = std::make_unique<render::PdfiumBackgroundProvider>(
-        *pdfBackend_, session_.document, kPdfBackgroundCapacity);
-    pendingStroke_.reset();
-    pendingPage_.reset();
+void QtDocumentController::NewBlankDocument() {
+    auto session = std::make_shared<ProjectSession>();
+    AttachSession(std::move(session));
 }
+
+bool QtDocumentController::SaveTo(const std::filesystem::path& path, std::string* error) {
+    if (session_ == nullptr || path.empty()) {
+        return false;
+    }
+    if (!ProjectFile::Save(session_->document, path)) {
+        if (error != nullptr) {
+            *error = "cannot write " + path.string();
+        }
+        return false;
+    }
+
+    session_->document.SetFilePath(path);
+    session_->dirty = false;
+    manager_.NotifySessionSaved(session_);
+    NotifySessionChanged(true);
+    return true;
+}
+
+bool QtDocumentController::ExportPdf(const std::filesystem::path& path, bool embedProject, std::string* error) {
+    if (session_ == nullptr || path.empty()) {
+        return false;
+    }
+
+    const std::vector<std::uint8_t> serialized =
+        embedProject ? ProjectFile::Serialize(session_->document) : std::vector<std::uint8_t> {};
+
+    // Write to a temporary destination and only replace the requested file
+    // after a successful export (plan step 6.6).
+    std::filesystem::path temporary = path;
+    temporary += ".tmp";
+    std::error_code removeError;
+    std::filesystem::remove(temporary, removeError);
+
+    if (!pdfBackend_->ExportPdf(
+            session_->document,
+            temporary,
+            kPdfExportRenderScale,
+            input_.strokeSmoothing,
+            3.0f,
+            2.0f,
+            std::span<const std::uint8_t>(serialized))) {
+        std::filesystem::remove(temporary, removeError);
+        if (error != nullptr) {
+            *error = "cannot export PDF " + path.string();
+        }
+        return false;
+    }
+
+    std::error_code renameError;
+    std::filesystem::rename(temporary, path, renameError);
+    if (renameError) {
+        std::filesystem::remove(temporary, removeError);
+        if (error != nullptr) {
+            *error = "cannot replace " + path.string();
+        }
+        return false;
+    }
+    return true;
+}
+
+bool QtDocumentController::HasSavedPath() const {
+    return session_ != nullptr && !session_->document.FilePath().empty();
+}
+
+const std::filesystem::path& QtDocumentController::FilePath() const {
+    static const std::filesystem::path kEmpty {};
+    return session_ != nullptr ? session_->document.FilePath() : kEmpty;
+}
+
+void QtDocumentController::RebuildPdfBackground() {
+    pdfBackground_.reset();
+    if (session_ == nullptr) {
+        return;
+    }
+    pdfBackground_ = std::make_unique<render::PdfiumBackgroundProvider>(
+        *pdfBackend_, session_->document, kPdfBackgroundCapacity);
+}
+
+void QtDocumentController::NotifySessionChanged(bool originating) {
+    if (session_ == nullptr) {
+        return;
+    }
+    ProjectChange change;
+    change.kind = ProjectChange::Kind::Committed;
+    change.revision = session_->revision;
+    for (QObject* owner : manager_.ViewsForSession(session_)) {
+        if (auto* view = qobject_cast<QtDocumentController*>(owner); view != nullptr) {
+            view->OnSessionChanged(change, view == this && originating);
+        }
+    }
+    manager_.UpdateAutoSaveTimer(session_);
+    if (originating) {
+        emit SessionChanged();
+    }
+}
+
+// --- SessionView ------------------------------------------------------------
+
+bool QtDocumentController::IsInteractionActive() const {
+    return pendingStroke_.has_value() || EditingText() || EditingLatex();
+}
+
+void QtDocumentController::FinishInteraction() {
+    if (pendingStroke_.has_value()) {
+        EndStroke();
+    }
+    if (EditingText()) {
+        CommitTextEdit(editContent_ != nullptr ? editContent_->CaptureEditedText() : PageText {});
+    }
+    if (EditingLatex()) {
+        CommitLatexEdit(editContent_ != nullptr ? editContent_->CaptureEditedLatexSource() : QString());
+    }
+}
+
+void QtDocumentController::OnSessionChanged(const ProjectChange&, bool originating) {
+    if (!originating) {
+        // Another view committed: drop the pending preview and refresh caches.
+        pendingStroke_.reset();
+        pendingStrokePage_.reset();
+        emit SessionChanged();
+    }
+}
+
+void QtDocumentController::SetCurrentPageIndex(std::size_t index) {
+    if (session_ != nullptr && index < session_->document.PageCount()) {
+        currentPage_ = index;
+    }
+}
+
+const Document& QtDocumentController::DocumentRef() const {
+    static const Document kEmpty {};
+    return session_ != nullptr ? session_->document : kEmpty;
+}
+
+std::uint64_t QtDocumentController::Revision() const {
+    return session_ != nullptr ? session_->revision : 0U;
+}
+
+Page* QtDocumentController::PageAt(std::size_t pageIndex) {
+    if (session_ == nullptr || pageIndex >= session_->document.PageCount()) {
+        return nullptr;
+    }
+    return &session_->document.PageAt(pageIndex);
+}
+
+const Page* QtDocumentController::PageAt(std::size_t pageIndex) const {
+    if (session_ == nullptr || pageIndex >= session_->document.PageCount()) {
+        return nullptr;
+    }
+    return &session_->document.PageAt(pageIndex);
+}
+
+std::uint64_t QtDocumentController::NextObjectId() const {
+    std::uint64_t next = 1;
+    if (session_ != nullptr) {
+        for (std::size_t pageIndex = 0; pageIndex < session_->document.PageCount(); ++pageIndex) {
+            const Page& page = session_->document.PageAt(pageIndex);
+            for (const PageText& text : page.texts) {
+                next = std::max(next, text.id + 1U);
+            }
+            for (const PageLatex& latex : page.latexes) {
+                next = std::max(next, latex.id + 1U);
+            }
+        }
+    }
+    return next;
+}
+
+// --- strokes ----------------------------------------------------------------
 
 void QtDocumentController::BeginStroke(std::size_t pageIndex, Vec2 point, float pageScale) {
     (void)pageScale;
+    FinishInteraction();
     pendingStroke_.reset();
-    pendingPage_.reset();
-    if (pageIndex >= session_.document.PageCount()) {
+    pendingStrokePage_.reset();
+    if (PageAt(pageIndex) == nullptr) {
         return;
     }
 
@@ -120,7 +310,8 @@ void QtDocumentController::BeginStroke(std::size_t pageIndex, Vec2 point, float 
     stroke.smoothing = input_.strokeSmoothing;
     stroke.points.push_back(point);
     pendingStroke_ = std::move(stroke);
-    pendingPage_ = pageIndex;
+    pendingStrokePage_ = pageIndex;
+    currentPage_ = pageIndex;
 }
 
 void QtDocumentController::ExtendStroke(Vec2 point, float pageScale) {
@@ -141,39 +332,41 @@ void QtDocumentController::ExtendStroke(Vec2 point, float pageScale) {
 }
 
 void QtDocumentController::EndStroke() {
-    if (!pendingStroke_.has_value() || !pendingPage_.has_value()) {
+    if (!pendingStroke_.has_value() || !pendingStrokePage_.has_value() || session_ == nullptr) {
         CancelStroke();
         return;
     }
 
     Stroke finished = std::move(*pendingStroke_);
-    const std::size_t pageIndex = *pendingPage_;
+    const std::size_t pageIndex = *pendingStrokePage_;
     pendingStroke_.reset();
-    pendingPage_.reset();
+    pendingStrokePage_.reset();
 
-    if (finished.points.empty() || pageIndex >= session_.document.PageCount()) {
+    Page* page = PageAt(pageIndex);
+    if (page == nullptr || finished.points.empty()) {
         return;
     }
 
     // Same commit shape as the reference (App::EndStroke): append, push an
     // AddStroke action with its insert index, clear the redo stack, bump the
-    // revision once.
-    std::vector<Stroke>& strokes = session_.document.PageAt(pageIndex).strokes;
+    // revision once and broadcast once.
     HistoryAction action {};
     action.type = HistoryActionType::AddStroke;
     action.stroke = finished;
-    action.index = strokes.size();
+    action.index = page->strokes.size();
     action.pageIndex = pageIndex;
-    strokes.push_back(std::move(finished));
-    session_.undoActions.push_back(std::move(action));
-    session_.redoActions.clear();
-    session_.dirty = true;
-    ++session_.revision;
+    page->strokes.push_back(std::move(finished));
+    session_->undoActions.push_back(std::move(action));
+    session_->redoActions.clear();
+    session_->dirty = true;
+    ++session_->revision;
+    currentPage_ = pageIndex;
+    NotifySessionChanged(true);
 }
 
 void QtDocumentController::CancelStroke() {
     pendingStroke_.reset();
-    pendingPage_.reset();
+    pendingStrokePage_.reset();
 }
 
 const Stroke* QtDocumentController::PendingStroke() const {
@@ -181,67 +374,324 @@ const Stroke* QtDocumentController::PendingStroke() const {
 }
 
 std::size_t QtDocumentController::PendingStrokePage() const {
-    return pendingPage_.value_or(0U);
+    return pendingStrokePage_.value_or(0U);
 }
 
-bool QtDocumentController::ApplyStrokeHistoryAction(HistoryAction& action, bool undo) {
-    if (action.pageIndex >= session_.document.PageCount()) {
-        return false;
-    }
-    if (action.type != HistoryActionType::AddStroke && action.type != HistoryActionType::RemoveStroke) {
-        return false;
-    }
+// --- history ----------------------------------------------------------------
 
-    std::vector<Stroke>& strokes = session_.document.PageAt(action.pageIndex).strokes;
-    const bool inserting = (action.type == HistoryActionType::AddStroke) ? !undo : undo;
-    if (inserting) {
-        if (action.index > strokes.size()) {
-            return false;
-        }
-        strokes.insert(strokes.begin() + static_cast<std::ptrdiff_t>(action.index), action.stroke);
-    } else {
-        if (action.index >= strokes.size()) {
-            return false;
-        }
-        strokes.erase(strokes.begin() + static_cast<std::ptrdiff_t>(action.index));
-    }
-    return true;
+bool QtDocumentController::CanUndo() const {
+    return session_ != nullptr && !session_->undoActions.empty();
+}
+
+bool QtDocumentController::CanRedo() const {
+    return session_ != nullptr && !session_->redoActions.empty();
 }
 
 bool QtDocumentController::Undo() {
-    if (session_.undoActions.empty()) {
+    if (session_ == nullptr || session_->undoActions.empty()) {
+        return false;
+    }
+    FinishInteraction();
+
+    HistoryAction action = std::move(session_->undoActions.back());
+    session_->undoActions.pop_back();
+    if (!ApplyHistoryAction(session_->document, action, true)) {
+        session_->undoActions.push_back(std::move(action));
         return false;
     }
 
-    HistoryAction action = std::move(session_.undoActions.back());
-    session_.undoActions.pop_back();
-    if (!ApplyStrokeHistoryAction(action, true)) {
-        session_.undoActions.push_back(std::move(action));
-        return false;
-    }
-
-    session_.redoActions.push_back(std::move(action));
-    session_.dirty = true;
-    ++session_.revision;
+    session_->redoActions.push_back(std::move(action));
+    session_->dirty = true;
+    ++session_->revision;
+    currentPage_ = std::min(action.pageIndex, session_->document.PageCount() > 0 ? session_->document.PageCount() - 1U : 0U);
+    NotifySessionChanged(true);
     return true;
 }
 
 bool QtDocumentController::Redo() {
-    if (session_.redoActions.empty()) {
+    if (session_ == nullptr || session_->redoActions.empty()) {
+        return false;
+    }
+    FinishInteraction();
+
+    HistoryAction action = std::move(session_->redoActions.back());
+    session_->redoActions.pop_back();
+    if (!ApplyHistoryAction(session_->document, action, false)) {
+        session_->redoActions.push_back(std::move(action));
         return false;
     }
 
-    HistoryAction action = std::move(session_.redoActions.back());
-    session_.redoActions.pop_back();
-    if (!ApplyStrokeHistoryAction(action, false)) {
-        session_.redoActions.push_back(std::move(action));
-        return false;
-    }
-
-    session_.undoActions.push_back(std::move(action));
-    session_.dirty = true;
-    ++session_.revision;
+    session_->undoActions.push_back(std::move(action));
+    session_->dirty = true;
+    ++session_->revision;
+    currentPage_ = std::min(action.pageIndex, session_->document.PageCount() > 0 ? session_->document.PageCount() - 1U : 0U);
+    NotifySessionChanged(true);
     return true;
+}
+
+// --- object creation and text editing ---------------------------------------
+
+std::size_t QtDocumentController::AddTextObject(std::size_t pageIndex, Vec2 topLeft, float fontSize) {
+    Page* page = PageAt(pageIndex);
+    if (page == nullptr) {
+        return 0U;
+    }
+    FinishInteraction();
+
+    PageText text;
+    text.id = NextObjectId();
+    text.x = topLeft.x;
+    text.y = topLeft.y;
+    text.fontSize = fontSize;
+    page->texts.push_back(text);
+    const std::size_t index = page->texts.size() - 1U;
+    if (BeginTextEdit(pageIndex, index)) {
+        editingTextCreates_ = true;
+    }
+    return index;
+}
+
+std::size_t QtDocumentController::AddLatexObject(std::size_t pageIndex, Vec2 topLeft, float fontSize) {
+    Page* page = PageAt(pageIndex);
+    if (page == nullptr) {
+        return 0U;
+    }
+    FinishInteraction();
+
+    PageLatex latex;
+    latex.id = NextObjectId();
+    latex.x = topLeft.x;
+    latex.y = topLeft.y;
+    latex.fontSize = fontSize;
+    page->latexes.push_back(latex);
+    const std::size_t index = page->latexes.size() - 1U;
+    if (BeginLatexEdit(pageIndex, index)) {
+        editingLatexCreates_ = true;
+    }
+    return index;
+}
+
+bool QtDocumentController::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) {
+    FinishInteraction();
+    Page* page = PageAt(pageIndex);
+    if (page == nullptr || textIndex >= page->texts.size()) {
+        return false;
+    }
+
+    editingTextBefore_ = page->texts[textIndex];
+    editingTextPage_ = pageIndex;
+    editingTextIndex_ = textIndex;
+    editingTextCreates_ = false;
+    currentPage_ = pageIndex;
+    emit EditStateChanged();
+    return true;
+}
+
+const PageText* QtDocumentController::EditingTextObject() const {
+    if (!editingTextIndex_.has_value()) {
+        return nullptr;
+    }
+    return &editingTextBefore_;
+}
+
+bool QtDocumentController::BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex) {
+    FinishInteraction();
+    Page* page = PageAt(pageIndex);
+    if (page == nullptr || latexIndex >= page->latexes.size()) {
+        return false;
+    }
+
+    editingLatexBefore_ = page->latexes[latexIndex];
+    editingLatexPage_ = pageIndex;
+    editingLatexIndex_ = latexIndex;
+    editingLatexCreates_ = false;
+    currentPage_ = pageIndex;
+    emit EditStateChanged();
+    return true;
+}
+
+const PageLatex* QtDocumentController::EditingLatexObject() const {
+    if (!editingLatexPage_.has_value() || !editingLatexIndex_.has_value()) {
+        return nullptr;
+    }
+    const Page* page = PageAt(*editingLatexPage_);
+    if (page == nullptr || *editingLatexIndex_ >= page->latexes.size()) {
+        return nullptr;
+    }
+    return &page->latexes[*editingLatexIndex_];
+}
+
+std::size_t QtDocumentController::EditingPageIndex() const {
+    if (editingTextPage_.has_value()) {
+        return *editingTextPage_;
+    }
+    if (editingLatexPage_.has_value()) {
+        return *editingLatexPage_;
+    }
+    return currentPage_;
+}
+
+void QtDocumentController::CommitTextEdit(PageText edited) {
+    if (!editingTextPage_.has_value() || !editingTextIndex_.has_value() || session_ == nullptr) {
+        CancelTextEdit();
+        return;
+    }
+
+    const std::size_t pageIndex = *editingTextPage_;
+    const std::size_t textIndex = *editingTextIndex_;
+    const PageText before = editingTextBefore_;
+    const bool creates = editingTextCreates_;
+    editingTextPage_.reset();
+    editingTextIndex_.reset();
+    editingTextCreates_ = false;
+
+    Page* page = PageAt(pageIndex);
+    if (page == nullptr || textIndex >= page->texts.size()) {
+        emit EditStateChanged();
+        return;
+    }
+
+    // The overlay owns the model's identity and position; only content and spans
+    // come from the edit.
+    PageText& stored = page->texts[textIndex];
+    if (edited.id == 0U) {
+        edited.id = stored.id;
+    }
+    edited.x = stored.x;
+    edited.y = stored.y;
+
+    HistoryAction action {};
+    bool changed = false;
+    if (edited.content.empty()) {
+        page->texts.erase(page->texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
+        if (!creates) {
+            action.type = HistoryActionType::RemoveText;
+            action.pageIndex = pageIndex;
+            action.index = textIndex;
+            action.text = before;
+            changed = true;
+        }
+    } else {
+        edited = text::NormalizeCommittedText(edited);
+        page->texts[textIndex] = edited;
+        if (creates) {
+            action.type = HistoryActionType::AddText;
+            action.pageIndex = pageIndex;
+            action.index = textIndex;
+            action.text = edited;
+            changed = true;
+        } else if (!PageTextEqual(before, edited)) {
+            action.type = HistoryActionType::UpdateText;
+            action.pageIndex = pageIndex;
+            action.index = textIndex;
+            action.text = before;
+            action.replacementText = edited;
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        session_->undoActions.push_back(std::move(action));
+        session_->redoActions.clear();
+        session_->dirty = true;
+        ++session_->revision;
+        NotifySessionChanged(true);
+    }
+    emit EditStateChanged();
+}
+
+void QtDocumentController::CancelTextEdit() {
+    if (!editingTextIndex_.has_value()) {
+        return;
+    }
+    // A cancelled creation removes its placeholder again (the reference erases
+    // an object created by the cancelled edit); nothing was recorded in history.
+    if (editingTextCreates_ && editingTextPage_.has_value() && editingTextIndex_.has_value()) {
+        if (Page* page = PageAt(*editingTextPage_); page != nullptr && *editingTextIndex_ < page->texts.size()) {
+            page->texts.erase(page->texts.begin() + static_cast<std::ptrdiff_t>(*editingTextIndex_));
+        }
+    }
+    editingTextPage_.reset();
+    editingTextIndex_.reset();
+    editingTextCreates_ = false;
+    emit EditStateChanged();
+}
+
+void QtDocumentController::CommitLatexEdit(const QString& source) {
+    if (!editingLatexPage_.has_value() || !editingLatexIndex_.has_value() || session_ == nullptr) {
+        CancelLatexEdit();
+        return;
+    }
+
+    const std::size_t pageIndex = *editingLatexPage_;
+    const std::size_t latexIndex = *editingLatexIndex_;
+    const PageLatex before = editingLatexBefore_;
+    const bool creates = editingLatexCreates_;
+    editingLatexPage_.reset();
+    editingLatexIndex_.reset();
+    editingLatexCreates_ = false;
+
+    Page* page = PageAt(pageIndex);
+    if (page == nullptr || latexIndex >= page->latexes.size()) {
+        emit EditStateChanged();
+        return;
+    }
+
+    PageLatex edited = page->latexes[latexIndex];
+    edited.content = source.toStdU16String();
+
+    HistoryAction action {};
+    bool changed = false;
+    if (edited.content.empty()) {
+        page->latexes.erase(page->latexes.begin() + static_cast<std::ptrdiff_t>(latexIndex));
+        if (!creates) {
+            action.type = HistoryActionType::RemoveLatex;
+            action.pageIndex = pageIndex;
+            action.index = latexIndex;
+            action.latex = before;
+            changed = true;
+        }
+    } else {
+        page->latexes[latexIndex] = edited;
+        if (creates) {
+            action.type = HistoryActionType::AddLatex;
+            action.pageIndex = pageIndex;
+            action.index = latexIndex;
+            action.latex = edited;
+            changed = true;
+        } else if (!PageLatexEqual(before, edited)) {
+            action.type = HistoryActionType::UpdateLatex;
+            action.pageIndex = pageIndex;
+            action.index = latexIndex;
+            action.latex = before;
+            action.replacementLatex = edited;
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        session_->undoActions.push_back(std::move(action));
+        session_->redoActions.clear();
+        session_->dirty = true;
+        ++session_->revision;
+        NotifySessionChanged(true);
+    }
+    emit EditStateChanged();
+}
+
+void QtDocumentController::CancelLatexEdit() {
+    if (!editingLatexIndex_.has_value()) {
+        return;
+    }
+    if (editingLatexCreates_ && editingLatexPage_.has_value() && editingLatexIndex_.has_value()) {
+        if (Page* page = PageAt(*editingLatexPage_); page != nullptr && *editingLatexIndex_ < page->latexes.size()) {
+            page->latexes.erase(page->latexes.begin() + static_cast<std::ptrdiff_t>(*editingLatexIndex_));
+        }
+    }
+    editingLatexPage_.reset();
+    editingLatexIndex_.reset();
+    editingLatexCreates_ = false;
+    emit EditStateChanged();
 }
 
 }  // namespace cnote::qt

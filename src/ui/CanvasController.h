@@ -2,10 +2,23 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+
+#include <QString>
 
 #include "Document.h"
 
 namespace cnote::ui {
+
+// Implemented by the canvas: the controller needs the overlay's current content
+// when an edit is finished from outside the canvas (e.g. the session manager
+// finishes interactions before another view edits).
+class EditContentSource {
+public:
+    virtual ~EditContentSource() = default;
+    [[nodiscard]] virtual PageText CaptureEditedText() const = 0;
+    [[nodiscard]] virtual QString CaptureEditedLatexSource() const = 0;
+};
 
 // Tuning values the legacy App read from its settings; the canvas needs them to
 // sample and preview strokes exactly like the reference frontend.
@@ -47,6 +60,21 @@ public:
     // In-progress stroke, for the live preview. Null when no stroke is active.
     [[nodiscard]] virtual const Stroke* PendingStroke() const = 0;
     [[nodiscard]] virtual std::size_t PendingStrokePage() const = 0;
+
+    // --- editing (plan steps 5.5/5.6) -------------------------------------
+    // The overlay editors live in the canvas; the controller owns the edit
+    // session (object snapshot, history action) and the renderer exclusion.
+    [[nodiscard]] virtual bool BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) = 0;
+    [[nodiscard]] virtual bool BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex) = 0;
+    [[nodiscard]] virtual const PageText* EditingTextObject() const = 0;
+    [[nodiscard]] virtual const PageLatex* EditingLatexObject() const = 0;
+    [[nodiscard]] virtual std::size_t EditingPageIndex() const = 0;
+    [[nodiscard]] virtual std::optional<std::size_t> EditingTextIndex() const = 0;
+    [[nodiscard]] virtual std::optional<std::size_t> EditingLatexIndex() const = 0;
+    virtual void CommitTextEdit(PageText edited) = 0;
+    virtual void CancelTextEdit() = 0;
+    virtual void CommitLatexEdit(const QString& source) = 0;
+    virtual void CancelLatexEdit() = 0;
 
     [[nodiscard]] virtual bool CanUndo() const = 0;
     [[nodiscard]] virtual bool CanRedo() const = 0;

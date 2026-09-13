@@ -1,7 +1,6 @@
 #pragma once
 
 #include <filesystem>
-#include <memory>
 #include <string>
 
 #include <QMainWindow>
@@ -11,24 +10,29 @@
 class QAction;
 class QLabel;
 
+namespace cnote {
+class AppManager;
+}
+
 namespace cnote::ui {
 class CanvasWidget;
 }
 
 namespace cnote::qt {
 
-// Minimal shell for the migration slice: window, canvas, open/undo/redo/fit
-// actions and a status line.  Chrome, dialogs, settings, editing overlays and
-// export are later slices (plan steps 5-7).
+// Shell for the runnable Qt slice: window, canvas, session registration with the
+// AppManager and the file/editing commands the canvas gate exercises.  Chrome,
+// settings dialogs and session/AppManager parity for the full app are later
+// slices (plan steps 4-7).
 class QtMainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit QtMainWindow(QWidget* parent = nullptr);
+    explicit QtMainWindow(cnote::AppManager& manager, QWidget* parent = nullptr);
     ~QtMainWindow() override;
 
-    // Loads a project or PDF into the session.  Returns false without touching
-    // the current document when the file cannot be loaded.
+    // Loads a project or PDF, joining an already-open session for the same file.
+    // Returns false without touching the current document when it cannot load.
     [[nodiscard]] bool OpenPath(const std::filesystem::path& path);
 
     [[nodiscard]] ui::CanvasWidget* Canvas() const { return canvas_; }
@@ -36,20 +40,35 @@ public:
 
 public slots:
     void OpenFileDialog();
+    void NewDocument();
+    void Save();
+    bool SaveAs();
+    bool ExportPdf(bool embedProject);
     void Undo();
     void Redo();
     void FitToWindow();
     void ZoomIn();
     void ZoomOut();
+    void AddTextObject();
+    void AddLatexObject();
+
+protected:
+    void closeEvent(QCloseEvent* event) override;
 
 private:
     void UpdateChrome();
 
+    cnote::AppManager& manager_;
     QtDocumentController controller_;
     ui::CanvasWidget* canvas_ = nullptr;
     QLabel* statusLabel_ = nullptr;
+    QAction* saveAction_ = nullptr;
+    QAction* exportAction_ = nullptr;
+    QAction* exportFlatAction_ = nullptr;
     QAction* undoAction_ = nullptr;
     QAction* redoAction_ = nullptr;
+    QAction* addTextAction_ = nullptr;
+    QAction* addLatexAction_ = nullptr;
 };
 
 }  // namespace cnote::qt

@@ -8,12 +8,19 @@
 
 #include <QPointF>
 #include <QRectF>
+#include <QString>
+#include <QStringList>
 #include <QWidget>
 
 #include "Document.h"
+#include "latex/LatexCompletion.h"
 #include "render/PageRenderer.h"
 #include "ui/CanvasController.h"
 
+class QListView;
+class QPlainTextEdit;
+class QStringListModel;
+class QTextEdit;
 class QTimer;
 
 namespace cnote::ui {
@@ -27,19 +34,15 @@ struct CanvasPageView {
     bool valid = false;
 };
 
-// QWidget canvas for the Qt migration (plan steps 3.1/3.2/3.3).
+// QWidget canvas for the Qt migration (plan steps 3.1/3.2/3.3, 5.5/5.6).
 //
-// Owns per-view viewport state and transient interaction state, and the raster
-// caches derived from them.  Committed-object drawing is delegated to
-// render::PageRenderer and text layout to text::TextLayoutQt; this widget never
-// re-implements object primitives.  Mutations go through CanvasController, so
-// the widget has no dependency on App, HWND/HDC or the document owner.
-//
-// Geometry follows the reference Windows frontend: 96-DPI reference scale
-// (Qt logical pixels), fit scale = (canvasWidth - 120) / widestPage, 26 px page
-// gap, 40 px top inset, pan clamping slack 20% clamped to [96, 260]/[96, 320],
-// zoom range [0.35, 4.0] with 1.1/0.9 wheel steps anchored at the cursor.
-class CanvasWidget : public QWidget {
+// Owns per-view viewport state, transient interaction state, the raster caches
+// derived from them, and the overlaid editors (QTextEdit for styled notes,
+// QPlainTextEdit plus a QListView completion popup for LaTeX source).  It is
+// only a view: committed objects come from render::PageRenderer, text layout
+// from text::TextLayoutQt, edit decisions from text::TextEditingQt and every
+// document mutation goes through CanvasController.
+class CanvasWidget : public QWidget, public EditContentSource {
     Q_OBJECT
 
 public:
@@ -53,6 +56,8 @@ public:
     static constexpr int kWheelScrollLines = 3;
     static constexpr int kWheelScrollUnitPixels = 18;
     static constexpr int kZoomSessionDelayMs = 100;
+    static constexpr int kTextEditorMinWidth = 360;
+    static constexpr int kTextEditorMinHeight = 120;
 
     explicit CanvasWidget(CanvasController& controller, QWidget* parent = nullptr);
     ~CanvasWidget() override;
@@ -77,23 +82,46 @@ public:
     [[nodiscard]] QPointF PageToScreen(std::size_t pageIndex, Vec2 point) const;
 
     // --- document changes -------------------------------------------------
-    // Drops raster caches.  Called automatically when the controller's revision
-    // changes; the shell may also call it directly after loading a document.
     void NotifyDocumentChanged();
-
-    // Optional lazy PDF page backgrounds (plan step 3.4/3.5).  The provider is
-    // owned by the shell/services and must outlive the widget's caches; the
-    // canvas only passes it to render::PageRenderParams.  Passing nullptr or a
-    // provider whose document no longer matches the controller drops caches.
     void SetPdfBackgroundProvider(render::PdfBackgroundProvider* provider);
 
-    // --- interaction (also the programmatic path used by tests/harness) ----
+    // --- interaction ------------------------------------------------------
     void BeginStrokeAt(const QPointF& logical);
     bool ExtendStrokeTo(const QPointF& logical);
     void EndStroke();
     void CancelStroke();
 
-    // Diagnostics used by the smoke harness/timings.
+    // --- editing overlay --------------------------------------------------
+    // Begins editing the topmost text or LaTeX object under `logical`; when no
+    // object is hit, nothing happens (the click starts a stroke instead).
+    bool BeginEditAt(const QPointF& logical);
+    // Shows the overlay for an edit the controller already started (e.g. a new
+    // object created from a shell command), or hides it when none is active.
+    void SyncEditOverlay();
+    // Commits (Ctrl+Enter) or cancels (Escape) the active edit.
+    void CommitActiveEdit();
+    void CancelActiveEdit();
+    [[nodiscard]] bool EditOverlayActive() const;
+
+    [[nodiscard]] QTextEdit* TextEditor() const { return textEditor_; }
+    [[nodiscard]] QPlainTextEdit* LatexEditor() const { return latexEditor_; }
+    // Applies a style to the text overlay's current selection.
+    void ApplyTextFormatToSelection(const PageTextStyle& style);
+
+    void SetLatexSource(const QString& source, int cursorPosition);
+    [[nodiscard]] QString LatexSource() const;
+    [[nodiscard]] bool LatexPopupVisible() const;
+    [[nodiscard]] QStringList LatexPopupItems() const;
+    [[nodiscard]] int LatexPopupRow() const;
+    void SetLatexPopupRow(int row);
+    void RefreshLatexPopup();
+    bool AcceptLatexSuggestion();
+
+    // ui::EditContentSource (overlay content for manager-driven commits).
+    [[nodiscard]] PageText CaptureEditedText() const override;
+    [[nodiscard]] QString CaptureEditedLatexSource() const override;
+
+    // Diagnostics used by the gate harness/timings.
     [[nodiscard]] std::size_t CachedSurfaceCount() const;
     [[nodiscard]] std::size_t LastPaintPageCount() const { return lastPaintPageCount_; }
 
@@ -107,6 +135,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     struct SurfaceEntry {
@@ -132,6 +161,17 @@ private:
     void ClampViewportPan();
     [[nodiscard]] QRectF VisibleCanvasRect() const;
 
+    // Overlay plumbing.
+    void EnsureTextEditor();
+    void EnsureLatexEditor();
+    void ShowTextOverlay(const PageText& text);
+    void ShowLatexOverlay(const PageLatex& object);
+    void HideOverlays();
+    void PositionOverlays();
+    void SyncLatexPopup();
+    bool HandleEditorKey(QObject* watched, QKeyEvent* event);
+    bool HandleLatexPairKey(QPlainTextEdit& editor, const QString& text);
+
     CanvasController& controller_;
     float zoom_ = 1.0f;
     float panX_ = 0.0f;
@@ -147,14 +187,21 @@ private:
     QPointF zoomAnchorCursor_ {};
     QTimer* zoomSettleTimer_ = nullptr;
 
-    // Pan gesture state.
     bool panning_ = false;
     QPointF panLastPosition_ {};
 
-    // Stroke gesture state.
     bool drawing_ = false;
-    std::optional<std::size_t> strokePageIndex_;
+    std::optional<std::size_t> strokePageIndex_ {};
     QPointF strokeLastPosition_ {};
+
+    QTextEdit* textEditor_ = nullptr;
+    QPlainTextEdit* latexEditor_ = nullptr;
+    QListView* latexPopup_ = nullptr;
+    QStringListModel* latexPopupModel_ = nullptr;
+    std::vector<latex::CompletionItem> latexSuggestions_ {};
+    std::optional<std::size_t> overlayPageIndex_ {};
+    std::optional<std::size_t> overlayTextIndex_ {};
+    std::optional<std::size_t> overlayLatexIndex_ {};
 
     std::unordered_map<std::size_t, PageSurfaces> surfaces_;
     render::PdfBackgroundProvider* pdfBackground_ = nullptr;
