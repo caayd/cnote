@@ -96,13 +96,19 @@ void PaintImage(QPainter& painter, const PageImage& image, const PageRenderParam
 
     painter.save();
     painter.setOpacity(painter.opacity() * std::clamp(opacity, 0.0f, 1.0f));
-    // The legacy renderer leaves GDI+'s default interpolation in place, which
-    // blends when a page image is scaled up: the frozen reference (exe
-    // 0f62092d) renders the 2x2 translucent test image in representative.cnote
-    // with blended quadrant centres ((247,155,155) and (112,207,90) sampled at
-    // 175%) and a gradient scanline, while nearest-neighbour produced the pure
-    // quadrant colours (255,127,127) / (127,255,127). Keep the painter's
-    // smoothing for page images; only the cached page-surface blit turns it off.
+    // Filter parity: the legacy page-cache renderer draws page objects with
+    // GDI+ InterpolationModeHighQualityBicubic / PixelOffsetModeHighQuality /
+    // CompositingQualityHighQuality (src/App.cpp:4380), while the transient
+    // interaction previews use InterpolationModeBilinear (src/App.cpp:7282).
+    // Qt's SmoothPixmapTransform is a bilinear upscale, so committed page images
+    // match the reference's *direction* (measured on the frozen reference:
+    // blended quadrant centres, gradient scanline - nearest-neighbour produced
+    // hard quadrants and was wrong) but not its kernel: the reference smooths
+    // further (69-run scanline and pulled-in corners on the 2x2 test image,
+    // Qt 21 runs with pure corners at 175%). Closing that would need a bicubic
+    // resample of page images; plan 3.3 does not pin the filter, so it stays an
+    // open fidelity note. Only the cached page-surface blit turns smoothing off
+    // (it is a 1:1 device-pixel copy).
     painter.translate(centerX, centerY);
     painter.rotate(static_cast<qreal>(image.rotationDegrees));
     painter.drawImage(QRectF(-drawWidth * 0.5, -drawHeight * 0.5, drawWidth, drawHeight), view);
