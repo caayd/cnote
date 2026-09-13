@@ -23,7 +23,6 @@
 #include "fpdf_text.h"
 #include "fpdfview.h"
 
-#include "ProjectFile.h"
 #include "selection/Geometry.h"
 #include "text/TextGeometry.h"
 
@@ -56,38 +55,21 @@ using text::WrappedTextLayout;
 constexpr float kMinimumStrokeRenderWidth = 1.25f;
 constexpr float kStrokeRenderWidthDivisor = 2.15f;
 constexpr float kTextLayoutScale = 8.0f;
-constexpr wchar_t kEmbeddedCnoteAttachmentName[] = L"cnote-edit-data.cnote";
+constexpr char16_t kEmbeddedCnoteAttachmentName[] = u"cnote-edit-data.cnote";
 
-std::optional<std::vector<std::uint8_t>> ReadAllBytes(const std::filesystem::path& filePath) {
-    std::ifstream input(filePath, std::ios::binary);
-    if (!input) {
-        return std::nullopt;
+// PDFium wide strings are UTF-16 code units; build a null-terminated
+// FPDF_WCHAR buffer explicitly rather than reinterpreting wchar_t.
+std::vector<FPDF_WCHAR> PdfWideString(std::u16string_view value) {
+    std::vector<FPDF_WCHAR> buffer;
+    buffer.reserve(value.size() + 1U);
+    for (char16_t unit : value) {
+        buffer.push_back(static_cast<FPDF_WCHAR>(unit));
     }
-
-    input.seekg(0, std::ios::end);
-    const std::streamoff size = input.tellg();
-    if (size < 0) {
-        return std::nullopt;
-    }
-    input.seekg(0, std::ios::beg);
-
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if (!bytes.empty()) {
-        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        if (!input) {
-            return std::nullopt;
-        }
-    }
-
-    return bytes;
+    buffer.push_back(0);
+    return buffer;
 }
 
-FPDF_WIDESTRING PdfWideString(const wchar_t* value) {
-    static_assert(sizeof(wchar_t) == sizeof(FPDF_WCHAR));
-    return reinterpret_cast<FPDF_WIDESTRING>(value);
-}
-
-std::optional<std::wstring> AttachmentName(FPDF_ATTACHMENT attachment) {
+std::optional<std::u16string> AttachmentName(FPDF_ATTACHMENT attachment) {
     const unsigned long byteLength = FPDFAttachment_GetName(attachment, nullptr, 0);
     if (byteLength < sizeof(FPDF_WCHAR) || byteLength % sizeof(FPDF_WCHAR) != 0) {
         return std::nullopt;
@@ -100,9 +82,12 @@ std::optional<std::wstring> AttachmentName(FPDF_ATTACHMENT attachment) {
     }
 
     const std::size_t charCount = buffer.back() == 0 ? buffer.size() - 1U : buffer.size();
-    return std::wstring(
-        reinterpret_cast<const wchar_t*>(buffer.data()),
-        reinterpret_cast<const wchar_t*>(buffer.data()) + charCount);
+    std::u16string name;
+    name.reserve(charCount);
+    for (std::size_t index = 0; index < charCount; ++index) {
+        name.push_back(static_cast<char16_t>(buffer[index]));
+    }
+    return name;
 }
 
 std::optional<std::vector<std::uint8_t>> AttachmentFileBytes(FPDF_ATTACHMENT attachment) {
@@ -120,41 +105,16 @@ std::optional<std::vector<std::uint8_t>> AttachmentFileBytes(FPDF_ATTACHMENT att
     return bytes;
 }
 
-std::optional<std::vector<std::uint8_t>> ExtractEmbeddedCnoteProject(
-    const std::vector<std::uint8_t>& pdfBytes) {
-    FPDF_DOCUMENT documentHandle = FPDF_LoadMemDocument64(pdfBytes.data(), pdfBytes.size(), nullptr);
-    if (documentHandle == nullptr) {
-        return std::nullopt;
-    }
-
-    std::optional<std::vector<std::uint8_t>> projectBytes;
-    const int attachmentCount = FPDFDoc_GetAttachmentCount(documentHandle);
-    for (int attachmentIndex = 0; attachmentIndex < attachmentCount; ++attachmentIndex) {
-        FPDF_ATTACHMENT attachment = FPDFDoc_GetAttachment(documentHandle, attachmentIndex);
-        if (attachment == nullptr) {
-            continue;
-        }
-
-        const std::optional<std::wstring> name = AttachmentName(attachment);
-        if (name.has_value() && *name == kEmbeddedCnoteAttachmentName) {
-            projectBytes = AttachmentFileBytes(attachment);
-            break;
-        }
-    }
-
-    FPDF_CloseDocument(documentHandle);
-    return projectBytes;
-}
-
 bool AppendEmbeddedCnoteProject(
     FPDF_DOCUMENT documentHandle,
-    const std::vector<std::uint8_t>& projectBytes) {
+    std::span<const std::uint8_t> projectBytes) {
     if (documentHandle == nullptr || projectBytes.empty()
         || projectBytes.size() > std::numeric_limits<unsigned long>::max()) {
         return false;
     }
 
-    FPDF_ATTACHMENT attachment = FPDFDoc_AddAttachment(documentHandle, PdfWideString(kEmbeddedCnoteAttachmentName));
+    const std::vector<FPDF_WCHAR> attachmentName = PdfWideString(kEmbeddedCnoteAttachmentName);
+    FPDF_ATTACHMENT attachment = FPDFDoc_AddAttachment(documentHandle, attachmentName.data());
     if (attachment == nullptr) {
         return false;
     }
@@ -743,6 +703,35 @@ struct PdfFileWriter {
 
 }  // namespace
 
+std::optional<std::vector<std::uint8_t>> PdfiumBackend::ExtractEmbeddedProject(
+    const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes) const {
+    if (!pdfBytes || pdfBytes->empty()) {
+        return std::nullopt;
+    }
+    FPDF_DOCUMENT documentHandle = FPDF_LoadMemDocument64(pdfBytes->data(), pdfBytes->size(), nullptr);
+    if (documentHandle == nullptr) {
+        return std::nullopt;
+    }
+
+    std::optional<std::vector<std::uint8_t>> projectBytes;
+    const int attachmentCount = FPDFDoc_GetAttachmentCount(documentHandle);
+    for (int attachmentIndex = 0; attachmentIndex < attachmentCount; ++attachmentIndex) {
+        FPDF_ATTACHMENT attachment = FPDFDoc_GetAttachment(documentHandle, attachmentIndex);
+        if (attachment == nullptr) {
+            continue;
+        }
+
+        const std::optional<std::u16string> name = AttachmentName(attachment);
+        if (name.has_value() && *name == kEmbeddedCnoteAttachmentName) {
+            projectBytes = AttachmentFileBytes(attachment);
+            break;
+        }
+    }
+
+    FPDF_CloseDocument(documentHandle);
+    return projectBytes;
+}
+
 namespace { unsigned int pdfiumUsers = 0; }
 
 PdfiumBackend::PdfiumBackend() {
@@ -754,27 +743,6 @@ PdfiumBackend::~PdfiumBackend() {
     if (initialized_ && --pdfiumUsers == 0) {
         FPDF_DestroyLibrary();
     }
-}
-
-std::optional<Document> PdfiumBackend::Open(const std::filesystem::path& filePath) {
-    if (!initialized_ || filePath.empty()) {
-        return std::nullopt;
-    }
-
-    const auto pdfBytes = ReadAllBytes(filePath);
-    if (!pdfBytes.has_value()) {
-        return std::nullopt;
-    }
-
-    if (const auto embeddedProject = ExtractEmbeddedCnoteProject(*pdfBytes); embeddedProject.has_value()) {
-        if (auto projectDocument = ProjectFile::LoadFromBytes(*embeddedProject, filePath);
-            projectDocument.has_value()) {
-            HydrateProject(*projectDocument);
-            return projectDocument;
-        }
-    }
-
-    return OpenFromMemory(filePath, std::make_shared<std::vector<std::uint8_t>>(std::move(*pdfBytes)));
 }
 
 std::optional<Document> PdfiumBackend::OpenFromMemory(
@@ -1024,7 +992,7 @@ bool PdfiumBackend::ExportPdf(
     float strokeSmoothing,
     float dashLength,
     float dashGap,
-    bool embedProject) const {
+    std::span<const std::uint8_t> embeddedProject) const {
     if (!initialized_ || filePath.empty() || document.PageCount() == 0U || renderScale <= 0.0f) {
         return false;
     }
@@ -1144,9 +1112,8 @@ bool PdfiumBackend::ExportPdf(
         ok = FPDFPage_GenerateContent(pageHandle) != 0;
     }
 
-    if (ok && embedProject) {
-        const std::vector<std::uint8_t> projectBytes = ProjectFile::Serialize(document);
-        static_cast<void>(AppendEmbeddedCnoteProject(outputDocument, projectBytes));
+    if (ok && !embeddedProject.empty()) {
+        static_cast<void>(AppendEmbeddedCnoteProject(outputDocument, embeddedProject));
     }
 
     if (ok) {

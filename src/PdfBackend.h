@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -20,21 +21,13 @@ struct PdfTextCharBox {
     float bottom = 0.0f;
 };
 
-class IPdfBackend {
-public:
-    virtual ~IPdfBackend() = default;
-
-    [[nodiscard]] virtual std::optional<Document> Open(const std::filesystem::path& filePath) = 0;
-};
-
-class PdfiumBackend final : public IPdfBackend {
+class PdfiumBackend final {
 public:
     PdfiumBackend();
-    ~PdfiumBackend() override;
+    ~PdfiumBackend();
     PdfiumBackend(const PdfiumBackend&) = delete;
     PdfiumBackend& operator=(const PdfiumBackend&) = delete;
 
-    [[nodiscard]] std::optional<Document> Open(const std::filesystem::path& filePath) override;
     [[nodiscard]] std::optional<Document> OpenFromMemory(
         const std::filesystem::path& sourcePath,
         std::shared_ptr<std::vector<std::uint8_t>> pdfBytes) const;
@@ -43,6 +36,11 @@ public:
     // Missing or invalid sources fall back to a solid page raster. Model decode
     // stays usable without calling this.
     void HydrateProject(Document& document) const;
+
+    // Returns the embedded cnote project attachment bytes, if present.
+    [[nodiscard]] std::optional<std::vector<std::uint8_t>> ExtractEmbeddedProject(
+        const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes) const;
+
     [[nodiscard]] std::optional<RasterImage> RenderPage(
         const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
         std::size_t pageIndex,
@@ -65,7 +63,7 @@ public:
         float strokeSmoothing,
         float dashLength,
         float dashGap,
-        bool embedProject) const;
+        std::span<const std::uint8_t> embeddedProject) const;
 
 private:
     bool initialized_ = false;

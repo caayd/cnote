@@ -22,6 +22,7 @@
 #include "SettingsWindow.h"
 #include "ShortcutConfig.h"
 #include "Unicode.h"
+#include "document/FileIO.h"
 #include "ui/UiUtil.h"
 
 using cnote::HasExtension;
@@ -544,7 +545,7 @@ bool App::AppendPagesFromDocumentPath(const std::filesystem::path& filePath) {
         }
         pdfBackend_.HydrateProject(*opened);
     } else if (HasExtension(filePath, u".pdf")) {
-        opened = pdfBackend_.Open(filePath);
+        opened = LoadDocumentFile(filePath, pdfBackend_);
         if (!opened.has_value()) {
             MessageBoxW(window_, L"Failed to open or render the PDF for page import.", L"Append Pages", MB_OK | MB_ICONERROR);
             return false;

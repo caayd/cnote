@@ -5,6 +5,7 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <span>
 #include <stdexcept>
 
 namespace cnote {
@@ -154,7 +155,7 @@ struct ProjectSessionTests {
         Require(originalSession->views.size() == 1 && second.AutoSaveOwner() == &second, "autosave ownership transfers");
         Require(second.CanAutoSaveCurrentDocument(), "remaining view can autosave dirty project");
         Require(second.pdfBackend_.ExportPdf(second.session_->document, scratch / L"after-close.pdf",
-                    1.0f, 0.55f, 3, 2, false), "PDF rendering survives another window's destruction");
+                    1.0f, 0.55f, 3, 2, std::span<const std::uint8_t> {}), "PDF rendering survives another window's destruction");
         Require(latex::Parse(u"x^2", 24, true) != nullptr, "LaTeX survives another window's destruction");
         Require(second.CreateAdditionalWindow(true, SW_HIDE), "surviving view can create another linked view");
         App& fourth = *root.childWindows_.back();
