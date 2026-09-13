@@ -971,7 +971,6 @@ set_tests_properties(interaction_router_qt PROPERTIES TIMEOUT 120)
 # same legacy run.
 add_executable(cnote_selection_math_tests
     tests/SelectionMathTests.cpp
-    src/ui/SelectionMath.cpp
 )
 target_include_directories(cnote_selection_math_tests PRIVATE src)
 target_compile_features(cnote_selection_math_tests PRIVATE cxx_std_20)

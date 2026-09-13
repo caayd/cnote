@@ -11,6 +11,8 @@
 #include "qt/QtDocumentIo.h"
 #include "render/PdfiumBackgroundProvider.h"
 #include "text/TextEditingQt.h"
+#include "text/TextLayoutQt.h"
+#include "ui/SelectionMath.h"
 
 namespace cnote::qt {
 
@@ -692,6 +694,247 @@ void QtDocumentController::CancelLatexEdit() {
     editingLatexIndex_.reset();
     editingLatexCreates_ = false;
     emit EditStateChanged();
+}
+
+// --- selection, page gestures and erase -------------------------------------
+
+bool QtDocumentController::HasSelection() const {
+    for (const auto& entry : selection_) {
+        if (!entry.second.Empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+const ui::PageSelection& QtDocumentController::SelectionFor(std::size_t pageIndex) const {
+    static const ui::PageSelection kEmpty {};
+    const auto entry = selection_.find(pageIndex);
+    return entry != selection_.end() ? entry->second : kEmpty;
+}
+
+void QtDocumentController::ClearSelection() {
+    selection_.clear();
+}
+
+void QtDocumentController::AddObjectToSelection(const ui::ObjectRef& object) {
+    ui::PageSelection& selection = selection_[object.pageIndex];
+    switch (object.kind) {
+    case ui::ObjectKind::Stroke:
+        selection.strokes.push_back(object.objectIndex);
+        break;
+    case ui::ObjectKind::Image:
+        selection.images.push_back(object.objectIndex);
+        break;
+    case ui::ObjectKind::Text:
+        selection.texts.push_back(object.objectIndex);
+        break;
+    case ui::ObjectKind::Latex:
+        selection.latexes.push_back(object.objectIndex);
+        break;
+    }
+}
+
+void QtDocumentController::SelectObjects(std::size_t pageIndex, ui::PageSelection selection) {
+    if (selection.Empty()) {
+        selection_.erase(pageIndex);
+        return;
+    }
+    selection_[pageIndex] = std::move(selection);
+}
+
+void QtDocumentController::BeginPageGesture(std::size_t pageIndex) {
+    CancelPageGesture();
+    const Page* page = PageAt(pageIndex);
+    if (page == nullptr) {
+        return;
+    }
+    gesturePage_ = pageIndex;
+    gestureBefore_ = *page;
+    gestureChanged_ = false;
+}
+
+Page* QtDocumentController::GesturePage() {
+    return gesturePage_.has_value() ? PageAt(*gesturePage_) : nullptr;
+}
+
+void QtDocumentController::CommitPageGesture() {
+    if (!gesturePage_.has_value()) {
+        return;
+    }
+    const std::size_t pageIndex = *gesturePage_;
+    Page before = gestureBefore_;
+    gesturePage_.reset();
+    gestureBefore_ = Page {};
+    const bool changed = gestureChanged_;
+    gestureChanged_ = false;
+
+    Page* page = PageAt(pageIndex);
+    if (!changed || page == nullptr || session_ == nullptr || PageEqual(before, *page)) {
+        return;
+    }
+
+    // One transaction per gesture, the reference's PushReplacePagesHistoryAction.
+    HistoryAction action {};
+    action.type = HistoryActionType::ReplacePages;
+    action.pageIndices = { pageIndex };
+    action.pages = { std::move(before) };
+    action.replacementPages = { *page };
+    action.focusPageIndex = pageIndex;
+    session_->undoActions.push_back(std::move(action));
+    session_->redoActions.clear();
+    session_->dirty = true;
+    ++session_->revision;
+    NotifySessionChanged(true);
+}
+
+void QtDocumentController::CancelPageGesture() {
+    if (!gesturePage_.has_value()) {
+        gestureChanged_ = false;
+        return;
+    }
+    const std::size_t pageIndex = *gesturePage_;
+    Page before = std::move(gestureBefore_);
+    gesturePage_.reset();
+    gestureBefore_ = Page {};
+    gestureChanged_ = false;
+    if (Page* page = PageAt(pageIndex); page != nullptr) {
+        *page = std::move(before);
+    }
+}
+
+void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
+    Page* page = GesturePage();
+    if (page == nullptr || (delta.x == 0.0f && delta.y == 0.0f)) {
+        return;
+    }
+    const ui::PageSelection& selection = SelectionFor(pageIndex);
+
+    for (const std::size_t index : selection.strokes) {
+        if (index >= page->strokes.size()) {
+            continue;
+        }
+        const Vec2 clamped = ui::ClampStrokeDeltaToPage(page->strokes[index], *page, delta);
+        if (clamped.x == 0.0f && clamped.y == 0.0f) {
+            continue;
+        }
+        ui::TranslateStrokePoints(page->strokes[index], clamped);
+        gestureChanged_ = true;
+    }
+    for (const std::size_t index : selection.images) {
+        if (index >= page->images.size()) {
+            continue;
+        }
+        PageImage& image = page->images[index];
+        const Vec2 clamped = ui::ClampImageDeltaToPage(image, *page, delta);
+        if (clamped.x == 0.0f && clamped.y == 0.0f) {
+            continue;
+        }
+        image.x += clamped.x;
+        image.y += clamped.y;
+        gestureChanged_ = true;
+    }
+    for (const std::size_t index : selection.texts) {
+        if (index >= page->texts.size()) {
+            continue;
+        }
+        PageText& text = page->texts[index];
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page->width);
+        const Vec2 clamped {
+            std::clamp(delta.x, -bounds.left, page->width - bounds.right),
+            std::clamp(delta.y, -bounds.top, page->height - bounds.bottom),
+        };
+        if (clamped.x == 0.0f && clamped.y == 0.0f) {
+            continue;
+        }
+        text.x += clamped.x;
+        text.y += clamped.y;
+        gestureChanged_ = true;
+    }
+    for (const std::size_t index : selection.latexes) {
+        if (index >= page->latexes.size()) {
+            continue;
+        }
+        PageLatex& object = page->latexes[index];
+        const Vec2 clamped = ui::ClampLatexDeltaToPage(object, *page, delta);
+        if (clamped.x == 0.0f && clamped.y == 0.0f) {
+            continue;
+        }
+        object.x += clamped.x;
+        object.y += clamped.y;
+        gestureChanged_ = true;
+    }
+}
+
+void QtDocumentController::CommitErase(std::size_t pageIndex, const std::vector<ui::ObjectRef>& targets) {
+    Page* page = PageAt(pageIndex);
+    if (page == nullptr || targets.empty()) {
+        return;
+    }
+
+    std::vector<std::size_t> strokes;
+    std::vector<std::size_t> images;
+    std::vector<std::size_t> texts;
+    std::vector<std::size_t> latexes;
+    for (const ui::ObjectRef& target : targets) {
+        if (target.pageIndex != pageIndex) {
+            continue;
+        }
+        switch (target.kind) {
+        case ui::ObjectKind::Stroke: strokes.push_back(target.objectIndex); break;
+        case ui::ObjectKind::Image: images.push_back(target.objectIndex); break;
+        case ui::ObjectKind::Text: texts.push_back(target.objectIndex); break;
+        case ui::ObjectKind::Latex: latexes.push_back(target.objectIndex); break;
+        }
+    }
+
+    BeginPageGesture(pageIndex);
+    const auto removeDescending = [](auto& objects, std::vector<std::size_t>& indices) {
+        std::sort(indices.begin(), indices.end());
+        indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+        for (auto it = indices.rbegin(); it != indices.rend(); ++it) {
+            if (*it < objects.size()) {
+                objects.erase(objects.begin() + static_cast<std::ptrdiff_t>(*it));
+            }
+        }
+    };
+    // Reference order (App::EndErase): texts, latexes, images, strokes.
+    removeDescending(page->texts, texts);
+    removeDescending(page->latexes, latexes);
+    removeDescending(page->images, images);
+    removeDescending(page->strokes, strokes);
+
+    // The erased objects leave the selection as well.
+    ui::PageSelection remaining = SelectionFor(pageIndex);
+    const auto drop = [](std::vector<std::size_t>& selected, const std::vector<std::size_t>& removed) {
+        selected.erase(
+            std::remove_if(selected.begin(), selected.end(), [&](std::size_t index) {
+                return std::find(removed.begin(), removed.end(), index) != removed.end();
+            }),
+            selected.end());
+    };
+    drop(remaining.strokes, strokes);
+    drop(remaining.latexes, latexes);
+    drop(remaining.images, images);
+    drop(remaining.texts, texts);
+    SelectObjects(pageIndex, std::move(remaining));
+
+    gestureChanged_ = true;
+    CommitPageGesture();
+}
+
+void QtDocumentController::SetPendingStrokeDotted(bool dotted) {
+    if (pendingStroke_.has_value()) {
+        pendingStroke_->style.dotted = dotted;
+    }
+}
+
+void QtDocumentController::ReplacePendingStrokePoints(const std::vector<Vec2>& points, bool dotted) {
+    if (!pendingStroke_.has_value()) {
+        return;
+    }
+    pendingStroke_->points = points;
+    pendingStroke_->style.dotted = dotted;
 }
 
 }  // namespace cnote::qt

@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <QElapsedTimer>
 #include <QPointF>
 #include <QRectF>
 #include <QString>
@@ -16,6 +17,9 @@
 #include "latex/LatexCompletion.h"
 #include "render/PageRenderer.h"
 #include "ui/CanvasController.h"
+#include "ui/InteractionRouter.h"
+#include "ui/PrecisionInputSink.h"
+#include "ui/SelectionMath.h"
 
 class QListView;
 class QPlainTextEdit;
@@ -42,7 +46,7 @@ struct CanvasPageView {
 // only a view: committed objects come from render::PageRenderer, text layout
 // from text::TextLayoutQt, edit decisions from text::TextEditingQt and every
 // document mutation goes through CanvasController.
-class CanvasWidget : public QWidget, public EditContentSource {
+class CanvasWidget : public QWidget, public EditContentSource, public InteractionHost, public PrecisionInputSink {
     Q_OBJECT
 
 public:
@@ -77,7 +81,7 @@ public:
     // --- geometry ---------------------------------------------------------
     [[nodiscard]] std::vector<CanvasPageView> CalculatePageViews() const;
     [[nodiscard]] CanvasPageView CalculatePageView(std::size_t pageIndex) const;
-    [[nodiscard]] std::optional<CanvasPageView> HitTestPage(const QPointF& logical) const;
+    [[nodiscard]] std::optional<CanvasPageView> HitTestPageView(const QPointF& logical) const;
     [[nodiscard]] Vec2 ScreenToPage(const CanvasPageView& view, const QPointF& logical, bool clampToPage) const;
     [[nodiscard]] QPointF PageToScreen(std::size_t pageIndex, Vec2 point) const;
 
@@ -85,7 +89,73 @@ public:
     void NotifyDocumentChanged();
     void SetPdfBackgroundProvider(render::PdfBackgroundProvider* provider);
 
-    // --- interaction ------------------------------------------------------
+    // --- interaction (plan step 5.1: PointerSample-shaped entry points) ----
+    // The widget is only a host for the router: it converts Qt events into
+    // PointerSample/WheelSample, owns the viewport and transient state, and
+    // performs the effects (geometry, caches, model mutation through the
+    // controller).  The state machine itself lives in ui::InteractionRouter.
+    void HandlePointerPress(const PointerSample& sample);
+    void HandlePointerMove(const PointerSample& sample);
+    void HandlePointerRelease(const PointerSample& sample);
+    void HandlePointerCancel(CancelReason reason);
+    void SetTool(Tool tool) { router_->SetTool(tool); }
+    void SetSelectionMode(SelectionMode mode) { router_->SetSelectionMode(mode); }
+    void SetInteractionModifiers(InteractionModifiers modifiers) { router_->SetModifiers(modifiers); }
+    [[nodiscard]] InteractionRouter& Router() { return *router_; }
+    [[nodiscard]] InteractionKind ActiveInteraction() const { return router_ != nullptr ? router_->ActiveInteraction() : InteractionKind::None; }
+    // Builds the sample the Qt event handlers feed to the router.
+    [[nodiscard]] PointerSample SampleFromEvent(const QMouseEvent& event);
+
+    // ui::InteractionHost ---------------------------------------------------
+    [[nodiscard]] std::optional<PageHit> HitTestPage(const QPointF& logical) const override;
+    [[nodiscard]] Vec2 ScreenToPage(const QPointF& logical, bool clampToPage) const override;
+    [[nodiscard]] bool IsPointInCanvas(const QPointF& logical) const override;
+    [[nodiscard]] bool HasSelection() const override;
+    [[nodiscard]] bool CursorInteractsWithSelection(const QPointF& logical) const override;
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> HitTestText(const QPointF& logical) const override;
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> HitTestLatex(const QPointF& logical) const override;
+    [[nodiscard]] std::optional<std::size_t> PageWithPdfTextAt(const QPointF& logical) const override;
+    [[nodiscard]] std::optional<SelectionHit> HitTestSelectionObject(const QPointF& logical, std::size_t pageIndex) const override;
+    [[nodiscard]] std::optional<TransformRequest> HitTestSelectionHandle(const QPointF& logical) const override;
+    [[nodiscard]] std::vector<ObjectRef> EraseTargetsAt(const QPointF& logical) const override;
+    void ZoomByWheelSteps(int steps, const QPointF& anchor) override;
+    void ScrollBy(const QPointF& logicalDelta) override;
+    void SetViewPage(std::size_t pageIndex) override;
+    void SetCursor(CursorKind cursor) override;
+    void InvalidateCanvas() override;
+    void SetPointerCapture(bool captured) override;
+    void BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted) override;
+    void SetStrokeDotted(bool dotted) override;
+    void AppendStrokePoint(Vec2 pagePoint, bool dotted) override;
+    void ReplaceStrokePoints(const std::vector<Vec2>& points, bool dotted) override;
+    void CommitStroke() override;
+    void DiscardStroke() override;
+    void ClearSelection() override;
+    void UpdateSelectionOverlay(const QPointF& anchor, const QPointF& current, bool lasso, const std::vector<QPointF>& lassoPoints) override;
+    void CommitSelection(const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click) override;
+    void AddObjectToSelection(ObjectRef object) override;
+    void BeginMoveSelection(std::size_t pageIndex) override;
+    void UpdateMoveSelection(const QPointF& logicalDelta) override;
+    void CommitMoveSelection() override;
+    void BeginTransform(const TransformRequest& request) override;
+    void UpdateTransform(const QPointF& logical) override;
+    void CommitTransform() override;
+    void UpdatePendingErase(const std::vector<ObjectRef>& pending) override;
+    void CommitErase(const std::vector<ObjectRef>& pending) override;
+    void BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) override;
+    void CreateTextAt(std::size_t pageIndex, Vec2 pagePoint) override;
+    void BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex) override;
+    void CreateLatexAt(std::size_t pageIndex, Vec2 pagePoint) override;
+
+    // ui::PrecisionInputSink -------------------------------------------------
+    [[nodiscard]] PrecisionInputRoute RoutePrecisionInput(const QPoint& globalPosition) const override;
+    void BeginPrecisionGesture() override;
+    void SetPrecisionGestureCursor(bool active) override;
+    void ZoomAtAnchor(qreal cumulativeScale, const QPoint& globalAnchor) override;
+    void PanBy(qreal deltaX, qreal deltaY) override;
+    void EndPrecisionGesture() override;
+
+    // --- programmatic stroke path (used by tests/harness) -----------------
     void BeginStrokeAt(const QPointF& logical);
     bool ExtendStrokeTo(const QPointF& logical);
     void EndStroke();
@@ -135,6 +205,9 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void keyReleaseEvent(QKeyEvent* event) override;
+    void focusOutEvent(QFocusEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
@@ -154,6 +227,19 @@ private:
     const render::PageSurfaceCache& EnsureSurface(const CanvasPageView& view, const Page& page);
     void PaintPageContents(QPainter& painter, const Page& page, const CanvasPageView& view);
     void PruneSurfaces(const std::vector<std::size_t>& visiblePages);
+
+    // Reference smooth scroll: 90 ms, elapsed-time driven with a precise timer
+    // and the legacy cubic interpolation (Viewport.cpp:53).
+    void StartSmoothScroll(const QPointF& delta);
+    void StopSmoothScroll();
+    void UpdateSmoothScroll();
+
+    // Selection / erase rendering helpers.
+    [[nodiscard]] std::optional<SelectionBounds> SelectionBoundsForPage(std::size_t pageIndex) const;
+    [[nodiscard]] std::optional<ObjectRef> TopmostObjectAt(const QPointF& logical, bool includeStrokes) const;
+    [[nodiscard]] bool EditOverlayOwnsPoint(const QPointF& logical) const;
+    void PaintSelectionOverlay(QPainter& painter);
+    void PaintPendingErase(QPainter& painter, const CanvasPageView& view);
 
     void BeginZoomSession(const QPointF& anchor);
     void EndZoomSession();
@@ -187,12 +273,28 @@ private:
     QPointF zoomAnchorCursor_ {};
     QTimer* zoomSettleTimer_ = nullptr;
 
-    bool panning_ = false;
-    QPointF panLastPosition_ {};
+    // Constructed in the constructor body: the router's constructor queries the
+    // host, so it must not run while the widget is still under construction.
+    std::unique_ptr<InteractionRouter> router_;
+    bool pointerCaptured_ = false;
+    QPointF lastPointerPosition_ {};
 
-    bool drawing_ = false;
-    std::optional<std::size_t> strokePageIndex_ {};
-    QPointF strokeLastPosition_ {};
+    // Reference smooth scroll (90 ms, cubic interpolation).
+    QTimer* scrollTimer_ = nullptr;
+    QElapsedTimer scrollClock_;
+    QPointF scrollStart_ {};
+    QPointF scrollTarget_ {};
+    bool scrolling_ = false;
+    qreal precisionStartZoom_ = 1.0;
+
+    // Transient selection/erase overlay state (never part of cache signatures).
+    bool selectionOverlayActive_ = false;
+    QPointF selectionAnchor_ {};
+    QPointF selectionCurrent_ {};
+    bool selectionOverlayLasso_ = false;
+    std::vector<QPointF> lassoPoints_;
+    std::vector<ObjectRef> pendingErase_;
+
 
     QTextEdit* textEditor_ = nullptr;
     QPlainTextEdit* latexEditor_ = nullptr;

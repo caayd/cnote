@@ -240,7 +240,7 @@ void QtMainWindow::ZoomOut() {
 }
 
 void QtMainWindow::AddTextObject() {
-    const std::optional<ui::CanvasPageView> hit = canvas_->HitTestPage(canvas_->rect().center());
+    const std::optional<ui::CanvasPageView> hit = canvas_->HitTestPageView(canvas_->rect().center());
     const std::size_t pageIndex = hit.has_value() ? hit->pageIndex : controller_.CurrentPageIndex();
     const Vec2 point = hit.has_value()
         ? canvas_->ScreenToPage(*hit, canvas_->rect().center(), false)
@@ -251,7 +251,7 @@ void QtMainWindow::AddTextObject() {
 }
 
 void QtMainWindow::AddLatexObject() {
-    const std::optional<ui::CanvasPageView> hit = canvas_->HitTestPage(canvas_->rect().center());
+    const std::optional<ui::CanvasPageView> hit = canvas_->HitTestPageView(canvas_->rect().center());
     const std::size_t pageIndex = hit.has_value() ? hit->pageIndex : controller_.CurrentPageIndex();
     const Vec2 point = hit.has_value()
         ? canvas_->ScreenToPage(*hit, canvas_->rect().center(), false)

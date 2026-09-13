@@ -13,6 +13,7 @@
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPen>
 #include <QPlainTextEdit>
 #include <QScrollBar>
@@ -25,6 +26,7 @@
 #include <QWheelEvent>
 
 #include "latex/LatexEngine.h"
+#include "ui/SelectionMath.h"
 #include "text/TextEditingQt.h"
 #include "text/TextLayoutQt.h"
 
@@ -72,6 +74,8 @@ CanvasWidget::CanvasWidget(CanvasController& controller, QWidget* parent)
     // The whole widget is repainted by us; Qt need not clear it first.
     setAttribute(Qt::WA_OpaquePaintEvent, true);
     setFocusPolicy(Qt::StrongFocus);
+
+    router_ = std::make_unique<InteractionRouter>(*this, InteractionTuning {});
 
     zoomSettleTimer_ = new QTimer(this);
     zoomSettleTimer_->setSingleShot(true);
@@ -137,7 +141,7 @@ void CanvasWidget::ResetView() {
 void CanvasWidget::BeginZoomSession(const QPointF& anchor) {
     zoomSessionActive_ = true;
     zoomAnchorValid_ = false;
-    if (const std::optional<CanvasPageView> hit = HitTestPage(anchor); hit.has_value()) {
+    if (const std::optional<CanvasPageView> hit = HitTestPageView(anchor); hit.has_value()) {
         zoomAnchorValid_ = true;
         zoomAnchorPageIndex_ = hit->pageIndex;
         zoomAnchorPage_ = ScreenToPage(*hit, anchor, false);
@@ -285,7 +289,7 @@ CanvasPageView CanvasWidget::CalculatePageView(std::size_t pageIndex) const {
     return views[pageIndex];
 }
 
-std::optional<CanvasPageView> CanvasWidget::HitTestPage(const QPointF& logical) const {
+std::optional<CanvasPageView> CanvasWidget::HitTestPageView(const QPointF& logical) const {
     for (const CanvasPageView& view : CalculatePageViews()) {
         if (view.valid && view.rect.contains(logical)) {
             return view;
@@ -451,8 +455,8 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
         }
 
         const Page& page = document.PageAt(view.pageIndex);
-        const bool liveStrokeOnPage = drawing_ && strokePageIndex_.has_value()
-            && *strokePageIndex_ == view.pageIndex;
+        const bool liveStrokeOnPage = controller_.PendingStroke() != nullptr
+            && controller_.PendingStrokePage() == view.pageIndex;
         const render::PageSurfaceCache* surface = nullptr;
 
         if (zoomSessionActive_ && !liveStrokeOnPage) {
@@ -497,6 +501,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                 }
             }
         }
+        PaintPendingErase(painter, view);
         painter.restore();
 
         // Page border, drawn on top of the page edge like the reference.
@@ -512,6 +517,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 
     lastPaintPageCount_ = paintedPages;
     PruneSurfaces(visiblePages);
+    PaintSelectionOverlay(painter);
     PositionOverlays();
 }
 
@@ -526,102 +532,30 @@ void CanvasWidget::resizeEvent(QResizeEvent* event) {
 // --- interaction -----------------------------------------------------------
 
 void CanvasWidget::BeginStrokeAt(const QPointF& logical) {
-    const std::optional<CanvasPageView> hit = HitTestPage(logical);
-    if (!hit.has_value() || hit->scale <= 0.0f) {
-        return;
-    }
-
-    strokePageIndex_ = hit->pageIndex;
-    drawing_ = true;
-    strokeLastPosition_ = logical;
-    controller_.BeginStroke(hit->pageIndex, ScreenToPage(*hit, logical, true), hit->scale);
-
-    const qreal margin = kStrokeDirtyMarginPixels;
-    update(QRectF(logical.x() - margin, logical.y() - margin, margin * 2.0, margin * 2.0).toAlignedRect());
+    PointerSample sample;
+    sample.position = logical;
+    sample.button = Qt::LeftButton;
+    sample.buttons = Qt::LeftButton;
+    sample.timestamp = 0;
+    HandlePointerPress(sample);
 }
 
 bool CanvasWidget::ExtendStrokeTo(const QPointF& logical) {
-    if (!drawing_ || !strokePageIndex_.has_value()) {
-        return false;
-    }
-
-    const Document& document = controller_.DocumentRef();
-    if (*strokePageIndex_ >= document.PageCount()) {
-        CancelStroke();
-        return false;
-    }
-
-    const CanvasPageView view = CalculatePageView(*strokePageIndex_);
-    if (!view.valid || view.scale <= 0.0f) {
-        return false;
-    }
-
-    // Reference App::ApplyStrokePoint: crossing into another page ends the
-    // current stroke and starts a new segment on the page under the pointer.
-    if (const std::optional<CanvasPageView> hit = HitTestPage(logical);
-        hit.has_value() && hit->pageIndex != *strokePageIndex_) {
-        const QRectF previousRect = view.rect;
-        EndStroke();
-        controller_.BeginStroke(hit->pageIndex, ScreenToPage(*hit, logical, true), hit->scale);
-        strokePageIndex_ = hit->pageIndex;
-        drawing_ = true;
-        strokeLastPosition_ = logical;
-        update(previousRect.toAlignedRect().united(hit->rect.toAlignedRect()));
-        return true;
-    }
-
-    controller_.ExtendStroke(ScreenToPage(view, logical, true), view.scale);
-
-    // Dirty-region repaint for the new segment only; the page raster cache is
-    // untouched, so the rest of the canvas is not redrawn from the document.
-    const qreal margin = kStrokeDirtyMarginPixels;
-    const QRectF segment = QRectF(strokeLastPosition_, logical).normalized()
-        .adjusted(-margin, -margin, margin, margin);
-    strokeLastPosition_ = logical;
-    update(segment.toAlignedRect());
+    PointerSample sample;
+    sample.position = logical;
+    sample.buttons = Qt::LeftButton;
+    HandlePointerMove(sample);
     return true;
 }
 
 void CanvasWidget::EndStroke() {
-    if (!drawing_) {
-        return;
-    }
-
-    drawing_ = false;
-    const std::optional<std::size_t> pageIndex = strokePageIndex_;
-    strokePageIndex_.reset();
-    controller_.EndStroke();
-
-    if (pageIndex.has_value()) {
-        // The committed stroke lives in the page raster cache now; drop that
-        // page's surfaces so the next paint re-renders it exactly once.
-        const auto page = surfaces_.find(*pageIndex);
-        if (page != surfaces_.end()) {
-            surfaces_.erase(page);
-        }
-        const CanvasPageView view = CalculatePageView(*pageIndex);
-        update(view.valid ? view.rect.toAlignedRect() : rect());
-    } else {
-        update();
-    }
+    PointerSample sample;
+    sample.position = lastPointerPosition_;
+    HandlePointerRelease(sample);
 }
 
 void CanvasWidget::CancelStroke() {
-    if (!drawing_) {
-        return;
-    }
-
-    drawing_ = false;
-    const std::optional<std::size_t> pageIndex = strokePageIndex_;
-    strokePageIndex_.reset();
-    controller_.CancelStroke();
-
-    if (pageIndex.has_value()) {
-        if (const auto page = surfaces_.find(*pageIndex); page != surfaces_.end()) {
-            surfaces_.erase(page);
-        }
-    }
-    update();
+    HandlePointerCancel(CancelReason::Escape);
 }
 
 // --- editing overlay -------------------------------------------------------
@@ -631,7 +565,7 @@ bool CanvasWidget::EditOverlayActive() const {
 }
 
 bool CanvasWidget::BeginEditAt(const QPointF& logical) {
-    const std::optional<CanvasPageView> hit = HitTestPage(logical);
+    const std::optional<CanvasPageView> hit = HitTestPageView(logical);
     if (!hit.has_value()) {
         return false;
     }
@@ -667,6 +601,16 @@ bool CanvasWidget::BeginEditAt(const QPointF& logical) {
                 return true;
             }
         }
+    }
+    return false;
+}
+
+bool CanvasWidget::EditOverlayOwnsPoint(const QPointF& logical) const {
+    if (textEditor_ != nullptr && textEditor_->isVisible() && textEditor_->geometry().contains(logical.toPoint())) {
+        return true;
+    }
+    if (latexEditor_ != nullptr && latexEditor_->isVisible() && latexEditor_->geometry().contains(logical.toPoint())) {
+        return true;
     }
     return false;
 }
@@ -1099,99 +1043,843 @@ bool CanvasWidget::eventFilter(QObject* watched, QEvent* event) {
     return QWidget::eventFilter(watched, event);
 }
 
+PointerSample CanvasWidget::SampleFromEvent(const QMouseEvent& event) {
+    PointerSample sample;
+    sample.position = event.position();
+    sample.button = event.button();
+    sample.buttons = event.buttons();
+    sample.modifiers = event.modifiers();
+    sample.timestamp = static_cast<quint64>(event.timestamp());
+    return sample;
+}
+
 void CanvasWidget::mousePressEvent(QMouseEvent* event) {
     setFocus(Qt::MouseFocusReason);
-
-    if (event->button() == Qt::MiddleButton) {
-        panning_ = true;
-        panLastPosition_ = event->position();
-        setCursor(Qt::ClosedHandCursor);
-        event->accept();
-        return;
-    }
-    if (event->button() == Qt::LeftButton) {
-        // Clicking another object commits the active edit first; clicking the
-        // edited object keeps it open.
-        if (EditOverlayActive()) {
-            const std::optional<CanvasPageView> hit = HitTestPage(event->position());
-            if (!hit.has_value()) {
-                CommitActiveEdit();
-                event->accept();
-                return;
-            }
-        }
-        if (BeginEditAt(event->position())) {
-            event->accept();
-            return;
-        }
-        BeginStrokeAt(event->position());
-        event->accept();
-        return;
-    }
-    QWidget::mousePressEvent(event);
+    // No chrome bands live inside this widget (the toolbar/sidebar are separate
+    // widgets), so the event goes straight to the router (MessageLoop.cpp:189-211
+    // offers bands first in the legacy window; here the widget boundary does).
+    lastPointerPosition_ = event->position();
+    HandlePointerPress(SampleFromEvent(*event));
+    event->accept();
 }
 
 void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
-    if (panning_) {
-        const QPointF delta = event->position() - panLastPosition_;
-        panLastPosition_ = event->position();
-        PanBy(delta);
-        event->accept();
-        return;
-    }
-    if (drawing_ && (event->buttons() & Qt::LeftButton) != 0) {
-        ExtendStrokeTo(event->position());
-        event->accept();
-        return;
-    }
-    QWidget::mouseMoveEvent(event);
+    lastPointerPosition_ = event->position();
+    HandlePointerMove(SampleFromEvent(*event));
+    event->accept();
 }
 
 void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
-    if (event->button() == Qt::MiddleButton && panning_) {
-        panning_ = false;
-        unsetCursor();
+    lastPointerPosition_ = event->position();
+    HandlePointerRelease(SampleFromEvent(*event));
+    event->accept();
+}
+
+void CanvasWidget::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Escape) {
+        CancelActiveEdit();
+        HandlePointerCancel(CancelReason::Escape);
         event->accept();
         return;
     }
-    if (event->button() == Qt::LeftButton && drawing_) {
-        EndStroke();
-        event->accept();
-        return;
+    InteractionModifiers modifiers = router_->Modifiers();
+    if (event->key() == Qt::Key_A) {
+        modifiers.straightLine = true;
+    } else if (event->key() == Qt::Key_Space) {
+        modifiers.dotted = true;
     }
-    QWidget::mouseReleaseEvent(event);
+    modifiers.snapLine = event->modifiers().testFlag(Qt::ShiftModifier);
+    modifiers.oval = event->modifiers().testFlag(Qt::ControlModifier);
+    SetInteractionModifiers(modifiers);
+    QWidget::keyPressEvent(event);
+}
+
+void CanvasWidget::keyReleaseEvent(QKeyEvent* event) {
+    InteractionModifiers modifiers = router_->Modifiers();
+    if (event->key() == Qt::Key_A) {
+        modifiers.straightLine = false;
+    } else if (event->key() == Qt::Key_Space) {
+        modifiers.dotted = false;
+    }
+    modifiers.snapLine = event->modifiers().testFlag(Qt::ShiftModifier);
+    modifiers.oval = event->modifiers().testFlag(Qt::ControlModifier);
+    SetInteractionModifiers(modifiers);
+    QWidget::keyReleaseEvent(event);
+}
+
+void CanvasWidget::focusOutEvent(QFocusEvent* event) {
+    // Legacy focus-loss/lost-grab finishing (Session.cpp:95): commit the partial
+    // interaction once and release capture. Idempotent in the router.
+    HandlePointerCancel(CancelReason::FocusLost);
+    QWidget::focusOutEvent(event);
 }
 
 void CanvasWidget::wheelEvent(QWheelEvent* event) {
-    if (event->modifiers().testFlag(Qt::ControlModifier)) {
-        // Cursor-anchored zoom: one 1.1/0.9 step per wheel notch (reference
-        // App::ZoomAt), anchored at the pointer.
-        const int delta = event->angleDelta().y() != 0 ? event->angleDelta().y() : event->angleDelta().x();
-        if (delta != 0) {
-            ZoomBySteps(delta > 0 ? 1 : -1, event->position());
-        }
+    WheelSample sample;
+    sample.position = event->position();
+    sample.angleDeltaY = event->angleDelta().y();
+    sample.angleDeltaX = event->angleDelta().x();
+    sample.pixelDelta = event->pixelDelta();
+    sample.modifiers = event->modifiers();
+    if (router_->HandleWheel(sample)) {
         event->accept();
         return;
     }
-
-    // Ordinary wheels use angleDelta (3 lines * 18 logical px per notch, the
-    // reference WheelScrollPixels); precision devices deliver pixelDelta, which
-    // is already in pixels and is applied without additional smoothing.
-    QPointF pixels;
-    if (!event->pixelDelta().isNull()) {
-        pixels = QPointF(event->pixelDelta());
-    } else {
-        constexpr qreal kPixelsPerNotch = static_cast<qreal>(kWheelScrollLines * kWheelScrollUnitPixels);
-        const QPoint angle = event->angleDelta();
-        pixels = QPointF(
-            (static_cast<qreal>(angle.x()) / 120.0) * kPixelsPerNotch,
-            (static_cast<qreal>(angle.y()) / 120.0) * kPixelsPerNotch);
-    }
-    if (!pixels.isNull()) {
-        // Reference: vertical wheel pans along +y, horizontal wheel pans -x.
-        PanBy(QPointF(-pixels.x(), pixels.y()));
-    }
     event->accept();
+}
+
+// --- pointer entry points and InteractionHost -------------------------------
+
+
+void CanvasWidget::HandlePointerPress(const PointerSample& sample) {
+    // Pressing outside the editor overlay commits the active edit (the overlay
+    // owns clicks inside itself because it is a child widget).
+    if (EditOverlayActive() && !EditOverlayOwnsPoint(sample.position)) {
+        CommitActiveEdit();
+    }
+    router_->HandlePointerPress(sample);
+    update();
+}
+
+void CanvasWidget::HandlePointerMove(const PointerSample& sample) {
+    router_->HandlePointerMove(sample);
+}
+
+void CanvasWidget::HandlePointerRelease(const PointerSample& sample) {
+    router_->HandlePointerRelease(sample);
+    update();
+}
+
+void CanvasWidget::HandlePointerCancel(CancelReason reason) {
+    // Idempotent: the router commits the partial *pointer* interaction exactly
+    // once and releases capture (legacy FinishDocumentInteraction).  Active
+    // text/LaTeX edits are not cancelled here: they own their own focus, and a
+    // canvas focus change must not discard typed content (Escape cancels).
+    static_cast<void>(reason);
+    router_->FinishInteraction();
+    update();
+}
+
+std::optional<PageHit> CanvasWidget::HitTestPage(const QPointF& logical) const {
+    const std::optional<CanvasPageView> view = HitTestPageView(logical);
+    if (!view.has_value()) {
+        return std::nullopt;
+    }
+    return PageHit { view->pageIndex, view->scale };
+}
+
+Vec2 CanvasWidget::ScreenToPage(const QPointF& logical, bool clampToPage) const {
+    const std::optional<CanvasPageView> view = HitTestPageView(logical);
+    if (!view.has_value()) {
+        return {};
+    }
+    return ScreenToPage(*view, logical, clampToPage);
+}
+
+bool CanvasWidget::IsPointInCanvas(const QPointF& logical) const {
+    return VisibleCanvasRect().contains(logical);
+}
+
+bool CanvasWidget::HasSelection() const {
+    return controller_.HasSelection();
+}
+
+bool CanvasWidget::CursorInteractsWithSelection(const QPointF& logical) const {
+    const std::optional<CanvasPageView> view = HitTestPageView(logical);
+    if (!view.has_value()) {
+        return false;
+    }
+    const std::optional<SelectionBounds> bounds = SelectionBoundsForPage(view->pageIndex);
+    if (!bounds.has_value()) {
+        return false;
+    }
+
+    // Legacy App::CursorHitsSelectionMoveGrip (Selection.cpp:711): the grip is
+    // the frame's centre square; selected objects also count (Selection.cpp:823).
+    const Vec2 pagePoint = ScreenToPage(*view, logical, false);
+    const float gripRadius = SelectionHandleHitRadiusPixels(96) / std::max(0.1f, view->scale);
+    const Vec2 center {
+        (bounds->left + bounds->right) * 0.5f,
+        (bounds->top + bounds->bottom) * 0.5f,
+    };
+    if (pagePoint.x >= center.x - gripRadius && pagePoint.x <= center.x + gripRadius
+        && pagePoint.y >= center.y - gripRadius && pagePoint.y <= center.y + gripRadius) {
+        return true;
+    }
+    if (pagePoint.x >= bounds->left - gripRadius && pagePoint.x <= bounds->right + gripRadius
+        && pagePoint.y >= bounds->top - gripRadius && pagePoint.y <= bounds->bottom + gripRadius) {
+        return true;
+    }
+    return false;
+}
+
+std::optional<ObjectRef> CanvasWidget::TopmostObjectAt(const QPointF& logical, bool includeStrokes) const {
+    const std::optional<CanvasPageView> view = HitTestPageView(logical);
+    if (!view.has_value()) {
+        return std::nullopt;
+    }
+    const Document& document = controller_.DocumentRef();
+    const Page& page = document.PageAt(view->pageIndex);
+    const Vec2 pagePoint = ScreenToPage(*view, logical, false);
+
+    // Topmost first: LaTeX, text, images, strokes (reference layer order).
+    for (std::size_t index = page.latexes.size(); index-- > 0U;) {
+        if (LatexHitsPoint(page.latexes[index], page.width, pagePoint)) {
+            return ObjectRef { view->pageIndex, ObjectKind::Latex, index };
+        }
+    }
+    for (std::size_t index = page.texts.size(); index-- > 0U;) {
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
+        if (pagePoint.x >= bounds.left && pagePoint.x <= bounds.right
+            && pagePoint.y >= bounds.top && pagePoint.y <= bounds.bottom) {
+            return ObjectRef { view->pageIndex, ObjectKind::Text, index };
+        }
+    }
+    for (std::size_t index = page.images.size(); index-- > 0U;) {
+        if (ImageHitsPoint(page.images[index], pagePoint)) {
+            return ObjectRef { view->pageIndex, ObjectKind::Image, index };
+        }
+    }
+    if (includeStrokes) {
+        const float radius = 6.0f / std::max(0.1f, view->scale);
+        for (std::size_t index = page.strokes.size(); index-- > 0U;) {
+            if (StrokeHitsPoint(page.strokes[index], pagePoint, radius, controller_.InputSettings().strokeSmoothing)) {
+                return ObjectRef { view->pageIndex, ObjectKind::Stroke, index };
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::pair<std::size_t, std::size_t>> CanvasWidget::HitTestText(const QPointF& logical) const {
+    const std::optional<ObjectRef> object = TopmostObjectAt(logical, false);
+    if (!object.has_value() || object->kind != ObjectKind::Text) {
+        return std::nullopt;
+    }
+    return std::make_pair(object->pageIndex, object->objectIndex);
+}
+
+std::optional<std::pair<std::size_t, std::size_t>> CanvasWidget::HitTestLatex(const QPointF& logical) const {
+    const std::optional<ObjectRef> object = TopmostObjectAt(logical, false);
+    if (!object.has_value() || object->kind != ObjectKind::Latex) {
+        return std::nullopt;
+    }
+    return std::make_pair(object->pageIndex, object->objectIndex);
+}
+
+std::optional<std::size_t> CanvasWidget::PageWithPdfTextAt(const QPointF& logical) const {
+    // PDF text selection is not ported in this slice (plan step 5.2); returning
+    // nullopt keeps ordinary tool routing without a fake hit.
+    static_cast<void>(logical);
+    return std::nullopt;
+}
+
+std::optional<SelectionHit> CanvasWidget::HitTestSelectionObject(const QPointF& logical, std::size_t pageIndex) const {
+    const std::optional<CanvasPageView> view = HitTestPageView(logical);
+    if (!view.has_value() || view->pageIndex != pageIndex) {
+        return std::nullopt;
+    }
+    const std::optional<ObjectRef> object = TopmostObjectAt(logical, true);
+    if (!object.has_value()) {
+        return std::nullopt;
+    }
+
+    const PageSelection& selection = controller_.SelectionFor(pageIndex);
+    bool selected = false;
+    switch (object->kind) {
+    case ObjectKind::Stroke:
+        selected = std::find(selection.strokes.begin(), selection.strokes.end(), object->objectIndex) != selection.strokes.end();
+        break;
+    case ObjectKind::Image:
+        selected = std::find(selection.images.begin(), selection.images.end(), object->objectIndex) != selection.images.end();
+        break;
+    case ObjectKind::Text:
+        selected = std::find(selection.texts.begin(), selection.texts.end(), object->objectIndex) != selection.texts.end();
+        break;
+    case ObjectKind::Latex:
+        selected = std::find(selection.latexes.begin(), selection.latexes.end(), object->objectIndex) != selection.latexes.end();
+        break;
+    }
+
+    SelectionHit hit;
+    hit.kind = object->kind;
+    hit.objectIndex = object->objectIndex;
+    hit.selected = selected;
+    hit.moveGrip = CursorInteractsWithSelection(logical);
+    return hit;
+}
+
+std::optional<TransformRequest> CanvasWidget::HitTestSelectionHandle(const QPointF& logical) const {
+    // Transform handles (resize/rotate) are not ported in this slice; returning
+    // nullopt keeps the router out of a transform gesture it cannot apply yet
+    // instead of starting a no-op.
+    static_cast<void>(logical);
+    return std::nullopt;
+}
+
+std::vector<ObjectRef> CanvasWidget::EraseTargetsAt(const QPointF& logical) const {
+    std::vector<ObjectRef> targets;
+    const std::optional<CanvasPageView> view = HitTestPageView(logical);
+    if (!view.has_value()) {
+        return targets;
+    }
+    const Document& document = controller_.DocumentRef();
+    const Page& page = document.PageAt(view->pageIndex);
+    const Vec2 pagePoint = ScreenToPage(*view, logical, false);
+
+    // Reference App::EraseAt: the eraser radius is max(3.5, eraseBrushSize * 4)
+    // logical pixels (App.cpp:168/7420) scaled into page units.
+    constexpr float kEraserMinRadiusPixels = 3.5f;
+    constexpr float kEraseBrushSizePixels = 3.0f;
+    const float radiusPage = std::max(kEraserMinRadiusPixels, kEraseBrushSizePixels * 4.0f) / std::max(0.1f, view->scale);
+    const Vec2 a { pagePoint.x - radiusPage, pagePoint.y - radiusPage };
+    const Vec2 b { pagePoint.x + radiusPage, pagePoint.y + radiusPage };
+
+    for (std::size_t index = 0; index < page.images.size(); ++index) {
+        if (ImageIntersectsRectSelection(page.images[index], a, b)) {
+            targets.push_back(ObjectRef { view->pageIndex, ObjectKind::Image, index });
+        }
+    }
+    for (std::size_t index = 0; index < page.texts.size(); ++index) {
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
+        if (!(bounds.right < a.x || bounds.left > b.x || bounds.bottom < a.y || bounds.top > b.y)) {
+            targets.push_back(ObjectRef { view->pageIndex, ObjectKind::Text, index });
+        }
+    }
+    for (std::size_t index = 0; index < page.latexes.size(); ++index) {
+        if (LatexIntersectsRectSelection(page.latexes[index], page.width, a, b)) {
+            targets.push_back(ObjectRef { view->pageIndex, ObjectKind::Latex, index });
+        }
+    }
+    for (std::size_t index = 0; index < page.strokes.size(); ++index) {
+        if (StrokeHitsPoint(page.strokes[index], pagePoint, radiusPage, controller_.InputSettings().strokeSmoothing)) {
+            targets.push_back(ObjectRef { view->pageIndex, ObjectKind::Stroke, index });
+        }
+    }
+    return targets;
+}
+
+void CanvasWidget::ZoomByWheelSteps(int steps, const QPointF& anchor) {
+    ZoomBySteps(steps, anchor);
+}
+
+void CanvasWidget::ScrollBy(const QPointF& logicalDelta) {
+    // Reference 90 ms smooth scroll (plan step 5.3).
+    StartSmoothScroll(logicalDelta);
+}
+
+void CanvasWidget::SetViewPage(std::size_t pageIndex) {
+    controller_.SetCurrentPageIndex(pageIndex);
+}
+
+void CanvasWidget::SetCursor(CursorKind cursor) {
+    switch (cursor) {
+    case CursorKind::Arrow: setCursor(Qt::ArrowCursor); break;
+    case CursorKind::Cross: setCursor(Qt::CrossCursor); break;
+    case CursorKind::OpenHand: setCursor(Qt::OpenHandCursor); break;
+    case CursorKind::ClosedHand: setCursor(Qt::ClosedHandCursor); break;
+    case CursorKind::Text: setCursor(Qt::IBeamCursor); break;
+    case CursorKind::Move: setCursor(Qt::SizeAllCursor); break;
+    case CursorKind::Eraser:
+        // No system eraser cursor: a small cross keeps the erase tool legible.
+        setCursor(Qt::CrossCursor);
+        break;
+    }
+}
+
+void CanvasWidget::InvalidateCanvas() {
+    surfaces_.clear();
+    update();
+}
+
+void CanvasWidget::SetPointerCapture(bool captured) {
+    if (captured == pointerCaptured_) {
+        return;
+    }
+    pointerCaptured_ = captured;
+    if (!isVisible()) {
+        return;
+    }
+    if (captured) {
+        grabMouse();
+    } else {
+        releaseMouse();
+    }
+}
+
+void CanvasWidget::BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted) {
+    const CanvasPageView view = CalculatePageView(pageIndex);
+    controller_.BeginStroke(pageIndex, pagePoint, view.scale);
+    controller_.SetPendingStrokeDotted(dotted);
+}
+
+void CanvasWidget::SetStrokeDotted(bool dotted) {
+    controller_.SetPendingStrokeDotted(dotted);
+    update();
+}
+
+void CanvasWidget::AppendStrokePoint(Vec2 pagePoint, bool dotted) {
+    const std::size_t pageIndex = controller_.PendingStrokePage();
+    const CanvasPageView view = CalculatePageView(pageIndex);
+    controller_.ExtendStroke(pagePoint, view.scale);
+    controller_.SetPendingStrokeDotted(dotted);
+    update();
+}
+
+void CanvasWidget::ReplaceStrokePoints(const std::vector<Vec2>& points, bool dotted) {
+    const std::size_t pageIndex = controller_.PendingStrokePage();
+    controller_.ReplacePendingStrokePoints(points, dotted);
+    const CanvasPageView view = CalculatePageView(pageIndex);
+    if (view.valid) {
+        update(view.rect.toAlignedRect());
+    }
+}
+
+void CanvasWidget::CommitStroke() {
+    const std::size_t pageIndex = controller_.PendingStrokePage();
+    controller_.EndStroke();
+    const auto page = surfaces_.find(pageIndex);
+    if (page != surfaces_.end()) {
+        surfaces_.erase(page);
+    }
+    const CanvasPageView view = CalculatePageView(pageIndex);
+    update(view.valid ? view.rect.toAlignedRect() : rect());
+}
+
+void CanvasWidget::DiscardStroke() {
+    const std::size_t pageIndex = controller_.PendingStrokePage();
+    controller_.CancelStroke();
+    const auto page = surfaces_.find(pageIndex);
+    if (page != surfaces_.end()) {
+        surfaces_.erase(page);
+    }
+    update();
+}
+
+void CanvasWidget::ClearSelection() {
+    controller_.ClearSelection();
+    update();
+}
+
+void CanvasWidget::UpdateSelectionOverlay(
+    const QPointF& anchor, const QPointF& current, bool lasso, const std::vector<QPointF>& lassoPoints) {
+    selectionOverlayActive_ = true;
+    selectionAnchor_ = anchor;
+    selectionCurrent_ = current;
+    selectionOverlayLasso_ = lasso;
+    lassoPoints_ = lassoPoints;
+    update();
+}
+
+void CanvasWidget::CommitSelection(
+    const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click) {
+    selectionOverlayActive_ = false;
+
+    const std::optional<CanvasPageView> view = HitTestPageView(anchor);
+    if (!view.has_value()) {
+        controller_.ClearSelection();
+        update();
+        return;
+    }
+
+    const Document& document = controller_.DocumentRef();
+    const Page& page = document.PageAt(view->pageIndex);
+    const Vec2 anchorPage = ScreenToPage(*view, anchor, false);
+    const Vec2 currentPage = ScreenToPage(*view, current, false);
+
+    PageSelection selection;
+    if (click) {
+        // 18 logical px click radius (Selection.cpp:1269).
+        constexpr float kSelectionClickRadiusPixels = 18.0f;
+        const float radiusPage = kSelectionClickRadiusPixels / std::max(0.1f, view->scale);
+        const Vec2 a { anchorPage.x - radiusPage, anchorPage.y - radiusPage };
+        const Vec2 b { anchorPage.x + radiusPage, anchorPage.y + radiusPage };
+        for (std::size_t index = 0; index < page.strokes.size(); ++index) {
+            if (StrokeIntersectsRectSelection(page.strokes[index], a, b, controller_.InputSettings().strokeSmoothing)) {
+                selection.strokes.push_back(index);
+            }
+        }
+        for (std::size_t index = 0; index < page.images.size(); ++index) {
+            if (ImageIntersectsRectSelection(page.images[index], a, b)) {
+                selection.images.push_back(index);
+            }
+        }
+        for (std::size_t index = 0; index < page.texts.size(); ++index) {
+            const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
+            if (!(bounds.right < a.x || bounds.left > b.x || bounds.bottom < a.y || bounds.top > b.y)) {
+                selection.texts.push_back(index);
+            }
+        }
+        for (std::size_t index = 0; index < page.latexes.size(); ++index) {
+            if (LatexIntersectsRectSelection(page.latexes[index], page.width, a, b)) {
+                selection.latexes.push_back(index);
+            }
+        }
+    } else if (lasso && !boxOverride) {
+        std::vector<Vec2> polygon;
+        polygon.reserve(lassoPoints_.size());
+        for (const QPointF& point : lassoPoints_) {
+            polygon.push_back(ScreenToPage(*view, point, false));
+        }
+        if (polygon.size() >= 3U) {
+            for (std::size_t index = 0; index < page.strokes.size(); ++index) {
+                if (StrokeIntersectsPolygonSelection(page.strokes[index], polygon, controller_.InputSettings().strokeSmoothing)) {
+                    selection.strokes.push_back(index);
+                }
+            }
+            for (std::size_t index = 0; index < page.images.size(); ++index) {
+                if (ImageIntersectsPolygonSelection(page.images[index], polygon)) {
+                    selection.images.push_back(index);
+                }
+            }
+            for (std::size_t index = 0; index < page.texts.size(); ++index) {
+                const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
+                const std::array<Vec2, 4> corners {{
+                    { bounds.left, bounds.top }, { bounds.right, bounds.top },
+                    { bounds.right, bounds.bottom }, { bounds.left, bounds.bottom },
+                }};
+                bool hit = false;
+                for (const Vec2& corner : corners) {
+                    hit = hit || PointInPolygon(corner, polygon);
+                }
+                if (hit) {
+                    selection.texts.push_back(index);
+                }
+            }
+            for (std::size_t index = 0; index < page.latexes.size(); ++index) {
+                if (LatexIntersectsPolygonSelection(page.latexes[index], page.width, polygon)) {
+                    selection.latexes.push_back(index);
+                }
+            }
+        }
+    } else {
+        const float left = std::min(anchorPage.x, currentPage.x);
+        const float top = std::min(anchorPage.y, currentPage.y);
+        const float right = std::max(anchorPage.x, currentPage.x);
+        const float bottom = std::max(anchorPage.y, currentPage.y);
+        const Vec2 a { left, top };
+        const Vec2 b { right, bottom };
+        for (std::size_t index = 0; index < page.strokes.size(); ++index) {
+            if (StrokeIntersectsRectSelection(page.strokes[index], a, b, controller_.InputSettings().strokeSmoothing)) {
+                selection.strokes.push_back(index);
+            }
+        }
+        for (std::size_t index = 0; index < page.images.size(); ++index) {
+            if (ImageIntersectsRectSelection(page.images[index], a, b)) {
+                selection.images.push_back(index);
+            }
+        }
+        for (std::size_t index = 0; index < page.texts.size(); ++index) {
+            const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
+            if (!(bounds.right < left || bounds.left > right || bounds.bottom < top || bounds.top > bottom)) {
+                selection.texts.push_back(index);
+            }
+        }
+        for (std::size_t index = 0; index < page.latexes.size(); ++index) {
+            if (LatexIntersectsRectSelection(page.latexes[index], page.width, a, b)) {
+                selection.latexes.push_back(index);
+            }
+        }
+    }
+
+    controller_.SelectObjects(view->pageIndex, std::move(selection));
+    update();
+}
+
+void CanvasWidget::AddObjectToSelection(ObjectRef object) {
+    controller_.AddObjectToSelection(object);
+    update();
+}
+
+void CanvasWidget::BeginMoveSelection(std::size_t pageIndex) {
+    controller_.BeginPageGesture(pageIndex);
+}
+
+void CanvasWidget::UpdateMoveSelection(const QPointF& logicalDelta) {
+    const std::optional<std::size_t> pageIndex = controller_.GesturePageIndex();
+    if (!pageIndex.has_value()) {
+        return;
+    }
+    const CanvasPageView view = CalculatePageView(*pageIndex);
+    if (!view.valid || view.scale <= 0.0f) {
+        return;
+    }
+    controller_.MoveSelectionBy(
+        *pageIndex,
+        Vec2 { static_cast<float>(logicalDelta.x()) / view.scale, static_cast<float>(logicalDelta.y()) / view.scale });
+    if (const auto page = surfaces_.find(*pageIndex); page != surfaces_.end()) {
+        surfaces_.erase(page);
+    }
+    update();
+}
+
+void CanvasWidget::CommitMoveSelection() {
+    controller_.CommitPageGesture();
+    update();
+}
+
+void CanvasWidget::BeginTransform(const TransformRequest& request) {
+    // Transform handles are not hit-tested in this slice (see
+    // HitTestSelectionHandle), so this path is unreachable; keep the contract
+    // explicit instead of mutating geometry we cannot yet preview.
+    static_cast<void>(request);
+}
+
+void CanvasWidget::UpdateTransform(const QPointF& logical) {
+    static_cast<void>(logical);
+}
+
+void CanvasWidget::CommitTransform() {}
+
+void CanvasWidget::UpdatePendingErase(const std::vector<ObjectRef>& pending) {
+    pendingErase_ = pending;
+    update();
+}
+
+void CanvasWidget::CommitErase(const std::vector<ObjectRef>& pending) {
+    std::map<std::size_t, std::vector<ObjectRef>> perPage;
+    for (const ObjectRef& object : pending) {
+        perPage[object.pageIndex].push_back(object);
+    }
+    for (const auto& entry : perPage) {
+        controller_.CommitErase(entry.first, entry.second);
+        if (const auto page = surfaces_.find(entry.first); page != surfaces_.end()) {
+            surfaces_.erase(page);
+        }
+    }
+    pendingErase_.clear();
+    update();
+}
+
+void CanvasWidget::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) {
+    if (controller_.BeginTextEdit(pageIndex, textIndex)) {
+        SyncEditOverlay();
+    }
+}
+
+void CanvasWidget::CreateTextAt(std::size_t pageIndex, Vec2 pagePoint) {
+    controller_.AddTextObject(pageIndex, pagePoint, 24.0f);
+    SyncEditOverlay();
+}
+
+void CanvasWidget::BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex) {
+    if (controller_.BeginLatexEdit(pageIndex, latexIndex)) {
+        SyncEditOverlay();
+    }
+}
+
+void CanvasWidget::CreateLatexAt(std::size_t pageIndex, Vec2 pagePoint) {
+    controller_.AddLatexObject(pageIndex, pagePoint, 28.0f);
+    SyncEditOverlay();
+}
+
+// --- ui::PrecisionInputSink -------------------------------------------------
+
+PrecisionInputRoute CanvasWidget::RoutePrecisionInput(const QPoint& globalPosition) const {
+    const QPointF logical = mapFromGlobal(globalPosition);
+    return VisibleCanvasRect().contains(logical) ? PrecisionInputRoute::Canvas : PrecisionInputRoute::PassThrough;
+}
+
+void CanvasWidget::BeginPrecisionGesture() {
+    precisionStartZoom_ = zoom_;
+}
+
+void CanvasWidget::SetPrecisionGestureCursor(bool active) {
+    SetCursor(active ? CursorKind::ClosedHand : CursorKind::Arrow);
+}
+
+void CanvasWidget::ZoomAtAnchor(qreal cumulativeScale, const QPoint& globalAnchor) {
+    const QPointF logical = mapFromGlobal(globalAnchor);
+    SetZoom(static_cast<float>(precisionStartZoom_ * cumulativeScale), logical);
+}
+
+void CanvasWidget::PanBy(qreal deltaX, qreal deltaY) {
+    PanBy(QPointF(deltaX, deltaY));
+}
+
+void CanvasWidget::EndPrecisionGesture() {
+    SetCursor(CursorKind::Arrow);
+}
+
+// --- smooth scroll, selection helpers and transient painting ----------------
+
+void CanvasWidget::StartSmoothScroll(const QPointF& delta) {
+    scrollStart_ = QPointF(panX_, panY_);
+    scrollTarget_ = scrollStart_ + delta;
+    scrollClock_.start();
+    scrolling_ = true;
+    if (scrollTimer_ == nullptr) {
+        scrollTimer_ = new QTimer(this);
+        scrollTimer_->setTimerType(Qt::PreciseTimer);
+        scrollTimer_->setInterval(8);
+        connect(scrollTimer_, &QTimer::timeout, this, [this]() { UpdateSmoothScroll(); });
+    }
+    scrollTimer_->start();
+}
+
+void CanvasWidget::StopSmoothScroll() {
+    scrolling_ = false;
+    if (scrollTimer_ != nullptr) {
+        scrollTimer_->stop();
+    }
+}
+
+void CanvasWidget::UpdateSmoothScroll() {
+    if (!scrolling_) {
+        return;
+    }
+    constexpr double kSmoothScrollDurationMs = 90.0;
+    const double progress = std::min(1.0, static_cast<double>(scrollClock_.elapsed()) / kSmoothScrollDurationMs);
+    // Reference Viewport.cpp:53 interpolation: start + (target - start) * (1 - (1-t)^3).
+    const double remaining = 1.0 - progress;
+    const double eased = 1.0 - (remaining * remaining * remaining);
+    panX_ = static_cast<float>(scrollStart_.x() + ((scrollTarget_.x() - scrollStart_.x()) * eased));
+    panY_ = static_cast<float>(scrollStart_.y() + ((scrollTarget_.y() - scrollStart_.y()) * eased));
+    ClampViewportPan();
+    NotifyViewportChanged();
+    if (progress >= 1.0) {
+        StopSmoothScroll();
+    }
+}
+
+std::optional<SelectionBounds> CanvasWidget::SelectionBoundsForPage(std::size_t pageIndex) const {
+    const Document& document = controller_.DocumentRef();
+    if (pageIndex >= document.PageCount()) {
+        return std::nullopt;
+    }
+    const Page& page = document.PageAt(pageIndex);
+    const PageSelection& selection = controller_.SelectionFor(pageIndex);
+    if (selection.Empty()) {
+        return std::nullopt;
+    }
+
+    SelectionBounds bounds;
+    const auto include = [&bounds](float left, float top, float right, float bottom) {
+        if (!bounds.valid) {
+            bounds = SelectionBounds { left, top, right, bottom, true };
+            return;
+        }
+        bounds.left = std::min(bounds.left, left);
+        bounds.top = std::min(bounds.top, top);
+        bounds.right = std::max(bounds.right, right);
+        bounds.bottom = std::max(bounds.bottom, bottom);
+    };
+
+    for (const std::size_t index : selection.strokes) {
+        if (index >= page.strokes.size()) {
+            continue;
+        }
+        float minX = 0.0f;
+        float minY = 0.0f;
+        float maxX = 0.0f;
+        float maxY = 0.0f;
+        if (StrokeBounds(page.strokes[index], &minX, &minY, &maxX, &maxY)) {
+            include(minX, minY, maxX, maxY);
+        }
+    }
+    for (const std::size_t index : selection.images) {
+        if (index >= page.images.size()) {
+            continue;
+        }
+        for (const Vec2& corner : ImageCorners(page.images[index])) {
+            include(corner.x, corner.y, corner.x, corner.y);
+        }
+    }
+    for (const std::size_t index : selection.texts) {
+        if (index >= page.texts.size()) {
+            continue;
+        }
+        const text::QtTextBounds textBounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
+        include(textBounds.left, textBounds.top, textBounds.right, textBounds.bottom);
+    }
+    for (const std::size_t index : selection.latexes) {
+        if (index >= page.latexes.size()) {
+            continue;
+        }
+        const LatexBounds latexBounds = MeasurePageLatexBounds(page.latexes[index], page.width);
+        include(latexBounds.left, latexBounds.top, latexBounds.right, latexBounds.bottom);
+    }
+    return bounds.valid ? std::optional<SelectionBounds>(bounds) : std::nullopt;
+}
+
+void CanvasWidget::PaintSelectionOverlay(QPainter& painter) {
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    // Committed selection: dashed frame plus handles (transient, never cached).
+    for (const CanvasPageView& view : CalculatePageViews()) {
+        if (!view.valid) {
+            continue;
+        }
+        const std::optional<SelectionBounds> bounds = SelectionBoundsForPage(view.pageIndex);
+        if (!bounds.has_value()) {
+            continue;
+        }
+        const QRectF frame(
+            view.rect.left() + (static_cast<qreal>(bounds->left) * view.scale),
+            view.rect.top() + (static_cast<qreal>(bounds->top) * view.scale),
+            static_cast<qreal>(bounds->right - bounds->left) * view.scale,
+            static_cast<qreal>(bounds->bottom - bounds->top) * view.scale);
+
+        QPen pen(QColor(59, 130, 246), 1.0, Qt::DashLine);
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(frame);
+
+        const qreal handleHalf = 4.0;
+        painter.setPen(QPen(QColor(59, 130, 246), 1.0));
+        painter.setBrush(QColor(255, 255, 255));
+        const std::array<QPointF, 8> handles {{
+            frame.topLeft(), frame.topRight(), frame.bottomRight(), frame.bottomLeft(),
+            QPointF(frame.center().x(), frame.top()), QPointF(frame.center().x(), frame.bottom()),
+            QPointF(frame.left(), frame.center().y()), QPointF(frame.right(), frame.center().y()),
+        }};
+        for (const QPointF& handle : handles) {
+            painter.drawRect(QRectF(handle.x() - handleHalf, handle.y() - handleHalf, handleHalf * 2.0, handleHalf * 2.0));
+        }
+        // Move grip at the frame centre (reference App::CursorHitsSelectionMoveGrip).
+        painter.setBrush(QColor(59, 130, 246));
+        painter.drawEllipse(frame.center(), 3.0, 3.0);
+    }
+
+    // Live marquee / lasso.
+    if (selectionOverlayActive_) {
+        painter.setPen(QPen(QColor(59, 130, 246), 1.0, selectionOverlayLasso_ ? Qt::SolidLine : Qt::DashLine));
+        painter.setBrush(QColor(59, 130, 246, 40));
+        if (selectionOverlayLasso_ && lassoPoints_.size() >= 2U) {
+            QPainterPath path;
+            path.moveTo(lassoPoints_.front());
+            for (std::size_t index = 1; index < lassoPoints_.size(); ++index) {
+                path.lineTo(lassoPoints_[index]);
+            }
+            path.closeSubpath();
+            painter.drawPath(path);
+        } else if (!selectionOverlayLasso_) {
+            painter.drawRect(QRectF(selectionAnchor_, selectionCurrent_).normalized());
+        }
+    }
+    painter.restore();
+}
+
+void CanvasWidget::PaintPendingErase(QPainter& painter, const CanvasPageView& view) {
+    if (pendingErase_.empty()) {
+        return;
+    }
+    painter.save();
+    painter.translate(view.rect.topLeft());
+    for (const ObjectRef& object : pendingErase_) {
+        if (object.pageIndex != view.pageIndex || object.kind != ObjectKind::Stroke) {
+            continue;
+        }
+        const Document& document = controller_.DocumentRef();
+        const Page& page = document.PageAt(view.pageIndex);
+        if (object.objectIndex >= page.strokes.size()) {
+            continue;
+        }
+        // 50% pending-erase feedback (App.cpp:172 kPendingEraseOpacity).
+        render::PaintStrokePreview(painter, page.strokes[object.objectIndex], RenderParamsFor(view), 0.5f);
+    }
+    painter.restore();
 }
 
 }  // namespace cnote::ui

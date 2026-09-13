@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -14,6 +15,7 @@
 #include "ProjectSession.h"
 #include "shell/AppManager.h"
 #include "ui/CanvasController.h"
+#include "ui/InteractionRouter.h"
 
 namespace cnote {
 class PdfiumBackend;
@@ -59,6 +61,29 @@ public:
     // outside the canvas (AppManager::FinishInteraction).
     void SetEditContentSource(ui::EditContentSource* source) { editContent_ = source; }
 
+    // --- selection and object-gesture surface (ui::CanvasController) --------
+    [[nodiscard]] bool HasSelection() const override;
+    [[nodiscard]] const ui::PageSelection& SelectionFor(std::size_t pageIndex) const override;
+    void ClearSelection() override;
+    void AddObjectToSelection(const ui::ObjectRef& object) override;
+    void SelectObjects(std::size_t pageIndex, ui::PageSelection selection) override;
+    void SetCurrentPageIndex(std::size_t index) override;
+
+    // One transaction per gesture: the page is snapshotted when the gesture
+    // starts and a single ReplacePages action records before/after on commit.
+    void BeginPageGesture(std::size_t pageIndex) override;
+    void CommitPageGesture() override;
+    void CancelPageGesture() override;
+    [[nodiscard]] std::optional<std::size_t> GesturePageIndex() const override { return gesturePage_; }
+    [[nodiscard]] Page* GesturePage();
+    void MoveSelectionBy(std::size_t pageIndex, Vec2 delta) override;
+    void CommitErase(std::size_t pageIndex, const std::vector<ui::ObjectRef>& targets) override;
+
+    // Stroke effects the interaction router drives (line/oval modes replace the
+    // whole pending point list).
+    void SetPendingStrokeDotted(bool dotted) override;
+    void ReplacePendingStrokePoints(const std::vector<Vec2>& points, bool dotted) override;
+
     void SetActiveStrokeStyle(StrokeStyle style) { strokeStyle_ = style; }
     [[nodiscard]] StrokeStyle ActiveStrokeStyle() const { return strokeStyle_; }
 
@@ -84,13 +109,12 @@ public:
     void FinishInteraction() override;
     void OnSessionChanged(const ProjectChange& change, bool originating) override;
     [[nodiscard]] std::size_t CurrentPageIndex() const override { return currentPage_; }
-    void SetCurrentPageIndex(std::size_t index) override;
 
     // --- object creation and editing -------------------------------------
     // Inserts an empty object at the given page position and starts editing it;
     // an empty commit removes it again, exactly like the reference frontend.
-    std::size_t AddTextObject(std::size_t pageIndex, Vec2 topLeft, float fontSize);
-    std::size_t AddLatexObject(std::size_t pageIndex, Vec2 topLeft, float fontSize);
+    std::size_t AddTextObject(std::size_t pageIndex, Vec2 topLeft, float fontSize) override;
+    std::size_t AddLatexObject(std::size_t pageIndex, Vec2 topLeft, float fontSize) override;
 
     [[nodiscard]] bool BeginTextEdit(std::size_t pageIndex, std::size_t textIndex);
     [[nodiscard]] bool BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex);
@@ -137,6 +161,11 @@ private:
     ui::EditContentSource* editContent_ = nullptr;
     std::optional<std::size_t> pendingStrokePage_ {};
     std::optional<Stroke> pendingStroke_ {};
+
+    std::map<std::size_t, ui::PageSelection> selection_;
+    std::optional<std::size_t> gesturePage_ {};
+    Page gestureBefore_ {};
+    bool gestureChanged_ = false;
 
     // Text edit state: the object snapshot the overlay was filled from.
     std::optional<std::size_t> editingTextPage_ {};

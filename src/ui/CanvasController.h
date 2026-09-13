@@ -7,8 +7,22 @@
 #include <QString>
 
 #include "Document.h"
+#include "ui/InteractionRouter.h"
 
 namespace cnote::ui {
+
+// Selected object indices for one page, exactly like the reference's
+// selected*Indices_ maps.  Selection is per view and never part of history.
+struct PageSelection {
+    std::vector<std::size_t> strokes;
+    std::vector<std::size_t> images;
+    std::vector<std::size_t> texts;
+    std::vector<std::size_t> latexes;
+
+    [[nodiscard]] bool Empty() const {
+        return strokes.empty() && images.empty() && texts.empty() && latexes.empty();
+    }
+};
 
 // Implemented by the canvas: the controller needs the overlay's current content
 // when an edit is finished from outside the canvas (e.g. the session manager
@@ -56,6 +70,10 @@ public:
     virtual void ExtendStroke(Vec2 point, float pageScale) = 0;
     virtual void EndStroke() = 0;
     virtual void CancelStroke() = 0;
+    // Live stroke modes the interaction router tracks (line/oval replace the
+    // whole pending point list; Space toggles dotted).
+    virtual void SetPendingStrokeDotted(bool dotted) = 0;
+    virtual void ReplacePendingStrokePoints(const std::vector<Vec2>& points, bool dotted) = 0;
 
     // In-progress stroke, for the live preview. Null when no stroke is active.
     [[nodiscard]] virtual const Stroke* PendingStroke() const = 0;
@@ -75,6 +93,26 @@ public:
     virtual void CancelTextEdit() = 0;
     virtual void CommitLatexEdit(const QString& source) = 0;
     virtual void CancelLatexEdit() = 0;
+    // Object creation from the text/LaTeX tools (the host positions the object).
+    virtual std::size_t AddTextObject(std::size_t pageIndex, Vec2 topLeft, float fontSize) = 0;
+    virtual std::size_t AddLatexObject(std::size_t pageIndex, Vec2 topLeft, float fontSize) = 0;
+
+    // --- selection, gestures and erase (ui::InteractionHost effects) --------
+    [[nodiscard]] virtual bool HasSelection() const = 0;
+    [[nodiscard]] virtual const PageSelection& SelectionFor(std::size_t pageIndex) const = 0;
+    virtual void ClearSelection() = 0;
+    virtual void AddObjectToSelection(const ObjectRef& object) = 0;
+    virtual void SelectObjects(std::size_t pageIndex, PageSelection selection) = 0;
+    virtual void SetCurrentPageIndex(std::size_t index) = 0;
+
+    // One transaction per gesture: snapshot on begin, one ReplacePages action on
+    // commit, restore on cancel.
+    virtual void BeginPageGesture(std::size_t pageIndex) = 0;
+    virtual void CommitPageGesture() = 0;
+    virtual void CancelPageGesture() = 0;
+    [[nodiscard]] virtual std::optional<std::size_t> GesturePageIndex() const = 0;
+    virtual void MoveSelectionBy(std::size_t pageIndex, Vec2 delta) = 0;
+    virtual void CommitErase(std::size_t pageIndex, const std::vector<ObjectRef>& targets) = 0;
 
     [[nodiscard]] virtual bool CanUndo() const = 0;
     [[nodiscard]] virtual bool CanRedo() const = 0;
