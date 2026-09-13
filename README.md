@@ -95,6 +95,11 @@ cmake --build build
 The configure step fails when the SDK version, binary format, architecture,
 headers, runtime, or compiler does not match. The build copies the imported
 `pdfium` target's runtime next to the executable automatically.
+The initial shared build boundary is `cnote_model`, a plain C++20 static
+library containing `Document`. It has only the public `src` include path and
+does not inherit the legacy UI's Windows or Qt definitions. The legacy
+`cnote_core` and existing tests consume this target while the Windows product
+remains unchanged.
 
 ## Run
 

@@ -8,12 +8,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/Pdfium.cmake")
 
 
+add_library(cnote_model STATIC
+    src/Document.cpp
+)
+target_include_directories(cnote_model PUBLIC src)
+target_compile_features(cnote_model PUBLIC cxx_std_20)
+target_compile_options(cnote_model PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+
 add_library(cnote_core STATIC
     src/App.cpp
     src/AppSettings.cpp
     src/ui/Layout.cpp
     src/DpiUtil.cpp
-    src/Document.cpp
     src/NewPageSettingsWindow.cpp
     src/PdfBackend.cpp
     src/ProjectFile.cpp
@@ -44,6 +52,7 @@ add_executable(cnote WIN32 src/main.cpp src/cnote.rc)
 target_link_libraries(cnote PRIVATE cnote_core)
 
 target_include_directories(cnote_core PUBLIC src)
+target_link_libraries(cnote_core PUBLIC cnote_model)
 
 target_compile_definitions(cnote_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
 
@@ -176,7 +185,6 @@ enable_testing()
 
 add_executable(cnote_latex_engine_tests
     tests/LatexEngineTests.cpp
-    src/Document.cpp
     src/latex/LatexEngine.cpp
     src/latex/LatexCompletion.cpp
 )
@@ -185,13 +193,12 @@ target_compile_definitions(cnote_latex_engine_tests PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602
     LATEX_RES_ROOT=L"${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res"
 )
-target_link_libraries(cnote_latex_engine_tests PRIVATE microtex gdiplus)
+target_link_libraries(cnote_latex_engine_tests PRIVATE cnote_model microtex gdiplus)
 add_test(NAME latex_engine COMMAND cnote_latex_engine_tests)
 
 add_executable(cnote_text_model_tests
     tests/TextModelTests.cpp
     src/DpiUtil.cpp
-    src/Document.cpp
     src/latex/LatexEngine.cpp
     src/PdfBackend.cpp
     src/ProjectFile.cpp
@@ -214,6 +221,7 @@ target_link_libraries(cnote_text_model_tests PRIVATE
     pdfium
     user32
 )
+target_link_libraries(cnote_text_model_tests PRIVATE cnote_model)
 add_test(NAME text_model_round_trip COMMAND cnote_text_model_tests)
 
 add_custom_command(TARGET cnote POST_BUILD
