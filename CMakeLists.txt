@@ -992,3 +992,80 @@ endif()
 add_test(NAME selection_math_qt COMMAND cnote_selection_math_tests)
 set_tests_properties(selection_math_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+
+# --- Qt precision input: Windows touchpad and native gestures (plan 5.3/5.4) --
+# Portable decision core plus the Qt event filter the canvas installs on itself,
+# and the Windows-only QAbstractNativeEventFilter that reuses the existing
+# PrecisionTouchpad adapter (the legacy message-loop wiring stays in cnote_core
+# untouched).  Qt Gui/Core only for the portable half; no widgets, no App.
+add_library(cnote_precision_input_qt STATIC
+    src/ui/PrecisionInputRouter.cpp
+    src/ui/PrecisionInputFilterQt.cpp
+)
+set_target_properties(cnote_precision_input_qt PROPERTIES AUTOMOC ON)
+target_include_directories(cnote_precision_input_qt PUBLIC src)
+target_compile_features(cnote_precision_input_qt PUBLIC cxx_std_20)
+target_compile_options(cnote_precision_input_qt PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_precision_input_qt PUBLIC Qt6::Gui)
+if(WIN32)
+    target_sources(cnote_precision_input_qt PRIVATE
+        src/platform/windows/PrecisionTouchpadQt.cpp
+        src/platform/windows/PrecisionTouchpad.cpp
+    )
+    target_compile_definitions(cnote_precision_input_qt PUBLIC
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
+    target_link_libraries(cnote_precision_input_qt PUBLIC user32)
+endif()
+if(MINGW)
+    # The adapter uses touchpad declarations newer than the default MinGW SDK.
+    set_source_files_properties(
+        src/platform/windows/PrecisionTouchpad.cpp
+        PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/include")
+    set_source_files_properties(
+        src/platform/windows/PrecisionTouchpadQt.cpp
+        PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/include")
+endif()
+
+# Portable decision-core evidence: routing, consume/pass-through, duplicate
+# suppression, availability fallback, inertia transitions and thresholds.
+add_executable(cnote_precision_router_tests tests/PrecisionInputRouterTests.cpp)
+target_compile_options(cnote_precision_router_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_precision_router_tests PRIVATE cnote_precision_input_qt)
+add_test(NAME precision_input_router_qt COMMAND cnote_precision_router_tests)
+
+# Widget-level harness: real QWidget + real Qt events through the installed
+# filter, proving ordinary wheel/mouse input is unchanged and that native
+# pinch/pan reaches the sink.
+add_executable(cnote_precision_filter_tests tests/PrecisionInputFilterTests.cpp)
+target_compile_options(cnote_precision_filter_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_precision_filter_tests PRIVATE cnote_precision_input_qt Qt6::Widgets)
+add_test(NAME precision_input_filter_qt COMMAND cnote_precision_filter_tests)
+set_tests_properties(precision_input_filter_qt PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+
+if(WIN32)
+    # Windows adapter lifecycle, availability fallback and inertia timer wiring.
+    add_executable(cnote_precision_touchpad_tests tests/PrecisionTouchpadQtTests.cpp)
+    target_compile_options(cnote_precision_touchpad_tests PRIVATE
+        $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+    )
+    target_link_libraries(cnote_precision_touchpad_tests PRIVATE cnote_precision_input_qt Qt6::Widgets)
+    add_test(NAME precision_touchpad_qt COMMAND cnote_precision_touchpad_tests)
+    set_tests_properties(precision_touchpad_qt PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    foreach(_cnote_precision_test cnote_precision_filter_tests cnote_precision_touchpad_tests)
+        foreach(_cnote_qt_runtime Qt6::Core Qt6::Gui Qt6::Widgets)
+            add_custom_command(TARGET ${_cnote_precision_test} POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:${_cnote_qt_runtime}>"
+                    "$<TARGET_FILE_DIR:${_cnote_precision_test}>"
+            )
+        endforeach()
+    endforeach()
+endif()
