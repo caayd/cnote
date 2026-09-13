@@ -363,11 +363,17 @@ add_test(NAME selection_clipboard_qt COMMAND cnote_selection_clipboard_tests)
 # The Windows bridge evidence needs the real (non-offscreen) platform; the
 # other platforms run this service test on the offscreen platform like the
 # rest of the Qt suite.
+# The test bounds its own clipboard acquisition and ends with SKIP (return code
+# 77) when another process owns the desktop clipboard; a real bridge regression
+# still fails when CNOTE_STRICT_CLIPBOARD=1 is exported. The CTest timeout is
+# the last-resort guard so a blocked clipboard call can never hold a runner.
 if(WIN32)
-    set_tests_properties(selection_clipboard_qt PROPERTIES
+    set_tests_properties(selection_clipboard_qt PROPERTIES TIMEOUT 180
+        SKIP_RETURN_CODE 77
         ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_plugins}")
 else()
-    set_tests_properties(selection_clipboard_qt PROPERTIES
+    set_tests_properties(selection_clipboard_qt PROPERTIES TIMEOUT 180
+        SKIP_RETURN_CODE 77
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 endif()
 
