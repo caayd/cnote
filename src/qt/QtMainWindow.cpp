@@ -116,11 +116,8 @@ bool QtMainWindow::OpenPath(const std::filesystem::path& path) {
 
     std::string error;
     if (!controller_.OpenFile(path, &error)) {
-        QMessageBox::critical(
-            this,
-            QStringLiteral("cnote"),
-            QStringLiteral("Could not open %1\n%2")
-                .arg(QString::fromStdString(path.string()), QString::fromStdString(error)));
+        ReportError(QStringLiteral("Could not open %1\n%2")
+            .arg(QString::fromStdString(path.string()), QString::fromStdString(error)));
         return false;
     }
 
@@ -156,9 +153,7 @@ void QtMainWindow::Save() {
     if (controller_.HasSavedPath()) {
         std::string error;
         if (!controller_.SaveTo(controller_.FilePath(), &error)) {
-            QMessageBox::critical(
-                this, QStringLiteral("cnote"),
-                QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
+            ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
         }
         UpdateChrome();
         return;
@@ -177,9 +172,7 @@ bool QtMainWindow::SaveAs() {
     }
     std::string error;
     if (!controller_.SaveTo(std::filesystem::path(selected.toStdString()), &error)) {
-        QMessageBox::critical(
-            this, QStringLiteral("cnote"),
-            QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
+        ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
         UpdateChrome();
         return false;
     }
@@ -199,9 +192,7 @@ bool QtMainWindow::ExportPdf(bool embedProject) {
     }
     std::string error;
     if (!controller_.ExportPdf(std::filesystem::path(selected.toStdString()), embedProject, &error)) {
-        QMessageBox::critical(
-            this, QStringLiteral("cnote"),
-            QStringLiteral("Could not export: %1").arg(QString::fromStdString(error)));
+        ReportError(QStringLiteral("Could not export: %1").arg(QString::fromStdString(error)));
         return false;
     }
     statusBar()->showMessage(QStringLiteral("Exported %1").arg(selected), 4000);
@@ -273,12 +264,13 @@ void QtMainWindow::closeEvent(QCloseEvent* event) {
         const bool lastView = viewCount <= 1U;
 
         std::string error;
-        if (lastView && controller_.HasSavedPath()) {
+        if (!lastView) {
+            // Closing one view of a shared session neither writes the project
+            // nor asks anything: the other views keep the unsaved changes.
+        } else if (controller_.HasSavedPath()) {
             // Plan 4.5: the last view auto-saves an already-saved project.
             if (!controller_.SaveTo(controller_.FilePath(), &error)) {
-                QMessageBox::critical(
-                    this, QStringLiteral("cnote"),
-                    QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
+                ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
                 event->ignore();
                 return;
             }
@@ -290,6 +282,9 @@ void QtMainWindow::closeEvent(QCloseEvent* event) {
             CloseDecision decision = CloseDecision::Cancel;
             if (closeDecision_) {
                 decision = closeDecision_();
+            } else if (HeadlessModals()) {
+                std::fprintf(stderr, "MODAL cnote: Save this cnote? -> Discard (headless)\n");
+                decision = CloseDecision::Discard;
             } else {
                 const QMessageBox::StandardButton choice = QMessageBox::warning(
                     this,
@@ -311,9 +306,7 @@ void QtMainWindow::closeEvent(QCloseEvent* event) {
                     : SaveAs();
                 if (!saved) {
                     if (!error.empty()) {
-                        QMessageBox::critical(
-                            this, QStringLiteral("cnote"),
-                            QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
+                        ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
                     }
                     event->ignore();
                     return;
@@ -323,10 +316,32 @@ void QtMainWindow::closeEvent(QCloseEvent* event) {
     }
 
     QMainWindow::closeEvent(event);
+    if (event->isAccepted()) {
+        // The window may be shown again; re-registering on show restores it.
+        controller_.DetachForClose();
+    }
 }
 
 void QtMainWindow::SetCloseDecisionProvider(std::function<CloseDecision()> provider) {
     closeDecision_ = std::move(provider);
+}
+
+bool QtMainWindow::HeadlessModals() {
+    static const bool headless = qEnvironmentVariableIsSet("CNOTE_HEADLESS");
+    return headless;
+}
+
+void QtMainWindow::ReportError(const QString& text) {
+    if (HeadlessModals()) {
+        std::fprintf(stderr, "MODAL cnote: %s\n", text.toUtf8().constData());
+        return;
+    }
+    QMessageBox::critical(this, QStringLiteral("cnote"), text);
+}
+
+void QtMainWindow::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
+    controller_.ReattachForShow();
 }
 
 void QtMainWindow::UpdateChrome() {

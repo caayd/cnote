@@ -49,6 +49,11 @@ public:
     // dialog (plan 6.6 close semantics are covered by tests either way).
     void SetCloseDecisionProvider(std::function<CloseDecision()> provider);
 
+    // Headless/test runs (CNOTE_HEADLESS=1) must never block on a modal dialog:
+    // informational modals are logged to stderr instead, and the close prompt
+    // falls back to Discard unless a test injected a CloseDecisionProvider.
+    [[nodiscard]] static bool HeadlessModals();
+
     [[nodiscard]] ui::CanvasWidget* Canvas() const { return canvas_; }
     [[nodiscard]] QtDocumentController& Controller() { return controller_; }
 
@@ -68,6 +73,7 @@ public slots:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
     void UpdateChrome();
@@ -84,6 +90,8 @@ private:
     QAction* addTextAction_ = nullptr;
     QAction* addLatexAction_ = nullptr;
     std::function<CloseDecision()> closeDecision_;
+
+    void ReportError(const QString& text);
 };
 
 }  // namespace cnote::qt

@@ -127,6 +127,17 @@ void QtDocumentController::NewBlankDocument() {
     AttachSession(std::move(session));
 }
 
+void QtDocumentController::DetachForClose() {
+    CancelStroke();
+    manager_.UnregisterView(this);
+}
+
+void QtDocumentController::ReattachForShow() {
+    if (session_ != nullptr) {
+        manager_.RegisterView(this, this, session_);
+    }
+}
+
 bool QtDocumentController::SaveTo(const std::filesystem::path& path, std::string* error) {
     if (session_ == nullptr || path.empty()) {
         return false;

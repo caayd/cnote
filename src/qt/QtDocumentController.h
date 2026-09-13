@@ -53,6 +53,12 @@ public:
     [[nodiscard]] bool ExportPdf(const std::filesystem::path& path, bool embedProject, std::string* error);
 
     [[nodiscard]] render::PdfBackgroundProvider* PdfBackground() const { return pdfBackground_.get(); }
+    // Closing a window detaches its view from the shared session so the close
+    // of the remaining view is treated as the last view; showing the window
+    // again re-registers it (RegisterView is idempotent).
+    void DetachForClose();
+    void ReattachForShow();
+
     [[nodiscard]] bool Dirty() const { return session_ != nullptr && session_->dirty; }
     // Diagnostics: Saved changes broadcast by this view's controller (plan 6.6);
     // a successful save is exactly one, a failed save none.

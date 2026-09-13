@@ -80,6 +80,9 @@ int main(int argc, char** argv) {
         // disabled equations (plan step 3.8).
         if (selfCheck) {
             std::fprintf(stderr, "self-check: MicroTeX resources not found at %s\n", cnote::PathToUtf8(resRoot).c_str());
+        } else if (qEnvironmentVariableIsSet("CNOTE_HEADLESS")) {
+            std::fprintf(stderr, "MODAL cnote: MicroTeX resources not found at:\n%s\n",
+                         cnote::PathToUtf8(resRoot).c_str());
         } else {
             QMessageBox::critical(
                 nullptr,
