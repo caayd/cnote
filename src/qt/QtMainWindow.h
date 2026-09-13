@@ -12,8 +12,9 @@
 #include "settings/SettingsStoreQt.h"
 
 class QAction;
-class QLabel;
 class QMenu;
+class QVBoxLayout;
+class QWidget;
 
 namespace cnote {
 class AppManager;
@@ -119,7 +120,12 @@ private:
     cnote::AppManager& manager_;
     QtDocumentController controller_;
     ui::CanvasWidget* canvas_ = nullptr;
-    QLabel* statusLabel_ = nullptr;
+    // The canvas lives below the reserved toolbar band, exactly like the
+    // reference client layout (App::CanvasRect starts under the chrome); the
+    // toolbar and sidebar are overlays on the window.
+    QWidget* content_ = nullptr;
+    QVBoxLayout* contentLayout_ = nullptr;
+    int reservedTop_ = -1;
     QAction* saveAction_ = nullptr;
     QAction* exportAction_ = nullptr;
     QAction* exportFlatAction_ = nullptr;

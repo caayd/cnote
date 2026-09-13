@@ -16,9 +16,8 @@
 #include <QMouseEvent>
 #include <QResizeEvent>
 #include <QScreen>
-#include <QStatusBar>
 #include <QTextEdit>
-#include <QToolBar>
+#include <QVBoxLayout>
 
 #include "Unicode.h"
 #include "document/SelectionClipboardQt.h"
@@ -116,15 +115,17 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
     setWindowTitle(QStringLiteral("cnote"));
     settings_ = settingsStore_.Load();
 
-    canvas_ = new ui::CanvasWidget(controller_, this);
-    setCentralWidget(canvas_);
+    content_ = new QWidget(this);
+    contentLayout_ = new QVBoxLayout(content_);
+    contentLayout_->setContentsMargins(0, 0, 0, 0);
+    contentLayout_->setSpacing(0);
+    canvas_ = new ui::CanvasWidget(controller_, content_);
     canvas_->setMouseTracking(true);
+    contentLayout_->addWidget(canvas_);
+    setCentralWidget(content_);
 
     CreateChrome();
     ApplySettingsToShell();
-
-    statusLabel_ = new QLabel(this);
-    statusBar()->addPermanentWidget(statusLabel_);
 
     connect(canvas_, &ui::CanvasWidget::ViewportChanged, this, &QtMainWindow::UpdateChrome);
     connect(&controller_, &QtDocumentController::SessionChanged, this, [this]() {
@@ -374,9 +375,9 @@ void QtMainWindow::CreateChrome() {
     });
     connect(toolbar_, &ui::ToolbarWidget::TextFontFamilyChanged, this, [this](TextFontFamily family) {
         ApplyTextFormat([family](QTextCharFormat& format) {
-            format.setFontFamily(QString::fromStdString(
+            format.setFontFamilies({ QString::fromStdString(
                 family == TextFontFamily::Monospace ? "Consolas"
-                                                    : (family == TextFontFamily::Serif ? "Times New Roman" : "Segoe UI")));
+                                                    : (family == TextFontFamily::Serif ? "Times New Roman" : "Segoe UI")) });
         });
     });
     connect(toolbar_, &ui::ToolbarWidget::ToolbarGeometryChanged, this, [this]() { UpdateChromeGeometry(); });
@@ -533,7 +534,7 @@ void QtMainWindow::RefreshRecentMenu() {
 }
 
 void QtMainWindow::OpenRecentPath(const std::filesystem::path& path) {
-    OpenPath(path);
+    static_cast<void>(OpenPath(path));
 }
 
 ui::NewPageDraft QtMainWindow::CurrentPageDraft() const {
@@ -632,7 +633,7 @@ void QtMainWindow::OpenNewPageSettings() {
 void QtMainWindow::CopySelection() {
     cnote::SelectionClipboardData data;
     if (controller_.BuildSelectionPayload(data)) {
-        cnote::clipboard::WriteSelection(data);
+        static_cast<void>(cnote::clipboard::WriteSelection(data));
     }
 }
 
@@ -813,7 +814,6 @@ bool QtMainWindow::ExportPdf(bool embedProject) {
         return false;
     }
     RecordRecentPath(destination);
-    statusBar()->showMessage(QStringLiteral("Exported %1").arg(selected), 4000);
     return true;
 }
 
@@ -983,6 +983,10 @@ void QtMainWindow::UpdateChromeGeometry() {
         toolbar_->setGeometry(0, qRound(toolbar_->ToolbarOffsetY()), width(), band);
         toolbar_->raise();
     }
+    if (contentLayout_ != nullptr && reservedTop_ != reserved) {
+        reservedTop_ = reserved;
+        contentLayout_->setContentsMargins(0, reserved, 0, 0);
+    }
     if (sidebar_ != nullptr) {
         sidebar_->SetMaximized(isMaximized());
         sidebar_->SetHostClientRect(rect(), reserved);
@@ -1032,13 +1036,10 @@ void QtMainWindow::UpdateChrome() {
     const QString fileLabel = document.FilePath().empty()
         ? QStringLiteral("Untitled")
         : QFileInfo(QString::fromStdU16String(document.FilePath().u16string())).fileName();
-    if (statusLabel_ != nullptr) {
-        statusLabel_->setText(QStringLiteral("%1  |  %2 page(s)  |  %3%  |  %4")
-            .arg(fileLabel)
-            .arg(pages)
-            .arg(canvas_ != nullptr ? qRound(canvas_->Zoom() * 100.0) : 100)
-            .arg(controller_.HasSelection() ? QStringLiteral("selection") : QStringLiteral("no selection")));
-    }
+    (void)pages;
+    // The reference frontend has no status bar: file/zoom live in the toolbar
+    // band and the page indicator lives in the sidebar, so the canvas keeps the
+    // full client height above its chrome.
     if (saveAction_ != nullptr) {
         saveAction_->setEnabled(controller_.Dirty());
     }
