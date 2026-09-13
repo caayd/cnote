@@ -442,7 +442,12 @@ void CanvasWidget::PruneSurfaces(const std::vector<std::size_t>& visiblePages) {
 }
 
 void CanvasWidget::NotifyDocumentChanged() {
-    surfaces_.clear();
+    // Repaint request, not a cache drop: every committed change is covered by
+    // the per-page signature (content hash) the renderer checks on the next
+    // paint, and CommitStroke already composites its stroke into the cached
+    // raster. Clearing here re-rendered a dense page (~1 s) on the paint after
+    // each commit, which delayed the first frame of the next stroke by ~10
+    // refresh intervals (measured on dense-1000x100 at a 0.8 s cadence).
     update();
 }
 
