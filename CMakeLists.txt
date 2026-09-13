@@ -479,3 +479,43 @@ if(WIN32 AND TARGET cnote_core)
     set_tests_properties(settings_parity_qt PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
 endif()
+
+# --- Qt clipboard bridge (migration plan step 2.6) ----------------------------
+# Platform-neutral CTS selection codec plus the QClipboard bridge: structured
+# selections travel as application/x-cnote-selection and, on Windows, through
+# Qt's Windows MIME bridge under the legacy registered format
+# cnote.selection.v1.  Ordinary image data and plain text are the paste
+# fallbacks in that order.  Qt Gui only - no widgets, no App/HWND/HDC - and
+# nothing here mutates a document.  The legacy Win32 clipboard path
+# (src/document/Clipboard.cpp) stays in cnote_core until cutover.
+add_library(cnote_clipboard_qt STATIC
+    src/document/SelectionClipboardCodec.cpp
+    src/document/SelectionClipboardQt.cpp
+)
+target_include_directories(cnote_clipboard_qt PUBLIC src)
+target_compile_features(cnote_clipboard_qt PUBLIC cxx_std_20)
+target_compile_options(cnote_clipboard_qt PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_clipboard_qt PUBLIC cnote_model Qt6::Gui)
+
+# Self-contained contract test over the real OS clipboard: CTS round trip,
+# structured > image > text priority, invalid/empty payloads and - on Windows -
+# the registered-format bridge in both directions.
+add_executable(cnote_selection_clipboard_tests tests/SelectionClipboardQtTests.cpp)
+target_compile_options(cnote_selection_clipboard_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_selection_clipboard_tests PRIVATE cnote_clipboard_qt)
+add_test(NAME selection_clipboard_qt COMMAND cnote_selection_clipboard_tests)
+# The Windows bridge evidence needs the real (non-offscreen) platform; the
+# other platforms run this service test on the offscreen platform like the
+# rest of the Qt suite.
+if(WIN32)
+    set_tests_properties(selection_clipboard_qt PROPERTIES
+        ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+else()
+    set_tests_properties(selection_clipboard_qt PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+endif()
+
