@@ -436,6 +436,21 @@ add_library(cnote_qt_ui STATIC
     src/Unicode.cpp
     # Shared session/view registry and autosave timers (Qt Core only).
     src/shell/AppManager.cpp
+    # New-page draft/defaults model used by the window's page commands (the
+    # dialogs that also use it are separate targets).
+    src/ui/PageDefaultsQt.cpp
+    # Ported chrome widgets instantiated by the window (plan 6.1-6.3).
+    src/ui/ToolbarWidget.cpp
+    src/ui/SidebarWidget.cpp
+    src/ui/ChromeAssetsQt.cpp
+    src/settings/KeyBindingQt.cpp
+    # Clipboard flavors for the selection commands (Ctrl+C/X/V).
+    src/document/SelectionClipboardQt.cpp
+    src/document/SelectionClipboardCodec.cpp
+    # Settings and new-page dialogs the window owns (modeless, live model).
+    src/ui/SettingsDialogQt.cpp
+    src/ui/SettingsFormatQt.cpp
+    src/ui/NewPageDialogQt.cpp
 )
 set_target_properties(cnote_qt_ui PROPERTIES AUTOMOC ON)
 target_include_directories(cnote_qt_ui PUBLIC src)
@@ -616,6 +631,7 @@ else()
     set_tests_properties(layout_parity_qt PROPERTIES TIMEOUT 120
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
 endif()
+
 # --- Qt packaging: installed resources, deployment and CPack ------------------
 # Migration plan steps 7.3/7.4.
 #
@@ -847,6 +863,83 @@ add_test(NAME new_page_dialog_qt COMMAND cnote_new_page_dialog_tests)
 set_tests_properties(new_page_dialog_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
 
+# --- Qt precision input: Windows touchpad and native gestures (plan 5.3/5.4) --
+# Portable decision core plus the Qt event filter the canvas installs on itself,
+# and the Windows-only QAbstractNativeEventFilter that reuses the existing
+# PrecisionTouchpad adapter (the legacy message-loop wiring stays in cnote_core
+# untouched).  Qt Gui/Core only for the portable half; no widgets, no App.
+add_library(cnote_precision_input_qt STATIC
+    src/ui/PrecisionInputRouter.cpp
+    src/ui/PrecisionInputFilterQt.cpp
+)
+set_target_properties(cnote_precision_input_qt PROPERTIES AUTOMOC ON)
+target_include_directories(cnote_precision_input_qt PUBLIC src)
+target_compile_features(cnote_precision_input_qt PUBLIC cxx_std_20)
+target_compile_options(cnote_precision_input_qt PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_precision_input_qt PUBLIC Qt6::Gui)
+if(WIN32)
+    target_sources(cnote_precision_input_qt PRIVATE
+        src/platform/windows/PrecisionTouchpadQt.cpp
+        src/platform/windows/PrecisionTouchpad.cpp
+    )
+    target_compile_definitions(cnote_precision_input_qt PUBLIC
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
+    target_link_libraries(cnote_precision_input_qt PUBLIC user32)
+endif()
+if(MINGW)
+    # The adapter uses touchpad declarations newer than the default MinGW SDK.
+    set_source_files_properties(
+        src/platform/windows/PrecisionTouchpad.cpp
+        PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/include")
+    set_source_files_properties(
+        src/platform/windows/PrecisionTouchpadQt.cpp
+        PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/include")
+endif()
+
+# Portable decision-core evidence: routing, consume/pass-through, duplicate
+# suppression, availability fallback, inertia transitions and thresholds.
+add_executable(cnote_precision_router_tests tests/PrecisionInputRouterTests.cpp)
+target_compile_options(cnote_precision_router_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_precision_router_tests PRIVATE cnote_precision_input_qt)
+add_test(NAME precision_input_router_qt COMMAND cnote_precision_router_tests)
+
+# Widget-level harness: real QWidget + real Qt events through the installed
+# filter, proving ordinary wheel/mouse input is unchanged and that native
+# pinch/pan reaches the sink.
+add_executable(cnote_precision_filter_tests tests/PrecisionInputFilterTests.cpp)
+target_compile_options(cnote_precision_filter_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_precision_filter_tests PRIVATE cnote_precision_input_qt Qt6::Widgets)
+add_test(NAME precision_input_filter_qt COMMAND cnote_precision_filter_tests)
+set_tests_properties(precision_input_filter_qt PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+
+if(WIN32)
+    # Windows adapter lifecycle, availability fallback and inertia timer wiring.
+    add_executable(cnote_precision_touchpad_tests tests/PrecisionTouchpadQtTests.cpp)
+    target_compile_options(cnote_precision_touchpad_tests PRIVATE
+        $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+    )
+    target_link_libraries(cnote_precision_touchpad_tests PRIVATE cnote_precision_input_qt Qt6::Widgets)
+    add_test(NAME precision_touchpad_qt COMMAND cnote_precision_touchpad_tests)
+    set_tests_properties(precision_touchpad_qt PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    foreach(_cnote_precision_test cnote_precision_filter_tests cnote_precision_touchpad_tests)
+        foreach(_cnote_qt_runtime Qt6::Core Qt6::Gui Qt6::Widgets)
+            add_custom_command(TARGET ${_cnote_precision_test} POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:${_cnote_qt_runtime}>"
+                    "$<TARGET_FILE_DIR:${_cnote_precision_test}>"
+            )
+        endforeach()
+    endforeach()
+endif()
+
 # The dialog tests need QtWidgets at runtime; stage the Qt runtime next to the
 # executables on Windows (the other Qt test targets rely on a manual copy).
 if(WIN32)
@@ -860,6 +953,7 @@ if(WIN32)
         endforeach()
     endforeach()
 endif()
+
 
 # --- Qt compact chrome widgets (migration plan steps 6.1/6.2/6.3) -------------
 # ToolbarWidget reproduces the reference compact toolbar (34 logical-pixel base
@@ -963,6 +1057,7 @@ target_link_libraries(cnote_interaction_router_tests PRIVATE cnote_interaction_q
 add_test(NAME interaction_router_qt COMMAND cnote_interaction_router_tests)
 set_tests_properties(interaction_router_qt PROPERTIES TIMEOUT 120)
 
+
 # --- Portable selection math (plan steps 5.2/5.3) ----------------------------
 # src/selection/Geometry.cpp is bound to App/POINT/RECT and cannot be linked
 # into Qt targets, so the Qt canvas uses this portable port.  On Windows the
@@ -991,83 +1086,6 @@ endif()
 add_test(NAME selection_math_qt COMMAND cnote_selection_math_tests)
 set_tests_properties(selection_math_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
-
-# --- Qt precision input: Windows touchpad and native gestures (plan 5.3/5.4) --
-# Portable decision core plus the Qt event filter the canvas installs on itself,
-# and the Windows-only QAbstractNativeEventFilter that reuses the existing
-# PrecisionTouchpad adapter (the legacy message-loop wiring stays in cnote_core
-# untouched).  Qt Gui/Core only for the portable half; no widgets, no App.
-add_library(cnote_precision_input_qt STATIC
-    src/ui/PrecisionInputRouter.cpp
-    src/ui/PrecisionInputFilterQt.cpp
-)
-set_target_properties(cnote_precision_input_qt PROPERTIES AUTOMOC ON)
-target_include_directories(cnote_precision_input_qt PUBLIC src)
-target_compile_features(cnote_precision_input_qt PUBLIC cxx_std_20)
-target_compile_options(cnote_precision_input_qt PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-target_link_libraries(cnote_precision_input_qt PUBLIC Qt6::Gui)
-if(WIN32)
-    target_sources(cnote_precision_input_qt PRIVATE
-        src/platform/windows/PrecisionTouchpadQt.cpp
-        src/platform/windows/PrecisionTouchpad.cpp
-    )
-    target_compile_definitions(cnote_precision_input_qt PUBLIC
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
-    target_link_libraries(cnote_precision_input_qt PUBLIC user32)
-endif()
-if(MINGW)
-    # The adapter uses touchpad declarations newer than the default MinGW SDK.
-    set_source_files_properties(
-        src/platform/windows/PrecisionTouchpad.cpp
-        PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/include")
-    set_source_files_properties(
-        src/platform/windows/PrecisionTouchpadQt.cpp
-        PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/include")
-endif()
-
-# Portable decision-core evidence: routing, consume/pass-through, duplicate
-# suppression, availability fallback, inertia transitions and thresholds.
-add_executable(cnote_precision_router_tests tests/PrecisionInputRouterTests.cpp)
-target_compile_options(cnote_precision_router_tests PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-target_link_libraries(cnote_precision_router_tests PRIVATE cnote_precision_input_qt)
-add_test(NAME precision_input_router_qt COMMAND cnote_precision_router_tests)
-
-# Widget-level harness: real QWidget + real Qt events through the installed
-# filter, proving ordinary wheel/mouse input is unchanged and that native
-# pinch/pan reaches the sink.
-add_executable(cnote_precision_filter_tests tests/PrecisionInputFilterTests.cpp)
-target_compile_options(cnote_precision_filter_tests PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-)
-target_link_libraries(cnote_precision_filter_tests PRIVATE cnote_precision_input_qt Qt6::Widgets)
-add_test(NAME precision_input_filter_qt COMMAND cnote_precision_filter_tests)
-set_tests_properties(precision_input_filter_qt PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
-
-if(WIN32)
-    # Windows adapter lifecycle, availability fallback and inertia timer wiring.
-    add_executable(cnote_precision_touchpad_tests tests/PrecisionTouchpadQtTests.cpp)
-    target_compile_options(cnote_precision_touchpad_tests PRIVATE
-        $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
-    )
-    target_link_libraries(cnote_precision_touchpad_tests PRIVATE cnote_precision_input_qt Qt6::Widgets)
-    add_test(NAME precision_touchpad_qt COMMAND cnote_precision_touchpad_tests)
-    set_tests_properties(precision_touchpad_qt PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
-    foreach(_cnote_precision_test cnote_precision_filter_tests cnote_precision_touchpad_tests)
-        foreach(_cnote_qt_runtime Qt6::Core Qt6::Gui Qt6::Widgets)
-            add_custom_command(TARGET ${_cnote_precision_test} POST_BUILD
-                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "$<TARGET_FILE:${_cnote_qt_runtime}>"
-                    "$<TARGET_FILE_DIR:${_cnote_precision_test}>"
-            )
-        endforeach()
-    endforeach()
-endif()
 
 # --- Cross-platform portability tests (plan 7.1/7.6, assumptions section) -----
 # Path/file-name behavior the Windows build alone cannot catch: case-only path

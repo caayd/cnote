@@ -984,4 +984,353 @@ void QtDocumentController::ReplacePendingStrokePoints(const std::vector<Vec2>& p
     pendingStroke_->style.dotted = dotted;
 }
 
+// --- page operations --------------------------------------------------------
+
+namespace {
+
+// Page snapshot from the new-page draft, exactly like the reference
+// NewPageSettingsWindow apply path.
+Page MakePageFromDraft(const ui::NewPageDraft& draft, const std::vector<std::uint32_t>& palette) {
+    Page page {};
+    ui::ApplyConfiguredSettingsToPage(
+        page,
+        std::max(ui::kMinPageSize, draft.width),
+        std::max(ui::kMinPageSize, draft.height),
+        draft.backgroundColor,
+        ui::ResolvedPaletteProfile(draft.paletteProfile, palette),
+        draft.applyPaletteProfileToExistingStrokes);
+    return page;
+}
+
+}  // namespace
+
+std::size_t QtDocumentController::InsertPages(std::size_t index, std::size_t count, const ui::NewPageDraft& draft) {
+    if (session_ == nullptr || count == 0U) {
+        return 0U;
+    }
+    Document& document = session_->document;
+    const std::size_t insertIndex = std::min(index, document.PageCount());
+
+    std::vector<Page> pages;
+    pages.reserve(count);
+    for (std::size_t offset = 0; offset < count; ++offset) {
+        pages.push_back(MakePageFromDraft(draft, session_->document.NewPageDefaults().paletteProfile));
+    }
+    for (std::size_t offset = 0; offset < pages.size(); ++offset) {
+        document.InsertPage(insertIndex + offset, pages[offset]);
+    }
+    document.SetCurrentPageIndex(insertIndex);
+
+    HistoryAction action {};
+    action.type = HistoryActionType::AddPages;
+    action.pages = std::move(pages);
+    action.index = insertIndex;
+    action.focusPageIndex = insertIndex;
+    session_->undoActions.push_back(std::move(action));
+    session_->redoActions.clear();
+    session_->dirty = true;
+    ++session_->revision;
+    currentPage_ = insertIndex;
+    NotifySessionChanged(true);
+    return insertIndex;
+}
+
+void QtDocumentController::ApplyNewPageDraft(const ui::NewPageDraft& draft, ui::NewPageApplyScope scope) {
+    if (session_ == nullptr) {
+        return;
+    }
+    Document& document = session_->document;
+    const std::vector<std::uint32_t> palette = document.NewPageDefaults().paletteProfile;
+
+    if (scope == ui::NewPageApplyScope::FuturePages) {
+        SetNewPageDefaults(ui::NewPageDefaults {
+            std::max(ui::kMinPageSize, draft.width),
+            std::max(ui::kMinPageSize, draft.height),
+            draft.backgroundColor,
+            ui::ResolvedPaletteProfile(draft.paletteProfile, palette),
+            draft.applyPaletteProfileToExistingStrokes,
+        });
+        return;
+    }
+
+    std::vector<std::size_t> indices;
+    std::vector<Page> before;
+    if (scope == ui::NewPageApplyScope::AllPages) {
+        indices.reserve(document.PageCount());
+        for (std::size_t page = 0; page < document.PageCount(); ++page) {
+            indices.push_back(page);
+        }
+    } else if (document.PageCount() > 0U) {
+        indices.push_back(std::min(currentPage_, document.PageCount() - 1U));
+    }
+    if (indices.empty()) {
+        return;
+    }
+
+    bool changed = false;
+    for (const std::size_t pageIndex : indices) {
+        Page& page = document.PageAt(pageIndex);
+        before.push_back(page);
+        changed = ui::ApplyConfiguredSettingsToPage(
+                      page,
+                      std::max(ui::kMinPageSize, draft.width),
+                      std::max(ui::kMinPageSize, draft.height),
+                      draft.backgroundColor,
+                      ui::ResolvedPaletteProfile(draft.paletteProfile, palette),
+                      draft.applyPaletteProfileToExistingStrokes)
+            || changed;
+    }
+    if (!changed) {
+        return;
+    }
+
+    std::vector<Page> after;
+    after.reserve(indices.size());
+    for (const std::size_t pageIndex : indices) {
+        after.push_back(document.PageAt(pageIndex));
+    }
+
+    HistoryAction action {};
+    action.type = HistoryActionType::ReplacePages;
+    action.pageIndices = indices;
+    action.pages = std::move(before);
+    action.replacementPages = std::move(after);
+    action.focusPageIndex = indices.front();
+    session_->undoActions.push_back(std::move(action));
+    session_->redoActions.clear();
+    session_->dirty = true;
+    ++session_->revision;
+    NotifySessionChanged(true);
+}
+
+void QtDocumentController::SetNewPageDefaults(const ui::NewPageDefaults& defaults) {
+    if (session_ == nullptr) {
+        return;
+    }
+    Document& document = session_->document;
+    Document::PageDefaults pageDefaults {};
+    pageDefaults.width = std::max(ui::kMinPageSize, defaults.width);
+    pageDefaults.height = std::max(ui::kMinPageSize, defaults.height);
+    pageDefaults.backgroundColor = defaults.backgroundColor;
+    pageDefaults.paletteProfile = defaults.paletteProfile;
+    const Document::PageDefaults& stored = document.NewPageDefaults();
+    const bool same = stored.width == pageDefaults.width && stored.height == pageDefaults.height
+        && stored.backgroundColor == pageDefaults.backgroundColor
+        && stored.paletteProfile == pageDefaults.paletteProfile;
+    if (same) {
+        return;
+    }
+    document.SetNewPageDefaults(pageDefaults);
+    if (session_ != nullptr) {
+        session_->dirty = true;
+        ++session_->revision;
+        NotifySessionChanged(true);
+    }
+}
+
+ui::NewPageDefaults QtDocumentController::NewPageDefaults() const {
+    const Document& document = DocumentRef();
+    const Document::PageDefaults& stored = document.NewPageDefaults();
+    ui::NewPageDefaults defaults {};
+    defaults.width = stored.width;
+    defaults.height = stored.height;
+    defaults.backgroundColor = stored.backgroundColor;
+    defaults.paletteProfile = stored.paletteProfile;
+    return defaults;
+}
+
+// --- selection clipboard, document side -------------------------------------
+
+bool QtDocumentController::BuildSelectionPayload(cnote::SelectionClipboardData& data) const {
+    const Document& document = DocumentRef();
+    data = cnote::SelectionClipboardData {};
+    bool any = false;
+    bool haveBounds = false;
+
+    const auto growPoint = [&](float x, float y) {
+        if (!haveBounds) {
+            data.minX = data.maxX = x;
+            data.minY = data.maxY = y;
+            haveBounds = true;
+            return;
+        }
+        data.minX = std::min(data.minX, x);
+        data.minY = std::min(data.minY, y);
+        data.maxX = std::max(data.maxX, x);
+        data.maxY = std::max(data.maxY, y);
+    };
+
+    for (const auto& [pageIndex, selection] : selection_) {
+        if (pageIndex >= document.PageCount() || selection.Empty()) {
+            continue;
+        }
+        const Page& page = document.PageAt(pageIndex);
+        for (const std::size_t index : selection.strokes) {
+            if (index >= page.strokes.size()) {
+                continue;
+            }
+            for (const Vec2& point : page.strokes[index].points) {
+                growPoint(point.x, point.y);
+            }
+            data.strokes.push_back(page.strokes[index]);
+            any = true;
+        }
+        for (const std::size_t index : selection.texts) {
+            if (index >= page.texts.size()) {
+                continue;
+            }
+            const PageText& text = page.texts[index];
+            growPoint(text.x, text.y);
+            growPoint(text.x + text.width, text.y + text.height);
+            data.texts.push_back(text);
+            any = true;
+        }
+        for (const std::size_t index : selection.latexes) {
+            if (index >= page.latexes.size()) {
+                continue;
+            }
+            growPoint(page.latexes[index].x, page.latexes[index].y);
+            data.latexes.push_back(page.latexes[index]);
+            any = true;
+        }
+        for (const std::size_t index : selection.images) {
+            if (index >= page.images.size()) {
+                continue;
+            }
+            const PageImage& image = page.images[index];
+            growPoint(image.x, image.y);
+            growPoint(image.x + image.width, image.y + image.height);
+            data.images.push_back(image);
+            any = true;
+        }
+    }
+    return any;
+}
+
+bool QtDocumentController::RemoveSelection() {
+    if (session_ == nullptr || selection_.empty()) {
+        return false;
+    }
+    Document& document = session_->document;
+    std::vector<std::size_t> indices;
+    std::vector<Page> before;
+    std::vector<Page> after;
+    bool changed = false;
+
+    for (const auto& [pageIndex, selection] : selection_) {
+        if (pageIndex >= document.PageCount() || selection.Empty()) {
+            continue;
+        }
+        indices.push_back(pageIndex);
+        before.push_back(document.PageAt(pageIndex));
+        Page& page = document.PageAt(pageIndex);
+
+        const auto removeAt = [](auto& objects, std::vector<std::size_t> indices) {
+            std::sort(indices.begin(), indices.end(), std::greater<> {});
+            for (const std::size_t index : indices) {
+                if (index < objects.size()) {
+                    objects.erase(objects.begin() + static_cast<std::ptrdiff_t>(index));
+                }
+            }
+        };
+        removeAt(page.strokes, selection.strokes);
+        removeAt(page.texts, selection.texts);
+        removeAt(page.latexes, selection.latexes);
+        removeAt(page.images, selection.images);
+        after.push_back(page);
+        changed = true;
+    }
+    if (!changed) {
+        return false;
+    }
+
+    HistoryAction action {};
+    action.type = HistoryActionType::ReplacePages;
+    action.pageIndices = indices;
+    action.pages = std::move(before);
+    action.replacementPages = std::move(after);
+    action.focusPageIndex = indices.front();
+    session_->undoActions.push_back(std::move(action));
+    session_->redoActions.clear();
+    session_->dirty = true;
+    ++session_->revision;
+    selection_.clear();
+    NotifySessionChanged(true);
+    return true;
+}
+
+bool QtDocumentController::PastePayload(
+    std::size_t pageIndex, Vec2 target, const cnote::SelectionClipboardData& data) {
+    if (session_ == nullptr || DocumentRef().PageCount() == 0U) {
+        return false;
+    }
+    if (data.strokes.empty() && data.texts.empty() && data.latexes.empty() && data.images.empty()) {
+        return false;
+    }
+    pageIndex = std::min(pageIndex, DocumentRef().PageCount() - 1U);
+    Document& document = session_->document;
+    Page& page = document.PageAt(pageIndex);
+    const Page before = page;
+
+    // Center the payload on the target and keep it inside the page when it fits.
+    const float width = data.maxX - data.minX;
+    const float height = data.maxY - data.minY;
+    float deltaX = target.x - (data.minX + width * 0.5f);
+    float deltaY = target.y - (data.minY + height * 0.5f);
+    if (width <= page.width) {
+        deltaX = std::clamp(deltaX, -data.minX, page.width - data.maxX);
+    }
+    if (height <= page.height) {
+        deltaY = std::clamp(deltaY, -data.minY, page.height - data.maxY);
+    }
+
+    ui::PageSelection pasted {};
+    for (const Stroke& source : data.strokes) {
+        Stroke stroke = source;
+        ui::TranslateStrokePoints(stroke, Vec2 { deltaX, deltaY });
+        pasted.strokes.push_back(page.strokes.size());
+        page.strokes.push_back(std::move(stroke));
+    }
+    for (const PageText& source : data.texts) {
+        PageText text = source;
+        text.id = NextObjectId();
+        text.x += deltaX;
+        text.y += deltaY;
+        pasted.texts.push_back(page.texts.size());
+        page.texts.push_back(std::move(text));
+    }
+    for (const PageLatex& source : data.latexes) {
+        PageLatex latex = source;
+        latex.id = NextObjectId();
+        latex.x += deltaX;
+        latex.y += deltaY;
+        pasted.latexes.push_back(page.latexes.size());
+        page.latexes.push_back(std::move(latex));
+    }
+    for (const PageImage& source : data.images) {
+        PageImage image = source;
+        image.x += deltaX;
+        image.y += deltaY;
+        pasted.images.push_back(page.images.size());
+        page.images.push_back(std::move(image));
+    }
+
+    HistoryAction action {};
+    action.type = HistoryActionType::ReplacePages;
+    action.pageIndices = { pageIndex };
+    action.pages = { before };
+    action.replacementPages = { page };
+    action.focusPageIndex = pageIndex;
+    session_->undoActions.push_back(std::move(action));
+    session_->redoActions.clear();
+    session_->dirty = true;
+    ++session_->revision;
+
+    selection_.clear();
+    selection_[pageIndex] = std::move(pasted);
+    currentPage_ = pageIndex;
+    NotifySessionChanged(true);
+    return true;
+}
+
 }  // namespace cnote::qt

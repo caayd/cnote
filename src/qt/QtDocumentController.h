@@ -12,6 +12,8 @@
 #include <QString>
 
 #include "Document.h"
+#include "document/SelectionClipboardCodec.h"
+#include "ui/PageDefaultsQt.h"
 #include "ProjectSession.h"
 #include "shell/AppManager.h"
 #include "ui/CanvasController.h"
@@ -95,6 +97,30 @@ public:
 
     void SetActiveStrokeStyle(StrokeStyle style) { strokeStyle_ = style; }
     [[nodiscard]] StrokeStyle ActiveStrokeStyle() const { return strokeStyle_; }
+    // Input tuning (spacing/smoothing/render smoothing) from the settings model.
+    void SetInputSettings(ui::CanvasInputSettings settings) { input_ = settings; }
+
+    // --- page operations (plan 6.2: Add Page / Append Pages / page settings) --
+    // Inserts `count` pages built from `draft` at `index` (clamped to the page
+    // count); one AddPages undo step. Returns the first inserted index.
+    std::size_t InsertPages(std::size_t index, std::size_t count, const ui::NewPageDraft& draft);
+    // Legacy NewPageSettingsWindow actions: apply the draft to the current page,
+    // to every page, or store it for pages created later.
+    void ApplyNewPageDraft(const ui::NewPageDraft& draft, ui::NewPageApplyScope scope);
+    void SetNewPageDefaults(const ui::NewPageDefaults& defaults);
+    [[nodiscard]] ui::NewPageDefaults NewPageDefaults() const;
+
+    // --- selection clipboard, document side (the shell owns QClipboard) ------
+    // Collects the selected objects of every page the view has a selection on,
+    // with the bounds the paste centers on. False when nothing is selected.
+    [[nodiscard]] bool BuildSelectionPayload(cnote::SelectionClipboardData& data) const;
+    // Removes the selected objects as one undo step; false when nothing was
+    // selected.
+    bool RemoveSelection();
+    // Inserts `data` into `pageIndex` with the payload's bounds centered on
+    // `target` (clamped to stay inside the page), selects the pasted objects and
+    // records one undo step.
+    bool PastePayload(std::size_t pageIndex, Vec2 target, const cnote::SelectionClipboardData& data);
 
     // --- ui::CanvasController --------------------------------------------
     [[nodiscard]] const Document& DocumentRef() const override;
