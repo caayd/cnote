@@ -1068,3 +1068,18 @@ if(WIN32)
         endforeach()
     endforeach()
 endif()
+
+# --- Portable XPRESS codec tests (plan step 2.4) ------------------------------
+# tests/XpressCodecTests.cpp existed but was registered nowhere; the codec is
+# load-bearing for v14 project compatibility (Windows cabinet buffer framing plus
+# MS-XCA XPRESS-Huffman), so it runs as its own CTest.
+add_executable(cnote_xpress_codec_tests
+    tests/XpressCodecTests.cpp
+    src/document/XpressCodec.cpp
+)
+target_include_directories(cnote_xpress_codec_tests PRIVATE src)
+target_compile_features(cnote_xpress_codec_tests PRIVATE cxx_std_20)
+target_compile_options(cnote_xpress_codec_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+add_test(NAME xpress_codec COMMAND cnote_xpress_codec_tests)
