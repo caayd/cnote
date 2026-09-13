@@ -96,9 +96,15 @@ void PaintImage(QPainter& painter, const PageImage& image, const PageRenderParam
 
     painter.save();
     painter.setOpacity(painter.opacity() * std::clamp(opacity, 0.0f, 1.0f));
+    // Reference parity: page images are drawn with nearest-neighbour sampling
+    // (GDI+ InterpolationModeNearestNeighbor), so a 2x2 translucent test image
+    // shows four hard quadrants instead of a smoothed gradient.
+    const bool smooth = painter.testRenderHint(QPainter::SmoothPixmapTransform);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
     painter.translate(centerX, centerY);
     painter.rotate(static_cast<qreal>(image.rotationDegrees));
     painter.drawImage(QRectF(-drawWidth * 0.5, -drawHeight * 0.5, drawWidth, drawHeight), view);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, smooth);
     painter.restore();
 }
 

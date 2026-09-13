@@ -194,6 +194,9 @@ public:
     // Diagnostics used by the gate harness/timings.
     // Page-surface re-renders (a signature change) and scale/DPR cache misses.
     [[nodiscard]] std::uint64_t SurfaceRenderCount() const { return surfaceRenders_; }
+    [[nodiscard]] float ViewportPanX() const { return panX_; }
+    [[nodiscard]] float ViewportPanY() const { return panY_; }
+    [[nodiscard]] float ZoomReferenceWidth() const { return ZoomReferenceCanvasWidth(); }
     [[nodiscard]] std::uint64_t SurfaceScaleMissCount() const { return surfaceScaleMisses_; }
     [[nodiscard]] std::size_t CachedSurfaceCount() const;
     [[nodiscard]] std::size_t LastPaintPageCount() const { return lastPaintPageCount_; }
