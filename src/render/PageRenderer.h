@@ -33,6 +33,10 @@ struct PageRenderParams {
 // in the painter's coordinate space; the painter's state is preserved.
 void PaintPage(QPainter& painter, const Page& page, const QPointF& pageOrigin, const PageRenderParams& params);
 
+// Draws one image in page units (rotation and opacity applied). `params.scale`
+// maps page units to painter units exactly like PaintPage.
+void PaintImage(QPainter& painter, const PageImage& image, const PageRenderParams& params, float opacity);
+
 // Draws one stroke in page units for a transient preview (live stroke, pending
 // erase). Same pen/path/dash/opacity rules as committed strokes; `params.scale`
 // maps page units to painter units exactly like PaintPage.

@@ -11,6 +11,7 @@
 #include <QPen>
 
 #include "latex/LatexEngine.h"
+#include "selection/StrokeSmoothing.h"
 #include "text/TextLayoutQt.h"
 
 namespace cnote::render {
@@ -19,49 +20,6 @@ namespace {
 
 constexpr float kMinimumStrokeRenderWidth = 1.25f;
 constexpr float kStrokeRenderWidthDivisor = 2.15f;
-
-float DistanceSquared(Vec2 a, Vec2 b) {
-    const float dx = a.x - b.x;
-    const float dy = a.y - b.y;
-    return (dx * dx) + (dy * dy);
-}
-
-// Same smoothing kernel as the legacy renderer (selection/Geometry.cpp).
-std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float strength) {
-    if (points.size() <= 2U || strength <= 0.001f) {
-        return points;
-    }
-
-    std::vector<Vec2> smoothed;
-    smoothed.reserve(points.size());
-    smoothed.push_back(points.front());
-
-    const float sideWeight = 0.25f * std::clamp(strength, 0.0f, 1.0f);
-    const float centerWeight = 1.0f - (sideWeight * 2.0f);
-
-    for (std::size_t index = 1; index + 1 < points.size(); ++index) {
-        const Vec2 previous = points[index - 1];
-        const Vec2 current = points[index];
-        const Vec2 next = points[index + 1];
-        const Vec2 filtered {
-            (previous.x * sideWeight) + (current.x * centerWeight) + (next.x * sideWeight),
-            (previous.y * sideWeight) + (current.y * centerWeight) + (next.y * sideWeight),
-        };
-        if (DistanceSquared(filtered, smoothed.back()) >= 0.05f) {
-            smoothed.push_back(filtered);
-        }
-    }
-
-    if (DistanceSquared(points.back(), smoothed.back()) >= 0.01f) {
-        smoothed.push_back(points.back());
-    }
-    return smoothed;
-}
-
-float StrokeRenderSmoothing(const Stroke& stroke, float fallbackSmoothing) {
-    const float smoothing = std::isfinite(stroke.smoothing) ? stroke.smoothing : fallbackSmoothing;
-    return std::clamp(smoothing, 0.0f, 1.0f);
-}
 
 QColor StrokeColor(const Stroke& stroke, float opacity) {
     QColor color = QColor::fromRgba(stroke.style.color);
@@ -82,24 +40,6 @@ void PaintPageBackground(QPainter& painter, const Page& page, float scale) {
     }
 }
 
-void PaintImage(QPainter& painter, const PageImage& image, float scale, float opacity) {
-    if (image.pixels.empty() || image.pixelWidth <= 0 || image.pixelHeight <= 0) {
-        return;
-    }
-
-    const QImage view = WrapBgraImage(image.pixels.data(), image.pixelWidth, image.pixelHeight, image.stride);
-    const qreal drawWidth = static_cast<qreal>(image.width * scale);
-    const qreal drawHeight = static_cast<qreal>(image.height * scale);
-    const qreal centerX = static_cast<qreal>((image.x + (image.width * 0.5f)) * scale);
-    const qreal centerY = static_cast<qreal>((image.y + (image.height * 0.5f)) * scale);
-
-    painter.save();
-    painter.setOpacity(painter.opacity() * std::clamp(opacity, 0.0f, 1.0f));
-    painter.translate(centerX, centerY);
-    painter.rotate(static_cast<qreal>(image.rotationDegrees));
-    painter.drawImage(QRectF(-drawWidth * 0.5, -drawHeight * 0.5, drawWidth, drawHeight), view);
-    painter.restore();
-}
 
 void PaintText(QPainter& painter, const PageText& text, float pageWidth, float scale, float opacity) {
     text::DrawPageTextQt(painter, text, pageWidth, scale, text.x * scale, text.y * scale, opacity);
@@ -129,6 +69,26 @@ std::uint64_t HashFloat(std::uint64_t hash, float value) {
 }
 
 }  // namespace
+
+void PaintImage(QPainter& painter, const PageImage& image, const PageRenderParams& params, float opacity) {
+    if (image.pixels.empty() || image.pixelWidth <= 0 || image.pixelHeight <= 0) {
+        return;
+    }
+
+    const float scale = std::max(0.01f, params.scale);
+    const QImage view = WrapBgraImage(image.pixels.data(), image.pixelWidth, image.pixelHeight, image.stride);
+    const qreal drawWidth = static_cast<qreal>(image.width * scale);
+    const qreal drawHeight = static_cast<qreal>(image.height * scale);
+    const qreal centerX = static_cast<qreal>((image.x + (image.width * 0.5f)) * scale);
+    const qreal centerY = static_cast<qreal>((image.y + (image.height * 0.5f)) * scale);
+
+    painter.save();
+    painter.setOpacity(painter.opacity() * std::clamp(opacity, 0.0f, 1.0f));
+    painter.translate(centerX, centerY);
+    painter.rotate(static_cast<qreal>(image.rotationDegrees));
+    painter.drawImage(QRectF(-drawWidth * 0.5, -drawHeight * 0.5, drawWidth, drawHeight), view);
+    painter.restore();
+}
 
 void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRenderParams& params, float opacity) {
     if (stroke.points.empty()) {
@@ -203,7 +163,7 @@ void PaintPage(QPainter& painter, const Page& page, const QPointF& pageOrigin, c
     PaintPageBackground(painter, page, scale);
 
     for (const PageImage& image : page.images) {
-        PaintImage(painter, image, scale, 1.0f);
+        PaintImage(painter, image, params, 1.0f);
     }
 
     for (std::size_t index = 0; index < page.texts.size(); ++index) {

@@ -33,6 +33,7 @@ add_library(cnote_core STATIC
     src/document/Clipboard.cpp
     src/document/FileIO.cpp
     src/document/History.cpp
+    src/document/LoadDocumentFile.cpp
     src/document/Pages.cpp
     src/document/SelectionClipboardCodec.cpp
     src/document/Session.cpp
@@ -41,9 +42,11 @@ add_library(cnote_core STATIC
     src/latex/LatexCompletion.cpp
     src/latex/LatexEngine.cpp
     src/latex/LatexEngineGdi.cpp
+    src/PdfOverlayGdi.cpp
     src/render/Paint.cpp
     src/selection/Selection.cpp
     src/selection/Geometry.cpp
+    src/selection/StrokeSmoothing.cpp
     src/selection/Transforms.cpp
     src/shell/Startup.cpp
     src/ui/UiUtil.cpp
@@ -222,8 +225,10 @@ add_executable(cnote_text_model_tests
     src/latex/LatexEngine.cpp
     src/latex/LatexEngineGdi.cpp
     src/PdfBackend.cpp
+    src/PdfOverlayGdi.cpp
     src/ProjectFile.cpp
     src/selection/Geometry.cpp
+    src/selection/StrokeSmoothing.cpp
     src/text/TextGeometry.cpp
     src/ui/UiUtil.cpp
     src/document/XpressCodec.cpp
@@ -305,10 +310,22 @@ target_link_libraries(cnote_latex_qt PUBLIC cnote_model microtex_qt Qt6::Gui)
 add_library(cnote_render_qt STATIC
     src/text/TextLayoutQt.cpp
     src/render/PageRenderer.cpp
+    src/selection/StrokeSmoothing.cpp
 )
 target_include_directories(cnote_render_qt PUBLIC src)
 target_compile_features(cnote_render_qt PUBLIC cxx_std_20)
 target_link_libraries(cnote_render_qt PUBLIC cnote_model cnote_latex_qt Qt6::Gui)
+
+# Qt PDF export: the portable PDFium core plus the Qt overlay composition. The
+# legacy cnote_core keeps the GDI+ overlay (src/PdfOverlayGdi.cpp) until
+# cutover; the two overlay TUs are never linked into one target.
+add_library(cnote_pdf_qt STATIC
+    src/PdfBackend.cpp
+    src/render/PdfExportQt.cpp
+)
+target_include_directories(cnote_pdf_qt PUBLIC src)
+target_compile_features(cnote_pdf_qt PUBLIC cxx_std_20)
+target_link_libraries(cnote_pdf_qt PUBLIC cnote_render_qt pdfium)
 
 # Offscreen Qt page-renderer test: layer order, transparent text backgrounds,
 # span application, cache reuse without re-layout, model stability.
@@ -324,3 +341,49 @@ execute_process(
     OUTPUT_STRIP_TRAILING_WHITESPACE)
 set_tests_properties(render_qt_offscreen PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+
+# --- Qt canvas and runnable migration frontend (plan steps 3.1/3.2/3.3/3.9) ---
+# CanvasWidget owns per-view viewport/transient state and its raster caches and
+# delegates all committed-object drawing to cnote_render_qt; the controller owns
+# the shared ProjectSession (document + undo/redo) behind ui::CanvasController.
+# No App/HWND/HDC and no second rendering or text path.
+find_package(Qt6 6.11.2 REQUIRED COMPONENTS Widgets)
+
+add_library(cnote_qt_ui STATIC
+    src/ui/CanvasWidget.cpp
+    src/qt/QtDocumentController.cpp
+    src/qt/QtDocumentIo.cpp
+    src/qt/QtMainWindow.cpp
+    # Portable project decode used by the Qt file service.
+    src/ProjectFile.cpp
+    src/document/XpressCodec.cpp
+    src/Unicode.cpp
+    # Stroke geometry shared with cnote_render_qt. It belongs to that library's
+    # source list; it is listed here only until its CMake block adds it (the
+    # renderer fails to link without it). Remove once present there.
+    src/selection/StrokeSmoothing.cpp
+)
+set_target_properties(cnote_qt_ui PROPERTIES AUTOMOC ON)
+target_include_directories(cnote_qt_ui PUBLIC src)
+target_compile_features(cnote_qt_ui PUBLIC cxx_std_20)
+target_compile_options(cnote_qt_ui PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_qt_ui PUBLIC cnote_model cnote_render_qt Qt6::Widgets)
+
+add_executable(cnote_qt
+    src/qt/main.cpp
+    # Stroke geometry used by cnote_render_qt. It belongs to that library's
+    # source list; until its CMake block includes it, the renderer's archive is
+    # scanned after this target's own objects, so the definition must come from
+    # here. Remove once cnote_render_qt lists it.
+    src/selection/StrokeSmoothing.cpp
+)
+target_link_libraries(cnote_qt PRIVATE cnote_qt_ui)
+
+# MicroTeX's font/XML resources ship as real files next to the executable.
+add_custom_command(TARGET cnote_qt POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res"
+        "$<TARGET_FILE_DIR:cnote_qt>/latex-res"
+)
