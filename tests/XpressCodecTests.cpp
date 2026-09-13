@@ -20,6 +20,15 @@ std::vector<std::uint8_t> Probe(std::size_t size) {
     }
     return result;
 }
+std::uint32_t ReadU32(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    return static_cast<std::uint32_t>(bytes[offset])
+        | (static_cast<std::uint32_t>(bytes[offset + 1]) << 8U)
+        | (static_cast<std::uint32_t>(bytes[offset + 2]) << 16U)
+        | (static_cast<std::uint32_t>(bytes[offset + 3]) << 24U);
+}
+void PutU32(std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint32_t value) {
+    for (unsigned i = 0; i != 4; ++i) bytes[offset + i] = static_cast<std::uint8_t>(value >> (i * 8U));
+}
 }
 
 int main() {
@@ -54,6 +63,77 @@ int main() {
         auto badCrc = *encoded; badCrc[6] ^= 1U;
         Require(!cnote::DecompressXpressBuffer(badCrc, input.size()), "bad CRC accepted");
         Require(!cnote::DecompressXpressBuffer(*encoded, input.size() + 1U), "wrong size accepted");
+        // Windows Compression API buffer framing above the 64 MiB chunk limit:
+        // the outer header keeps chunk == 64 MiB and each following record is a
+        // little-endian uint32 body size followed by that body. The pre-fix
+        // writer emitted a single frame at any size (rejected natively with
+        // GetLastError 605) and the pre-fix reader required chunk == size, so a
+        // native >64 MiB payload was unreadable.
+        constexpr std::size_t chunkLimit = 64U * 1024U * 1024U;
+        {
+            const auto input = Probe(chunkLimit);
+            const auto encoded = cnote::CompressXpressBuffer(input);
+            Require(encoded.has_value(), "64 MiB encode failed");
+            Require(ReadU32(*encoded, 8) == chunkLimit && ReadU32(*encoded, 16) == chunkLimit,
+                "64 MiB frame header fields");
+            const auto decoded = cnote::DecompressXpressBuffer(*encoded, input.size());
+            Require(decoded.has_value() && *decoded == input, "64 MiB round trip failed");
+        }
+        {
+            const auto input = Probe(chunkLimit + 1U);
+            const auto encoded = cnote::CompressXpressBuffer(input);
+            Require(encoded.has_value(), "64 MiB + 1 encode failed");
+            Require(ReadU32(*encoded, 8) == input.size(), "64 MiB + 1 size field");
+            Require(ReadU32(*encoded, 16) == chunkLimit, "64 MiB + 1 chunk field");
+            const std::uint32_t firstBody = ReadU32(*encoded, 24);
+            Require(firstBody < chunkLimit && 28U + firstBody + 4U < encoded->size(),
+                "64 MiB + 1 missing second record");
+            Require(28U + firstBody + 4U + ReadU32(*encoded, 28U + firstBody) == encoded->size(),
+                "64 MiB + 1 second record length mismatch");
+            const auto decoded = cnote::DecompressXpressBuffer(*encoded, input.size());
+            Require(decoded.has_value() && *decoded == input, "64 MiB + 1 round trip failed");
+
+            auto truncated = *encoded;
+            truncated.pop_back();
+            Require(!cnote::DecompressXpressBuffer(truncated, input.size()), "truncated second record accepted");
+            auto cutPrefix = *encoded;
+            cutPrefix.resize(28U + firstBody + 3U);
+            Require(!cnote::DecompressXpressBuffer(cutPrefix, input.size()), "partial record prefix accepted");
+            auto bogusRecord = *encoded;
+            PutU32(bogusRecord, 28U + firstBody, 0xFFFFFFFFU);
+            Require(!cnote::DecompressXpressBuffer(bogusRecord, input.size()), "bogus record size accepted");
+            auto badCrc = *encoded;
+            badCrc[6] ^= 1U;
+            Require(!cnote::DecompressXpressBuffer(badCrc, input.size()), "bad CRC accepted");
+            auto singleFrame = *encoded;
+            PutU32(singleFrame, 16, static_cast<std::uint32_t>(input.size()));
+            Require(!cnote::DecompressXpressBuffer(singleFrame, input.size()),
+                "single frame above the chunk limit accepted");
+            Require(!cnote::DecompressXpressBuffer(*encoded, input.size() + 1U), "false larger size accepted");
+            Require(!cnote::DecompressXpressBuffer(*encoded, input.size() - 1U), "false smaller size accepted");
+        }
+        {
+            // A 28-byte header declaring a huge size must fail without trusting it.
+            std::vector<std::uint8_t> crafted(29U, 0U);
+            PutU32(crafted, 0, 0xC0E5510AU);
+            crafted[4] = 24U;
+            crafted[7] = 4U;
+            PutU32(crafted, 8, 0xFFFFFFFEU);
+            PutU32(crafted, 16, 0xFFFFFFFEU);
+            PutU32(crafted, 24, 1U);
+            std::uint32_t crc = 0xFFFFFFFFU;
+            auto update = [&crc](std::uint8_t value) {
+                crc ^= value;
+                for (unsigned bit = 0; bit != 8; ++bit) {
+                    crc = (crc >> 1U) ^ (0xEDB88320U & (0U - (crc & 1U)));
+                }
+            };
+            for (std::size_t i = 0; i != 6; ++i) update(crafted[i]);
+            for (std::size_t i = 7; i != 24; ++i) update(crafted[i]);
+            crafted[6] = static_cast<std::uint8_t>(crc ^ 0xFFFFFFFFU);
+            Require(!cnote::DecompressXpressBuffer(crafted, 0xFFFFFFFEU), "untrusted declared size accepted");
+        }
+
         std::cout << "XPRESS checks passed\n";
         return 0;
     } catch (const std::exception& error) {
