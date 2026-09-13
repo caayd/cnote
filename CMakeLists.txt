@@ -713,3 +713,37 @@ target_link_libraries(cnote_chrome_tests PRIVATE cnote_chrome_qt cnote_model Qt6
 add_test(NAME chrome_qt COMMAND cnote_chrome_tests)
 set_tests_properties(chrome_qt PROPERTIES TIMEOUT 120
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+
+# --- Qt interaction router (migration plan steps 5.1-5.3) ---------------------
+# Widget-free pointer/tool routing ported from src/shell/MessageLoop.cpp (tool
+# routing, drag state, capture) and the App interaction methods it calls.  Qt
+# Gui plus the model's Vec2 only: no QWidget, App, HWND or HDC.  The canvas
+# adopts it; src/ui/CanvasWidget.cpp stays with the canvas slice.
+add_library(cnote_interaction_qt STATIC
+    src/ui/InteractionRouter.cpp
+)
+target_include_directories(cnote_interaction_qt PUBLIC src)
+target_compile_features(cnote_interaction_qt PUBLIC cxx_std_20)
+target_compile_options(cnote_interaction_qt PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_interaction_qt PUBLIC cnote_model Qt6::Gui)
+
+# The Qt shell is the consumer; linking the library here is the single
+# preparation step the canvas slice needs before it adopts the router.
+if(TARGET cnote_qt_ui)
+    target_link_libraries(cnote_qt_ui PUBLIC cnote_interaction_qt)
+endif()
+
+# Deterministic behavior test over PointerSample sequences: tool routing,
+# precedence, modifier changes, page-boundary segmentation, pending-erase
+# commit-once, click-versus-drag thresholds and cancel-once.  Plain computation
+# over model types - no Qt platform or window is created.
+add_executable(cnote_interaction_router_tests tests/InteractionRouterTests.cpp)
+target_compile_features(cnote_interaction_router_tests PRIVATE cxx_std_20)
+target_compile_options(cnote_interaction_router_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_interaction_router_tests PRIVATE cnote_interaction_qt)
+add_test(NAME interaction_router_qt COMMAND cnote_interaction_router_tests)
+set_tests_properties(interaction_router_qt PROPERTIES TIMEOUT 120)
