@@ -20,8 +20,8 @@ document.
   runtime resource tree ships as `latex-res/` beside the executable
   (`Contents/Resources/latex-res` inside a macOS bundle) through
   `install(DIRECTORY third_party/microtex/res/ ...)`.
-- Notice status: the MIT text is **not** staged into the packages (see the open
-  prerequisites).
+- Notice status: the MIT text is staged into the packages at
+  `share/licenses/cnote/microtex/LICENSE`.
 
 ### MicroTeX resources and fonts (`third_party/microtex/res`)
 
@@ -46,8 +46,9 @@ document.
 
 - Version: 10.0.0 (`third_party/tinyxml2/tinyxml2.cpp`).
 - License: zlib (`third_party/tinyxml2/LICENSE.txt`).
-- Shipped: statically linked into MicroTeX's XML parsers (Windows and Qt
-  builds); no separate artifact, and no notice is staged into the packages.
+- Shipped: statically linked into MicroTeX's XML parsers; no separate
+  artifact. The zlib license text is staged into the packages at
+  `share/licenses/cnote/tinyxml2/LICENSE.txt`.
 
 ### mingw-w64 `interactioncontext.h` (`third_party/mingw-w64`)
 
@@ -83,7 +84,9 @@ document.
   `libtiff.txt`, `llvm-libc.txt`, `simdutf.txt`, `zlib.txt`.
 - Shipped: `pdfium.dll` (Windows) / `libpdfium.so` (Linux) /
   `libpdfium.dylib` (macOS) beside or under the application.
-- Notice status: no PDFium/BSD notice is staged into the packages.
+- Notice status: the SDK packaging license and the bundled third-party
+  license texts are staged into the packages under
+  `share/licenses/cnote/pdfium/`.
 
 ### Qt 6.11.2 (Core, Gui, Widgets and the deployed plugins)
 

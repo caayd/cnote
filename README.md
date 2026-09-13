@@ -3,10 +3,10 @@
 PDF annotation app in C++20 with a Qt 6 Widgets frontend for Windows, Linux and
 macOS.
 
-The application is the Qt 6 Widgets frontend (`cnote`, plan steps 7.1/7.2). The
-original Win32 frontend and its GDI/GDI+/DirectComposition code were removed at
-cutover; the model, codec and service layers are shared and portable. `THIRD-PARTY-NOTICES.md` inventories the licenses and
-lists the open release prerequisites.
+The application is a Qt 6 Widgets frontend (`cnote`). The original Win32
+frontend and its GDI/GDI+/DirectComposition code have been removed; the
+model, codec and service layers are portable. `THIRD-PARTY-NOTICES.md`
+inventories the licenses and lists the open release prerequisites.
 
 `cnote` is built around fast pen input, simple page navigation, and a minimal UI. It opens PDFs, lets you annotate them with strokes and pasted images, saves native `.cnote` projects, and exports back to PDF.
 
@@ -118,33 +118,30 @@ release status below.
 
 ## Test
 
-The suite needs no display for the model/codec tests and the offscreen platform
-plugin for the Qt tests (each Qt test already sets its own `QT_PLUGIN_PATH`
-through its CTest environment, so a plain `ctest` works after configure):
+The suite needs no display for the model/codec tests. Every Qt test selects
+its own platform through its CTest `ENVIRONMENT` properties (offscreen
+everywhere except the three Windows tests that need the native platform), so
+a plain `ctest` works after configure - do not force `QT_QPA_PLATFORM`
+globally, because the offscreen plugin's placeholder font metrics break the
+Windows font tests:
 
 ```bash
 # model/codec tests, no display
-ctest --test-dir build-qt -R '^(latex_engine|text_model_round_trip|project_sessions|session_manager_qt|interaction_router_qt)$' --output-on-failure
-# everything else, offscreen
-QT_QPA_PLATFORM=offscreen ctest --test-dir build-qt -E '^(latex_engine|text_model_round_trip|project_sessions|session_manager_qt|interaction_router_qt)$' --output-on-failure
+ctest --test-dir build-qt -R '^(xpress_codec|session_manager_qt|interaction_router_qt|precision_input_router_qt)$' --output-on-failure
+# everything else (offscreen, or the native platform where a test requires it)
+ctest --test-dir build-qt -E '^(xpress_codec|session_manager_qt|interaction_router_qt|precision_input_router_qt)$' --output-on-failure
 ```
 
-`latex_engine`, `text_model_round_trip` and `project_sessions` are the
-legacy-named Windows-only model tests; they are absent from the Linux/macOS test
-set. `layout_parity_qt` runs everywhere: on Windows it additionally compares the
-Qt chrome geometry against the live Win32 reference, on other platforms against
-the frozen reference table captured from it.
+The headless set is `xpress_codec` (pure C++), `session_manager_qt`
+(`QCoreApplication` only), `interaction_router_qt` and
+`precision_input_router_qt` (no Qt application object). On Windows the suite
+has 20 tests; Linux and macOS have 19 because `precision_touchpad_qt` is
+Windows-only. On Windows, `selection_clipboard_qt` (real clipboard bridge),
+`layout_parity_qt` and `font_fallback_qt` (real font metrics) run on the
+native platform; `layout_parity_qt` compares the Qt chrome geometry against
+the frozen reference table captured from the removed Win32 frontend.
 
-## Legacy Windows frontend (migration reference)
-
-The legacy target still builds on Windows and remains the behavioural reference
-until cutover. Do not extend it.
-
-```powershell
-cmake -S . -B build -G "MinGW Makefiles" `
-  -DCNOTE_PDFIUM_ROOT="$pwd/third_party/pdfium"
-cmake --build build
-```
+## Windows precision-touchpad header
 
 The Qt MinGW 13.1 kit does not ship `interactioncontext.h` or a MinGW
 `ninput` import library. Windows builds use the unmodified public-domain
@@ -160,9 +157,9 @@ link or redistribute Windows system binaries.
 
 ## Package
 
-The Qt application installs and packages through Qt's CMake deploy API
-(`qt_generate_deploy_app_script` + CPack). The legacy Windows `cnote` target
-keeps building but is neither installed nor packaged; it is renamed at cutover.
+The application installs and packages through Qt's CMake deploy API
+(`qt_generate_deploy_app_script` + CPack); `cnote` is the only product
+target.
 
 ```bash
 cmake --build build-qt --target cnote      # add -DCMAKE_CXX_COMPILER=... on Windows
@@ -181,17 +178,22 @@ Each package carries the MicroTeX `latex-res` tree beside the executable
 platform/image plugins, and - on Windows - the MinGW compiler runtime. The
 application resolves `latex-res` relative to its installed location through
 `cnote::platform::LatexResourceDir()`, not the working directory. The verified
-Windows ZIP contains 14 files under `bin/` (`cnote.exe`, `qt.conf`,
+Windows ZIP contains 13 files under `bin/` (`cnote.exe`, `qt.conf`,
 `Qt6Core/Gui/Widgets/Network/Svg.dll`, `opengl32sw.dll`, `D3Dcompiler_47.dll`,
-`pdfium.dll`, the MinGW runtime DLLs), 7 plugin directories, 33 translation
-files and 45 `latex-res` files. The verified Linux TGZ contains
-`bin/cnote`, `bin/qt.conf`, 45 `latex-res` files, 34 libraries under `lib/`
-and 13 plugin directories under `plugins/`.
+`pdfium.dll`, the MinGW runtime DLLs), a 36-file `latex-res` tree, 11 plugin
+files under 7 plugin directories, 33 translation files and 23 license files.
+The verified Linux TGZ contains `bin/cnote`, `bin/qt.conf`, the same 36-file
+`latex-res` tree, 33 libraries under `lib/`, 39 plugin files under 13 plugin
+directories, 32 translation files and 23 license files.
 
-Only the MicroTeX font licenses (`latex-res/fonts/licences/Knuth_License.txt`,
-`OFL.txt`, `License_for_dsrom.txt`) ride along in the packages today.
-`THIRD-PARTY-NOTICES.md` records the full inventory and lists the notices that
-are still missing (a packaging change, not yet made).
+Every package stages `share/licenses/cnote/` with `THIRD-PARTY-NOTICES.md`
+and the license texts of the redistributed components: MicroTeX (MIT plus the
+font licenses), tinyxml2 (zlib), PDFium (BSD-3-Clause plus its bundled
+licenses) and the MinGW-w64 public-domain disclaimer. The MicroTeX font
+licenses also ride inside `latex-res/fonts/licences/`. The Qt LGPL v3 text is
+taken from the deployed Qt installation when it ships one; the kits used here
+do not, so it must be supplied before publishing (see
+`THIRD-PARTY-NOTICES.md`, "Open prerequisites").
 
 Verify a package before shipping it:
 
@@ -224,15 +226,14 @@ From the build tree (Qt application):
 
 From a package, run `bin/cnote.exe` (Windows) or extract the TGZ anywhere and
 run `bin/cnote` - resources are resolved relative to the executable, so the
-working directory does not matter. The legacy reference build runs as
-`build\cnote.exe`.
+working directory does not matter.
 
 ## Release status
 
 Verified locally (Windows MinGW 13.1 and WSL Ubuntu 24.04): configure, build,
-the full CTest set, `cmake --install`, CPack ZIP/TGZ, and
-`tools/verify-package.cmake` (17/17 checks on the ZIP, 16/16 on the TGZ,
-including launching the packaged application headless).
+the full CTest set (20 tests on Windows, 19 on Linux), `cmake --install`,
+CPack ZIP/TGZ, and `tools/verify-package.cmake` (25/25 checks on the ZIP,
+24/24 on the TGZ, including launching the packaged application headless).
 
 Not verified, and not claimed as release-ready:
 
@@ -248,13 +249,15 @@ Not verified, and not claimed as release-ready:
 - **Qt LGPL distribution obligations** - dynamic linking is the selected route
   but the legal/distribution review has not happened (see
   `THIRD-PARTY-NOTICES.md`).
+- **No project-level license** - the repository has no `LICENSE`/`COPYING`
+  for cnote itself; the product's own license is undecided.
 
 ## Notes
 
-- `.cnote` is the native project format for editable work; v14 files written by
-  the legacy Windows application stay readable, and new files stay readable by
-  it.
+- `.cnote` is the native project format for editable work; v14 files written
+  by the former Win32 application stay readable, and new files remain v14 so
+  they stay readable by it.
 - Auto-save applies to saved `.cnote` documents.
 - The product UI is Qt 6 Widgets (Core/Gui/Widgets, dynamically linked). The
-  remaining raw Win32/GDI/GDI+ code belongs to the legacy `cnote` frontend that
-  is deleted at cutover; new work belongs in the Qt targets.
+  Win32/GDI/GDI+ frontend is deleted; the only remaining raw Win32 code is
+  the precision-touchpad adapter, which loads `ninput.dll` dynamically.

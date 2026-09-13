@@ -17,11 +17,14 @@
 #      checksums) and downloads + SHA-256-verifies the pinned PDFium 148.0.7749.0
 #      archive;
 #   2. configures with cmake/Pdfium.cmake's CNOTE_PDFIUM_ROOT contract;
-#   3. builds (no legacy Win32 target exists off Windows: CMakeLists.txt guards
-#      the legacy cnote/cnote_core/microtex-GDI targets with WIN32);
-#   4. runs the model/codec tests with no display, then every remaining test
-#      with QT_QPA_PLATFORM=offscreen (individual tests also set their own
-#      QT_PLUGIN_PATH through their CTest ENVIRONMENT properties).
+#   3. builds the cnote product target (the legacy Win32 frontend and its
+#      cnote_core/microtex-GDI targets were removed at cutover);
+#   4. runs the tests that need no display, then every remaining test.  Each
+#      Qt test selects its own platform through its CTest ENVIRONMENT
+#      properties (offscreen everywhere except the three Windows tests that
+#      need the native platform), so no QT_QPA_PLATFORM is set at step level:
+#      forcing offscreen on Windows breaks font_fallback_qt's real font
+#      metrics.
 
 name: build-and-test
 
@@ -33,11 +36,10 @@ on:
 env:
   QT_VERSION: 6.11.2
   PDFIUM_TAG: chromium/7749
-  # Tests that need no display.  latex_engine / text_model_round_trip /
-  # project_sessions are the legacy-named model tests and only exist on Windows;
-  # session_manager_qt is Qt Core only; interaction_router_qt creates no Qt
-  # object at all.
-  HEADLESS_TESTS: ^(latex_engine|text_model_round_trip|project_sessions|session_manager_qt|interaction_router_qt)$
+  # Tests that need no display: xpress_codec is pure C++; session_manager_qt
+  # uses QCoreApplication only; interaction_router_qt and
+  # precision_input_router_qt create no Qt application object at all.
+  HEADLESS_TESTS: ^(xpress_codec|session_manager_qt|interaction_router_qt|precision_input_router_qt)$
 
 jobs:
   windows-x64:
@@ -45,7 +47,6 @@ jobs:
     runs-on: windows-2022
     env:
       PDFIUM_ASSET: pdfium-win-x64.tgz
-      CNOTE_PLATFORM: windows
     steps:
       - uses: actions/checkout@v4
 
@@ -104,10 +105,8 @@ jobs:
         shell: bash
         run: ctest --test-dir build -R "$HEADLESS_TESTS" --output-on-failure
 
-      - name: Qt tests (offscreen)
+      - name: Qt tests (platform selected per test)
         shell: bash
-        env:
-          QT_QPA_PLATFORM: offscreen
         run: ctest --test-dir build -E "$HEADLESS_TESTS" --output-on-failure
 
   linux-x64:
@@ -160,9 +159,7 @@ jobs:
       - name: Model and codec tests (no display)
         run: ctest --test-dir build -R "$HEADLESS_TESTS" --output-on-failure
 
-      - name: Qt tests (offscreen)
-        env:
-          QT_QPA_PLATFORM: offscreen
+      - name: Qt tests (platform selected per test)
         run: ctest --test-dir build -E "$HEADLESS_TESTS" --output-on-failure
 
   macos-arm64:
@@ -211,9 +208,7 @@ jobs:
       - name: Model and codec tests (no display)
         run: ctest --test-dir build -R "$HEADLESS_TESTS" --output-on-failure
 
-      - name: Qt tests (offscreen)
-        env:
-          QT_QPA_PLATFORM: offscreen
+      - name: Qt tests (platform selected per test)
         run: ctest --test-dir build -E "$HEADLESS_TESTS" --output-on-failure
 
   macos-x64:
@@ -262,7 +257,5 @@ jobs:
       - name: Model and codec tests (no display)
         run: ctest --test-dir build -R "$HEADLESS_TESTS" --output-on-failure
 
-      - name: Qt tests (offscreen)
-        env:
-          QT_QPA_PLATFORM: offscreen
+      - name: Qt tests (platform selected per test)
         run: ctest --test-dir build -E "$HEADLESS_TESTS" --output-on-failure
