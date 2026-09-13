@@ -578,7 +578,15 @@ std::optional<std::vector<std::uint8_t>> DecompressXpressBuffer(
     }
     try {
         std::vector<std::uint8_t> output;
-        output.reserve(size);
+        // `size` comes from the file header, so never reserve it unconditionally:
+        // a forged multi-gigabyte size on a tiny input must fail on bounds, not
+        // commit a huge allocation. Cap the hint by what the stored body could
+        // plausibly expand to.
+        const std::size_t reserveHint =
+            available <= (std::numeric_limits<std::size_t>::max() - kTableBytes) / 8U
+            ? available * 8U + kTableBytes
+            : size;
+        output.reserve(std::min<std::size_t>(size, reserveHint));
         if (!multiChunk) {
             if (bodySize != available) return std::nullopt;
             if (!DecodeChunkInto(input.subspan(kHeaderBytes), size, output)) return std::nullopt;
