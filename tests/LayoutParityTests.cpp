@@ -1198,21 +1198,22 @@ int main(int argc, char** argv) {
     // invisible modal MessageBoxW and block forever.  Make the harness
     // self-sufficient (no reliance on the caller's environment) and arm a
     // watchdog so a missing/incompatible plugin fails fast instead of hanging.
-    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
-#ifdef Q_OS_WIN
-        // The offscreen plugin's font database returns placeholder metrics on
-        // Windows (every glyph one em wide), which cannot validate text layout.
-        // The windows platform is headless-safe here: no window is created.
-        qputenv("QT_QPA_PLATFORM", "windows");
-#else
-        qputenv("QT_QPA_PLATFORM", "offscreen");
-#endif
-    }
     if (qEnvironmentVariableIsEmpty("QT_PLUGIN_PATH") && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM_PLUGIN_PATH")) {
 #ifdef CNOTE_QT_PLUGIN_PATH
         qputenv("QT_PLUGIN_PATH", CNOTE_QT_PLUGIN_PATH);
 #endif
     }
+#ifdef Q_OS_WIN
+    // The offscreen plugin's font database returns placeholder metrics on
+    // Windows (one em advance per glyph, regardless of the glyph), so the
+    // live text comparison requires the windows platform.  It stays headless:
+    // this harness never creates a window.
+    qputenv("QT_QPA_PLATFORM", "windows");
+#else
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
+        qputenv("QT_QPA_PLATFORM", "offscreen");
+    }
+#endif
 
     std::atomic<bool> appReady { false };
     std::thread watchdog([&appReady] {
