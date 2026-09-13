@@ -328,18 +328,6 @@ target_include_directories(cnote_pdf_qt PUBLIC src)
 target_compile_features(cnote_pdf_qt PUBLIC cxx_std_20)
 target_link_libraries(cnote_pdf_qt PUBLIC cnote_render_qt pdfium)
 
-# Throwaway PDF-export harness (plan step 3.4 evidence). Not a CTest.
-add_executable(cnote_pdf_export_harness
-    tests/PdfExportHarness.cpp
-    src/ProjectFile.cpp
-    src/document/LoadDocumentFile.cpp
-    src/document/XpressCodec.cpp
-    src/Unicode.cpp
-)
-target_compile_definitions(cnote_pdf_export_harness PRIVATE
-    CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
-target_link_libraries(cnote_pdf_export_harness PRIVATE cnote_pdf_qt Qt6::Core)
-
 # Offscreen Qt page-renderer test: layer order, transparent text backgrounds,
 # span application, cache reuse without re-layout, model stability.
 add_executable(cnote_page_renderer_tests tests/PageRendererTests.cpp)
@@ -353,6 +341,21 @@ execute_process(
     OUTPUT_VARIABLE _cnote_qt_plugins
     OUTPUT_STRIP_TRAILING_WHITESPACE)
 set_tests_properties(render_qt_offscreen PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+
+# Self-contained Qt PDF-export contract test (no external fixtures).
+add_executable(cnote_pdf_export_tests
+    tests/PdfExportTests.cpp
+    src/ProjectFile.cpp
+    src/document/LoadDocumentFile.cpp
+    src/document/XpressCodec.cpp
+    src/Unicode.cpp
+)
+target_compile_definitions(cnote_pdf_export_tests PRIVATE
+    CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
+target_link_libraries(cnote_pdf_export_tests PRIVATE cnote_pdf_qt Qt6::Core)
+add_test(NAME pdf_export_qt COMMAND cnote_pdf_export_tests)
+set_tests_properties(pdf_export_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
 
 # --- Qt canvas and runnable migration frontend (plan steps 3.1/3.2/3.3/3.9) ---
