@@ -23,6 +23,14 @@ constexpr std::size_t kSymbolCount = 512U;
 // reflected CRC32@6, mode@7, uncompressed size@8, unknown zero@12, chunk
 // size@16, unknown zero@20, body size@24. The body uses one 256-byte
 // nibble-length table per 64 KiB decoded output block.
+//
+// Inputs above the 64 MiB chunk limit are split by the Compression API into
+// independently compressed chunks: the 28-byte header above describes the first
+// chunk (chunk size = 64 MiB, body size = first chunk body), and every following
+// chunk is a little-endian uint32 body size followed by that body. A chunk whose
+// body size equals its uncompressed size is stored raw. Verified with the
+// Windows Cabinet oracle at 64 MiB, 64 MiB + 1 and 107,890,189 bytes.
+constexpr std::uint32_t kChunkSize = 64U * 1024U * 1024U;
 
 std::uint32_t ReadU32(std::span<const std::uint8_t> bytes, std::size_t offset) {
     return static_cast<std::uint32_t>(bytes[offset])
@@ -446,18 +454,80 @@ std::optional<std::vector<std::uint8_t>> DecodeStream(
     return output;
 }
 
+// Appends one chunk body to `output`; a body whose size equals the expected
+// uncompressed size is stored raw.
+bool DecodeChunkInto(
+    std::span<const std::uint8_t> body,
+    std::size_t expectedSize,
+    std::vector<std::uint8_t>& output) {
+    if (body.size() == expectedSize) {
+        output.insert(output.end(), body.begin(), body.end());
+        return true;
+    }
+    const auto decoded = DecodeStream(body, expectedSize);
+    if (!decoded) {
+        return false;
+    }
+    output.insert(output.end(), decoded->begin(), decoded->end());
+    return true;
+}
+
 }  // namespace
 
 std::optional<std::vector<std::uint8_t>> CompressXpressBuffer(std::span<const std::uint8_t> input) {
     if (input.empty()) return std::vector<std::uint8_t>{};
     try {
         if (input.size() > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
-        const auto stream = EncodeLiteralStream(input);
-        const bool useRaw = !stream || stream->size() + 4U >= input.size();
-        const std::size_t bodySize = useRaw ? input.size() : stream->size();
-        if (bodySize > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
+        // Every chunk is compressed independently; a chunk that does not shrink
+        // is stored raw. Above the 64 MiB chunk limit the first chunk carries the
+        // full 28-byte header and each later chunk is a uint32 body size + body,
+        // matching the Windows Compression API.
+        const auto encodeChunk = [](std::span<const std::uint8_t> chunk) -> std::optional<std::vector<std::uint8_t>> {
+            const auto stream = EncodeLiteralStream(chunk);
+            if (!stream || stream->size() + 4U >= chunk.size()) {
+                return std::vector<std::uint8_t>(chunk.begin(), chunk.end());
+            }
+            return stream;
+        };
+
+        if (input.size() <= kChunkSize) {
+            const auto stream = EncodeLiteralStream(input);
+            const bool useRaw = !stream || stream->size() + 4U >= input.size();
+            const std::size_t bodySize = useRaw ? input.size() : stream->size();
+            std::vector<std::uint8_t> result;
+            result.reserve(kHeaderBytes + bodySize);
+            AppendU32(result, kMagic);
+            result.push_back(static_cast<std::uint8_t>(kHeaderSize));
+            result.push_back(static_cast<std::uint8_t>(kHeaderSize >> 8U));
+            result.push_back(0);
+            result.push_back(kModeXpressHuffman);
+            AppendU32(result, static_cast<std::uint32_t>(input.size()));
+            AppendU32(result, 0);
+            AppendU32(result, static_cast<std::uint32_t>(input.size()));
+            AppendU32(result, 0);
+            AppendU32(result, static_cast<std::uint32_t>(bodySize));
+            if (useRaw) result.insert(result.end(), input.begin(), input.end());
+            else result.insert(result.end(), stream->begin(), stream->end());
+            result[6] = HeaderCrc(result);
+            return result;
+        }
+
+        const auto firstBody = encodeChunk(input.first(kChunkSize));
+        if (!firstBody || firstBody->size() > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
+        std::vector<std::vector<std::uint8_t>> laterBodies;
+        std::size_t offset = kChunkSize;
+        while (offset < input.size()) {
+            const std::size_t chunkLength = std::min<std::size_t>(kChunkSize, input.size() - offset);
+            auto body = encodeChunk(input.subspan(offset, chunkLength));
+            if (!body || body->size() > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
+            laterBodies.push_back(std::move(*body));
+            offset += chunkLength;
+        }
+
+        std::size_t totalSize = kHeaderBytes + firstBody->size();
+        for (const auto& extra : laterBodies) totalSize += extra.size() + 4U;
         std::vector<std::uint8_t> result;
-        result.reserve(kHeaderBytes + bodySize);
+        result.reserve(totalSize);
         AppendU32(result, kMagic);
         result.push_back(static_cast<std::uint8_t>(kHeaderSize));
         result.push_back(static_cast<std::uint8_t>(kHeaderSize >> 8U));
@@ -465,11 +535,14 @@ std::optional<std::vector<std::uint8_t>> CompressXpressBuffer(std::span<const st
         result.push_back(kModeXpressHuffman);
         AppendU32(result, static_cast<std::uint32_t>(input.size()));
         AppendU32(result, 0);
-        AppendU32(result, static_cast<std::uint32_t>(input.size()));
+        AppendU32(result, kChunkSize);
         AppendU32(result, 0);
-        AppendU32(result, static_cast<std::uint32_t>(bodySize));
-        if (useRaw) result.insert(result.end(), input.begin(), input.end());
-        else result.insert(result.end(), stream->begin(), stream->end());
+        AppendU32(result, static_cast<std::uint32_t>(firstBody->size()));
+        result.insert(result.end(), firstBody->begin(), firstBody->end());
+        for (const auto& extra : laterBodies) {
+            AppendU32(result, static_cast<std::uint32_t>(extra.size()));
+            result.insert(result.end(), extra.begin(), extra.end());
+        }
         result[6] = HeaderCrc(result);
         return result;
     } catch (const std::bad_alloc&) {
@@ -496,12 +569,37 @@ std::optional<std::vector<std::uint8_t>> DecompressXpressBuffer(
     const std::uint32_t size = ReadU32(input, 8);
     const std::uint32_t chunkSize = ReadU32(input, 16);
     const std::uint32_t bodySize = ReadU32(input, 24);
-    if (size != expectedSize || chunkSize != size || ReadU32(input, 12) != 0
-        || ReadU32(input, 20) != 0 || bodySize != input.size() - kHeaderBytes) return std::nullopt;
-    const auto body = input.subspan(kHeaderBytes);
+    const bool multiChunk = size > kChunkSize;
+    if (size != expectedSize || ReadU32(input, 12) != 0 || ReadU32(input, 20) != 0
+        || (chunkSize != size && !(multiChunk && chunkSize == kChunkSize))) return std::nullopt;
+    const std::size_t available = input.size() - kHeaderBytes;
+    if (bodySize > available || size > static_cast<std::uint64_t>(std::vector<std::uint8_t>().max_size())) {
+        return std::nullopt;
+    }
     try {
-        if (bodySize == size) return std::vector<std::uint8_t>(body.begin(), body.end());
-        return DecodeStream(body, expectedSize);
+        std::vector<std::uint8_t> output;
+        output.reserve(size);
+        if (!multiChunk) {
+            if (bodySize != available) return std::nullopt;
+            if (!DecodeChunkInto(input.subspan(kHeaderBytes), size, output)) return std::nullopt;
+            return output;
+        }
+        if (!DecodeChunkInto(input.subspan(kHeaderBytes, bodySize), kChunkSize, output)) return std::nullopt;
+        std::size_t offset = kHeaderBytes + bodySize;
+        std::uint64_t remaining = size - kChunkSize;
+        while (remaining > 0) {
+            if (input.size() - offset < 4U) return std::nullopt;
+            const std::uint32_t nextBodySize = ReadU32(input, offset);
+            offset += 4U;
+            if (nextBodySize > input.size() - offset) return std::nullopt;
+            const std::size_t chunkExpected = static_cast<std::size_t>(
+                std::min<std::uint64_t>(remaining, kChunkSize));
+            if (!DecodeChunkInto(input.subspan(offset, nextBodySize), chunkExpected, output)) return std::nullopt;
+            offset += nextBodySize;
+            remaining -= chunkExpected;
+        }
+        if (offset != input.size() || output.size() != size) return std::nullopt;
+        return output;
     } catch (const std::bad_alloc&) {
         return std::nullopt;
     } catch (const std::length_error&) {
