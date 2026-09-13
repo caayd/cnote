@@ -1,14 +1,17 @@
 #include "ProjectFile.h"
+#include "document/XpressCodec.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
-#include <compressapi.h>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <string>
 #include <string_view>
+#include <span>
+#include <type_traits>
 #include <vector>
 
 #include <windows.h>
@@ -102,21 +105,42 @@ bool WriteAllBytes(const std::wstring& filePath, const std::vector<std::uint8_t>
 }
 
 struct ByteReader {
-    const std::vector<std::uint8_t>& bytes;
+    std::span<const std::uint8_t> bytes;
     std::size_t offset = 0;
 
+    [[nodiscard]] std::size_t Remaining() const noexcept {
+        return bytes.size() - offset;
+    }
+
     [[nodiscard]] bool ReadExact(void* destination, std::size_t size) {
-        if (offset + size > bytes.size()) {
+        if (size > Remaining()) {
             return false;
         }
-        std::memcpy(destination, bytes.data() + offset, size);
+        if (size != 0) std::memcpy(destination, bytes.data() + offset, size);
         offset += size;
         return true;
     }
 
     template <typename T>
     [[nodiscard]] bool Read(T& value) {
-        return ReadExact(&value, sizeof(value));
+        static_assert(std::is_same_v<T, float> || std::is_same_v<T, std::uint8_t>
+            || std::is_same_v<T, std::uint32_t> || std::is_same_v<T, std::uint64_t>
+            || std::is_same_v<T, std::int32_t>);
+        if constexpr (std::is_same_v<T, float>) {
+            static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559);
+            std::uint32_t bits;
+            if (!Read(bits)) return false;
+            value = std::bit_cast<float>(bits);
+        } else {
+            if (sizeof(T) > Remaining()) return false;
+            using Unsigned = std::make_unsigned_t<T>;
+            Unsigned bits = 0;
+            for (std::size_t byte = 0; byte < sizeof(T); ++byte) {
+                bits |= static_cast<Unsigned>(bytes[offset++]) << (byte * 8U);
+            }
+            value = std::bit_cast<T>(bits);
+        }
+        return true;
     }
 
     [[nodiscard]] bool ReadString(std::wstring& value) {
@@ -124,11 +148,11 @@ struct ByteReader {
         if (!Read(size)) {
             return false;
         }
-        if (offset + size > bytes.size()) {
+        if (size > Remaining()) {
             return false;
         }
         const auto* begin = reinterpret_cast<const char*>(bytes.data() + offset);
-        std::string utf8(begin, begin + size);
+        const std::string_view utf8(begin, size);
         value = Utf8ToWide(utf8);
         offset += size;
         return true;
@@ -139,7 +163,7 @@ struct ByteReader {
         if (!Read(size)) {
             return false;
         }
-        if (size > bytes.size() || offset + static_cast<std::size_t>(size) > bytes.size()) {
+        if (size > Remaining()) {
             return false;
         }
         value.resize(static_cast<std::size_t>(size));
@@ -151,21 +175,6 @@ struct ByteReader {
     }
 };
 
-struct CompressorCloser {
-    void operator()(void* handle) const noexcept {
-        if (handle != nullptr) {
-            CloseCompressor(static_cast<COMPRESSOR_HANDLE>(handle));
-        }
-    }
-};
-
-struct DecompressorCloser {
-    void operator()(void* handle) const noexcept {
-        if (handle != nullptr) {
-            CloseDecompressor(static_cast<DECOMPRESSOR_HANDLE>(handle));
-        }
-    }
-};
 
 void AppendBytes(std::vector<std::uint8_t>& output, const void* data, std::size_t size) {
     const auto* begin = static_cast<const std::uint8_t*>(data);
@@ -174,7 +183,19 @@ void AppendBytes(std::vector<std::uint8_t>& output, const void* data, std::size_
 
 template <typename T>
 void AppendValue(std::vector<std::uint8_t>& output, const T& value) {
-    AppendBytes(output, &value, sizeof(value));
+    static_assert(std::is_same_v<T, float> || std::is_same_v<T, std::uint8_t>
+        || std::is_same_v<T, std::uint32_t> || std::is_same_v<T, std::uint64_t>
+        || std::is_same_v<T, std::int32_t>);
+    if constexpr (std::is_same_v<T, float>) {
+        static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559);
+        AppendValue(output, std::bit_cast<std::uint32_t>(value));
+    } else {
+        using Unsigned = std::make_unsigned_t<T>;
+        const auto bits = static_cast<Unsigned>(value);
+        for (std::size_t byte = 0; byte < sizeof(T); ++byte) {
+            output.push_back(static_cast<std::uint8_t>(bits >> (byte * 8U)));
+        }
+    }
 }
 
 void AppendString(std::vector<std::uint8_t>& output, const std::wstring& value) {
@@ -204,7 +225,7 @@ void AppendPaletteProfile(std::vector<std::uint8_t>& output, const std::vector<s
 
 bool ReadPaletteProfile(ByteReader& reader, std::vector<std::uint32_t>& paletteProfile) {
     std::uint32_t colorCount = 0;
-    if (!reader.Read(colorCount)) {
+    if (!reader.Read(colorCount) || colorCount > reader.Remaining() / 4U) {
         return false;
     }
 
@@ -250,7 +271,7 @@ bool ReadStroke(ByteReader& reader, std::uint32_t version, Stroke& stroke) {
     if (version >= 10U && !reader.Read(stroke.smoothing)) {
         return false;
     }
-    if (!reader.Read(pointCount)) {
+    if (!reader.Read(pointCount) || pointCount > reader.Remaining() / 8U) {
         return false;
     }
 
@@ -272,9 +293,9 @@ void AppendImage(std::vector<std::uint8_t>& output, const PageImage& image) {
     AppendValue(output, image.width);
     AppendValue(output, image.height);
     AppendValue(output, image.rotationDegrees);
-    AppendValue(output, image.pixelWidth);
-    AppendValue(output, image.pixelHeight);
-    AppendValue(output, image.stride);
+    AppendValue(output, static_cast<std::int32_t>(image.pixelWidth));
+    AppendValue(output, static_cast<std::int32_t>(image.pixelHeight));
+    AppendValue(output, static_cast<std::int32_t>(image.stride));
     AppendBlob(output, image.pixels);
 }
 
@@ -399,7 +420,8 @@ bool ReadText(ByteReader& reader, std::uint32_t version, PageText& text) {
     text.underline = (styleFlags & kTextStyleFlagUnderline) != 0;
     if (version >= 13U) {
         std::uint32_t spanCount = 0;
-        if (!reader.Read(spanCount) || spanCount > text.content.size() + 1U) {
+        if (!reader.Read(spanCount) || spanCount > text.content.size() + 1U
+            || spanCount > reader.Remaining() / 18U) {
             return false;
         }
         text.styleSpans.reserve(spanCount);
@@ -428,9 +450,9 @@ bool ReadText(ByteReader& reader, std::uint32_t version, PageText& text) {
 }
 
 void AppendRaster(std::vector<std::uint8_t>& output, const RasterImage& raster) {
-    AppendValue(output, raster.width);
-    AppendValue(output, raster.height);
-    AppendValue(output, raster.stride);
+    AppendValue(output, static_cast<std::int32_t>(raster.width));
+    AppendValue(output, static_cast<std::int32_t>(raster.height));
+    AppendValue(output, static_cast<std::int32_t>(raster.stride));
     AppendValue(output, raster.scale);
     AppendBlob(output, raster.pixels);
 }
@@ -443,74 +465,13 @@ bool ReadRaster(ByteReader& reader, RasterImage& raster) {
 }
 
 std::optional<std::vector<std::uint8_t>> CompressPayload(const std::vector<std::uint8_t>& payload) {
-    if (payload.empty()) {
-        return std::vector<std::uint8_t> {};
-    }
-
-    COMPRESSOR_HANDLE compressorHandle = nullptr;
-    if (CreateCompressor(COMPRESS_ALGORITHM_XPRESS_HUFF, nullptr, &compressorHandle) == FALSE) {
-        return std::nullopt;
-    }
-
-    std::unique_ptr<void, CompressorCloser> compressor(compressorHandle);
-    SIZE_T compressedSize = 0;
-    if (Compress(
-            compressorHandle,
-            const_cast<std::uint8_t*>(payload.data()),
-            payload.size(),
-            nullptr,
-            0,
-            &compressedSize) == FALSE
-        && GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
-        return std::nullopt;
-    }
-
-    std::vector<std::uint8_t> compressed(compressedSize);
-    if (Compress(
-            compressorHandle,
-            const_cast<std::uint8_t*>(payload.data()),
-            payload.size(),
-            compressed.data(),
-            compressed.size(),
-            &compressedSize) == FALSE) {
-        return std::nullopt;
-    }
-
-    compressed.resize(compressedSize);
-    return compressed;
+    return CompressXpressBuffer(payload);
 }
 
 std::optional<std::vector<std::uint8_t>> DecompressPayload(
-    const std::vector<std::uint8_t>& payload,
+    std::span<const std::uint8_t> payload,
     std::uint64_t expectedSize) {
-    if (expectedSize > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        return std::nullopt;
-    }
-
-    if (expectedSize == 0U) {
-        return std::vector<std::uint8_t> {};
-    }
-
-    DECOMPRESSOR_HANDLE decompressorHandle = nullptr;
-    if (CreateDecompressor(COMPRESS_ALGORITHM_XPRESS_HUFF, nullptr, &decompressorHandle) == FALSE) {
-        return std::nullopt;
-    }
-
-    std::unique_ptr<void, DecompressorCloser> decompressor(decompressorHandle);
-    std::vector<std::uint8_t> decompressed(static_cast<std::size_t>(expectedSize));
-    SIZE_T decompressedSize = 0;
-    if (Decompress(
-            decompressorHandle,
-            const_cast<std::uint8_t*>(payload.data()),
-            payload.size(),
-            decompressed.data(),
-            decompressed.size(),
-            &decompressedSize) == FALSE
-        || decompressedSize != decompressed.size()) {
-        return std::nullopt;
-    }
-
-    return decompressed;
+    return DecompressXpressBuffer(payload, expectedSize);
 }
 
 std::optional<Document> LoadProjectPayload(
@@ -530,7 +491,7 @@ std::optional<Document> LoadProjectPayload(
 
     if (version >= 4U) {
         std::uint32_t sourceCount = 0;
-        if (!reader.Read(sourceCount)) {
+        if (!reader.Read(sourceCount) || sourceCount > reader.Remaining() / 12U) {
             return std::nullopt;
         }
         pdfSources.reserve(sourceCount);
@@ -572,6 +533,13 @@ std::optional<Document> LoadProjectPayload(
             });
         }
     }
+
+    // Minimum wire bytes per page, excluding optional rasters and object data.
+    const std::size_t minimumPageBytes = 16U + (version >= 2U ? 4U : 0U)
+        + (version >= 3U ? 4U : 0U) + (version >= 4U ? 4U : 0U)
+        + (version >= 5U ? 4U : 0U) + (version >= 11U ? 4U : 0U)
+        + (version >= 14U ? 4U : 0U);
+    if (pageCount > reader.Remaining() / minimumPageBytes) return std::nullopt;
 
     std::vector<Page> savedPages;
     savedPages.reserve(pageCount);
@@ -624,6 +592,9 @@ std::optional<Document> LoadProjectPayload(
             return std::nullopt;
         }
 
+        const std::size_t minimumStrokeBytes = 12U + (version >= 9U ? 1U : 0U)
+            + (version >= 10U ? 4U : 0U);
+        if (strokeCount > reader.Remaining() / minimumStrokeBytes) return std::nullopt;
         page.strokes.reserve(strokeCount);
         for (std::uint32_t strokeIndex = 0; strokeIndex < strokeCount; ++strokeIndex) {
             Stroke stroke {};
@@ -633,6 +604,9 @@ std::optional<Document> LoadProjectPayload(
             page.strokes.push_back(std::move(stroke));
         }
 
+        const std::size_t minimumTextBytes = version >= 13U ? 40U
+            : version >= 8U ? 32U : version >= 7U ? 28U : version >= 6U ? 24U : 20U;
+        if (textCount > reader.Remaining() / minimumTextBytes) return std::nullopt;
         page.texts.reserve(textCount);
         for (std::uint32_t textIndex = 0; textIndex < textCount; ++textIndex) {
             PageText text {};
@@ -676,6 +650,7 @@ std::optional<Document> LoadProjectPayload(
             }
         }
 
+        if (latexCount > reader.Remaining() / 24U) return std::nullopt;
         page.latexes.reserve(latexCount);
         for (std::uint32_t latexIndex = 0; latexIndex < latexCount; ++latexIndex) {
             PageLatex latex {};
@@ -685,6 +660,7 @@ std::optional<Document> LoadProjectPayload(
             page.latexes.push_back(std::move(latex));
         }
 
+        if (imageCount > reader.Remaining() / 40U) return std::nullopt;
         page.images.reserve(imageCount);
         for (std::uint32_t imageIndex = 0; imageIndex < imageCount; ++imageIndex) {
             PageImage image {};
@@ -696,6 +672,7 @@ std::optional<Document> LoadProjectPayload(
 
         savedPages.push_back(std::move(page));
     }
+    if (reader.Remaining() != 0) return std::nullopt;
 
     std::vector<std::optional<Document>> openedSources;
     openedSources.reserve(pdfSources.size());
@@ -750,7 +727,6 @@ std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
     AppendValue(bytes, sourceCount);
     for (std::size_t sourceIndex = 0; sourceIndex < document.PdfSourceCount(); ++sourceIndex) {
         const Document::PdfSource& pdfSource = document.PdfSourceAt(sourceIndex);
-        AppendString(bytes, pdfSource.sourcePath);
         AppendBlob(bytes, pdfSource.pdfData ? *pdfSource.pdfData : std::vector<std::uint8_t> {});
     }
     AppendValue(bytes, document.NewPageDefaults().width);
@@ -826,25 +802,21 @@ std::optional<Document> ProjectFile::LoadFromBytes(
         if (!reader.Read(payloadEncoding) || !reader.Read(uncompressedPayloadSize)) {
             return std::nullopt;
         }
-        const std::vector<std::uint8_t> storedPayload(bytes.begin() + static_cast<std::ptrdiff_t>(reader.offset), bytes.end());
-        std::vector<std::uint8_t> payload;
+        const auto storedPayload = reader.bytes.subspan(reader.offset);
         if (payloadEncoding == kPayloadEncodingRaw) {
-            payload = storedPayload;
-            if (payload.size() != uncompressedPayloadSize) {
-                return std::nullopt;
-            }
+            if (storedPayload.size() != uncompressedPayloadSize) return std::nullopt;
+            ByteReader payloadReader { storedPayload };
+            return LoadProjectPayload(payloadReader, version, filePath, pdfBackend);
         } else if (payloadEncoding == kPayloadEncodingXpressHuff) {
             const auto decompressedPayload = DecompressPayload(storedPayload, uncompressedPayloadSize);
             if (!decompressedPayload.has_value()) {
                 return std::nullopt;
             }
-            payload = std::move(*decompressedPayload);
+            ByteReader payloadReader { *decompressedPayload };
+            return LoadProjectPayload(payloadReader, version, filePath, pdfBackend);
         } else {
             return std::nullopt;
         }
-
-        ByteReader payloadReader { payload };
-        return LoadProjectPayload(payloadReader, version, filePath, pdfBackend);
     }
 
     return LoadProjectPayload(reader, version, filePath, pdfBackend);
