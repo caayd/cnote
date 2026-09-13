@@ -110,7 +110,7 @@ struct ProjectSessionTests {
         Require(root.session_->document.PageAt(0).texts[0].content == u"original", "cross-view text undo");
         root.Redo();
 
-        const auto projectPath = (scratch / L"linked.cnote").wstring();
+        const std::filesystem::path projectPath = scratch / L"linked.cnote";
         Require(second.SaveCnoteToPath(projectPath, false), "save shared project");
         Require(!root.session_->dirty && !root.CurrentWindowTitle().ends_with(L"*"), "save clears every dirty title");
         Require(root.session_->document.FilePath() == projectPath, "save path shared");
@@ -120,7 +120,7 @@ struct ProjectSessionTests {
                 "autosave interval changes reach the owning view");
         auto saved = ProjectFile::Load(projectPath, root.pdfBackend_);
         Require(saved && saved->PageAt(0).texts[0].content == u"edited in first view", "shared edits round trip");
-        Require(!second.SaveCnoteToPath((scratch / L"missing" / L"failure.cnote").wstring(), false), "save failure reported");
+        Require(!second.SaveCnoteToPath(scratch / L"missing" / L"failure.cnote", false), "save failure reported");
 
         auto defaults = root.session_->document.NewPageDefaults();
         defaults.width = 420;
@@ -128,13 +128,13 @@ struct ProjectSessionTests {
         root.newPageSettings_.width = defaults.width;
         root.NotifyDocumentMutated();
         Require(second.newPageSettings_.width == 420, "project page defaults shared");
-        Require(!second.SaveCnoteToPath((scratch / L"missing" / L"failure.cnote").wstring(), false)
+        Require(!second.SaveCnoteToPath(scratch / L"missing" / L"failure.cnote", false)
                 && root.session_->dirty, "failed save preserves shared dirty state");
 
         Require(root.CreateAdditionalWindow(false, SW_HIDE), "create independent window");
         App& third = *root.childWindows_.back();
         Require(third.session_ != root.session_, "new window starts independent project");
-        Require(third.OpenDocumentPath((scratch / L"." / L"LINKED.cnote").wstring()), "open equivalent existing path");
+        Require(third.OpenDocumentPath(scratch / L"." / L"LINKED.cnote"), "open equivalent existing path");
         Require(third.session_ == root.session_, "opening existing file attaches to session");
         StrokeOn(third, 0);
         auto originalSession = root.session_;
@@ -153,7 +153,7 @@ struct ProjectSessionTests {
         Require(!QuitPending(), "original close does not post quit");
         Require(originalSession->views.size() == 1 && second.AutoSaveOwner() == &second, "autosave ownership transfers");
         Require(second.CanAutoSaveCurrentDocument(), "remaining view can autosave dirty project");
-        Require(second.pdfBackend_.ExportPdf(second.session_->document, (scratch / L"after-close.pdf").wstring(),
+        Require(second.pdfBackend_.ExportPdf(second.session_->document, scratch / L"after-close.pdf",
                     1.0f, 0.55f, 3, 2, false), "PDF rendering survives another window's destruction");
         Require(latex::Parse(u"x^2", 24, true) != nullptr, "LaTeX survives another window's destruction");
         Require(second.CreateAdditionalWindow(true, SW_HIDE), "surviving view can create another linked view");

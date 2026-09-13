@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -23,7 +24,7 @@ class IPdfBackend {
 public:
     virtual ~IPdfBackend() = default;
 
-    [[nodiscard]] virtual std::optional<Document> Open(const std::wstring& filePath) = 0;
+    [[nodiscard]] virtual std::optional<Document> Open(const std::filesystem::path& filePath) = 0;
 };
 
 class PdfiumBackend final : public IPdfBackend {
@@ -33,9 +34,9 @@ public:
     PdfiumBackend(const PdfiumBackend&) = delete;
     PdfiumBackend& operator=(const PdfiumBackend&) = delete;
 
-    [[nodiscard]] std::optional<Document> Open(const std::wstring& filePath) override;
+    [[nodiscard]] std::optional<Document> Open(const std::filesystem::path& filePath) override;
     [[nodiscard]] std::optional<Document> OpenFromMemory(
-        const std::wstring& sourcePath,
+        const std::filesystem::path& sourcePath,
         std::shared_ptr<std::vector<std::uint8_t>> pdfBytes) const;
     [[nodiscard]] std::optional<RasterImage> RenderPage(
         const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
@@ -54,7 +55,7 @@ public:
         int height) const;
     [[nodiscard]] bool ExportPdf(
         const Document& document,
-        const std::wstring& filePath,
+        const std::filesystem::path& filePath,
         float renderScale,
         float strokeSmoothing,
         float dashLength,

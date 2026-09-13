@@ -382,7 +382,7 @@ void App::UpdateAutoSaveTimer() {
 }
 
 bool App::HasSavedCnotePath() const {
-    return session_->document.FilePath().ends_with(kCnoteFileExtension);
+    return HasExtension(session_->document.FilePath(), kCnoteFileExtension);
 }
 
 bool App::CanAutoSaveCurrentDocument() const {

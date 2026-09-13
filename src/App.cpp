@@ -690,13 +690,8 @@ HCURSOR CreateSquareBrushCursor(int brushDiameter, COLORREF fillColor) {
     return cursor;
 }
 
-std::wstring BaseName(const std::wstring& path) {
-    const auto slash = path.find_last_of(L"\\/");
-    if (slash == std::wstring::npos) {
-        return path;
-    }
-
-    return path.substr(slash + 1);
+std::wstring BaseName(const std::filesystem::path& path) {
+    return path.filename().native();
 }
 
 std::wstring EscapeMenuText(std::wstring_view value) {
@@ -711,15 +706,15 @@ std::wstring EscapeMenuText(std::wstring_view value) {
     return escaped;
 }
 
-std::wstring RecentDocumentMenuLabel(const std::wstring& path) {
+std::wstring RecentDocumentMenuLabel(const std::filesystem::path& path) {
     std::wstring label;
     std::wstring fileName = BaseName(path);
     if (fileName.empty()) {
-        fileName = path;
+        fileName = path.native();
     }
     label += EscapeMenuText(fileName);
 
-    const std::filesystem::path parent = std::filesystem::path(path).parent_path();
+    const std::filesystem::path parent = path.parent_path();
     if (!parent.empty()) {
         label += L"\t";
         label += EscapeMenuText(parent.native());

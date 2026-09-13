@@ -16,7 +16,7 @@ constexpr DWORD kDwmWindowCornerRound = 2;
 
 }  // namespace
 
-int App::Run(int showCommand, std::optional<std::wstring> startupPath) {
+int App::Run(int showCommand, std::optional<std::filesystem::path> startupPath) {
     if (!CreateMainWindow(showCommand)) {
         return 1;
     }

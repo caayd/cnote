@@ -3,6 +3,7 @@
 #include <memory>
 #include <optional>
 #include <array>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
@@ -56,7 +57,7 @@ public:
     explicit App(HINSTANCE instance);
     ~App();
 
-    int Run(int showCommand, std::optional<std::wstring> startupPath = std::nullopt);
+    int Run(int showCommand, std::optional<std::filesystem::path> startupPath = std::nullopt);
     [[nodiscard]] static float SnapBrushSize(float size);
     enum class Tool {
         Select,
@@ -291,7 +292,7 @@ private:
     bool IsSessionInteractionActive() const;
     App* AutoSaveOwner() const;
     void SetSessionAutoSaveInterval(unsigned int seconds);
-    static std::shared_ptr<ProjectSession> FindOpenSession(const std::wstring& path);
+    static std::shared_ptr<ProjectSession> FindOpenSession(const std::filesystem::path& path);
     std::size_t CurrentPageIndex() const;
     Page& CurrentPage();
     const Page& CurrentPage() const;
@@ -470,7 +471,7 @@ private:
         bool applyPaletteProfileToExistingStrokes);
     [[nodiscard]] bool OpenNewWindow();
     [[nodiscard]] bool AppendPagesFromFile();
-    [[nodiscard]] bool AppendPagesFromDocumentPath(const std::wstring& filePath);
+    [[nodiscard]] bool AppendPagesFromDocumentPath(const std::filesystem::path& filePath);
     void PanBy(float dx, float dy);
     void SmoothPanBy(float dx, float dy);
     void ApplyPanDelta(float dx, float dy);
@@ -547,18 +548,18 @@ private:
     void CycleColor();
     void SetColorIndex(std::size_t index);
     void OpenDocument();
-    [[nodiscard]] bool OpenDocumentPath(const std::wstring& filePath);
-    [[nodiscard]] bool OpenProject(const std::wstring& filePath);
-    [[nodiscard]] bool OpenPdf(const std::wstring& filePath);
+    [[nodiscard]] bool OpenDocumentPath(const std::filesystem::path& filePath);
+    [[nodiscard]] bool OpenProject(const std::filesystem::path& filePath);
+    [[nodiscard]] bool OpenPdf(const std::filesystem::path& filePath);
     [[nodiscard]] bool SaveCurrentCnote();
-    [[nodiscard]] bool SaveCnoteToPath(const std::wstring& filePath, bool showError);
+    [[nodiscard]] bool SaveCnoteToPath(const std::filesystem::path& filePath, bool showError);
     [[nodiscard]] bool SaveAsCnote();
     [[nodiscard]] bool ExportAsPdf();
     void PrepareForDocumentSwitch();
     void ApplyDocument(Document document, bool resetBrushWidth = false);
-    [[nodiscard]] std::wstring SuggestedCnotePath() const;
-    [[nodiscard]] std::wstring SuggestedPdfExportPath() const;
-    void RecordRecentDocumentPath(const std::wstring& filePath, bool saveSettings = true);
+    [[nodiscard]] std::filesystem::path SuggestedCnotePath() const;
+    [[nodiscard]] std::filesystem::path SuggestedPdfExportPath() const;
+    void RecordRecentDocumentPath(const std::filesystem::path& filePath, bool saveSettings = true);
     [[nodiscard]] bool OpenRecentDocument(std::size_t index);
     [[nodiscard]] bool IsCursorInsidePage(POINT cursor) const;
     [[nodiscard]] std::optional<PageView> HitTestPage(POINT cursor) const;
@@ -929,7 +930,7 @@ private:
     bool titleMenuActive_ = false;
     int hoveredWindowButton_ = -1;
     bool trackingMouseLeave_ = false;
-    std::vector<std::wstring> recentDocumentPaths_ {};
+    std::vector<std::filesystem::path> recentDocumentPaths_ {};
     HDC paintBackbufferDc_ = nullptr;
     HBITMAP paintBackbufferBitmap_ = nullptr;
     HGDIOBJ paintBackbufferPreviousBitmap_ = nullptr;

@@ -35,7 +35,7 @@ void EnablePerMonitorDpiAwareness() {
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
     EnablePerMonitorDpiAwareness();
 
-    std::optional<std::wstring> startupPath;
+    std::optional<std::filesystem::path> startupPath;
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv != nullptr) {

@@ -14,6 +14,7 @@ using cnote::HasExtension;
 
 namespace {
 
+#ifdef _WIN32
 std::wstring Lowercase(std::wstring value) {
     std::transform(
         value.begin(),
@@ -25,16 +26,21 @@ std::wstring Lowercase(std::wstring value) {
     return value;
 }
 
-bool PathsEqualIgnoreCase(const std::wstring& a, const std::wstring& b) {
-    return Lowercase(a) == Lowercase(b);
+bool PathsEqual(const std::filesystem::path& a, const std::filesystem::path& b) {
+    return Lowercase(a.native()) == Lowercase(b.native());
 }
+#else
+bool PathsEqual(const std::filesystem::path& a, const std::filesystem::path& b) {
+    return a == b;
+}
+#endif
 
-std::wstring NormalizeFilePathForHistory(const std::wstring& filePath) {
+std::filesystem::path NormalizeFilePathForHistory(const std::filesystem::path& filePath) {
     if (filePath.empty()) {
         return {};
     }
 
-    std::filesystem::path path(filePath);
+    std::filesystem::path path = filePath;
     if (path.is_relative()) {
         std::error_code error;
         const std::filesystem::path absolutePath = std::filesystem::absolute(path, error);
@@ -43,43 +49,43 @@ std::wstring NormalizeFilePathForHistory(const std::wstring& filePath) {
         }
     }
 
-    return path.lexically_normal().native();
+    return path.lexically_normal();
 }
 
 }  // namespace
 
-std::wstring App::SuggestedCnotePath() const {
-    std::wstring basePath = session_->document.FilePath();
+std::filesystem::path App::SuggestedCnotePath() const {
+    std::filesystem::path basePath = session_->document.FilePath();
     if (basePath.empty()) {
         basePath = session_->document.SourcePath();
     }
 
     std::filesystem::path suggestion;
     if (!basePath.empty()) {
-        suggestion = std::filesystem::path(basePath);
-        suggestion.replace_extension(kCnoteFileExtension);
+        suggestion = basePath;
+        suggestion.replace_extension(std::filesystem::path(kCnoteFileExtension));
     } else {
-        suggestion = std::filesystem::path(L"Untitled").replace_extension(kCnoteFileExtension);
+        suggestion = std::filesystem::path(L"Untitled").replace_extension(std::filesystem::path(kCnoteFileExtension));
     }
 
-    return suggestion.native();
+    return suggestion;
 }
 
-std::wstring App::SuggestedPdfExportPath() const {
-    std::wstring basePath = session_->document.FilePath();
+std::filesystem::path App::SuggestedPdfExportPath() const {
+    std::filesystem::path basePath = session_->document.FilePath();
     if (basePath.empty()) {
         basePath = session_->document.SourcePath();
     }
 
     std::filesystem::path suggestion;
     if (!basePath.empty()) {
-        suggestion = std::filesystem::path(basePath);
+        suggestion = basePath;
         suggestion.replace_extension(L".pdf");
     } else {
         suggestion = std::filesystem::path(L"Untitled").replace_extension(L".pdf");
     }
 
-    return suggestion.native();
+    return suggestion;
 }
 
 void App::OpenDocument() {
@@ -104,7 +110,7 @@ void App::OpenDocument() {
     static_cast<void>(OpenDocumentPath(fileBuffer));
 }
 
-bool App::OpenDocumentPath(const std::wstring& filePath) {
+bool App::OpenDocumentPath(const std::filesystem::path& filePath) {
     if (auto existing = FindOpenSession(filePath)) {
         if (existing == session_) return true;
         if (!ConfirmCloseWithUnsavedChanges()) return false;
@@ -124,7 +130,7 @@ bool App::OpenDocumentPath(const std::wstring& filePath) {
         return OpenProject(filePath);
     }
 
-    if (HasExtension(filePath, L".pdf")) {
+    if (HasExtension(filePath, u".pdf")) {
         return OpenPdf(filePath);
     }
 
@@ -132,7 +138,7 @@ bool App::OpenDocumentPath(const std::wstring& filePath) {
     return false;
 }
 
-bool App::OpenProject(const std::wstring& filePath) {
+bool App::OpenProject(const std::filesystem::path& filePath) {
     const auto opened = ProjectFile::Load(filePath, pdfBackend_);
     if (!opened.has_value()) {
         MessageBoxW(window_, L"Failed to open the cnote file.", L"Open Cnote", MB_OK | MB_ICONERROR);
@@ -152,7 +158,7 @@ bool App::OpenProject(const std::wstring& filePath) {
     return true;
 }
 
-bool App::OpenPdf(const std::wstring& filePath) {
+bool App::OpenPdf(const std::filesystem::path& filePath) {
     const auto opened = pdfBackend_.Open(filePath);
     if (!opened.has_value()) {
         MessageBoxW(window_, L"Failed to open or render the PDF.", L"Open PDF", MB_OK | MB_ICONERROR);
@@ -181,7 +187,7 @@ bool App::SaveCurrentCnote() {
     return SaveAsCnote();
 }
 
-bool App::SaveCnoteToPath(const std::wstring& filePath, bool showError) {
+bool App::SaveCnoteToPath(const std::filesystem::path& filePath, bool showError) {
     if (auto existing = FindOpenSession(filePath); existing && existing != session_) {
         if (showError) MessageBoxW(window_, L"This path is already open in another project. Choose a different filename.", L"Save Cnote", MB_OK | MB_ICONERROR);
         return false;
@@ -202,15 +208,15 @@ bool App::SaveCnoteToPath(const std::wstring& filePath, bool showError) {
     return true;
 }
 
-void App::RecordRecentDocumentPath(const std::wstring& filePath, bool saveSettings) {
-    const std::wstring normalizedPath = NormalizeFilePathForHistory(filePath);
+void App::RecordRecentDocumentPath(const std::filesystem::path& filePath, bool saveSettings) {
+    const std::filesystem::path normalizedPath = NormalizeFilePathForHistory(filePath);
     if (normalizedPath.empty()
-        || (!HasExtension(normalizedPath, kCnoteFileExtension) && !HasExtension(normalizedPath, L".pdf"))) {
+        || (!HasExtension(normalizedPath, kCnoteFileExtension) && !HasExtension(normalizedPath, u".pdf"))) {
         return;
     }
 
-    const auto existing = std::find_if(recentDocumentPaths_.begin(), recentDocumentPaths_.end(), [&](const std::wstring& recentPath) {
-        return PathsEqualIgnoreCase(recentPath, normalizedPath);
+    const auto existing = std::find_if(recentDocumentPaths_.begin(), recentDocumentPaths_.end(), [&](const std::filesystem::path& recentPath) {
+        return PathsEqual(recentPath, normalizedPath);
     });
 
     if (existing != recentDocumentPaths_.end() && existing == recentDocumentPaths_.begin()) {
@@ -242,9 +248,9 @@ bool App::OpenRecentDocument(std::size_t index) {
         return false;
     }
 
-    const std::wstring filePath = recentDocumentPaths_[index];
+    const std::filesystem::path filePath = recentDocumentPaths_[index];
     std::error_code error;
-    if (!std::filesystem::exists(std::filesystem::path(filePath), error)) {
+    if (!std::filesystem::exists(filePath, error)) {
         MessageBoxW(window_, L"That recent file was not found.", L"Open", MB_OK | MB_ICONERROR);
         recentDocumentPaths_.erase(recentDocumentPaths_.begin() + static_cast<std::ptrdiff_t>(index));
         SaveAppSettings();
@@ -257,7 +263,7 @@ bool App::OpenRecentDocument(std::size_t index) {
 
 bool App::SaveAsCnote() {
     wchar_t fileBuffer[MAX_PATH] = {};
-    const std::wstring suggested = SuggestedCnotePath();
+    const std::filesystem::path suggested = SuggestedCnotePath();
     std::wcsncpy(fileBuffer, suggested.c_str(), std::size(fileBuffer) - 1U);
 
     OPENFILENAMEW dialog {};
@@ -282,7 +288,7 @@ bool App::ExportAsPdf() {
     constexpr float kPdfExportFallbackRenderScale = 4.0f;
 
     wchar_t fileBuffer[MAX_PATH] = {};
-    const std::wstring suggested = SuggestedPdfExportPath();
+    const std::filesystem::path suggested = SuggestedPdfExportPath();
     std::wcsncpy(fileBuffer, suggested.c_str(), std::size(fileBuffer) - 1U);
 
     OPENFILENAMEW dialog {};

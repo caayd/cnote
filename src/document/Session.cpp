@@ -169,7 +169,7 @@ void App::OnSessionChanged(const ProjectChange& change, bool originatingView) {
     }
 }
 
-std::shared_ptr<ProjectSession> App::FindOpenSession(const std::wstring& path) {
+std::shared_ptr<ProjectSession> App::FindOpenSession(const std::filesystem::path& path) {
     if (path.empty()) return {};
     for (App* view : openWindows_) {
         const auto& existing = view->session_->document.FilePath();
@@ -180,9 +180,16 @@ std::shared_ptr<ProjectSession> App::FindOpenSession(const std::wstring& path) {
         const auto requestedPath = std::filesystem::absolute(path, error).lexically_normal();
         if (error) continue;
         const auto existingPath = std::filesystem::absolute(existing, error).lexically_normal();
-        if (!error && CompareStringOrdinal(requestedPath.c_str(), -1, existingPath.c_str(), -1, TRUE) == CSTR_EQUAL) {
+        if (error) continue;
+#ifdef _WIN32
+        if (CompareStringOrdinal(requestedPath.c_str(), -1, existingPath.c_str(), -1, TRUE) == CSTR_EQUAL) {
             return view->session_;
         }
+#else
+        if (requestedPath == existingPath) {
+            return view->session_;
+        }
+#endif
     }
     return {};
 }

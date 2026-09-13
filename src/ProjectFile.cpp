@@ -20,32 +20,24 @@
 
 namespace cnote {
 
-bool HasExtension(const std::wstring& path, const wchar_t* extension) {
-    const std::filesystem::path filePath(path);
-    return filePath.has_extension() && _wcsicmp(filePath.extension().c_str(), extension) == 0;
+bool HasExtension(const std::filesystem::path& path, std::u16string_view extension) {
+    const std::u16string actual = path.extension().u16string();
+    if (actual.size() != extension.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        const char16_t a = actual[index];
+        const char16_t b = extension[index];
+        const char16_t lowerA = (a >= u'A' && a <= u'Z') ? static_cast<char16_t>(a + 32) : a;
+        const char16_t lowerB = (b >= u'A' && b <= u'Z') ? static_cast<char16_t>(b + 32) : b;
+        if (lowerA != lowerB) {
+            return false;
+        }
+    }
+    return true;
 }
 
 namespace {
-
-// Transitional: Document path fields are still native wide until the path
-// migration; model UTF-16 maps one 16-bit code unit per wchar.
-std::wstring WideFromUtf16(std::u16string_view value) {
-    std::wstring wide;
-    wide.reserve(value.size());
-    for (char16_t unit : value) {
-        wide.push_back(static_cast<wchar_t>(unit));
-    }
-    return wide;
-}
-
-std::u16string Utf16FromWide(std::wstring_view value) {
-    std::u16string text;
-    text.reserve(value.size());
-    for (wchar_t unit : value) {
-        text.push_back(static_cast<char16_t>(unit));
-    }
-    return text;
-}
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
@@ -59,8 +51,8 @@ constexpr std::uint8_t kTextStyleFlagUnderline = 1U << 2U;
 constexpr std::uint32_t kPayloadEncodingRaw = 0U;
 constexpr std::uint32_t kPayloadEncodingXpressHuff = 1U;
 
-std::optional<std::vector<std::uint8_t>> ReadAllBytes(const std::wstring& filePath) {
-    std::ifstream input(std::filesystem::path(filePath), std::ios::binary);
+std::optional<std::vector<std::uint8_t>> ReadAllBytes(const std::filesystem::path& filePath) {
+    std::ifstream input(filePath, std::ios::binary);
     if (!input) {
         return std::nullopt;
     }
@@ -83,8 +75,8 @@ std::optional<std::vector<std::uint8_t>> ReadAllBytes(const std::wstring& filePa
     return bytes;
 }
 
-bool WriteAllBytes(const std::wstring& filePath, const std::vector<std::uint8_t>& bytes) {
-    std::ofstream output(std::filesystem::path(filePath), std::ios::binary | std::ios::trunc);
+bool WriteAllBytes(const std::filesystem::path& filePath, const std::vector<std::uint8_t>& bytes) {
+    std::ofstream output(filePath, std::ios::binary | std::ios::trunc);
     if (!output) {
         return false;
     }
@@ -150,6 +142,20 @@ struct ByteReader {
         return true;
     }
 
+    [[nodiscard]] bool ReadPath(std::filesystem::path& value) {
+        std::uint32_t size = 0;
+        if (!Read(size)) {
+            return false;
+        }
+        if (size > Remaining()) {
+            return false;
+        }
+        const auto* begin = reinterpret_cast<const char*>(bytes.data() + offset);
+        value = Utf8ToPath(std::string_view(begin, size));
+        offset += size;
+        return true;
+    }
+
     [[nodiscard]] bool ReadBlob(std::vector<std::uint8_t>& value) {
         std::uint64_t size = 0;
         if (!Read(size)) {
@@ -203,6 +209,15 @@ void AppendValue(std::vector<std::uint8_t>& output, const T& value) {
 
 void AppendString(std::vector<std::uint8_t>& output, const std::u16string& value) {
     const std::string utf8 = Utf16ToUtf8(value);
+    const auto size = static_cast<std::uint32_t>(utf8.size());
+    AppendValue(output, size);
+    if (!utf8.empty()) {
+        AppendBytes(output, utf8.data(), utf8.size());
+    }
+}
+
+void AppendPath(std::vector<std::uint8_t>& output, const std::filesystem::path& value) {
+    const std::string utf8 = PathToUtf8(value);
     const auto size = static_cast<std::uint32_t>(utf8.size());
     AppendValue(output, size);
     if (!utf8.empty()) {
@@ -498,7 +513,7 @@ std::optional<std::vector<std::uint8_t>> DecompressPayload(
 std::optional<Document> LoadProjectPayload(
     ByteReader& reader,
     std::uint32_t version,
-    const std::wstring& filePath,
+    const std::filesystem::path& filePath,
     PdfiumBackend& pdfBackend) {
     std::uint32_t flags = 0;
     std::uint32_t currentPageIndex = 0;
@@ -517,13 +532,13 @@ std::optional<Document> LoadProjectPayload(
         }
         pdfSources.reserve(sourceCount);
         for (std::uint32_t sourceIndex = 0; sourceIndex < sourceCount; ++sourceIndex) {
-            std::u16string sourcePath;
+            std::filesystem::path sourcePath;
             std::vector<std::uint8_t> pdfBytes;
-            if (!reader.ReadString(sourcePath) || !reader.ReadBlob(pdfBytes)) {
+            if (!reader.ReadPath(sourcePath) || !reader.ReadBlob(pdfBytes)) {
                 return std::nullopt;
             }
             pdfSources.push_back({
-                WideFromUtf16(sourcePath),
+                std::move(sourcePath),
                 std::make_shared<std::vector<std::uint8_t>>(std::move(pdfBytes)),
             });
         }
@@ -536,9 +551,9 @@ std::optional<Document> LoadProjectPayload(
             return std::nullopt;
         }
     } else {
-        std::u16string sourcePath;
+        std::filesystem::path sourcePath;
         std::vector<std::uint8_t> pdfBytes;
-        if (!reader.ReadString(sourcePath) || !reader.ReadBlob(pdfBytes)) {
+        if (!reader.ReadPath(sourcePath) || !reader.ReadBlob(pdfBytes)) {
             return std::nullopt;
         }
         if (version >= 3U
@@ -549,7 +564,7 @@ std::optional<Document> LoadProjectPayload(
         }
         if ((flags & kProjectFlagHasPdf) != 0U && !pdfBytes.empty()) {
             pdfSources.push_back({
-                WideFromUtf16(sourcePath),
+                std::move(sourcePath),
                 std::make_shared<std::vector<std::uint8_t>>(std::move(pdfBytes)),
             });
         }
@@ -735,7 +750,7 @@ std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
     AppendValue(bytes, sourceCount);
     for (std::size_t sourceIndex = 0; sourceIndex < document.PdfSourceCount(); ++sourceIndex) {
         const Document::PdfSource& pdfSource = document.PdfSourceAt(sourceIndex);
-        AppendString(bytes, Utf16FromWide(pdfSource.sourcePath));
+        AppendPath(bytes, pdfSource.sourcePath);
         AppendBlob(bytes, pdfSource.pdfData ? *pdfSource.pdfData : std::vector<std::uint8_t> {});
     }
     AppendValue(bytes, document.NewPageDefaults().width);
@@ -781,7 +796,7 @@ std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
 
 }  // namespace
 
-std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBackend& pdfBackend) {
+std::optional<Document> ProjectFile::Load(const std::filesystem::path& filePath, PdfiumBackend& pdfBackend) {
     const auto bytes = ReadAllBytes(filePath);
     if (!bytes.has_value()) {
         return std::nullopt;
@@ -791,7 +806,7 @@ std::optional<Document> ProjectFile::Load(const std::wstring& filePath, PdfiumBa
 }
 std::optional<Document> ProjectFile::LoadFromBytes(
     const std::vector<std::uint8_t>& bytes,
-    const std::wstring& filePath,
+    const std::filesystem::path& filePath,
     PdfiumBackend& pdfBackend) {
     ByteReader reader { bytes };
     char magic[sizeof(kCnoteMagic)] {};
@@ -853,7 +868,7 @@ std::vector<std::uint8_t> ProjectFile::Serialize(const Document& document) {
     return bytes;
 }
 
-bool ProjectFile::Save(const Document& document, const std::wstring& filePath) {
+bool ProjectFile::Save(const Document& document, const std::filesystem::path& filePath) {
     const std::vector<std::uint8_t> bytes = Serialize(document);
     return WriteAllBytes(filePath, bytes);
 }

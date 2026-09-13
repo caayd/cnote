@@ -58,8 +58,8 @@ constexpr float kStrokeRenderWidthDivisor = 2.15f;
 constexpr float kTextLayoutScale = 8.0f;
 constexpr wchar_t kEmbeddedCnoteAttachmentName[] = L"cnote-edit-data.cnote";
 
-std::optional<std::vector<std::uint8_t>> ReadAllBytes(const std::wstring& filePath) {
-    std::ifstream input(std::filesystem::path(filePath), std::ios::binary);
+std::optional<std::vector<std::uint8_t>> ReadAllBytes(const std::filesystem::path& filePath) {
+    std::ifstream input(filePath, std::ios::binary);
     if (!input) {
         return std::nullopt;
     }
@@ -756,7 +756,7 @@ PdfiumBackend::~PdfiumBackend() {
     }
 }
 
-std::optional<Document> PdfiumBackend::Open(const std::wstring& filePath) {
+std::optional<Document> PdfiumBackend::Open(const std::filesystem::path& filePath) {
     if (!initialized_ || filePath.empty()) {
         return std::nullopt;
     }
@@ -777,7 +777,7 @@ std::optional<Document> PdfiumBackend::Open(const std::wstring& filePath) {
 }
 
 std::optional<Document> PdfiumBackend::OpenFromMemory(
-    const std::wstring& sourcePath,
+    const std::filesystem::path& sourcePath,
     std::shared_ptr<std::vector<std::uint8_t>> pdfBytes) const {
     if (!initialized_ || !pdfBytes || pdfBytes->empty()) {
         return std::nullopt;
@@ -982,7 +982,7 @@ bool PdfiumBackend::RenderPageToHdc(
 
 bool PdfiumBackend::ExportPdf(
     const Document& document,
-    const std::wstring& filePath,
+    const std::filesystem::path& filePath,
     float renderScale,
     float strokeSmoothing,
     float dashLength,

@@ -534,7 +534,7 @@ bool App::AppendPagesFromFile() {
     return AppendPagesFromDocumentPath(fileBuffer);
 }
 
-bool App::AppendPagesFromDocumentPath(const std::wstring& filePath) {
+bool App::AppendPagesFromDocumentPath(const std::filesystem::path& filePath) {
     std::optional<Document> opened;
     if (HasExtension(filePath, kCnoteFileExtension)) {
         opened = ProjectFile::Load(filePath, pdfBackend_);
@@ -542,7 +542,7 @@ bool App::AppendPagesFromDocumentPath(const std::wstring& filePath) {
             MessageBoxW(window_, L"Failed to open the cnote file for page import.", L"Append Pages", MB_OK | MB_ICONERROR);
             return false;
         }
-    } else if (HasExtension(filePath, L".pdf")) {
+    } else if (HasExtension(filePath, u".pdf")) {
         opened = pdfBackend_.Open(filePath);
         if (!opened.has_value()) {
             MessageBoxW(window_, L"Failed to open or render the PDF for page import.", L"Append Pages", MB_OK | MB_ICONERROR);
@@ -725,7 +725,7 @@ void App::LoadAppSettings() {
     std::optional<std::size_t> loadedColorIndex;
     std::optional<std::size_t> loadedSettingsPaletteIndex;
     std::map<unsigned int, PendingNamedPalette> pendingNamedPalettes;
-    std::map<unsigned int, std::wstring> pendingRecentDocumentPaths;
+    std::map<unsigned int, std::filesystem::path> pendingRecentDocumentPaths;
     std::string line;
     while (std::getline(input, line)) {
         const std::string trimmed = TrimAscii(line);
@@ -799,7 +799,7 @@ void App::LoadAppSettings() {
             if (const auto index = ParseUnsignedInt(std::string_view(key).substr(16)); index.has_value()
                 && *index >= 1U
                 && *index <= kMaxRecentDocuments) {
-                std::wstring recentPath = TrimWide(Utf8ToWide(value));
+                std::filesystem::path recentPath = Utf8ToPath(TrimAscii(value));
                 if (!recentPath.empty()) {
                     pendingRecentDocumentPaths[*index] = std::move(recentPath);
                 }
@@ -811,7 +811,7 @@ void App::LoadAppSettings() {
             if (const auto index = ParseUnsignedInt(std::string_view(key).substr(13)); index.has_value()
                 && *index >= 1U
                 && *index <= kMaxRecentDocuments) {
-                std::wstring recentPath = TrimWide(Utf8ToWide(value));
+                std::filesystem::path recentPath = Utf8ToPath(TrimAscii(value));
                 if (!recentPath.empty() && pendingRecentDocumentPaths.find(*index) == pendingRecentDocumentPaths.end()) {
                     pendingRecentDocumentPaths[*index] = std::move(recentPath);
                 }
@@ -1052,7 +1052,7 @@ void App::SaveAppSettings() const {
     output << "settings_palette_index=" << settings_.paletteIndex << '\n';
     output << "default_page_color=" << std::hex << std::uppercase << settings_.defaultPageColor << std::dec << std::nouppercase << '\n';
     for (std::size_t index = 0; index < recentDocumentPaths_.size(); ++index) {
-        output << "recent_document_" << (index + 1U) << '=' << WideToUtf8(recentDocumentPaths_[index]) << '\n';
+        output << "recent_document_" << (index + 1U) << '=' << PathToUtf8(recentDocumentPaths_[index]) << '\n';
     }
     output << "draw_brush_size=" << settings_.drawBrushSize << '\n';
     output << "erase_brush_size=" << settings_.eraseBrushSize << '\n';
