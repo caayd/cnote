@@ -944,9 +944,22 @@ void QtMainWindow::SetCloseDecisionProvider(std::function<CloseDecision()> provi
     closeDecision_ = std::move(provider);
 }
 
+namespace {
+
+bool& ForcedHeadlessModals() {
+    static bool forced = false;
+    return forced;
+}
+
+}  // namespace
+
 bool QtMainWindow::HeadlessModals() {
-    static const bool headless = qEnvironmentVariableIsSet("CNOTE_HEADLESS");
-    return headless;
+    static const bool fromEnvironment = qEnvironmentVariableIsSet("CNOTE_HEADLESS");
+    return fromEnvironment || ForcedHeadlessModals();
+}
+
+void QtMainWindow::SetHeadlessModals(bool headless) {
+    ForcedHeadlessModals() = headless;
 }
 
 void QtMainWindow::ReportError(const QString& text) {

@@ -98,12 +98,18 @@ int main(int argc, char** argv) {
         cnote::AppManager manager;
         manager.SetAutoSaveHandler(&AutoSaveSession);
 
+        // The self-check runs without an event loop or a shown window, so a
+        // modal error dialog would block forever (plan 7.3 requires packaging
+        // verification to fail with a code instead).
+        if (selfCheck) {
+            cnote::qt::QtMainWindow::SetHeadlessModals(true);
+        }
+
         cnote::qt::QtMainWindow window(manager);
         window.resize(1400, 960);
         if (!selfCheck) {
             window.show();
         }
-
         const std::filesystem::path& fileToOpen = selfCheck ? selfCheckFixture : startupFile;
         if (!fileToOpen.empty()) {
             if (!window.OpenPath(fileToOpen)) {
@@ -118,7 +124,6 @@ int main(int argc, char** argv) {
             exitCode = app.exec();
         }
     }
-
     cnote::latex::Shutdown();
     return exitCode;
 }

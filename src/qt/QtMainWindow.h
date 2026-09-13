@@ -62,6 +62,10 @@ public:
     // informational modals are logged to stderr instead, and the close prompt
     // falls back to Discard unless a test injected a CloseDecisionProvider.
     [[nodiscard]] static bool HeadlessModals();
+    // Non-interactive entry points (the packaging --self-check, harnesses) must
+    // never construct a modal dialog even without CNOTE_HEADLESS: this forces
+    // HeadlessModals() on for the whole process before the window exists.
+    static void SetHeadlessModals(bool headless);
 
     [[nodiscard]] ui::CanvasWidget* Canvas() const { return canvas_; }
     [[nodiscard]] QtDocumentController& Controller() { return controller_; }
