@@ -36,6 +36,7 @@ add_library(cnote_core STATIC
     src/document/Pages.cpp
     src/document/SelectionClipboardCodec.cpp
     src/document/Session.cpp
+    src/document/XpressCodec.cpp
     src/latex/LatexEditing.cpp
     src/latex/LatexCompletion.cpp
     src/latex/LatexEngine.cpp
@@ -173,7 +174,6 @@ target_compile_definitions(microtex PRIVATE _HAS_STD_BYTE=0)
 target_link_libraries(microtex PUBLIC tinyxml2 gdiplus)
 
 target_link_libraries(cnote_core PUBLIC
-    cabinet
     comdlg32
     comctl32
     d3d11
@@ -223,6 +223,7 @@ add_executable(cnote_text_model_tests
     src/selection/Geometry.cpp
     src/text/TextGeometry.cpp
     src/ui/UiUtil.cpp
+    src/document/XpressCodec.cpp
 )
 target_include_directories(cnote_text_model_tests PRIVATE src)
 target_compile_definitions(cnote_text_model_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
@@ -230,7 +231,6 @@ target_compile_options(cnote_text_model_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
 target_link_libraries(cnote_text_model_tests PRIVATE
-    cabinet
     comctl32
     gdi32
     gdiplus

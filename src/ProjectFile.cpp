@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <bit>
-#include <compressapi.h>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -14,9 +13,8 @@
 #include <type_traits>
 #include <vector>
 
-#include <windows.h>
-
 #include "Unicode.h"
+#include "document/XpressCodec.h"
 
 namespace cnote {
 
@@ -172,18 +170,6 @@ struct ByteReader {
         return true;
     }
 };
-struct CompressorCloser {
-    void operator()(void* handle) const noexcept {
-        if (handle != nullptr) CloseCompressor(static_cast<COMPRESSOR_HANDLE>(handle));
-    }
-};
-
-struct DecompressorCloser {
-    void operator()(void* handle) const noexcept {
-        if (handle != nullptr) CloseDecompressor(static_cast<DECOMPRESSOR_HANDLE>(handle));
-    }
-};
-
 
 void AppendBytes(std::vector<std::uint8_t>& output, const void* data, std::size_t size) {
     const auto* begin = static_cast<const std::uint8_t*>(data);
@@ -481,35 +467,6 @@ bool ReadRaster(ByteReader& reader, RasterImage& raster) {
     return reader.ReadBlob(raster.pixels);
 }
 
-std::optional<std::vector<std::uint8_t>> CompressPayload(const std::vector<std::uint8_t>& payload) {
-    if (payload.empty()) return std::vector<std::uint8_t>{};
-    COMPRESSOR_HANDLE handle = nullptr;
-    if (!CreateCompressor(COMPRESS_ALGORITHM_XPRESS_HUFF, nullptr, &handle)) return std::nullopt;
-    std::unique_ptr<void, CompressorCloser> compressor(handle);
-    SIZE_T size = 0;
-    if (!Compress(handle, const_cast<std::uint8_t*>(payload.data()), payload.size(), nullptr, 0, &size)
-        && GetLastError() != ERROR_INSUFFICIENT_BUFFER) return std::nullopt;
-    std::vector<std::uint8_t> compressed(size);
-    if (!Compress(handle, const_cast<std::uint8_t*>(payload.data()), payload.size(), compressed.data(), compressed.size(), &size)) return std::nullopt;
-    compressed.resize(size);
-    return compressed;
-}
-
-std::optional<std::vector<std::uint8_t>> DecompressPayload(
-    std::span<const std::uint8_t> payload,
-    std::uint64_t expectedSize) {
-    if (expectedSize > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())
-        || expectedSize == 0) return expectedSize == 0 ? std::optional<std::vector<std::uint8_t>>(std::vector<std::uint8_t>{}) : std::nullopt;
-    DECOMPRESSOR_HANDLE handle = nullptr;
-    if (!CreateDecompressor(COMPRESS_ALGORITHM_XPRESS_HUFF, nullptr, &handle)) return std::nullopt;
-    std::unique_ptr<void, DecompressorCloser> decompressor(handle);
-    std::vector<std::uint8_t> decompressed(static_cast<std::size_t>(expectedSize));
-    SIZE_T size = 0;
-    if (!Decompress(handle, const_cast<std::uint8_t*>(payload.data()), payload.size(), decompressed.data(), decompressed.size(), &size)
-        || size != decompressed.size()) return std::nullopt;
-    return decompressed;
-}
-
 std::optional<Document> LoadProjectPayload(
     ByteReader& reader,
     std::uint32_t version,
@@ -792,7 +749,7 @@ std::optional<Document> ProjectFile::LoadFromBytes(
             ByteReader payloadReader { storedPayload };
             return LoadProjectPayload(payloadReader, version, filePath);
         } else if (payloadEncoding == kPayloadEncodingXpressHuff) {
-            const auto decompressedPayload = DecompressPayload(storedPayload, uncompressedPayloadSize);
+            const auto decompressedPayload = DecompressXpressBuffer(storedPayload, uncompressedPayloadSize);
             if (!decompressedPayload.has_value()) {
                 return std::nullopt;
             }
@@ -812,7 +769,7 @@ std::vector<std::uint8_t> ProjectFile::Serialize(const Document& document) {
     std::vector<std::uint8_t> storedPayload = payload;
     std::uint32_t payloadEncoding = kPayloadEncodingRaw;
 
-    if (const auto compressedPayload = CompressPayload(payload);
+    if (const auto compressedPayload = CompressXpressBuffer(payload);
         compressedPayload.has_value() && compressedPayload->size() < payload.size()) {
         storedPayload = std::move(*compressedPayload);
         payloadEncoding = kPayloadEncodingXpressHuff;
