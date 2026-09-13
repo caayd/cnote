@@ -287,7 +287,10 @@ if(SELF_CHECK)
             set(_sanitized_path "/usr/bin:/bin")
         endif()
 
-        set(_env_args "PATH=${_sanitized_path}")
+        # CNOTE_HEADLESS keeps a self-check failure from raising the application's
+        # modal message box, which would block a scripted run forever instead of
+        # exiting with the failure code (the modal is gated on that variable).
+        set(_env_args "PATH=${_sanitized_path}" "CNOTE_HEADLESS=1")
         if(PLATFORM STREQUAL "linux")
             list(APPEND _env_args "LD_LIBRARY_PATH=" "QT_PLUGIN_PATH=")
             if(DEFINED QT_QPA_PLATFORM AND NOT QT_QPA_PLATFORM STREQUAL "")
