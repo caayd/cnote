@@ -47,6 +47,14 @@ add_library(cnote_core STATIC
     src/text/TextGeometry.cpp
     src/viewport/Viewport.cpp
 )
+if(WIN32)
+    target_sources(cnote_core PRIVATE src/platform/windows/PrecisionTouchpad.cpp)
+endif()
+
+if(MINGW)
+    target_include_directories(cnote_core PRIVATE third_party/mingw-w64/include)
+endif()
+
 
 add_executable(cnote WIN32 src/main.cpp src/cnote.rc)
 target_link_libraries(cnote PRIVATE cnote_core)
@@ -167,7 +175,6 @@ target_link_libraries(cnote_core PUBLIC
     gdiplus
     microtex
     msimg32
-    ninput
     pdfium
     uxtheme
     user32

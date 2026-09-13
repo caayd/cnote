@@ -68,6 +68,18 @@ Requirements:
   GCC on Linux, or AppleClang on macOS)
 - PDFium **148.0.7749.0** for the target platform and architecture
 
+The Qt MinGW 13.1 kit does not ship `interactioncontext.h` or a MinGW
+`ninput` import library. Windows builds use the unmodified public-domain
+header from
+`mingw-w64/mingw-w64` commit `058bc941cb6b3a93fd00783827841536bc45ce58`
+(SHA-256
+`25f728091bc5baf7cdba2f86dc110a5649fdf59ccc3402fe2e2c3f13f7f3c252`),
+kept under `third_party/mingw-w64/include` with its upstream
+`DISCLAIMER.PD`. The precision-touchpad adapter adds that include path only
+for its Windows target and dynamically loads the documented `ninput.dll`
+APIs, including the Windows 11 ordinal-2507 pointer-frame API; it does not
+link or redistribute Windows system binaries.
+
 `CNOTE_PDFIUM_ROOT` selects one complete PDFium SDK root and defaults to the
 bundled `third_party/pdfium` Windows SDK. The root must contain
 `PDFiumConfig.cmake`, `VERSION`, the PDFium headers, and the matching runtime

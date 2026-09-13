@@ -23,10 +23,6 @@ namespace {
 using ui::HasRect;
 using appui::WindowFrameThicknessX;
 
-#if defined(__GNUC__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wcast-function-type"
-#endif
 
 using appui::BuildQuickSizePopupLayout;
 using appui::BuildSidebarHeaderLayout;
@@ -41,64 +37,6 @@ using appui::SidebarMetrics;
 using appui::ToolbarLayout;
 using appui::ToolbarTitleLayout;
 
-constexpr UINT32 kInteractionMeasurementUnitsScreen = 1U;
-constexpr UINT32 kInteractionUiFeedbackOff = 0U;
-constexpr UINT32 kInteractionFilterPointersOff = 0U;
-constexpr UINT kPrecisionTouchpadInertiaFrameMs = 15U;
-constexpr POINTER_INPUT_TYPE kPointerInputTypeTouchpad = static_cast<POINTER_INPUT_TYPE>(5);
-
-template <typename T>
-T ResolveProcAddress(HMODULE module, const char* name, WORD ordinal = 0) {
-    if (module == nullptr) {
-        return nullptr;
-    }
-
-    FARPROC proc = GetProcAddress(module, name);
-    if (proc == nullptr && ordinal != 0) {
-        proc = GetProcAddress(module, MAKEINTRESOURCEA(ordinal));
-    }
-    return reinterpret_cast<T>(proc);
-}
-
-struct PrecisionTouchpadApi {
-    using RegisterTouchpadCapableWindowFn = BOOL(WINAPI*)(HWND, BOOL);
-    using GetPointerFrameTouchpadInfoHistoryFn = BOOL(WINAPI*)(UINT32, UINT32*, UINT32*, POINTER_TOUCH_INFO*);
-    using ReportWindowContentInertiaFn = BOOL(WINAPI*)(HWND, BOOL);
-    using ProcessPointerFramesInteractionContext2Fn = HRESULT(WINAPI*)(HINTERACTIONCONTEXT, UINT32, UINT32, const POINTER_TYPE_INFO*);
-
-    RegisterTouchpadCapableWindowFn registerTouchpadCapableWindow = nullptr;
-    GetPointerFrameTouchpadInfoHistoryFn getPointerFrameTouchpadInfoHistory = nullptr;
-    ReportWindowContentInertiaFn reportWindowContentInertia = nullptr;
-    ProcessPointerFramesInteractionContext2Fn processPointerFramesInteractionContext2 = nullptr;
-};
-
-const PrecisionTouchpadApi& TouchpadApi() {
-    static const PrecisionTouchpadApi api = [] {
-        PrecisionTouchpadApi loaded {};
-        HMODULE user32 = GetModuleHandleW(L"user32.dll");
-        if (user32 == nullptr) {
-            user32 = LoadLibraryW(L"user32.dll");
-        }
-        HMODULE ninput = LoadLibraryW(L"ninput.dll");
-
-        loaded.registerTouchpadCapableWindow = ResolveProcAddress<PrecisionTouchpadApi::RegisterTouchpadCapableWindowFn>(
-            user32,
-            "RegisterTouchpadCapableWindow");
-        loaded.getPointerFrameTouchpadInfoHistory = ResolveProcAddress<PrecisionTouchpadApi::GetPointerFrameTouchpadInfoHistoryFn>(
-            user32,
-            "GetPointerFrameTouchpadInfoHistory");
-        loaded.reportWindowContentInertia = ResolveProcAddress<PrecisionTouchpadApi::ReportWindowContentInertiaFn>(
-            user32,
-            "ReportWindowContentInertia",
-            2695);
-        loaded.processPointerFramesInteractionContext2 = ResolveProcAddress<PrecisionTouchpadApi::ProcessPointerFramesInteractionContext2Fn>(
-            ninput,
-            "ProcessPointerFramesInteractionContext2",
-            2507);
-        return loaded;
-    }();
-    return api;
-}
 
 float WheelScrollPixels(int wheelDelta, UINT dpi, bool horizontal, int viewportSpan = 0) {
     UINT scrollUnits = 0;
@@ -139,275 +77,8 @@ RECT LiveTextEditFrameRect(const RECT& editRect, UINT dpi) {
     return frameRect;
 }
 
-#if defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
-
 }  // namespace
 
-void App::InitializePrecisionTouchpadSupport() {
-    ShutdownPrecisionTouchpadSupport();
-    if (window_ == nullptr) {
-        return;
-    }
-
-    const PrecisionTouchpadApi& api = TouchpadApi();
-    if (api.registerTouchpadCapableWindow == nullptr
-        || api.getPointerFrameTouchpadInfoHistory == nullptr
-        || api.processPointerFramesInteractionContext2 == nullptr) {
-        return;
-    }
-
-    if (FAILED(CreateInteractionContext(&precisionTouchpadInteractionContext_)) || precisionTouchpadInteractionContext_ == nullptr) {
-        precisionTouchpadInteractionContext_ = nullptr;
-        return;
-    }
-
-    const HRESULT callbackHr = RegisterOutputCallbackInteractionContext(
-        precisionTouchpadInteractionContext_,
-        &App::PrecisionTouchpadOutputCallback,
-        this);
-    const INTERACTION_CONTEXT_CONFIGURATION configuration[] {
-        {
-            INTERACTION_ID_MANIPULATION,
-            INTERACTION_CONFIGURATION_FLAG_MANIPULATION
-                | INTERACTION_CONFIGURATION_FLAG_MANIPULATION_TRANSLATION_X
-                | INTERACTION_CONFIGURATION_FLAG_MANIPULATION_TRANSLATION_Y
-                | INTERACTION_CONFIGURATION_FLAG_MANIPULATION_TRANSLATION_INERTIA
-                | INTERACTION_CONFIGURATION_FLAG_MANIPULATION_RAILS_X
-                | INTERACTION_CONFIGURATION_FLAG_MANIPULATION_RAILS_Y
-                | INTERACTION_CONFIGURATION_FLAG_MANIPULATION_SCALING
-        },
-    };
-    const HRESULT configurationHr = SUCCEEDED(callbackHr)
-        ? SetInteractionConfigurationInteractionContext(
-            precisionTouchpadInteractionContext_,
-            static_cast<UINT32>(std::size(configuration)),
-            configuration)
-        : E_FAIL;
-    const HRESULT measurementHr = SUCCEEDED(configurationHr)
-        ? SetPropertyInteractionContext(
-            precisionTouchpadInteractionContext_,
-            INTERACTION_CONTEXT_PROPERTY_MEASUREMENT_UNITS,
-            kInteractionMeasurementUnitsScreen)
-        : E_FAIL;
-    const HRESULT feedbackHr = SUCCEEDED(measurementHr)
-        ? SetPropertyInteractionContext(
-            precisionTouchpadInteractionContext_,
-            INTERACTION_CONTEXT_PROPERTY_INTERACTION_UI_FEEDBACK,
-            kInteractionUiFeedbackOff)
-        : E_FAIL;
-    const HRESULT filterHr = SUCCEEDED(feedbackHr)
-        ? SetPropertyInteractionContext(
-            precisionTouchpadInteractionContext_,
-            INTERACTION_CONTEXT_PROPERTY_FILTER_POINTERS,
-            kInteractionFilterPointersOff)
-        : E_FAIL;
-    if (FAILED(filterHr) || api.registerTouchpadCapableWindow(window_, TRUE) == FALSE) {
-        ShutdownPrecisionTouchpadSupport();
-        return;
-    }
-
-    precisionTouchpadEnabled_ = true;
-}
-
-void App::ShutdownPrecisionTouchpadSupport() {
-    StopPrecisionTouchpadInertia(false);
-    precisionTouchpadCanvasGestureActive_ = false;
-    precisionTouchpadManipulationActive_ = false;
-    precisionTouchpadManipulationStartZoom_ = zoom_;
-    precisionTouchpadLastInteractionFlags_ = INTERACTION_FLAG_NONE;
-
-    const PrecisionTouchpadApi& api = TouchpadApi();
-    if (precisionTouchpadEnabled_ && window_ != nullptr && api.registerTouchpadCapableWindow != nullptr) {
-        static_cast<void>(api.registerTouchpadCapableWindow(window_, FALSE));
-    }
-    precisionTouchpadEnabled_ = false;
-
-    if (precisionTouchpadInteractionContext_ != nullptr) {
-        static_cast<void>(DestroyInteractionContext(precisionTouchpadInteractionContext_));
-        precisionTouchpadInteractionContext_ = nullptr;
-    }
-}
-
-bool App::ShouldRoutePrecisionTouchpadGestureToCanvas(POINT cursor) const {
-    if (window_ == nullptr) {
-        return false;
-    }
-
-    RECT clientRect {};
-    GetClientRect(window_, &clientRect);
-    if (pdfSidebarOpen_ && IsPdfSidebarVisible()) {
-        const RECT sidebarRect = PdfSidebarRect(clientRect);
-        if (PtInRect(&sidebarRect, cursor) != 0) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool App::HandlePrecisionTouchpadPointerMessage(UINT message, WPARAM wParam, LPARAM) {
-    if (!precisionTouchpadEnabled_ || precisionTouchpadInteractionContext_ == nullptr) {
-        return false;
-    }
-
-    const UINT32 pointerId = GET_POINTERID_WPARAM(wParam);
-    POINTER_INFO pointerInfo {};
-    if (GetPointerInfo(pointerId, &pointerInfo) == FALSE || pointerInfo.pointerType != kPointerInputTypeTouchpad) {
-        return false;
-    }
-
-    POINT cursor = pointerInfo.ptPixelLocation;
-    ScreenToClient(window_, &cursor);
-    if (message == WM_POINTERDOWN || (pointerInfo.pointerFlags & POINTER_FLAG_NEW) != 0 || !precisionTouchpadCanvasGestureActive_) {
-        precisionTouchpadCanvasGestureActive_ = ShouldRoutePrecisionTouchpadGestureToCanvas(cursor);
-    }
-    if (!precisionTouchpadCanvasGestureActive_) {
-        return false;
-    }
-
-    const PrecisionTouchpadApi& api = TouchpadApi();
-    UINT32 entriesCount = 0;
-    UINT32 pointerCount = 0;
-    if (api.getPointerFrameTouchpadInfoHistory(pointerId, &entriesCount, &pointerCount, nullptr) == FALSE
-        || entriesCount == 0U
-        || pointerCount == 0U) {
-        return false;
-    }
-
-    std::vector<POINTER_TOUCH_INFO> touchInfo(entriesCount * pointerCount);
-    if (api.getPointerFrameTouchpadInfoHistory(pointerId, &entriesCount, &pointerCount, touchInfo.data()) == FALSE
-        || entriesCount == 0U
-        || pointerCount == 0U) {
-        return false;
-    }
-
-    touchInfo.resize(entriesCount * pointerCount);
-    std::vector<POINTER_TYPE_INFO> typeInfo(touchInfo.size());
-    for (std::size_t index = 0; index < touchInfo.size(); ++index) {
-        typeInfo[index].type = kPointerInputTypeTouchpad;
-        typeInfo[index].touchInfo = touchInfo[index];
-    }
-
-    const HRESULT hr = api.processPointerFramesInteractionContext2(
-        precisionTouchpadInteractionContext_,
-        entriesCount,
-        pointerCount,
-        typeInfo.data());
-    if (FAILED(hr)) {
-        if ((pointerInfo.pointerFlags & POINTER_FLAG_UP) != 0 || message == WM_POINTERUP) {
-            StopPrecisionTouchpadManipulation();
-        }
-        return false;
-    }
-
-    static_cast<void>(SkipPointerFrameMessages(pointerId));
-    if ((pointerInfo.pointerFlags & POINTER_FLAG_UP) != 0
-        && !precisionTouchpadManipulationActive_
-        && !precisionTouchpadInertiaActive_) {
-        precisionTouchpadCanvasGestureActive_ = false;
-    }
-    return true;
-}
-
-void App::HandlePrecisionTouchpadInteractionOutput(const INTERACTION_CONTEXT_OUTPUT& output) {
-    if (output.interactionId != INTERACTION_ID_MANIPULATION) {
-        return;
-    }
-
-    precisionTouchpadLastInteractionFlags_ = output.interactionFlags;
-    if ((output.interactionFlags & INTERACTION_FLAG_BEGIN) != 0) {
-        precisionTouchpadManipulationActive_ = true;
-        precisionTouchpadManipulationStartZoom_ = zoom_;
-    }
-    if ((output.interactionFlags & INTERACTION_FLAG_CANCEL) != 0) {
-        StopPrecisionTouchpadManipulation();
-        StopPrecisionTouchpadInertia(true);
-        return;
-    }
-
-    if ((output.interactionFlags & INTERACTION_FLAG_INERTIA) != 0) {
-        StartPrecisionTouchpadInertia();
-    } else if (precisionTouchpadInertiaActive_) {
-        StopPrecisionTouchpadInertia(true);
-    }
-
-    const INTERACTION_ARGUMENTS_MANIPULATION& manipulation = output.arguments.manipulation;
-    if (std::abs(manipulation.cumulative.scale - 1.0f) > 0.0005f) {
-        POINT anchor {
-            static_cast<int>(std::lround(output.x)),
-            static_cast<int>(std::lround(output.y)),
-        };
-        if (window_ != nullptr) {
-            ScreenToClient(window_, &anchor);
-        }
-        SetZoom(precisionTouchpadManipulationStartZoom_ * manipulation.cumulative.scale, anchor);
-    }
-
-    if (std::abs(manipulation.delta.translationX) > 0.001f || std::abs(manipulation.delta.translationY) > 0.001f) {
-        PanBy(manipulation.delta.translationX, manipulation.delta.translationY);
-    }
-
-    if ((output.interactionFlags & INTERACTION_FLAG_END) != 0) {
-        StopPrecisionTouchpadManipulation();
-        if ((output.interactionFlags & INTERACTION_FLAG_INERTIA) == 0) {
-            StopPrecisionTouchpadInertia(true);
-        }
-    }
-}
-
-void App::StartPrecisionTouchpadInertia() {
-    if (window_ == nullptr || precisionTouchpadInertiaActive_) {
-        return;
-    }
-
-    precisionTouchpadInertiaActive_ = true;
-    SetTimer(window_, kPrecisionTouchpadInertiaTimerId, kPrecisionTouchpadInertiaFrameMs, nullptr);
-    if (const PrecisionTouchpadApi& api = TouchpadApi(); api.reportWindowContentInertia != nullptr) {
-        static_cast<void>(api.reportWindowContentInertia(window_, TRUE));
-    }
-}
-
-void App::StopPrecisionTouchpadInertia(bool reportToSystem) {
-    if (window_ != nullptr) {
-        KillTimer(window_, kPrecisionTouchpadInertiaTimerId);
-    }
-    if (!precisionTouchpadInertiaActive_) {
-        return;
-    }
-
-    precisionTouchpadInertiaActive_ = false;
-    if (reportToSystem) {
-        if (const PrecisionTouchpadApi& api = TouchpadApi(); api.reportWindowContentInertia != nullptr && window_ != nullptr) {
-            static_cast<void>(api.reportWindowContentInertia(window_, FALSE));
-        }
-    }
-}
-
-void App::ProcessPrecisionTouchpadInertia() {
-    if (!precisionTouchpadInertiaActive_ || precisionTouchpadInteractionContext_ == nullptr) {
-        StopPrecisionTouchpadInertia(false);
-        return;
-    }
-
-    if (FAILED(ProcessInertiaInteractionContext(precisionTouchpadInteractionContext_))) {
-        StopPrecisionTouchpadInertia(true);
-    }
-}
-
-void App::StopPrecisionTouchpadManipulation() {
-    precisionTouchpadCanvasGestureActive_ = false;
-    precisionTouchpadManipulationActive_ = false;
-    precisionTouchpadManipulationStartZoom_ = zoom_;
-}
-
-void CALLBACK App::PrecisionTouchpadOutputCallback(void* clientData, const INTERACTION_CONTEXT_OUTPUT* output) {
-    if (clientData == nullptr || output == nullptr) {
-        return;
-    }
-
-    static_cast<App*>(clientData)->HandlePrecisionTouchpadInteractionOutput(*output);
-}
 
 LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
@@ -1439,6 +1110,107 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     }
 
     return DefWindowProcW(window_, message, wParam, lParam);
+}
+
+bool App::ShouldRoutePrecisionTouchpadGestureToCanvas(POINT cursor) const {
+    if (window_ == nullptr) {
+        return false;
+    }
+
+    RECT clientRect {};
+    GetClientRect(window_, &clientRect);
+    if (pdfSidebarOpen_ && IsPdfSidebarVisible()) {
+        const RECT sidebarRect = PdfSidebarRect(clientRect);
+        if (PtInRect(&sidebarRect, cursor) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void App::InitializePrecisionTouchpadSupport() {
+    ShutdownPrecisionTouchpadSupport();
+    if (window_ == nullptr) {
+        return;
+    }
+    if (precisionTouchpad_ == nullptr) {
+        precisionTouchpad_ = std::make_unique<PrecisionTouchpad>(
+            &App::PrecisionTouchpadGestureCallback,
+            &App::PrecisionTouchpadRouteCallback,
+            this);
+    }
+    precisionTouchpad_->Initialize(window_);
+}
+
+void App::ShutdownPrecisionTouchpadSupport() {
+    if (window_ != nullptr) {
+        KillTimer(window_, kPrecisionTouchpadInertiaTimerId);
+    }
+    precisionTouchpadManipulationActive_ = false;
+    precisionTouchpadManipulationStartZoom_ = zoom_;
+    if (precisionTouchpad_ != nullptr) {
+        precisionTouchpad_->Shutdown();
+    }
+}
+
+bool App::HandlePrecisionTouchpadPointerMessage(UINT message, WPARAM wParam, LPARAM) {
+    return precisionTouchpad_ != nullptr && precisionTouchpad_->HandlePointerMessage(message, wParam);
+}
+
+void App::ProcessPrecisionTouchpadInertia() {
+    if (precisionTouchpad_ == nullptr || !precisionTouchpad_->ProcessInertia()) {
+        if (window_ != nullptr) {
+            KillTimer(window_, kPrecisionTouchpadInertiaTimerId);
+        }
+    }
+}
+
+void App::HandlePrecisionTouchpadGesture(const PrecisionTouchpadGesture& gesture) {
+    if (window_ != nullptr) {
+        if (gesture.inertiaActive) {
+            SetTimer(window_, kPrecisionTouchpadInertiaTimerId, 15U, nullptr);
+        } else {
+            KillTimer(window_, kPrecisionTouchpadInertiaTimerId);
+        }
+    }
+    if (gesture.phase == PrecisionTouchpadGesture::Phase::Begin) {
+        precisionTouchpadManipulationActive_ = true;
+        precisionTouchpadManipulationStartZoom_ = zoom_;
+    }
+    if (gesture.phase == PrecisionTouchpadGesture::Phase::Cancel) {
+        precisionTouchpadManipulationActive_ = false;
+        precisionTouchpadManipulationStartZoom_ = zoom_;
+        return;
+    }
+
+    if (std::abs(gesture.cumulativeScale - 1.0f) > 0.0005f) {
+        POINT anchor = gesture.screenAnchor;
+        if (window_ != nullptr) {
+            ScreenToClient(window_, &anchor);
+        }
+        SetZoom(precisionTouchpadManipulationStartZoom_ * gesture.cumulativeScale, anchor);
+    }
+    if (std::abs(gesture.translationX) > 0.001f || std::abs(gesture.translationY) > 0.001f) {
+        PanBy(gesture.translationX, gesture.translationY);
+    }
+    if (gesture.phase == PrecisionTouchpadGesture::Phase::End) {
+        precisionTouchpadManipulationActive_ = false;
+        precisionTouchpadManipulationStartZoom_ = zoom_;
+    }
+}
+
+void App::PrecisionTouchpadGestureCallback(void* clientData, const PrecisionTouchpadGesture& gesture) {
+    if (clientData == nullptr) {
+        return;
+    }
+    static_cast<App*>(clientData)->HandlePrecisionTouchpadGesture(gesture);
+}
+
+bool App::PrecisionTouchpadRouteCallback(void* clientData, POINT clientCursor) {
+    if (clientData == nullptr) {
+        return false;
+    }
+    return static_cast<App*>(clientData)->ShouldRoutePrecisionTouchpadGestureToCanvas(clientCursor);
 }
 
 LRESULT CALLBACK App::WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {

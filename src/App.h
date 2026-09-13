@@ -8,7 +8,8 @@
 #include <vector>
 
 #include <windows.h>
-#include <interactioncontext.h>
+
+#include "platform/windows/PrecisionTouchpad.h"
 
 #include "latex/LatexCompletion.h"
 #include "Document.h"
@@ -477,13 +478,11 @@ private:
     void InitializePrecisionTouchpadSupport();
     void ShutdownPrecisionTouchpadSupport();
     [[nodiscard]] bool HandlePrecisionTouchpadPointerMessage(UINT message, WPARAM wParam, LPARAM lParam);
-    void HandlePrecisionTouchpadInteractionOutput(const INTERACTION_CONTEXT_OUTPUT& output);
-    void StartPrecisionTouchpadInertia();
-    void StopPrecisionTouchpadInertia(bool reportToSystem);
     void ProcessPrecisionTouchpadInertia();
-    void StopPrecisionTouchpadManipulation();
+    void HandlePrecisionTouchpadGesture(const PrecisionTouchpadGesture& gesture);
     [[nodiscard]] bool ShouldRoutePrecisionTouchpadGestureToCanvas(POINT cursor) const;
-    static void CALLBACK PrecisionTouchpadOutputCallback(void* clientData, const INTERACTION_CONTEXT_OUTPUT* output);
+    static void PrecisionTouchpadGestureCallback(void* clientData, const PrecisionTouchpadGesture& gesture);
+    static bool PrecisionTouchpadRouteCallback(void* clientData, POINT clientCursor);
     void StartSmoothScrollTimer();
     void StopSmoothScroll();
     void HandleSmoothScrollTimer();
@@ -835,12 +834,8 @@ private:
     std::vector<PaletteWheelPixelCacheEntry> paletteWheelPixelCacheEntries_ {};
     std::uint64_t paletteWheelPixelCacheSignature_ = 0;
     bool smoothScrollActive_ = false;
-    HINTERACTIONCONTEXT precisionTouchpadInteractionContext_ = nullptr;
-    INTERACTION_FLAGS precisionTouchpadLastInteractionFlags_ = INTERACTION_FLAG_NONE;
-    bool precisionTouchpadEnabled_ = false;
-    bool precisionTouchpadCanvasGestureActive_ = false;
+    std::unique_ptr<PrecisionTouchpad> precisionTouchpad_;
     bool precisionTouchpadManipulationActive_ = false;
-    bool precisionTouchpadInertiaActive_ = false;
     float precisionTouchpadManipulationStartZoom_ = 1.0f;
     SettingsState settings_ {};
     NewPageSettingsState newPageSettings_ {};
