@@ -192,10 +192,10 @@ add_test(NAME render_qt_offscreen COMMAND cnote_page_renderer_tests)
 get_target_property(_cnote_qmake Qt6::qmake IMPORTED_LOCATION)
 execute_process(
     COMMAND "${_cnote_qmake}" -query QT_INSTALL_PLUGINS
-    OUTPUT_VARIABLE _cnote_qt_plugins
+    OUTPUT_VARIABLE _cnote_plugins
     OUTPUT_STRIP_TRAILING_WHITESPACE)
 set_tests_properties(render_qt_offscreen PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
 # Self-contained Qt PDF-export contract test (no external fixtures).
 add_executable(cnote_pdf_export_tests
@@ -210,7 +210,7 @@ target_compile_definitions(cnote_pdf_export_tests PRIVATE
 target_link_libraries(cnote_pdf_export_tests PRIVATE cnote_pdf_qt Qt6::Core)
 add_test(NAME pdf_export_qt COMMAND cnote_pdf_export_tests)
 set_tests_properties(pdf_export_qt PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
 # Self-contained Qt editing-services test (offsets, formatting, LaTeX editing).
 add_executable(cnote_text_editing_tests
@@ -221,7 +221,7 @@ target_compile_definitions(cnote_text_editing_tests PRIVATE
 target_link_libraries(cnote_text_editing_tests PRIVATE cnote_render_qt)
 add_test(NAME text_editing_qt COMMAND cnote_text_editing_tests)
 set_tests_properties(text_editing_qt PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
 # Self-contained lazy PDF-background provider test.
 add_executable(cnote_pdf_background_tests
@@ -230,7 +230,7 @@ add_executable(cnote_pdf_background_tests
 target_link_libraries(cnote_pdf_background_tests PRIVATE cnote_pdf_qt)
 add_test(NAME pdf_background_qt COMMAND cnote_pdf_background_tests)
 set_tests_properties(pdf_background_qt PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
 # Self-contained Qt session-lifetime / autosave manager test.
 add_executable(cnote_session_manager_tests
@@ -248,7 +248,7 @@ add_test(NAME session_manager_qt COMMAND cnote_session_manager_tests)
 # No App/HWND/HDC and no second rendering or text path.
 find_package(Qt6 6.11.2 REQUIRED COMPONENTS Widgets)
 
-add_library(cnote_qt_ui STATIC
+add_library(cnote_ui STATIC
     src/ui/CanvasWidget.cpp
     src/qt/QtDocumentController.cpp
     src/qt/QtDocumentIo.cpp
@@ -276,29 +276,29 @@ add_library(cnote_qt_ui STATIC
     src/ui/SettingsFormatQt.cpp
     src/ui/NewPageDialogQt.cpp
 )
-set_target_properties(cnote_qt_ui PROPERTIES AUTOMOC ON)
-target_include_directories(cnote_qt_ui PUBLIC src)
-target_compile_features(cnote_qt_ui PUBLIC cxx_std_20)
-target_compile_options(cnote_qt_ui PRIVATE
+set_target_properties(cnote_ui PROPERTIES AUTOMOC ON)
+target_include_directories(cnote_ui PUBLIC src)
+target_compile_features(cnote_ui PUBLIC cxx_std_20)
+target_compile_options(cnote_ui PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
 # cnote_pdf_qt provides PdfiumBackend plus the portable file-loader service.
-target_link_libraries(cnote_qt_ui PUBLIC cnote_model cnote_render_qt cnote_pdf_qt Qt6::Widgets)
+target_link_libraries(cnote_ui PUBLIC cnote_model cnote_render_qt cnote_pdf_qt Qt6::Widgets)
 
-add_executable(cnote_qt src/qt/main.cpp)
-target_link_libraries(cnote_qt PRIVATE cnote_qt_ui)
+add_executable(cnote src/qt/main.cpp)
+target_link_libraries(cnote PRIVATE cnote_ui)
 
 # MicroTeX's font/XML resources ship as real files next to the executable.
-add_custom_command(TARGET cnote_qt POST_BUILD
+add_custom_command(TARGET cnote POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res"
-        "$<TARGET_FILE_DIR:cnote_qt>/latex-res"
+        "$<TARGET_FILE_DIR:cnote>/latex-res"
 )
 if(WIN32)
-    add_custom_command(TARGET cnote_qt POST_BUILD
+    add_custom_command(TARGET cnote POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "$<TARGET_FILE:pdfium>"
-            "$<TARGET_FILE_DIR:cnote_qt>/pdfium.dll"
+            "$<TARGET_FILE_DIR:cnote>/pdfium.dll"
     )
 endif()
 
@@ -331,7 +331,7 @@ target_compile_options(cnote_settings_tests PRIVATE
 target_link_libraries(cnote_settings_tests PRIVATE cnote_settings_qt)
 add_test(NAME settings_qt COMMAND cnote_settings_tests)
 set_tests_properties(settings_qt PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
 # --- Qt clipboard bridge (migration plan step 2.6) ----------------------------
 # Platform-neutral CTS selection codec plus the QClipboard bridge: structured
@@ -365,10 +365,10 @@ add_test(NAME selection_clipboard_qt COMMAND cnote_selection_clipboard_tests)
 # rest of the Qt suite.
 if(WIN32)
     set_tests_properties(selection_clipboard_qt PROPERTIES
-        ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+        ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_plugins}")
 else()
     set_tests_properties(selection_clipboard_qt PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 endif()
 
 # --- Qt layout consolidation (migration plan step 6.1) ------------------------
@@ -390,8 +390,8 @@ target_compile_options(cnote_layout_qt PRIVATE
 target_link_libraries(cnote_layout_qt PUBLIC Qt6::Gui)
 
 # The Qt shell is the product consumer of the consolidated layout.
-if(TARGET cnote_qt_ui)
-    target_link_libraries(cnote_qt_ui PUBLIC cnote_layout_qt)
+if(TARGET cnote_ui)
+    target_link_libraries(cnote_ui PUBLIC cnote_layout_qt)
 endif()
 
 # Layout parity evidence (plan step 6.1): one input matrix (client sizes
@@ -409,7 +409,7 @@ target_compile_features(cnote_layout_parity_tests PRIVATE cxx_std_20)
 # a missing Qt platform plugin makes QGuiApplication pop an invisible modal
 # message box on Windows and hang forever (observed under a stale CTest file).
 target_compile_definitions(cnote_layout_parity_tests PRIVATE
-    CNOTE_QT_PLUGIN_PATH="${_cnote_qt_plugins}"
+    CNOTE_QT_PLUGIN_PATH="${_cnote_plugins}"
 )
 target_compile_options(cnote_layout_parity_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
@@ -421,10 +421,10 @@ add_test(NAME layout_parity_qt COMMAND cnote_layout_parity_tests)
 # advances.  Other platforms only need geometry and run offscreen.
 if(WIN32)
     set_tests_properties(layout_parity_qt PROPERTIES TIMEOUT 120
-        ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+        ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_plugins}")
 else()
     set_tests_properties(layout_parity_qt PROPERTIES TIMEOUT 120
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 endif()
 
 # --- Qt packaging: installed resources, deployment and CPack ------------------
@@ -433,19 +433,19 @@ endif()
 # The Qt application is the only product target; it is installed and packaged.
 #
 # Layout produced by `cmake --install <prefix>` and by CPack:
-#   Windows: <prefix>/bin/cnote_qt.exe, Qt DLLs, the MinGW compiler runtime and
+#   Windows: <prefix>/bin/cnote.exe, Qt DLLs, the MinGW compiler runtime and
 #            platform/image plugins under <prefix>/plugins, pdfium.dll and
 #            latex-res/ beside the executable (windeployqt layout).
-#   Linux:   <prefix>/bin/cnote_qt + bin/latex-res, <prefix>/lib/libQt6*.so and
+#   Linux:   <prefix>/bin/cnote + bin/latex-res, <prefix>/lib/libQt6*.so and
 #            libpdfium.so, <prefix>/plugins/..., <prefix>/bin/qt.conf.  RPATHs
 #            are $ORIGIN-relative, so the tree can be extracted anywhere.
-#   macOS:   <prefix>/cnote_qt.app with Contents/Resources/latex-res and
+#   macOS:   <prefix>/cnote.app with Contents/Resources/latex-res and
 #            Contents/Frameworks/libpdfium.dylib.  Present but UNVERIFIED: there
 #            is no macOS machine in this environment (see the packaging report).
 #
 # `include(CPack)` must remain the last statement of this project: it captures
 # the install rules above.
-if(TARGET cnote_qt)
+if(TARGET cnote)
     include(GNUInstallDirs)
 
     # -- installed-location resource lookup and packaged application icon -----
@@ -468,26 +468,26 @@ if(TARGET cnote_qt)
         BASE "${CMAKE_CURRENT_SOURCE_DIR}/assets"
         FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/cnote.ico"
     )
-    target_link_libraries(cnote_qt_ui PUBLIC cnote_platform_qt)
+    target_link_libraries(cnote_ui PUBLIC cnote_platform_qt)
 
     # The Windows icon resource stays conditional; no other platform compiles it.
     if(WIN32)
-        target_sources(cnote_qt PRIVATE src/cnote.rc)
+        target_sources(cnote PRIVATE src/cnote.rc)
     endif()
 
     # -- install layout -------------------------------------------------------
-    get_target_property(_cnote_qt_output_name cnote_qt OUTPUT_NAME)
-    if(NOT _cnote_qt_output_name)
-        set(_cnote_qt_output_name "cnote_qt")
+    get_target_property(_cnote_output_name cnote OUTPUT_NAME)
+    if(NOT _cnote_output_name)
+        set(_cnote_output_name "cnote")
     endif()
-    set(_cnote_qt_app_bundle "${_cnote_qt_output_name}.app")
+    set(_cnote_app_bundle "${_cnote_output_name}.app")
     if(APPLE)
-        set(_cnote_qt_resource_dest "${_cnote_qt_app_bundle}/Contents/Resources")
+        set(_cnote_resource_dest "${_cnote_app_bundle}/Contents/Resources")
     else()
-        set(_cnote_qt_resource_dest "${CMAKE_INSTALL_BINDIR}")
+        set(_cnote_resource_dest "${CMAKE_INSTALL_BINDIR}")
     endif()
 
-    install(TARGETS cnote_qt
+    install(TARGETS cnote
         BUNDLE DESTINATION .
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
     )
@@ -495,14 +495,14 @@ if(TARGET cnote_qt)
     # MicroTeX's XML/TTF resources must remain real files (plan step 3.8): stage
     # them beside the executable, or in Contents/Resources inside a bundle.
     install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res/"
-        DESTINATION "${_cnote_qt_resource_dest}/latex-res"
+        DESTINATION "${_cnote_resource_dest}/latex-res"
     )
 
     # PDFium: the exact runtime library the build linked, installed where the
     # installed application loads it without any developer PATH entry.
     if(APPLE)
         install(FILES "$<TARGET_FILE:pdfium>"
-            DESTINATION "${_cnote_qt_app_bundle}/Contents/Frameworks")
+            DESTINATION "${_cnote_app_bundle}/Contents/Frameworks")
     elseif(WIN32)
         install(FILES "$<TARGET_FILE:pdfium>" DESTINATION "${CMAKE_INSTALL_BINDIR}")
     else()
@@ -512,16 +512,16 @@ if(TARGET cnote_qt)
     # Relocatable runtime paths: the installed executable finds the deployed
     # libraries relative to itself, never through a build-machine path.
     if(APPLE)
-        set_target_properties(cnote_qt PROPERTIES
+        set_target_properties(cnote PROPERTIES
             INSTALL_RPATH "@executable_path/../Frameworks")
     elseif(UNIX)
-        set_target_properties(cnote_qt PROPERTIES
+        set_target_properties(cnote PROPERTIES
             INSTALL_RPATH "$ORIGIN/../lib")
     endif()
 
     # -- macOS bundle (configured, explicitly unverified) ---------------------
     if(APPLE)
-        set_target_properties(cnote_qt PROPERTIES
+        set_target_properties(cnote PROPERTIES
             MACOSX_BUNDLE TRUE
             MACOSX_BUNDLE_BUNDLE_NAME "cnote"
             # Placeholder reverse-DNS identifier: macOS signing/notarization and
@@ -536,22 +536,22 @@ if(TARGET cnote_qt)
         # bundle without CFBundleIconFile rather than failing the build.
         find_package(Python3 COMPONENTS Interpreter QUIET)
         if(Python3_Interpreter_FOUND)
-            set(_cnote_qt_icns "${CMAKE_CURRENT_BINARY_DIR}/cnote.icns")
-            add_custom_command(OUTPUT "${_cnote_qt_icns}"
+            set(_cnote_icns "${CMAKE_CURRENT_BINARY_DIR}/cnote.icns")
+            add_custom_command(OUTPUT "${_cnote_icns}"
                 COMMAND "${Python3_EXECUTABLE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-icns.py"
                     "${CMAKE_CURRENT_SOURCE_DIR}/assets/cnote.ico"
-                    "${_cnote_qt_icns}"
+                    "${_cnote_icns}"
                 DEPENDS
                     "${CMAKE_CURRENT_SOURCE_DIR}/assets/cnote.ico"
                     "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-icns.py"
                 COMMENT "Generating cnote.icns from assets/cnote.ico"
                 VERBATIM
             )
-            add_custom_target(cnote_qt_bundle_icon ALL DEPENDS "${_cnote_qt_icns}")
-            install(FILES "${_cnote_qt_icns}"
-                DESTINATION "${_cnote_qt_app_bundle}/Contents/Resources")
-            set_target_properties(cnote_qt PROPERTIES
+            add_custom_target(cnote_bundle_icon ALL DEPENDS "${_cnote_icns}")
+            install(FILES "${_cnote_icns}"
+                DESTINATION "${_cnote_app_bundle}/Contents/Resources")
+            set_target_properties(cnote PROPERTIES
                 MACOSX_BUNDLE_ICON_FILE "cnote.icns")
         endif()
     endif()
@@ -566,17 +566,17 @@ if(TARGET cnote_qt)
     # application (and tools/verify-package.cmake) run the real binary headless
     # on a machine without a display.  Windows' default windeployqt set already
     # carries everything the verifier requires; macOS is handled by macdeployqt.
-    set(_cnote_qt_deploy_plugin_args "")
+    set(_cnote_deploy_plugin_args "")
     if(UNIX AND NOT APPLE)
-        set(_cnote_qt_deploy_plugin_args INCLUDE_PLUGINS offscreen)
+        set(_cnote_deploy_plugin_args INCLUDE_PLUGINS offscreen)
     endif()
     qt_generate_deploy_app_script(
-        TARGET cnote_qt
-        OUTPUT_SCRIPT _cnote_qt_deploy_script
+        TARGET cnote
+        OUTPUT_SCRIPT _cnote_deploy_script
         NO_UNSUPPORTED_PLATFORM_ERROR
-        ${_cnote_qt_deploy_plugin_args}
+        ${_cnote_deploy_plugin_args}
     )
-    install(SCRIPT "${_cnote_qt_deploy_script}")
+    install(SCRIPT "${_cnote_deploy_script}")
 
     # -- third-party notices (plan 7.4/7.6) ------------------------------------
     # The shipped archives carry the notice file plus the license texts of every
@@ -605,25 +605,25 @@ if(TARGET cnote_qt)
     # Qt's binary installers do not always carry it; when it is missing the
     # release must supply LICENSES/LGPL-3.0-only.txt from the Qt source, so this
     # is reported at configure time instead of being silently omitted.
-    get_target_property(_cnote_qt_core_location_local Qt6::Core IMPORTED_LOCATION)
-    get_filename_component(_cnote_qt_root_local "${_cnote_qt_core_location_local}/../.." ABSOLUTE)
-    set(_cnote_qt_lgpl_license "")
-    foreach(_cnote_qt_license_candidate
-        "${_cnote_qt_root_local}/LICENSE.LGPL3"
-        "${_cnote_qt_root_local}/LICENSE.LGPLv3"
-        "${_cnote_qt_root_local}/LICENSES/LGPL-3.0-only.txt"
-        "${_cnote_qt_root_local}/LICENSES/LGPL-3.0-or-later.txt")
-        if(EXISTS "${_cnote_qt_license_candidate}")
-            set(_cnote_qt_lgpl_license "${_cnote_qt_license_candidate}")
+    get_target_property(_cnote_core_location_local Qt6::Core IMPORTED_LOCATION)
+    get_filename_component(_cnote_root_local "${_cnote_core_location_local}/../.." ABSOLUTE)
+    set(_cnote_lgpl_license "")
+    foreach(_cnote_license_candidate
+        "${_cnote_root_local}/LICENSE.LGPL3"
+        "${_cnote_root_local}/LICENSE.LGPLv3"
+        "${_cnote_root_local}/LICENSES/LGPL-3.0-only.txt"
+        "${_cnote_root_local}/LICENSES/LGPL-3.0-or-later.txt")
+        if(EXISTS "${_cnote_license_candidate}")
+            set(_cnote_lgpl_license "${_cnote_license_candidate}")
             break()
         endif()
     endforeach()
-    if(_cnote_qt_lgpl_license)
-        install(FILES "${_cnote_qt_lgpl_license}"
+    if(_cnote_lgpl_license)
+        install(FILES "${_cnote_lgpl_license}"
             DESTINATION "${_cnote_notice_dir}/qt" RENAME "LICENSE.LGPL3")
     else()
         message(WARNING
-            "Qt LGPL v3 text not found under ${_cnote_qt_root_local}: the packaged "
+            "Qt LGPL v3 text not found under ${_cnote_root_local}: the packaged "
             "notices cannot include it. Supply LICENSES/LGPL-3.0-only.txt from the Qt "
             "source distribution before publishing an artifact (see "
             "THIRD-PARTY-NOTICES.md, 'Open prerequisites').")
@@ -637,17 +637,17 @@ if(TARGET cnote_qt)
         "cnote note-taking application (Qt ${Qt6_VERSION} build)")
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)
         if(APPLE AND CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
-            set(_cnote_qt_package_arch "arm64")
+            set(_cnote_package_arch "arm64")
         else()
-            set(_cnote_qt_package_arch "x64")
+            set(_cnote_package_arch "x64")
         endif()
     else()
-        set(_cnote_qt_package_arch "x86")
+        set(_cnote_package_arch "x86")
     endif()
     # Deterministic artifact name; the archive gets the same name as its
     # top-level directory (CPACK_INCLUDE_TOPLEVEL_DIRECTORY below).
     set(CPACK_PACKAGE_FILE_NAME
-        "cnote_qt-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}-${_cnote_qt_package_arch}")
+        "cnote-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}-${_cnote_package_arch}")
     set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
     set(CPACK_PACKAGE_CHECKSUM "SHA256")
     if(WIN32)
@@ -692,7 +692,7 @@ target_compile_options(cnote_settings_dialog_tests PRIVATE
 target_link_libraries(cnote_settings_dialog_tests PRIVATE cnote_dialogs_qt)
 add_test(NAME settings_dialog_qt COMMAND cnote_settings_dialog_tests)
 set_tests_properties(settings_dialog_qt PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
 # Self-contained offscreen evidence for the new-page dialog: draft clamping and
 # presets, swatch/hex/HSL colour edits, profile selection, remap toggle,
@@ -705,7 +705,7 @@ target_compile_options(cnote_new_page_dialog_tests PRIVATE
 target_link_libraries(cnote_new_page_dialog_tests PRIVATE cnote_dialogs_qt)
 add_test(NAME new_page_dialog_qt COMMAND cnote_new_page_dialog_tests)
 set_tests_properties(new_page_dialog_qt PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
 # --- Qt precision input: Windows touchpad and native gestures (plan 5.3/5.4) --
 # Portable decision core plus the Qt event filter the canvas installs on itself,
@@ -760,7 +760,7 @@ target_compile_options(cnote_precision_filter_tests PRIVATE
 target_link_libraries(cnote_precision_filter_tests PRIVATE cnote_precision_input_qt Qt6::Widgets)
 add_test(NAME precision_input_filter_qt COMMAND cnote_precision_filter_tests)
 set_tests_properties(precision_input_filter_qt PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
 if(WIN32)
     # Windows adapter lifecycle, availability fallback and inertia timer wiring.
@@ -771,12 +771,12 @@ if(WIN32)
     target_link_libraries(cnote_precision_touchpad_tests PRIVATE cnote_precision_input_qt Qt6::Widgets)
     add_test(NAME precision_touchpad_qt COMMAND cnote_precision_touchpad_tests)
     set_tests_properties(precision_touchpad_qt PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
     foreach(_cnote_precision_test cnote_precision_filter_tests cnote_precision_touchpad_tests)
-        foreach(_cnote_qt_runtime Qt6::Core Qt6::Gui Qt6::Widgets)
+        foreach(_cnote_runtime Qt6::Core Qt6::Gui Qt6::Widgets)
             add_custom_command(TARGET ${_cnote_precision_test} POST_BUILD
                 COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "$<TARGET_FILE:${_cnote_qt_runtime}>"
+                    "$<TARGET_FILE:${_cnote_runtime}>"
                     "$<TARGET_FILE_DIR:${_cnote_precision_test}>"
             )
         endforeach()
@@ -787,10 +787,10 @@ endif()
 # executables on Windows (the other Qt test targets rely on a manual copy).
 if(WIN32)
     foreach(_cnote_dialog_test cnote_settings_dialog_tests cnote_new_page_dialog_tests)
-        foreach(_cnote_qt_runtime Qt6::Core Qt6::Gui Qt6::Widgets)
+        foreach(_cnote_runtime Qt6::Core Qt6::Gui Qt6::Widgets)
             add_custom_command(TARGET ${_cnote_dialog_test} POST_BUILD
                 COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "$<TARGET_FILE:${_cnote_qt_runtime}>"
+                    "$<TARGET_FILE:${_cnote_runtime}>"
                     "$<TARGET_FILE_DIR:${_cnote_dialog_test}>"
             )
         endforeach()
@@ -847,8 +847,8 @@ target_link_libraries(cnote_chrome_qt PUBLIC
     cnote_layout_qt cnote_settings_qt cnote_render_qt Qt6::Widgets)
 
 # The Qt shell is the product consumer of the chrome widgets.
-if(TARGET cnote_qt_ui)
-    target_link_libraries(cnote_qt_ui PUBLIC cnote_chrome_qt)
+if(TARGET cnote_ui)
+    target_link_libraries(cnote_ui PUBLIC cnote_chrome_qt)
 endif()
 
 # Deterministic offscreen contract test (plan step 6.1): toolbar control rects
@@ -864,7 +864,7 @@ target_compile_options(cnote_chrome_tests PRIVATE
 target_link_libraries(cnote_chrome_tests PRIVATE cnote_chrome_qt cnote_model Qt6::Widgets)
 add_test(NAME chrome_qt COMMAND cnote_chrome_tests)
 set_tests_properties(chrome_qt PROPERTIES TIMEOUT 120
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
 # --- Qt interaction router (migration plan steps 5.1-5.3) ---------------------
 # Widget-free pointer/tool routing ported from src/shell/MessageLoop.cpp (tool
@@ -883,8 +883,8 @@ target_link_libraries(cnote_interaction_qt PUBLIC cnote_model Qt6::Gui)
 
 # The Qt shell is the consumer; linking the library here is the single
 # preparation step the canvas slice needs before it adopts the router.
-if(TARGET cnote_qt_ui)
-    target_link_libraries(cnote_qt_ui PUBLIC cnote_interaction_qt)
+if(TARGET cnote_ui)
+    target_link_libraries(cnote_ui PUBLIC cnote_interaction_qt)
 endif()
 
 # Deterministic behavior test over PointerSample sequences: tool routing,
@@ -917,7 +917,7 @@ target_compile_definitions(cnote_selection_math_tests PRIVATE
 target_link_libraries(cnote_selection_math_tests PRIVATE cnote_model cnote_latex_qt cnote_render_qt)
 add_test(NAME selection_math_qt COMMAND cnote_selection_math_tests)
 set_tests_properties(selection_math_qt PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
 # --- Cross-platform portability tests (plan 7.1/7.6, assumptions section) -----
 # Path/file-name behavior the Windows build alone cannot catch: case-only path
@@ -939,7 +939,7 @@ target_compile_options(cnote_portability_tests PRIVATE
 target_link_libraries(cnote_portability_tests PRIVATE cnote_pdf_qt cnote_settings_qt Qt6::Core)
 add_test(NAME portability_paths_qt COMMAND cnote_portability_tests)
 set_tests_properties(portability_paths_qt PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 if(WIN32)
     # PDFium is a runtime dependency of the export path; stage it next to the
     # test executable so a clean build directory can run this test directly.
@@ -965,10 +965,10 @@ add_test(NAME font_fallback_qt COMMAND cnote_font_fallback_tests)
 # have a real font database offscreen.
 if(WIN32)
     set_tests_properties(font_fallback_qt PROPERTIES TIMEOUT 120
-        ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+        ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_plugins}")
 else()
     set_tests_properties(font_fallback_qt PROPERTIES TIMEOUT 120
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 endif()
 
 # --- Portable XPRESS codec tests (plan step 2.4) ------------------------------
@@ -996,10 +996,10 @@ target_compile_features(cnote_persistence_tests PRIVATE cxx_std_20)
 target_compile_options(cnote_persistence_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_persistence_tests PRIVATE cnote_qt_ui cnote_settings_qt)
+target_link_libraries(cnote_persistence_tests PRIVATE cnote_ui cnote_settings_qt)
 add_test(NAME persistence_semantics_qt COMMAND cnote_persistence_tests)
 set_tests_properties(persistence_semantics_qt PROPERTIES TIMEOUT 180
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 if(WIN32)
     # PDFium is a runtime dependency of the export path.
     add_custom_command(TARGET cnote_persistence_tests POST_BUILD
@@ -1015,8 +1015,8 @@ endif()
 # result depends on the ambient PATH and on the order ctest happens to use
 # (observed as STATUS_ENTRYPOINT_NOT_FOUND / DLL-not-found flips between runs).
 if(WIN32)
-    get_target_property(_cnote_qt_core_location Qt6::Core IMPORTED_LOCATION)
-    get_filename_component(_cnote_qt_bin_dir "${_cnote_qt_core_location}" DIRECTORY)
+    get_target_property(_cnote_core_location Qt6::Core IMPORTED_LOCATION)
+    get_filename_component(_cnote_bin_dir "${_cnote_core_location}" DIRECTORY)
 
     function(cnote_stage_test_runtime target)
         foreach(_cnote_runtime_target Qt6::Core Qt6::Gui Qt6::Widgets pdfium)
@@ -1028,16 +1028,16 @@ if(WIN32)
             endif()
         endforeach()
         foreach(_cnote_runtime_dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll)
-            if(EXISTS "${_cnote_qt_bin_dir}/${_cnote_runtime_dll}")
+            if(EXISTS "${_cnote_bin_dir}/${_cnote_runtime_dll}")
                 add_custom_command(TARGET ${target} POST_BUILD
                     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                        "${_cnote_qt_bin_dir}/${_cnote_runtime_dll}"
+                        "${_cnote_bin_dir}/${_cnote_runtime_dll}"
                         "$<TARGET_FILE_DIR:${target}>")
             endif()
         endforeach()
     endfunction()
 
-    foreach(_cnote_qt_test_target
+    foreach(_cnote_test_target
         cnote_page_renderer_tests
         cnote_pdf_export_tests
         cnote_text_editing_tests
@@ -1058,8 +1058,8 @@ if(WIN32)
         cnote_font_fallback_tests
         cnote_xpress_codec_tests
         cnote_persistence_tests)
-        if(TARGET ${_cnote_qt_test_target})
-            cnote_stage_test_runtime(${_cnote_qt_test_target})
+        if(TARGET ${_cnote_test_target})
+            cnote_stage_test_runtime(${_cnote_test_target})
         endif()
     endforeach()
 endif()

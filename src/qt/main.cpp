@@ -1,4 +1,4 @@
-// cnote_qt: runnable Qt frontend for the migration slice (plan steps 3.9, 4-7).
+// cnote: Qt desktop frontend (plan steps 3.9, 4-7).
 //
 // Startup order matters: QApplication exists before MicroTeX is initialized
 // (the Qt adapter uses QFontDatabase/QPainter), the window and its caches are

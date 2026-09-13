@@ -15,10 +15,10 @@ namespace cnote::platform {
 // platform.
 //
 // Installed layout:
-//   * Windows:  <install>/cnote_qt.exe, <install>/latex-res/, <install>/pdfium.dll
-//   * Linux:    <install>/bin/cnote_qt, <install>/bin/latex-res/, <install>/lib/libpdfium.so
-//   * macOS:    cnote_qt.app/Contents/MacOS/cnote_qt,
-//               cnote_qt.app/Contents/Resources/latex-res/ (a bundle may not
+//   * Windows:  <install>/cnote.exe, <install>/latex-res/, <install>/pdfium.dll
+//   * Linux:    <install>/bin/cnote, <install>/bin/latex-res/, <install>/lib/libpdfium.so
+//   * macOS:    cnote.app/Contents/MacOS/cnote,
+//               cnote.app/Contents/Resources/latex-res/ (a bundle may not
 //               carry resources beside its executable)
 
 // Directory containing the installed executable.

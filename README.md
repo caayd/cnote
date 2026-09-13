@@ -3,12 +3,9 @@
 PDF annotation app in C++20 with a Qt 6 Widgets frontend for Windows, Linux and
 macOS.
 
-The product frontend is the Qt application (`cnote_qt`, renamed to `cnote` at
-cutover). The original Win32 frontend (`cnote` over `cnote_core`) still builds on
-Windows as the frozen migration reference and parity target: it is neither
-installed nor packaged, and it is deleted at cutover together with the GDI/GDI+
-and DirectComposition code. Both frontends share the same portable model,
-codec and service layers. `THIRD-PARTY-NOTICES.md` inventories the licenses and
+The application is the Qt 6 Widgets frontend (`cnote`, plan steps 7.1/7.2). The
+original Win32 frontend and its GDI/GDI+/DirectComposition code were removed at
+cutover; the model, codec and service layers are shared and portable. `THIRD-PARTY-NOTICES.md` inventories the licenses and
 lists the open release prerequisites.
 
 `cnote` is built around fast pen input, simple page navigation, and a minimal UI. It opens PDFs, lets you annotate them with strokes and pasted images, saves native `.cnote` projects, and exports back to PDF.
@@ -73,13 +70,9 @@ Shortcuts are editable in the settings window.
 | Layer | Targets | Contents |
 |---|---|---|
 | Model | `cnote_model` | `Document`, history values and the history reducer. Standard C++20 only: no Qt, no OS headers. |
-| Services | `cnote_render_qt`, `cnote_latex_qt`, `cnote_pdf_qt`, `cnote_settings_qt`, `cnote_clipboard_qt`, `cnote_layout_qt`, `cnote_interaction_qt`, `cnote_platform_qt`, `microtex_qt`, `tinyxml2` | Text layout (`QTextDocument`), page renderer, PDF import/export, settings store and key bindings, selection clipboard codec, chrome geometry, interaction routing, resource lookup, MicroTeX with the Qt backend. Qt Core/Gui (plus PDFium, MicroTeX, tinyxml2) - no Qt Widgets, no native window handles. |
-| UI | `cnote_chrome_qt`, `cnote_dialogs_qt`, `cnote_precision_input_qt`, `cnote_qt_ui` | Toolbar/sidebar chrome widgets, settings and new-page dialogs, the Windows precision-touchpad adapter, the canvas widget and the per-view controller. Depends on the services and Qt Widgets. |
-| Executable | `cnote_qt` (product) / `cnote` (legacy Win32 reference) | `QApplication` startup, session/window orchestration, deployment metadata. |
-
-The legacy `cnote_core` static library and the `cnote` executable are guarded by
-`if(WIN32)` in `CMakeLists.txt` and are not part of the Qt product; the migration
-target must configure on Linux/macOS without them.
+| Services | `cnote_services` (`microtex_qt`, `tinyxml2`) | Text layout (`QTextDocument`), page renderer, PDF import/export, settings store and key bindings, selection clipboard codec, chrome geometry, interaction routing, resource lookup, MicroTeX with the Qt backend. Qt Core/Gui (plus PDFium, MicroTeX, tinyxml2) - no Qt Widgets, no native window handles. |
+| UI | `cnote_ui` | Toolbar/sidebar chrome widgets, settings and new-page dialogs, the Windows precision-touchpad adapter, the canvas widget and the per-view controller. Depends on the services and Qt Widgets. |
+| Executable | `cnote` | `QApplication` startup, session/window orchestration, deployment metadata. |
 
 ## Build the Qt application
 
@@ -172,13 +165,13 @@ The Qt application installs and packages through Qt's CMake deploy API
 keeps building but is neither installed nor packaged; it is renamed at cutover.
 
 ```bash
-cmake --build build-qt --target cnote_qt      # add -DCMAKE_CXX_COMPILER=... on Windows
+cmake --build build-qt --target cnote      # add -DCMAKE_CXX_COMPILER=... on Windows
 cmake --install build-qt --prefix stage
 cpack --config build-qt/CPackConfig.cmake -B dist
 ```
 
-CPack produces `cnote_qt-<version>-Windows-x64.zip`, a relocatable
-`cnote_qt-<version>-Linux-x64.tar.gz` (extract anywhere; the executable and
+CPack produces `cnote-<version>-Windows-x64.zip`, a relocatable
+`cnote-<version>-Linux-x64.tar.gz` (extract anywhere; the executable and
 plugins carry `$ORIGIN`-relative RPATHs), and a `DragNDrop` disk image on macOS.
 The macOS configuration is present but unverified: no macOS machine is
 available. CPack writes a `.sha256` checksum next to each artifact.
@@ -188,11 +181,11 @@ Each package carries the MicroTeX `latex-res` tree beside the executable
 platform/image plugins, and - on Windows - the MinGW compiler runtime. The
 application resolves `latex-res` relative to its installed location through
 `cnote::platform::LatexResourceDir()`, not the working directory. The verified
-Windows ZIP contains 14 files under `bin/` (`cnote_qt.exe`, `qt.conf`,
+Windows ZIP contains 14 files under `bin/` (`cnote.exe`, `qt.conf`,
 `Qt6Core/Gui/Widgets/Network/Svg.dll`, `opengl32sw.dll`, `D3Dcompiler_47.dll`,
 `pdfium.dll`, the MinGW runtime DLLs), 7 plugin directories, 33 translation
 files and 45 `latex-res` files. The verified Linux TGZ contains
-`bin/cnote_qt`, `bin/qt.conf`, 45 `latex-res` files, 34 libraries under `lib/`
+`bin/cnote`, `bin/qt.conf`, 45 `latex-res` files, 34 libraries under `lib/`
 and 13 plugin directories under `plugins/`.
 
 Only the MicroTeX font licenses (`latex-res/fonts/licences/Knuth_License.txt`,
@@ -222,15 +215,15 @@ project. It is invoked this way by `.github/workflows/package.yml`.
 From the build tree (Qt application):
 
 ```powershell
-.\build-qt\cnote_qt.exe path\to\document.pdf
+.\build-qt\cnote.exe path\to\document.pdf
 ```
 
 ```bash
-./build-qt/cnote_qt path/to/document.pdf
+./build-qt/cnote path/to/document.pdf
 ```
 
-From a package, run `bin/cnote_qt.exe` (Windows) or extract the TGZ anywhere and
-run `bin/cnote_qt` - resources are resolved relative to the executable, so the
+From a package, run `bin/cnote.exe` (Windows) or extract the TGZ anywhere and
+run `bin/cnote` - resources are resolved relative to the executable, so the
 working directory does not matter. The legacy reference build runs as
 `build\cnote.exe`.
 
