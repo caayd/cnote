@@ -767,8 +767,9 @@ std::optional<Document> PdfiumBackend::Open(const std::filesystem::path& filePat
     }
 
     if (const auto embeddedProject = ExtractEmbeddedCnoteProject(*pdfBytes); embeddedProject.has_value()) {
-        if (auto projectDocument = ProjectFile::LoadFromBytes(*embeddedProject, filePath, *this);
+        if (auto projectDocument = ProjectFile::LoadFromBytes(*embeddedProject, filePath);
             projectDocument.has_value()) {
+            HydrateProject(*projectDocument);
             return projectDocument;
         }
     }
@@ -820,6 +821,42 @@ std::optional<Document> PdfiumBackend::OpenFromMemory(
     }
 
     return Document::CreatePdfDocument(sourcePath, std::move(pdfBytes), std::move(pages), 0, {});
+}
+
+void PdfiumBackend::HydrateProject(Document& document) const {
+    std::vector<std::optional<Document>> openedSources;
+    openedSources.reserve(document.PdfSourceCount());
+    for (std::size_t sourceIndex = 0; sourceIndex < document.PdfSourceCount(); ++sourceIndex) {
+        const Document::PdfSource& pdfSource = document.PdfSourceAt(sourceIndex);
+        if (!pdfSource.pdfData || pdfSource.pdfData->empty()) {
+            openedSources.push_back(std::nullopt);
+            continue;
+        }
+        openedSources.push_back(OpenFromMemory(pdfSource.sourcePath, pdfSource.pdfData));
+    }
+
+    for (std::size_t pageIndex = 0; pageIndex < document.PageCount(); ++pageIndex) {
+        Page& page = document.PageAt(pageIndex);
+        const bool hasValidPdfSource = page.sourcePdfSourceIndex >= 0
+            && static_cast<std::size_t>(page.sourcePdfSourceIndex) < openedSources.size()
+            && openedSources[static_cast<std::size_t>(page.sourcePdfSourceIndex)].has_value()
+            && page.sourcePdfPageIndex >= 0
+            && static_cast<std::size_t>(page.sourcePdfPageIndex)
+                < openedSources[static_cast<std::size_t>(page.sourcePdfSourceIndex)]->PageCount();
+        if (hasValidPdfSource) {
+            const Document& sourceDocument = *openedSources[static_cast<std::size_t>(page.sourcePdfSourceIndex)];
+            const Page& sourcePage = sourceDocument.PageAt(static_cast<std::size_t>(page.sourcePdfPageIndex));
+            page.width = sourcePage.width;
+            page.height = sourcePage.height;
+            page.raster = sourcePage.raster;
+        } else {
+            page.sourcePdfSourceIndex = -1;
+            page.sourcePdfPageIndex = -1;
+            if (page.raster.pixels.empty()) {
+                page.raster = CreateSolidRaster(page.width, page.height, 1.5f, 0xFFFFFFFFU);
+            }
+        }
+    }
 }
 
 std::optional<RasterImage> PdfiumBackend::RenderPage(

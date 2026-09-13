@@ -99,7 +99,7 @@ int main() {
         }
     }
 
-    const auto loaded = cnote::ProjectFile::LoadFromBytes(bytes, L"text-model-test.cnote", pdfBackend);
+    const auto loaded = cnote::ProjectFile::LoadFromBytes(bytes, L"text-model-test.cnote");
     if (!Require(loaded.has_value(), "serialized project did not load")
         || !Require(loaded->PageCount() == 1U, "page count changed")
         || !Require(loaded->CurrentPage().texts.size() == 1U, "text count changed")
@@ -133,8 +133,7 @@ int main() {
     unicodeDocument.CurrentPage().texts.push_back(unicodeText);
     const auto unicodeLoaded = cnote::ProjectFile::LoadFromBytes(
         cnote::ProjectFile::Serialize(unicodeDocument),
-        L"unicode-test.cnote",
-        pdfBackend);
+        L"unicode-test.cnote");
     if (!Require(unicodeLoaded.has_value(), "unicode project did not load")
         || !Require(unicodeLoaded->CurrentPage().texts.size() == 1U, "unicode text count changed")) {
         return 1;
@@ -156,8 +155,7 @@ int main() {
     nulDocument.CurrentPage().texts.push_back(nulText);
     const auto nulLoaded = cnote::ProjectFile::LoadFromBytes(
         cnote::ProjectFile::Serialize(nulDocument),
-        L"nul-test.cnote",
-        pdfBackend);
+        L"nul-test.cnote");
     if (!Require(nulLoaded.has_value() && nulLoaded->CurrentPage().texts.size() == 1U, "embedded NUL project did not load")
         || !Require(nulLoaded->CurrentPage().texts.front().content.size() == 3U, "embedded NUL was truncated")
         || !Require(nulLoaded->CurrentPage().texts.front().content[1] == u'\0', "embedded NUL was not preserved")) {

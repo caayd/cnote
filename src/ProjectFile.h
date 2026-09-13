@@ -8,7 +8,6 @@
 #include <vector>
 
 #include "Document.h"
-#include "PdfBackend.h"
 
 namespace cnote {
 
@@ -18,11 +17,10 @@ inline constexpr std::u16string_view kCnoteFileExtension = u".cnote";
 
 class ProjectFile {
 public:
-    [[nodiscard]] static std::optional<Document> Load(const std::filesystem::path& filePath, PdfiumBackend& pdfBackend);
+    [[nodiscard]] static std::optional<Document> Load(const std::filesystem::path& filePath);
     [[nodiscard]] static std::optional<Document> LoadFromBytes(
         const std::vector<std::uint8_t>& bytes,
-        const std::filesystem::path& filePath,
-        PdfiumBackend& pdfBackend);
+        const std::filesystem::path& filePath);
     [[nodiscard]] static std::vector<std::uint8_t> Serialize(const Document& document);
     [[nodiscard]] static bool Save(const Document& document, const std::filesystem::path& filePath);
 };

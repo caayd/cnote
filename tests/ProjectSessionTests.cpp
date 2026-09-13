@@ -118,7 +118,7 @@ struct ProjectSessionTests {
         second.SetSessionAutoSaveInterval(15);
         Require(root.session_->autoSaveIntervalSeconds == 15 && root.settings_.autoSaveIntervalSeconds == 15,
                 "autosave interval changes reach the owning view");
-        auto saved = ProjectFile::Load(projectPath, root.pdfBackend_);
+        auto saved = ProjectFile::Load(projectPath);
         Require(saved && saved->PageAt(0).texts[0].content == u"edited in first view", "shared edits round trip");
         Require(!second.SaveCnoteToPath(scratch / L"missing" / L"failure.cnote", false), "save failure reported");
 

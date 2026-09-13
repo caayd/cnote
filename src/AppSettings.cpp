@@ -537,11 +537,12 @@ bool App::AppendPagesFromFile() {
 bool App::AppendPagesFromDocumentPath(const std::filesystem::path& filePath) {
     std::optional<Document> opened;
     if (HasExtension(filePath, kCnoteFileExtension)) {
-        opened = ProjectFile::Load(filePath, pdfBackend_);
+        opened = ProjectFile::Load(filePath);
         if (!opened.has_value()) {
             MessageBoxW(window_, L"Failed to open the cnote file for page import.", L"Append Pages", MB_OK | MB_ICONERROR);
             return false;
         }
+        pdfBackend_.HydrateProject(*opened);
     } else if (HasExtension(filePath, u".pdf")) {
         opened = pdfBackend_.Open(filePath);
         if (!opened.has_value()) {

@@ -38,6 +38,11 @@ public:
     [[nodiscard]] std::optional<Document> OpenFromMemory(
         const std::filesystem::path& sourcePath,
         std::shared_ptr<std::vector<std::uint8_t>> pdfBytes) const;
+
+    // Reopens each stored PDF source and fills page geometry/rasters from it.
+    // Missing or invalid sources fall back to a solid page raster. Model decode
+    // stays usable without calling this.
+    void HydrateProject(Document& document) const;
     [[nodiscard]] std::optional<RasterImage> RenderPage(
         const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
         std::size_t pageIndex,

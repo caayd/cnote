@@ -139,11 +139,12 @@ bool App::OpenDocumentPath(const std::filesystem::path& filePath) {
 }
 
 bool App::OpenProject(const std::filesystem::path& filePath) {
-    const auto opened = ProjectFile::Load(filePath, pdfBackend_);
+    auto opened = ProjectFile::Load(filePath);
     if (!opened.has_value()) {
         MessageBoxW(window_, L"Failed to open the cnote file.", L"Open Cnote", MB_OK | MB_ICONERROR);
         return false;
     }
+    pdfBackend_.HydrateProject(*opened);
 
     if (!ConfirmCloseWithUnsavedChanges()) return false;
     PrepareForDocumentSwitch();

@@ -513,8 +513,7 @@ std::optional<std::vector<std::uint8_t>> DecompressPayload(
 std::optional<Document> LoadProjectPayload(
     ByteReader& reader,
     std::uint32_t version,
-    const std::filesystem::path& filePath,
-    PdfiumBackend& pdfBackend) {
+    const std::filesystem::path& filePath) {
     std::uint32_t flags = 0;
     std::uint32_t currentPageIndex = 0;
     std::uint32_t pageCount = 0;
@@ -697,43 +696,6 @@ std::optional<Document> LoadProjectPayload(
         savedPages.push_back(std::move(page));
     }
 
-    std::vector<std::optional<Document>> openedSources;
-    openedSources.reserve(pdfSources.size());
-    for (const Document::PdfSource& pdfSource : pdfSources) {
-        if (!pdfSource.pdfData || pdfSource.pdfData->empty()) {
-            openedSources.push_back(std::nullopt);
-            continue;
-        }
-        const auto opened = pdfBackend.OpenFromMemory(pdfSource.sourcePath, pdfSource.pdfData);
-        if (!opened.has_value()) {
-            openedSources.push_back(std::nullopt);
-        } else {
-            openedSources.push_back(std::move(*opened));
-        }
-    }
-
-    for (Page& savedPage : savedPages) {
-        const bool hasValidPdfSource = savedPage.sourcePdfSourceIndex >= 0
-            && static_cast<std::size_t>(savedPage.sourcePdfSourceIndex) < openedSources.size()
-            && openedSources[static_cast<std::size_t>(savedPage.sourcePdfSourceIndex)].has_value()
-            && savedPage.sourcePdfPageIndex >= 0
-            && static_cast<std::size_t>(savedPage.sourcePdfPageIndex)
-                < openedSources[static_cast<std::size_t>(savedPage.sourcePdfSourceIndex)]->PageCount();
-        if (hasValidPdfSource) {
-            const Document& sourceDocument = *openedSources[static_cast<std::size_t>(savedPage.sourcePdfSourceIndex)];
-            const Page& sourcePage = sourceDocument.PageAt(static_cast<std::size_t>(savedPage.sourcePdfPageIndex));
-            savedPage.width = sourcePage.width;
-            savedPage.height = sourcePage.height;
-            savedPage.raster = sourcePage.raster;
-        } else {
-            savedPage.sourcePdfSourceIndex = -1;
-            savedPage.sourcePdfPageIndex = -1;
-            if (savedPage.raster.pixels.empty()) {
-                savedPage.raster = CreateSolidRaster(savedPage.width, savedPage.height, 1.5f, 0xFFFFFFFFU);
-            }
-        }
-    }
-
     return Document::CreateProjectDocument(filePath, std::move(pdfSources), std::move(savedPages), currentPageIndex, pageDefaults);
 }
 
@@ -796,18 +758,17 @@ std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
 
 }  // namespace
 
-std::optional<Document> ProjectFile::Load(const std::filesystem::path& filePath, PdfiumBackend& pdfBackend) {
+std::optional<Document> ProjectFile::Load(const std::filesystem::path& filePath) {
     const auto bytes = ReadAllBytes(filePath);
     if (!bytes.has_value()) {
         return std::nullopt;
     }
 
-    return LoadFromBytes(*bytes, filePath, pdfBackend);
+    return LoadFromBytes(*bytes, filePath);
 }
 std::optional<Document> ProjectFile::LoadFromBytes(
     const std::vector<std::uint8_t>& bytes,
-    const std::filesystem::path& filePath,
-    PdfiumBackend& pdfBackend) {
+    const std::filesystem::path& filePath) {
     ByteReader reader { bytes };
     char magic[sizeof(kCnoteMagic)] {};
     std::uint32_t version = 0;
@@ -829,20 +790,20 @@ std::optional<Document> ProjectFile::LoadFromBytes(
         if (payloadEncoding == kPayloadEncodingRaw) {
             if (storedPayload.size() != uncompressedPayloadSize) return std::nullopt;
             ByteReader payloadReader { storedPayload };
-            return LoadProjectPayload(payloadReader, version, filePath, pdfBackend);
+            return LoadProjectPayload(payloadReader, version, filePath);
         } else if (payloadEncoding == kPayloadEncodingXpressHuff) {
             const auto decompressedPayload = DecompressPayload(storedPayload, uncompressedPayloadSize);
             if (!decompressedPayload.has_value()) {
                 return std::nullopt;
             }
             ByteReader payloadReader { *decompressedPayload };
-            return LoadProjectPayload(payloadReader, version, filePath, pdfBackend);
+            return LoadProjectPayload(payloadReader, version, filePath);
         } else {
             return std::nullopt;
         }
     }
 
-    return LoadProjectPayload(reader, version, filePath, pdfBackend);
+    return LoadProjectPayload(reader, version, filePath);
 }
 
 std::vector<std::uint8_t> ProjectFile::Serialize(const Document& document) {
