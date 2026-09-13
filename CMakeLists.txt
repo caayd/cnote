@@ -478,6 +478,15 @@ if(WIN32 AND TARGET cnote_core)
     add_test(NAME settings_parity_qt COMMAND cnote_settings_parity_tests)
     set_tests_properties(settings_parity_qt PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+    # The harness links cnote_core, so its Qt and PDFium runtime must sit next
+    # to the executable in a fresh build directory.
+    foreach(_cnote_parity_runtime Qt6::Core Qt6::Gui pdfium)
+        add_custom_command(TARGET cnote_settings_parity_tests POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:${_cnote_parity_runtime}>"
+                "$<TARGET_FILE_DIR:cnote_settings_parity_tests>"
+        )
+    endforeach()
 endif()
 
 # --- Qt clipboard bridge (migration plan step 2.6) ----------------------------
