@@ -1135,3 +1135,26 @@ target_compile_options(cnote_xpress_codec_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
 add_test(NAME xpress_codec COMMAND cnote_xpress_codec_tests)
+
+# --- Persistence and error semantics (migration plan 6.6, 4.5/7.2) -----------
+# Drives the real controller, manager, window and settings store: save and PDF
+# export failure/replace semantics, recent-document rules, and the close/auto-
+# save interplay on the last view.
+add_executable(cnote_persistence_tests tests/PersistenceSemanticsTests.cpp)
+target_include_directories(cnote_persistence_tests PRIVATE src)
+target_compile_features(cnote_persistence_tests PRIVATE cxx_std_20)
+target_compile_options(cnote_persistence_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_persistence_tests PRIVATE cnote_qt_ui cnote_settings_qt)
+add_test(NAME persistence_semantics_qt COMMAND cnote_persistence_tests)
+set_tests_properties(persistence_semantics_qt PROPERTIES TIMEOUT 180
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+if(WIN32)
+    # PDFium is a runtime dependency of the export path.
+    add_custom_command(TARGET cnote_persistence_tests POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:pdfium>"
+            "$<TARGET_FILE_DIR:cnote_persistence_tests>/pdfium.dll"
+    )
+endif()
