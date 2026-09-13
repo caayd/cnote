@@ -1,6 +1,5 @@
 #include "document/XpressCodec.h"
 
-#include <unordered_map>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -19,10 +18,11 @@ constexpr std::uint8_t kModeXpressHuffman = 4U;
 constexpr std::size_t kHeaderBytes = 28U;
 constexpr std::size_t kTableBytes = 256U;
 constexpr std::size_t kSymbolCount = 512U;
-// Cabinet's buffer framing is the observed 24-byte MSCF header followed by a
-// body at offset 28: magic@0, header size@4, CRC-8@6, mode@7, uncompressed
-// size@8, reserved@12, chunk size@16, reserved@20, body size@24. The body
-// uses one 256-byte nibble-length table per 64 KiB decoded output block.
+// Windows Compression API buffer framing is an observed 24-byte header followed
+// by a body at offset 28: magic@0, header size@4, low byte of standard
+// reflected CRC32@6, mode@7, uncompressed size@8, unknown zero@12, chunk
+// size@16, unknown zero@20, body size@24. The body uses one 256-byte
+// nibble-length table per 64 KiB decoded output block.
 
 std::uint32_t ReadU32(std::span<const std::uint8_t> bytes, std::size_t offset) {
     return static_cast<std::uint32_t>(bytes[offset])
@@ -304,7 +304,13 @@ public:
         bits_ = 32;
         return true;
     }
-    bool ReadRaw16(std::uint32_t& value) { return Read16(value); }
+    bool ReadRaw16(std::uint32_t& value) {
+        if (bytes_.size() - position_ < 2U) return false;
+        value = static_cast<std::uint32_t>(bytes_[position_])
+            | (static_cast<std::uint32_t>(bytes_[position_ + 1]) << 8U);
+        position_ += 2U;
+        return true;
+    }
     bool ReadBits(unsigned count, std::uint32_t& value) {
         if (count > 16U) return false;
         value = count == 0 ? 0 : mask_ >> (32U - count);
@@ -385,13 +391,6 @@ std::optional<std::vector<std::uint8_t>> DecodeStream(
     if (expectedSize > std::numeric_limits<std::size_t>::max()) return std::nullopt;
     std::vector<std::uint8_t> output;
     if (expectedSize > output.max_size()) return std::nullopt;
-    try {
-        output.reserve(static_cast<std::size_t>(expectedSize));
-    } catch (const std::bad_alloc&) {
-        return std::nullopt;
-    } catch (const std::length_error&) {
-        return std::nullopt;
-    }
     std::size_t tableOffset = 0;
     while (output.size() < expectedSize) {
         if (stream.size() < tableOffset || stream.size() - tableOffset < kTableBytes) return std::nullopt;
@@ -451,27 +450,33 @@ std::optional<std::vector<std::uint8_t>> DecodeStream(
 
 std::optional<std::vector<std::uint8_t>> CompressXpressBuffer(std::span<const std::uint8_t> input) {
     if (input.empty()) return std::vector<std::uint8_t>{};
-    if (input.size() > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
-    const auto stream = EncodeLiteralStream(input);
-    const bool useRaw = !stream || stream->size() + 4U >= input.size();
-    const std::size_t bodySize = useRaw ? input.size() : stream->size();
-    if (bodySize > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
-    std::vector<std::uint8_t> result;
-    result.reserve(kHeaderBytes + bodySize);
-    AppendU32(result, kMagic);
-    result.push_back(static_cast<std::uint8_t>(kHeaderSize));
-    result.push_back(static_cast<std::uint8_t>(kHeaderSize >> 8U));
-    result.push_back(0);
-    result.push_back(kModeXpressHuffman);
-    AppendU32(result, static_cast<std::uint32_t>(input.size()));
-    AppendU32(result, 0);
-    AppendU32(result, static_cast<std::uint32_t>(input.size()));
-    AppendU32(result, 0);
-    AppendU32(result, static_cast<std::uint32_t>(bodySize));
-    if (useRaw) result.insert(result.end(), input.begin(), input.end());
-    else result.insert(result.end(), stream->begin(), stream->end());
-    result[6] = HeaderCrc(result);
-    return result;
+    try {
+        if (input.size() > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
+        const auto stream = EncodeLiteralStream(input);
+        const bool useRaw = !stream || stream->size() + 4U >= input.size();
+        const std::size_t bodySize = useRaw ? input.size() : stream->size();
+        if (bodySize > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
+        std::vector<std::uint8_t> result;
+        result.reserve(kHeaderBytes + bodySize);
+        AppendU32(result, kMagic);
+        result.push_back(static_cast<std::uint8_t>(kHeaderSize));
+        result.push_back(static_cast<std::uint8_t>(kHeaderSize >> 8U));
+        result.push_back(0);
+        result.push_back(kModeXpressHuffman);
+        AppendU32(result, static_cast<std::uint32_t>(input.size()));
+        AppendU32(result, 0);
+        AppendU32(result, static_cast<std::uint32_t>(input.size()));
+        AppendU32(result, 0);
+        AppendU32(result, static_cast<std::uint32_t>(bodySize));
+        if (useRaw) result.insert(result.end(), input.begin(), input.end());
+        else result.insert(result.end(), stream->begin(), stream->end());
+        result[6] = HeaderCrc(result);
+        return result;
+    } catch (const std::bad_alloc&) {
+        return std::nullopt;
+    } catch (const std::length_error&) {
+        return std::nullopt;
+    }
 }
 
 std::optional<std::vector<std::uint8_t>> DecompressXpressBuffer(
@@ -494,8 +499,14 @@ std::optional<std::vector<std::uint8_t>> DecompressXpressBuffer(
     if (size != expectedSize || chunkSize != size || ReadU32(input, 12) != 0
         || ReadU32(input, 20) != 0 || bodySize != input.size() - kHeaderBytes) return std::nullopt;
     const auto body = input.subspan(kHeaderBytes);
-    if (bodySize == size) return std::vector<std::uint8_t>(body.begin(), body.end());
-    return DecodeStream(body, expectedSize);
+    try {
+        if (bodySize == size) return std::vector<std::uint8_t>(body.begin(), body.end());
+        return DecodeStream(body, expectedSize);
+    } catch (const std::bad_alloc&) {
+        return std::nullopt;
+    } catch (const std::length_error&) {
+        return std::nullopt;
+    }
 }
 
 }  // namespace cnote
