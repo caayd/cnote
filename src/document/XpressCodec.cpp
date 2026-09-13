@@ -19,6 +19,10 @@ constexpr std::uint8_t kModeXpressHuffman = 4U;
 constexpr std::size_t kHeaderBytes = 28U;
 constexpr std::size_t kTableBytes = 256U;
 constexpr std::size_t kSymbolCount = 512U;
+// Cabinet's buffer framing is the observed 24-byte MSCF header followed by a
+// body at offset 28: magic@0, header size@4, CRC-8@6, mode@7, uncompressed
+// size@8, reserved@12, chunk size@16, reserved@20, body size@24. The body
+// uses one 256-byte nibble-length table per 64 KiB decoded output block.
 
 std::uint32_t ReadU32(std::span<const std::uint8_t> bytes, std::size_t offset) {
     return static_cast<std::uint32_t>(bytes[offset])
