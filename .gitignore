@@ -10,3 +10,6 @@ third_party/pdfium/lib/pdfium.def
 *.obj
 *.o
 *.exe
+
+# Local CMake build directories (regenerable; never part of the product).
+/build-*/

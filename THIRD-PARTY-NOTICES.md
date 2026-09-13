@@ -27,13 +27,11 @@ document.
 
 - `res/fonts` ships inside `latex-res/fonts`, including its license texts:
   `Knuth_License.txt` (Computer Modern / TeX fonts), `License_for_dsrom.txt`,
-  `OFL.txt` (SIL Open Font License fonts). These are the only third-party
-  license texts that currently ride along in a package. Verified by listing the
-  produced artifacts: the Windows ZIP
-  (`cnote_qt-0.1.0-Windows-x64.zip`, 18/18 packaging checks) and the Linux TGZ
-  (`cnote_qt-0.1.0-Linux-x64.tar.gz`, 16/16 packaging checks) each contain
-  exactly those three files under `bin/latex-res/fonts/licences/` and no other
-  license or notice file.
+  `OFL.txt` (SIL Open Font License fonts), shipped inside `latex-res/fonts`.
+  The packages additionally carry this notice and the component license texts
+  under `share/licenses/cnote/` (see the install rules and the packaging
+  verification). Verified by listing the produced artifacts and by
+  tools/verify-package.cmake, which fails when any of those files is missing.
 - `res/greek` and `res/cyrillic` were **stripped because they carry GPLv3
   licenses** and are absent from the tree. Verified absent:
   `third_party/microtex/res/` contains no `greek/` or `cyrillic/` directory,

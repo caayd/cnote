@@ -52,9 +52,8 @@ struct FormulaMetrics {
 struct Formula;
 using FormulaHandle = std::shared_ptr<Formula>;
 
-// Must be called once after the platform graphics stack is up (GdiplusStartup
-// in the legacy frontend, QApplication in the Qt frontend), before any
-// Parse/Draw call. resRoot is the directory containing MicroTeX's resource
+// Must be called once after the platform graphics stack is up (QApplication
+// exists and its font database is usable), before any Parse/Draw call. resRoot is the directory containing MicroTeX's resource
 // tree (latex-res) and its `.clatexmath-res_root` marker.
 bool Initialize(const std::filesystem::path& resRoot);
 void Shutdown();

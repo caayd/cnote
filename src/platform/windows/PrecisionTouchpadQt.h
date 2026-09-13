@@ -19,8 +19,7 @@ namespace cnote::ui {
 
 // Windows precision-touchpad integration for the Qt frontend (plan step 5.4).
 //
-// It reuses the existing native adapter (src/platform/windows/PrecisionTouchpad,
-// still wired to the legacy Win32 message loop until cutover) as a
+// It reuses the native adapter (src/platform/windows/PrecisionTouchpad) as a
 // QAbstractNativeEventFilter instead of reimplementing it:
 //   * WM_POINTERDOWN/UPDATE/UP frames are fed to the adapter; when it consumes a
 //     frame the filter returns true, so Qt does not synthesise a duplicate

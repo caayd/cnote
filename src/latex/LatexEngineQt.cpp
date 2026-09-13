@@ -6,10 +6,9 @@
 
 #include "platform/qt/graphic_qt.h"
 
-// Qt drawing backend for the MicroTeX wrapper. Compiled only into Qt targets,
-// which link the `microtex_qt` target (BUILD_QT); the legacy frontend keeps
-// LatexEngineGdi.cpp and the GDI-flavoured `microtex` target instead. Never
-// link both backends into one target (plan step 1.5).
+// Qt drawing backend for the MicroTeX wrapper, compiled into the targets that
+// link `microtex_qt` (BUILD_QT). The GDI backend was removed at cutover; the
+// two platform backends must never be linked into one target (plan step 1.5).
 
 namespace cnote::latex {
 

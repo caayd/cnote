@@ -122,7 +122,7 @@ enable_testing()
 
 # --- Qt MicroTeX backend (migration plan step 3.8) ----------------------------
 # `microtex_qt` carries the MicroTeX engine sources plus the Qt platform
-# adapter; the GDI backend was removed at cutover (plan step 7.1).
+# adapter; the GDI backend it replaced no longer exists.
 #
 # third_party/microtex/src/platform/qt/graphic_qt.{h,cpp} are vendored from
 # NanoMichael/MicroTeX @ 0e3707f6 (MIT; third_party/microtex/LICENSE) with local
@@ -296,7 +296,7 @@ endif()
 # page rendering (plan step 1.5).  Qt Core/Gui only: no widgets, no window
 # handles, no App state.
 add_library(cnote_services STATIC
-    # Project codecs and file loading (moved out of the cnote_ui list at cutover).
+    # Project codecs and file loading.
     src/ProjectFile.cpp
     src/document/LoadDocumentFile.cpp
     src/document/XpressCodec.cpp
