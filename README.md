@@ -1,6 +1,15 @@
 # cnote
 
-Native Windows PDF annotation app in C++.
+PDF annotation app in C++20 with a Qt 6 Widgets frontend for Windows, Linux and
+macOS.
+
+The product frontend is the Qt application (`cnote_qt`, renamed to `cnote` at
+cutover). The original Win32 frontend (`cnote` over `cnote_core`) still builds on
+Windows as the frozen migration reference and parity target: it is neither
+installed nor packaged, and it is deleted at cutover together with the GDI/GDI+
+and DirectComposition code. Both frontends share the same portable model,
+codec and service layers. `THIRD-PARTY-NOTICES.md` inventories the licenses and
+lists the open release prerequisites.
 
 `cnote` is built around fast pen input, simple page navigation, and a minimal UI. It opens PDFs, lets you annotate them with strokes and pasted images, saves native `.cnote` projects, and exports back to PDF.
 
@@ -59,14 +68,90 @@ after restarting, and live interaction previews are not broadcast to other views
 
 Shortcuts are editable in the settings window.
 
-## Build
+## Target and layer structure
+
+| Layer | Targets | Contents |
+|---|---|---|
+| Model | `cnote_model` | `Document`, history values and the history reducer. Standard C++20 only: no Qt, no OS headers. |
+| Services | `cnote_render_qt`, `cnote_latex_qt`, `cnote_pdf_qt`, `cnote_settings_qt`, `cnote_clipboard_qt`, `cnote_layout_qt`, `cnote_interaction_qt`, `cnote_platform_qt`, `microtex_qt`, `tinyxml2` | Text layout (`QTextDocument`), page renderer, PDF import/export, settings store and key bindings, selection clipboard codec, chrome geometry, interaction routing, resource lookup, MicroTeX with the Qt backend. Qt Core/Gui (plus PDFium, MicroTeX, tinyxml2) - no Qt Widgets, no native window handles. |
+| UI | `cnote_chrome_qt`, `cnote_dialogs_qt`, `cnote_precision_input_qt`, `cnote_qt_ui` | Toolbar/sidebar chrome widgets, settings and new-page dialogs, the Windows precision-touchpad adapter, the canvas widget and the per-view controller. Depends on the services and Qt Widgets. |
+| Executable | `cnote_qt` (product) / `cnote` (legacy Win32 reference) | `QApplication` startup, session/window orchestration, deployment metadata. |
+
+The legacy `cnote_core` static library and the `cnote` executable are guarded by
+`if(WIN32)` in `CMakeLists.txt` and are not part of the Qt product; the migration
+target must configure on Linux/macOS without them.
+
+## Build the Qt application
 
 Requirements:
 
-- CMake 3.25+
-- A compiler matching the selected platform (MinGW-w64 GCC on Windows,
-  GCC on Linux, or AppleClang on macOS)
-- PDFium **148.0.7749.0** for the target platform and architecture
+- CMake 3.25+, Ninja, a C++20 compiler
+- Qt **6.11.2** (Core, Gui, Widgets) for the target platform
+- PDFium **148.0.7749.0** matching the target platform and architecture
+
+`CNOTE_PDFIUM_ROOT` must point at one complete PDFium SDK root: a directory with
+`PDFiumConfig.cmake`, `VERSION`, `include/` and the matching runtime library
+(`bin/pdfium.dll`, `lib/libpdfium.so`, `lib/libpdfium.dylib`). Configure fails
+when the version, binary format, architecture, headers, runtime or compiler do
+not match. On Windows the MinGW kit's import library is used when supplied;
+otherwise `gendef`/`dlltool` generate one under the build directory (never in the
+source tree).
+
+Windows x64, MinGW 13.1 from the Qt kit (verified locally):
+
+```powershell
+$qt = "C:/Qt/6.11.2/mingw_64"            # or the SDK location
+$pdfium = "C:/pdfium-148.0.7749.0/pdfium-win-x64"
+cmake -S . -B build-qt -G Ninja -DCMAKE_BUILD_TYPE=Release `
+  -DCMAKE_CXX_COMPILER="$qt/../../Tools/mingw1310_64/bin/g++.exe" `
+  -DCMAKE_PREFIX_PATH="$qt" `
+  -DCNOTE_PDFIUM_ROOT="$pdfium"
+cmake --build build-qt
+```
+
+Linux x64 with GCC (verified locally under Ubuntu 24.04 / WSL):
+
+```bash
+cmake -S . -B build-qt -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/opt/Qt/6.11.2/gcc_64 \
+  -DCNOTE_PDFIUM_ROOT="$HOME/pdfium-148.0.7749.0"
+cmake --build build-qt
+```
+
+macOS uses the same two commands with `-DCMAKE_PREFIX_PATH=<qt>/clang_64`,
+`-DCMAKE_OSX_ARCHITECTURES=arm64` (or `x86_64`) and the matching
+`pdfium-mac-<arch>` SDK. **The macOS build has not been executed** - see the
+release status below.
+
+## Test
+
+The suite needs no display for the model/codec tests and the offscreen platform
+plugin for the Qt tests (each Qt test already sets its own `QT_PLUGIN_PATH`
+through its CTest environment, so a plain `ctest` works after configure):
+
+```bash
+# model/codec tests, no display
+ctest --test-dir build-qt -R '^(latex_engine|text_model_round_trip|project_sessions|session_manager_qt|interaction_router_qt)$' --output-on-failure
+# everything else, offscreen
+QT_QPA_PLATFORM=offscreen ctest --test-dir build-qt -E '^(latex_engine|text_model_round_trip|project_sessions|session_manager_qt|interaction_router_qt)$' --output-on-failure
+```
+
+`latex_engine`, `text_model_round_trip` and `project_sessions` are the
+legacy-named Windows-only model tests; they are absent from the Linux/macOS test
+set. `layout_parity_qt` runs everywhere: on Windows it additionally compares the
+Qt chrome geometry against the live Win32 reference, on other platforms against
+the frozen reference table captured from it.
+
+## Legacy Windows frontend (migration reference)
+
+The legacy target still builds on Windows and remains the behavioural reference
+until cutover. Do not extend it.
+
+```powershell
+cmake -S . -B build -G "MinGW Makefiles" `
+  -DCNOTE_PDFIUM_ROOT="$pwd/third_party/pdfium"
+cmake --build build
+```
 
 The Qt MinGW 13.1 kit does not ship `interactioncontext.h` or a MinGW
 `ninput` import library. Windows builds use the unmodified public-domain
@@ -80,51 +165,16 @@ for its Windows target and dynamically loads the documented `ninput.dll`
 APIs, including the Windows 11 ordinal-2507 pointer-frame API; it does not
 link or redistribute Windows system binaries.
 
-`CNOTE_PDFIUM_ROOT` selects one complete PDFium SDK root and defaults to the
-bundled `third_party/pdfium` Windows SDK. The root must contain
-`PDFiumConfig.cmake`, `VERSION`, the PDFium headers, and the matching runtime
-library. On Windows, MinGW uses `libpdfium.dll.a` when supplied; otherwise
-`gendef` and `dlltool` generate an import library under the build directory
-(never in the source tree). MSVC uses `pdfium.dll.lib`.
+## Package
 
-For the current legacy Windows build:
+The Qt application installs and packages through Qt's CMake deploy API
+(`qt_generate_deploy_app_script` + CPack). The legacy Windows `cnote` target
+keeps building but is neither installed nor packaged; it is renamed at cutover.
 
-```powershell
-cmake -S . -B build -G "MinGW Makefiles" `
-  -DCNOTE_PDFIUM_ROOT="$pwd/third_party/pdfium"
-cmake --build build
-```
-
-The current legacy target is Windows-only. External Linux/macOS SDK roots are
-for the migration targets and dependency probes; pass an absolute root when
-those targets are enabled:
-
-```text
-cmake -S . -B build -G Ninja -DCNOTE_PDFIUM_ROOT=<pdfium-root>
-cmake --build build
-```
-
-The configure step fails when the SDK version, binary format, architecture,
-headers, runtime, or compiler does not match. The build copies the imported
-`pdfium` target's runtime next to the executable automatically.
-The initial shared build boundary is `cnote_model`, a plain C++20 static
-library containing `Document`. It has only the public `src` include path and
-does not inherit the legacy UI's Windows or Qt definitions. The legacy
-`cnote_core` and existing tests consume this target while the Windows product
-remains unchanged.
-
-## Package (Qt migration build)
-
-The Qt application (`cnote_qt`, migration target) installs and packages through
-Qt's CMake deploy API. The legacy Windows `cnote` target keeps building but is
-neither installed nor packaged; it is renamed at cutover.
-
-```text
-cmake -S . -B build-qt -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH=<qt-root> -DCNOTE_PDFIUM_ROOT=<pdfium-root>
-cmake --build build-qt --target cnote_qt
-cmake --install build-qt --prefix <stage-directory>
-cpack --config build-qt/CPackConfig.cmake
+```bash
+cmake --build build-qt --target cnote_qt      # add -DCMAKE_CXX_COMPILER=... on Windows
+cmake --install build-qt --prefix stage
+cpack --config build-qt/CPackConfig.cmake -B dist
 ```
 
 CPack produces `cnote_qt-<version>-Windows-x64.zip`, a relocatable
@@ -134,10 +184,21 @@ The macOS configuration is present but unverified: no macOS machine is
 available. CPack writes a `.sha256` checksum next to each artifact.
 
 Each package carries the MicroTeX `latex-res` tree beside the executable
-(`Contents/Resources` inside a macOS bundle), PDFium, the Qt platform and
-image-format plugins, and - on Windows - the MinGW compiler runtime. The
+(`Contents/Resources` inside a macOS bundle), PDFium, the Qt libraries and
+platform/image plugins, and - on Windows - the MinGW compiler runtime. The
 application resolves `latex-res` relative to its installed location through
-`cnote::platform::LatexResourceDir()`, not the working directory.
+`cnote::platform::LatexResourceDir()`, not the working directory. The verified
+Windows ZIP contains 14 files under `bin/` (`cnote_qt.exe`, `qt.conf`,
+`Qt6Core/Gui/Widgets/Network/Svg.dll`, `opengl32sw.dll`, `D3Dcompiler_47.dll`,
+`pdfium.dll`, the MinGW runtime DLLs), 7 plugin directories, 33 translation
+files and 45 `latex-res` files. The verified Linux TGZ contains
+`bin/cnote_qt`, `bin/qt.conf`, 45 `latex-res` files, 34 libraries under `lib/`
+and 13 plugin directories under `plugins/`.
+
+Only the MicroTeX font licenses (`latex-res/fonts/licences/Knuth_License.txt`,
+`OFL.txt`, `License_for_dsrom.txt`) ride along in the packages today.
+`THIRD-PARTY-NOTICES.md` records the full inventory and lists the notices that
+are still missing (a packaging change, not yet made).
 
 Verify a package before shipping it:
 
@@ -154,22 +215,53 @@ and fonts) and the Windows compiler runtime are present, that the executable and
 `qt.conf` embed no build-machine path, and then launches the packaged
 application from an unrelated working directory with a sanitized environment
 (`--self-check=<fixture>`), requiring it to resolve its resources and open the
-project.
+project. It is invoked this way by `.github/workflows/package.yml`.
 
 ## Run
 
-```powershell
-.\build\cnote.exe
-```
-
-Open a file directly:
+From the build tree (Qt application):
 
 ```powershell
-.\build\cnote.exe path\to\document.pdf
+.\build-qt\cnote_qt.exe path\to\document.pdf
 ```
+
+```bash
+./build-qt/cnote_qt path/to/document.pdf
+```
+
+From a package, run `bin/cnote_qt.exe` (Windows) or extract the TGZ anywhere and
+run `bin/cnote_qt` - resources are resolved relative to the executable, so the
+working directory does not matter. The legacy reference build runs as
+`build\cnote.exe`.
+
+## Release status
+
+Verified locally (Windows MinGW 13.1 and WSL Ubuntu 24.04): configure, build,
+the full CTest set, `cmake --install`, CPack ZIP/TGZ, and
+`tools/verify-package.cmake` (17/17 checks on the ZIP, 16/16 on the TGZ,
+including launching the packaged application headless).
+
+Not verified, and not claimed as release-ready:
+
+- **macOS build, bundle, signing and notarization** - no macOS machine is
+  available; the DMG path is configured only.
+- **Hosted CI runners** - `.github/workflows/` pins Qt 6.11.2 and PDFium
+  148.0.7749.0 and was validated by running its exact command sequences locally,
+  but no GitHub runner has executed it; the macOS jobs are entirely unexecuted.
+- **Physical input hardware** - pen/tablet behaviour, pressure, and the Windows
+  precision-touchpad adapter on real hardware.
+- **Multi-monitor and mixed-DPI transitions**, IME/accessibility behaviour, and
+  real-desktop rendering performance.
+- **Qt LGPL distribution obligations** - dynamic linking is the selected route
+  but the legal/distribution review has not happened (see
+  `THIRD-PARTY-NOTICES.md`).
 
 ## Notes
 
-- `.cnote` is the native project format for editable work.
+- `.cnote` is the native project format for editable work; v14 files written by
+  the legacy Windows application stay readable, and new files stay readable by
+  it.
 - Auto-save applies to saved `.cnote` documents.
-- This project is Windows-only and uses raw Win32, GDI, and GDI+ rather than a cross-platform UI framework.
+- The product UI is Qt 6 Widgets (Core/Gui/Widgets, dynamically linked). The
+  remaining raw Win32/GDI/GDI+ code belongs to the legacy `cnote` frontend that
+  is deleted at cutover; new work belongs in the Qt targets.
