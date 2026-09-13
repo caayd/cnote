@@ -519,3 +519,63 @@ else()
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
 endif()
 
+# --- Qt layout consolidation (migration plan step 6.1) ------------------------
+# Qt logical-pixel port of the reference chrome geometry (toolbar, toolbar
+# title/zoom, sidebar metrics and header, quick-size and text-format popups,
+# palette menu/wheel, toolbar auto-hide).  Qt Gui only - no widgets, no
+# App/HWND/HDC - so the Win32 frontend keeps src/ui/Layout.cpp until cutover
+# while the Qt shell consumes this one.  Every constant in src/ui/LayoutQt.cpp
+# records the call path it came from; the duplicate appui/App.cpp definitions
+# and their single disagreement (palette-wheel hover grow) are resolved in the
+# header comment.
+add_library(cnote_layout_qt STATIC
+    src/ui/LayoutQt.cpp
+)
+target_include_directories(cnote_layout_qt PUBLIC src)
+target_compile_features(cnote_layout_qt PUBLIC cxx_std_20)
+target_compile_options(cnote_layout_qt PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_layout_qt PUBLIC Qt6::Gui)
+
+# The Qt shell is the product consumer of the consolidated layout.
+if(TARGET cnote_qt_ui)
+    target_link_libraries(cnote_qt_ui PUBLIC cnote_layout_qt)
+endif()
+
+# Layout parity evidence (plan step 6.1): one input matrix (client sizes
+# including compact widths, palette sizes, maximized states, tool variants,
+# title/zoom text lengths, popup-edge clamping, auto-hide boundaries) drives
+# cnote::appui and cnote::appui::qt and asserts matching rectangles - exactly
+# for geometry and within the stated text-metric tolerance for title/zoom.
+# Windows additionally runs the live legacy comparison; every platform compares
+# against the frozen reference table captured from that legacy path (the
+# executable's own --emit-reference mode verifies the table on Windows).
+add_executable(cnote_layout_parity_tests tests/LayoutParityTests.cpp)
+target_include_directories(cnote_layout_parity_tests PRIVATE src)
+target_compile_features(cnote_layout_parity_tests PRIVATE cxx_std_20)
+# The harness must run with or without an externally set platform plugin path:
+# a missing Qt platform plugin makes QGuiApplication pop an invisible modal
+# message box on Windows and hang forever (observed under a stale CTest file).
+target_compile_definitions(cnote_layout_parity_tests PRIVATE
+    CNOTE_QT_PLUGIN_PATH="${_cnote_qt_plugins}"
+)
+target_compile_options(cnote_layout_parity_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_layout_parity_tests PRIVATE cnote_layout_qt Qt6::Gui)
+if(WIN32 AND TARGET cnote_core)
+    target_link_libraries(cnote_layout_parity_tests PRIVATE cnote_core)
+    target_compile_definitions(cnote_layout_parity_tests PRIVATE CNOTE_LAYOUT_LEGACY_PARITY)
+endif()
+add_test(NAME layout_parity_qt COMMAND cnote_layout_parity_tests)
+# Windows needs the native platform: the offscreen plugin's font database
+# returns placeholder metrics there, while the harness compares real text
+# advances.  Other platforms only need geometry and run offscreen.
+if(WIN32)
+    set_tests_properties(layout_parity_qt PROPERTIES TIMEOUT 120
+        ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+else()
+    set_tests_properties(layout_parity_qt PROPERTIES TIMEOUT 120
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+endif()
