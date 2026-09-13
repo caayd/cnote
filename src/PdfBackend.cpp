@@ -697,7 +697,11 @@ bool PdfiumBackend::ExportPdf(
     }
 
     if (ok) {
+#ifdef _WIN32
         std::FILE* file = _wfopen(filePath.c_str(), L"wb");
+#else
+        std::FILE* file = std::fopen(filePath.c_str(), "wb");
+#endif
         if (file == nullptr) {
             ok = false;
         } else {

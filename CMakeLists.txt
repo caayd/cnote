@@ -328,6 +328,18 @@ target_include_directories(cnote_pdf_qt PUBLIC src)
 target_compile_features(cnote_pdf_qt PUBLIC cxx_std_20)
 target_link_libraries(cnote_pdf_qt PUBLIC cnote_render_qt pdfium)
 
+# Throwaway PDF-export harness (plan step 3.4 evidence). Not a CTest.
+add_executable(cnote_pdf_export_harness
+    tests/PdfExportHarness.cpp
+    src/ProjectFile.cpp
+    src/document/LoadDocumentFile.cpp
+    src/document/XpressCodec.cpp
+    src/Unicode.cpp
+)
+target_compile_definitions(cnote_pdf_export_harness PRIVATE
+    CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
+target_link_libraries(cnote_pdf_export_harness PRIVATE cnote_pdf_qt Qt6::Core)
+
 # Offscreen Qt page-renderer test: layer order, transparent text backgrounds,
 # span application, cache reuse without re-layout, model stability.
 add_executable(cnote_page_renderer_tests tests/PageRendererTests.cpp)
@@ -358,11 +370,8 @@ add_library(cnote_qt_ui STATIC
     # Portable project decode used by the Qt file service.
     src/ProjectFile.cpp
     src/document/XpressCodec.cpp
+    src/document/LoadDocumentFile.cpp
     src/Unicode.cpp
-    # Stroke geometry shared with cnote_render_qt. It belongs to that library's
-    # source list; it is listed here only until its CMake block adds it (the
-    # renderer fails to link without it). Remove once present there.
-    src/selection/StrokeSmoothing.cpp
 )
 set_target_properties(cnote_qt_ui PROPERTIES AUTOMOC ON)
 target_include_directories(cnote_qt_ui PUBLIC src)
@@ -370,16 +379,10 @@ target_compile_features(cnote_qt_ui PUBLIC cxx_std_20)
 target_compile_options(cnote_qt_ui PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_qt_ui PUBLIC cnote_model cnote_render_qt Qt6::Widgets)
+# cnote_pdf_qt provides PdfiumBackend plus the portable file-loader service.
+target_link_libraries(cnote_qt_ui PUBLIC cnote_model cnote_render_qt cnote_pdf_qt Qt6::Widgets)
 
-add_executable(cnote_qt
-    src/qt/main.cpp
-    # Stroke geometry used by cnote_render_qt. It belongs to that library's
-    # source list; until its CMake block includes it, the renderer's archive is
-    # scanned after this target's own objects, so the definition must come from
-    # here. Remove once cnote_render_qt lists it.
-    src/selection/StrokeSmoothing.cpp
-)
+add_executable(cnote_qt src/qt/main.cpp)
 target_link_libraries(cnote_qt PRIVATE cnote_qt_ui)
 
 # MicroTeX's font/XML resources ship as real files next to the executable.
@@ -388,3 +391,10 @@ add_custom_command(TARGET cnote_qt POST_BUILD
         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res"
         "$<TARGET_FILE_DIR:cnote_qt>/latex-res"
 )
+if(WIN32)
+    add_custom_command(TARGET cnote_qt POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:pdfium>"
+            "$<TARGET_FILE_DIR:cnote_qt>/pdfium.dll"
+    )
+endif()
