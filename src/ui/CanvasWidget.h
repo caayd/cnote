@@ -83,6 +83,12 @@ public:
     // changes; the shell may also call it directly after loading a document.
     void NotifyDocumentChanged();
 
+    // Optional lazy PDF page backgrounds (plan step 3.4/3.5).  The provider is
+    // owned by the shell/services and must outlive the widget's caches; the
+    // canvas only passes it to render::PageRenderParams.  Passing nullptr or a
+    // provider whose document no longer matches the controller drops caches.
+    void SetPdfBackgroundProvider(render::PdfBackgroundProvider* provider);
+
     // --- interaction (also the programmatic path used by tests/harness) ----
     void BeginStrokeAt(const QPointF& logical);
     bool ExtendStrokeTo(const QPointF& logical);
@@ -154,6 +160,7 @@ private:
     QPointF strokeLastPosition_ {};
 
     std::unordered_map<std::size_t, PageSurfaces> surfaces_;
+    render::PdfBackgroundProvider* pdfBackground_ = nullptr;
     float cachedDevicePixelRatio_ = 0.0f;
     std::uint64_t cachedRevision_ = 0;
     std::size_t lastPaintPageCount_ = 0;

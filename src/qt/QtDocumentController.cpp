@@ -5,6 +5,10 @@
 #include <utility>
 #include <vector>
 
+#include "PdfBackend.h"
+#include "qt/QtDocumentIo.h"
+#include "render/PdfiumBackgroundProvider.h"
+
 namespace cnote::qt {
 
 namespace {
@@ -64,13 +68,32 @@ void AppendStrokePointWithResampling(Stroke& stroke, Vec2 point, float spacing) 
 
 }  // namespace
 
-QtDocumentController::QtDocumentController() = default;
+namespace {
+
+// Keeps at most this many lazily rendered PDF page rasters alive; the canvas
+// asks for the pages it actually paints.
+constexpr std::size_t kPdfBackgroundCapacity = 8;
+
+}  // namespace
+
+QtDocumentController::QtDocumentController()
+    : pdfBackend_(std::make_unique<PdfiumBackend>()) {}
 QtDocumentController::~QtDocumentController() = default;
 
 void QtDocumentController::ResetToBlank() {
     session_ = ProjectSession {};
+    pdfBackground_.reset();
     pendingStroke_.reset();
     pendingPage_.reset();
+}
+
+bool QtDocumentController::OpenFile(const std::filesystem::path& path, std::string* error) {
+    std::optional<Document> document = LoadDocument(path, *pdfBackend_, error);
+    if (!document.has_value()) {
+        return false;
+    }
+    AdoptDocument(std::move(*document));
+    return true;
 }
 
 void QtDocumentController::AdoptDocument(Document document) {
@@ -78,6 +101,8 @@ void QtDocumentController::AdoptDocument(Document document) {
     // controller's stroke style and input settings belong to the view.
     session_ = ProjectSession {};
     session_.document = std::move(document);
+    pdfBackground_ = std::make_unique<render::PdfiumBackgroundProvider>(
+        *pdfBackend_, session_.document, kPdfBackgroundCapacity);
     pendingStroke_.reset();
     pendingPage_.reset();
 }

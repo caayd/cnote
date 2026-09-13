@@ -2,12 +2,21 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 
 #include "Document.h"
 #include "ProjectSession.h"
 #include "ui/CanvasController.h"
+
+namespace cnote {
+class PdfiumBackend;
+}
+
+namespace cnote::render {
+class PdfBackgroundProvider;
+}
 
 namespace cnote::qt {
 
@@ -35,6 +44,12 @@ public:
     // Replaces the session content (open/new): clears history and dirty state,
     // drops any pending stroke, keeps the controller's stroke style settings.
     void AdoptDocument(Document document);
+
+    // Lazily rendered PDF page backgrounds for the current document (bounded
+    // LRU inside); null until a document is adopted.  The provider holds a
+    // reference to the session document, so it is recreated whenever the
+    // document is replaced.
+    [[nodiscard]] render::PdfBackgroundProvider* PdfBackground() const { return pdfBackground_.get(); }
 
     [[nodiscard]] const std::filesystem::path& FilePath() const { return session_.document.FilePath(); }
     [[nodiscard]] bool Dirty() const { return session_.dirty; }
@@ -65,6 +80,8 @@ private:
     bool ApplyStrokeHistoryAction(HistoryAction& action, bool undo);
 
     ProjectSession session_ {};
+    std::unique_ptr<PdfiumBackend> pdfBackend_;
+    std::unique_ptr<render::PdfBackgroundProvider> pdfBackground_;
     ui::CanvasInputSettings input_ {};
     StrokeStyle strokeStyle_ {};
     std::optional<std::size_t> pendingPage_ {};

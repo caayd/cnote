@@ -304,7 +304,19 @@ render::PageRenderParams CanvasWidget::RenderParamsFor(const CanvasPageView& vie
     params.scale = view.scale;
     params.devicePixelRatio = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
     params.strokeSmoothing = controller_.InputSettings().strokeSmoothing;
+    // Lazy PDF page backgrounds for pages that have a PDF source and no stored
+    // raster; PageRenderer asks the provider at the current raster scale.
+    params.pdfBackground = pdfBackground_;
     return params;
+}
+
+void CanvasWidget::SetPdfBackgroundProvider(render::PdfBackgroundProvider* provider) {
+    if (pdfBackground_ == provider) {
+        return;
+    }
+    pdfBackground_ = provider;
+    surfaces_.clear();
+    update();
 }
 
 const render::PageSurfaceCache* CanvasWidget::FindSurface(

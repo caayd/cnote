@@ -26,7 +26,8 @@ bool StartsWithPdfMagic(const std::filesystem::path& filePath) {
 
 }  // namespace
 
-std::optional<Document> LoadDocument(const std::filesystem::path& filePath, std::string* error) {
+std::optional<Document> LoadDocument(
+    const std::filesystem::path& filePath, PdfiumBackend& pdfBackend, std::string* error) {
     std::error_code fileError;
     if (!std::filesystem::is_regular_file(filePath, fileError)) {
         if (error != nullptr) {
@@ -34,8 +35,6 @@ std::optional<Document> LoadDocument(const std::filesystem::path& filePath, std:
         }
         return std::nullopt;
     }
-
-    PdfiumBackend pdfBackend;
 
     if (StartsWithPdfMagic(filePath)) {
         if (std::optional<Document> document = LoadDocumentFile(filePath, pdfBackend); document.has_value()) {

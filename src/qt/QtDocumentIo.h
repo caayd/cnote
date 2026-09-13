@@ -6,6 +6,10 @@
 
 #include "Document.h"
 
+namespace cnote {
+class PdfiumBackend;
+}
+
 namespace cnote::qt {
 
 // Loads a cnote project or a PDF document through the shared portable services:
@@ -16,6 +20,7 @@ namespace cnote::qt {
 //     their stored PDF sources by PdfiumBackend::HydrateProject.
 // Returns nullopt with a reason in `error` when the file cannot be loaded; the
 // caller's current document is left untouched.
-[[nodiscard]] std::optional<Document> LoadDocument(const std::filesystem::path& filePath, std::string* error);
+[[nodiscard]] std::optional<Document> LoadDocument(
+    const std::filesystem::path& filePath, PdfiumBackend& pdfBackend, std::string* error);
 
 }  // namespace cnote::qt

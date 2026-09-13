@@ -13,7 +13,6 @@
 #include <QToolBar>
 
 #include "qt/QtDocumentController.h"
-#include "qt/QtDocumentIo.h"
 #include "ui/CanvasWidget.h"
 
 namespace cnote::qt {
@@ -66,8 +65,7 @@ bool QtMainWindow::OpenPath(const std::filesystem::path& path) {
     canvas_->CancelStroke();
 
     std::string error;
-    std::optional<Document> document = LoadDocument(path, &error);
-    if (!document.has_value()) {
+    if (!controller_.OpenFile(path, &error)) {
         QMessageBox::critical(
             this,
             QStringLiteral("cnote"),
@@ -76,7 +74,8 @@ bool QtMainWindow::OpenPath(const std::filesystem::path& path) {
         return false;
     }
 
-    controller_.AdoptDocument(std::move(*document));
+    // PDF page backgrounds are rendered lazily by the controller's provider.
+    canvas_->SetPdfBackgroundProvider(controller_.PdfBackground());
     canvas_->ResetView();
     canvas_->NotifyDocumentChanged();
     canvas_->CenterOnPage(controller_.DocumentRef().CurrentPageIndex());
