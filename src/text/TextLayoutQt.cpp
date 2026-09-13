@@ -14,44 +14,16 @@
 #include <QPalette>
 #include <QString>
 #include <QTextBlock>
-#include <QTextCharFormat>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextLayout>
 #include <QTextOption>
 
+#include "text/TextEditingQt.h"
+
 namespace cnote::text {
 
 namespace {
-
-// The stored font size is pixel-like at the 96-DPI reference scale; Qt wants
-// points. Page zoom and DPR are applied by the caller, never baked in here.
-constexpr float kReferenceDpi = 96.0f;
-constexpr float kPointsPerPixel = 72.0f / kReferenceDpi;
-
-QFont MakeFont(TextFontFamily family, float fontSize, bool bold, bool italic, bool underline) {
-    QFont font;
-    switch (family) {
-    case TextFontFamily::Serif:
-        font.setFamily(QStringLiteral("Times New Roman"));
-        font.setStyleHint(QFont::Serif);
-        break;
-    case TextFontFamily::Monospace:
-        font.setFamily(QStringLiteral("Consolas"));
-        font.setStyleHint(QFont::Monospace);
-        break;
-    case TextFontFamily::Sans:
-    default:
-        font.setFamily(QStringLiteral("Segoe UI"));
-        font.setStyleHint(QFont::SansSerif);
-        break;
-    }
-    font.setPointSizeF(std::max(1.0f, fontSize) * kPointsPerPixel);
-    font.setBold(bold);
-    font.setItalic(italic);
-    font.setUnderline(underline);
-    return font;
-}
 
 Qt::Alignment AlignmentFor(TextAlignment alignment) {
     switch (alignment) {
@@ -72,92 +44,34 @@ std::u16string TrimTrailingLayoutWhitespace(std::u16string value) {
     return value;
 }
 
-// Normalizes CRLF/CR to a single paragraph separator while keeping a two-way
-// offset map, so line starts and span ranges stay in the model's UTF-16 space.
-struct NormalizedText {
-    std::u16string text;
-    std::vector<std::uint32_t> normalizedToOriginal;
-    std::vector<std::uint32_t> originalToNormalized;
-};
-
-NormalizedText NormalizeParagraphs(std::u16string_view content) {
-    NormalizedText result;
-    result.text.reserve(content.size());
-    result.normalizedToOriginal.reserve(content.size() + 1U);
-    result.originalToNormalized.resize(content.size() + 1U);
-
-    for (std::size_t index = 0; index < content.size();) {
-        const std::uint32_t normalizedIndex = static_cast<std::uint32_t>(result.text.size());
-        result.originalToNormalized[index] = normalizedIndex;
-        if (content[index] == u'\r') {
-            result.normalizedToOriginal.push_back(static_cast<std::uint32_t>(index));
-            result.text.push_back(u'\n');
-            if (index + 1U < content.size() && content[index + 1U] == u'\n') {
-                result.originalToNormalized[index + 1U] = normalizedIndex;
-                index += 2U;
-            } else {
-                index += 1U;
-            }
-        } else {
-            result.normalizedToOriginal.push_back(static_cast<std::uint32_t>(index));
-            result.text.push_back(content[index]);
-            ++index;
-        }
-    }
-    result.originalToNormalized[content.size()] = static_cast<std::uint32_t>(result.text.size());
-    result.normalizedToOriginal.push_back(static_cast<std::uint32_t>(content.size()));
-    return result;
-}
-
 struct BuiltDocument {
     std::unique_ptr<QTextDocument> document;
-    NormalizedText normalized;
+    TextOffsetMap map;
 };
 
 BuiltDocument BuildDocument(const PageText& text, float wrapWidth) {
     BuiltDocument built;
-    built.normalized = NormalizeParagraphs(text.content);
+    built.map = BuildTextOffsetMap(text.content);
 
     auto document = std::make_unique<QTextDocument>();
     document->setDocumentMargin(0.0);
-    document->setDefaultFont(MakeFont(text.fontFamily, text.fontSize, text.bold, text.italic, text.underline));
+    document->setDefaultFont(FontForStyle({
+        text.fontSize,
+        text.color,
+        text.fontFamily,
+        text.bold,
+        text.italic,
+        text.underline,
+    }));
     QTextOption option;
     option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
     option.setAlignment(AlignmentFor(text.alignment));
     document->setDefaultTextOption(option);
     document->setPlainText(QString::fromUtf16(
-        built.normalized.text.data(),
-        static_cast<qsizetype>(built.normalized.text.size())));
+        built.map.normalized.data(),
+        static_cast<qsizetype>(built.map.normalized.size())));
 
-    const std::size_t normalizedSize = built.normalized.text.size();
-    for (const PageTextStyleSpan& span : text.styleSpans) {
-        const std::size_t originalStart = std::min<std::size_t>(span.start, text.content.size());
-        const std::size_t originalEnd = std::min<std::size_t>(
-            text.content.size(),
-            static_cast<std::size_t>(span.start) + span.length);
-        if (originalEnd <= originalStart) {
-            continue;
-        }
-        const std::size_t start = std::min<std::size_t>(
-            built.normalized.originalToNormalized[originalStart], normalizedSize);
-        const std::size_t end = std::min<std::size_t>(
-            built.normalized.originalToNormalized[originalEnd], normalizedSize);
-        if (end <= start) {
-            continue;
-        }
-        QTextCursor cursor(document.get());
-        cursor.setPosition(static_cast<int>(start));
-        cursor.setPosition(static_cast<int>(end), QTextCursor::KeepAnchor);
-        QTextCharFormat format;
-        format.setFont(MakeFont(
-            span.style.fontFamily,
-            span.style.fontSize,
-            span.style.bold,
-            span.style.italic,
-            span.style.underline));
-        format.setForeground(QColor::fromRgba(span.style.color));
-        cursor.mergeCharFormat(format);
-    }
+    ApplyPageTextFormatting(*document, text);
 
     document->setTextWidth(static_cast<qreal>(wrapWidth));
     // Force the layout so block/line geometry is available to callers.
@@ -175,7 +89,14 @@ float ResolvedTextWidth(const PageText& text, float pageWidth) {
     const std::u16string measureText = TrimTrailingLayoutWhitespace(text.content);
     QTextDocument measure;
     measure.setDocumentMargin(0.0);
-    measure.setDefaultFont(MakeFont(text.fontFamily, text.fontSize, text.bold, text.italic, text.underline));
+    measure.setDefaultFont(FontForStyle({
+        text.fontSize,
+        text.color,
+        text.fontFamily,
+        text.bold,
+        text.italic,
+        text.underline,
+    }));
     measure.setPlainText(QString::fromUtf16(measureText.data(), static_cast<qsizetype>(measureText.size())));
     return std::max(1.0f, static_cast<float>(measure.idealWidth()));
 }
@@ -256,12 +177,7 @@ QtTextLayout LayoutPageTextQt(const PageText& text, float pageWidth) {
     const QFontMetricsF defaultMetrics(document.defaultFont());
     layout.lineHeight = std::max(1, static_cast<int>(std::ceil(defaultMetrics.height())));
     for (const PageTextStyleSpan& span : text.styleSpans) {
-        const QFontMetricsF spanMetrics(MakeFont(
-            span.style.fontFamily,
-            span.style.fontSize,
-            span.style.bold,
-            span.style.italic,
-            span.style.underline));
+        const QFontMetricsF spanMetrics(FontForStyle(span.style));
         layout.lineHeight = std::max(layout.lineHeight, static_cast<int>(std::ceil(spanMetrics.height())));
     }
 
@@ -272,17 +188,17 @@ QtTextLayout LayoutPageTextQt(const PageText& text, float pageWidth) {
         }
         for (int lineIndex = 0; lineIndex < blockLayout->lineCount(); ++lineIndex) {
             const QTextLine line = blockLayout->lineAt(lineIndex);
-            const std::size_t normalizedStart = static_cast<std::size_t>(block.position() + line.textStart());
-            const std::size_t normalizedEnd = normalizedStart + static_cast<std::size_t>(line.textLength());
-            if (normalizedEnd >= built.normalized.normalizedToOriginal.size()) {
+            const std::size_t documentStart = static_cast<std::size_t>(block.position() + line.textStart());
+            const std::size_t documentEnd = documentStart + static_cast<std::size_t>(line.textLength());
+            if (documentEnd >= built.map.documentToModel.size()) {
                 continue;
             }
             QtTextLine out;
-            out.start = built.normalized.normalizedToOriginal[normalizedStart];
-            const std::uint32_t originalEnd = built.normalized.normalizedToOriginal[normalizedEnd];
+            out.start = built.map.documentToModel[documentStart];
+            const std::uint32_t modelEnd = built.map.documentToModel[documentEnd];
             out.text = TrimTrailingLayoutWhitespace(text.content.substr(
                 out.start,
-                static_cast<std::size_t>(originalEnd - out.start)));
+                static_cast<std::size_t>(modelEnd - out.start)));
             layout.lines.push_back(std::move(out));
         }
     }

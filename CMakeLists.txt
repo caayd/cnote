@@ -310,6 +310,8 @@ target_link_libraries(cnote_latex_qt PUBLIC cnote_model microtex_qt Qt6::Gui)
 # QPainter/QImage committed-object page renderer. No widgets, no App/HWND/HDC.
 add_library(cnote_render_qt STATIC
     src/text/TextLayoutQt.cpp
+    src/text/TextEditingQt.cpp
+    src/latex/LatexCompletion.cpp
     src/render/PageRenderer.cpp
     src/selection/StrokeSmoothing.cpp
 )
@@ -356,6 +358,17 @@ target_compile_definitions(cnote_pdf_export_tests PRIVATE
 target_link_libraries(cnote_pdf_export_tests PRIVATE cnote_pdf_qt Qt6::Core)
 add_test(NAME pdf_export_qt COMMAND cnote_pdf_export_tests)
 set_tests_properties(pdf_export_qt PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+
+# Self-contained Qt editing-services test (offsets, formatting, LaTeX editing).
+add_executable(cnote_text_editing_tests
+    tests/TextEditingTests.cpp
+)
+target_compile_definitions(cnote_text_editing_tests PRIVATE
+    CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
+target_link_libraries(cnote_text_editing_tests PRIVATE cnote_render_qt)
+add_test(NAME text_editing_qt COMMAND cnote_text_editing_tests)
+set_tests_properties(text_editing_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
 
 # --- Qt canvas and runnable migration frontend (plan steps 3.1/3.2/3.3/3.9) ---
