@@ -785,6 +785,57 @@ if(TARGET cnote_qt)
     )
     install(SCRIPT "${_cnote_qt_deploy_script}")
 
+    # -- third-party notices (plan 7.4/7.6) ------------------------------------
+    # The shipped archives carry the notice file plus the license texts of every
+    # component that is redistributed: MicroTeX (MIT and its font licenses),
+    # tinyxml2 (zlib), PDFium (BSD-3-Clause and its bundled licenses) and the
+    # MinGW-w64 public-domain disclaimer (see THIRD-PARTY-NOTICES.md; the MinGW
+    # runtime DLLs shipped on Windows are covered by the GCC Runtime Library
+    # Exception rather than a separate license file).
+    set(_cnote_notice_dir "${CMAKE_INSTALL_DATADIR}/licenses/cnote")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/THIRD-PARTY-NOTICES.md"
+        DESTINATION "${_cnote_notice_dir}")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/LICENSE"
+        DESTINATION "${_cnote_notice_dir}/microtex")
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res/fonts/licences/"
+        DESTINATION "${_cnote_notice_dir}/microtex/fonts-licences")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinyxml2/LICENSE.txt"
+        DESTINATION "${_cnote_notice_dir}/tinyxml2")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium/LICENSE"
+        DESTINATION "${_cnote_notice_dir}/pdfium")
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium/licenses/"
+        DESTINATION "${_cnote_notice_dir}/pdfium/licenses")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/DISCLAIMER.PD"
+        DESTINATION "${_cnote_notice_dir}/mingw-w64")
+
+    # The LGPL v3 text is taken from the Qt installation that is being deployed.
+    # Qt's binary installers do not always carry it; when it is missing the
+    # release must supply LICENSES/LGPL-3.0-only.txt from the Qt source, so this
+    # is reported at configure time instead of being silently omitted.
+    get_target_property(_cnote_qt_core_location_local Qt6::Core IMPORTED_LOCATION)
+    get_filename_component(_cnote_qt_root_local "${_cnote_qt_core_location_local}/../.." ABSOLUTE)
+    set(_cnote_qt_lgpl_license "")
+    foreach(_cnote_qt_license_candidate
+        "${_cnote_qt_root_local}/LICENSE.LGPL3"
+        "${_cnote_qt_root_local}/LICENSE.LGPLv3"
+        "${_cnote_qt_root_local}/LICENSES/LGPL-3.0-only.txt"
+        "${_cnote_qt_root_local}/LICENSES/LGPL-3.0-or-later.txt")
+        if(EXISTS "${_cnote_qt_license_candidate}")
+            set(_cnote_qt_lgpl_license "${_cnote_qt_license_candidate}")
+            break()
+        endif()
+    endforeach()
+    if(_cnote_qt_lgpl_license)
+        install(FILES "${_cnote_qt_lgpl_license}"
+            DESTINATION "${_cnote_notice_dir}/qt" RENAME "LICENSE.LGPL3")
+    else()
+        message(WARNING
+            "Qt LGPL v3 text not found under ${_cnote_qt_root_local}: the packaged "
+            "notices cannot include it. Supply LICENSES/LGPL-3.0-only.txt from the Qt "
+            "source distribution before publishing an artifact (see "
+            "THIRD-PARTY-NOTICES.md, 'Open prerequisites').")
+    endif()
+
     # -- CPack: Windows x64 ZIP, Linux x64 relocatable TGZ --------------------
     set(CPACK_PACKAGE_NAME "cnote")
     set(CPACK_PACKAGE_VENDOR "cnote")
@@ -1175,4 +1226,59 @@ if(WIN32)
             "$<TARGET_FILE:pdfium>"
             "$<TARGET_FILE_DIR:cnote_persistence_tests>/pdfium.dll"
     )
+endif()
+
+# --- Test runtime staging (test hygiene) --------------------------------------
+# A fresh build directory has no Qt, PDFium or MinGW runtime on PATH, so every Qt
+# test executable gets the DLLs it needs next to it.  Without this the suite
+# result depends on the ambient PATH and on the order ctest happens to use
+# (observed as STATUS_ENTRYPOINT_NOT_FOUND / DLL-not-found flips between runs).
+if(WIN32)
+    get_target_property(_cnote_qt_core_location Qt6::Core IMPORTED_LOCATION)
+    get_filename_component(_cnote_qt_bin_dir "${_cnote_qt_core_location}" DIRECTORY)
+
+    function(cnote_stage_test_runtime target)
+        foreach(_cnote_runtime_target Qt6::Core Qt6::Gui Qt6::Widgets pdfium)
+            if(TARGET ${_cnote_runtime_target})
+                add_custom_command(TARGET ${target} POST_BUILD
+                    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "$<TARGET_FILE:${_cnote_runtime_target}>"
+                        "$<TARGET_FILE_DIR:${target}>")
+            endif()
+        endforeach()
+        foreach(_cnote_runtime_dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll)
+            if(EXISTS "${_cnote_qt_bin_dir}/${_cnote_runtime_dll}")
+                add_custom_command(TARGET ${target} POST_BUILD
+                    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "${_cnote_qt_bin_dir}/${_cnote_runtime_dll}"
+                        "$<TARGET_FILE_DIR:${target}>")
+            endif()
+        endforeach()
+    endfunction()
+
+    foreach(_cnote_qt_test_target
+        cnote_page_renderer_tests
+        cnote_pdf_export_tests
+        cnote_text_editing_tests
+        cnote_pdf_background_tests
+        cnote_session_manager_tests
+        cnote_settings_tests
+        cnote_selection_clipboard_tests
+        cnote_layout_parity_tests
+        cnote_settings_dialog_tests
+        cnote_new_page_dialog_tests
+        cnote_precision_router_tests
+        cnote_precision_filter_tests
+        cnote_precision_touchpad_tests
+        cnote_chrome_tests
+        cnote_interaction_router_tests
+        cnote_selection_math_tests
+        cnote_portability_tests
+        cnote_font_fallback_tests
+        cnote_xpress_codec_tests
+        cnote_persistence_tests)
+        if(TARGET ${_cnote_qt_test_target})
+            cnote_stage_test_runtime(${_cnote_qt_test_target})
+        endif()
+    endforeach()
 endif()

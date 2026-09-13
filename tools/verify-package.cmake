@@ -229,6 +229,39 @@ if(DEFINED DEVELOPER_PREFIX AND NOT DEVELOPER_PREFIX STREQUAL "")
     endforeach()
 endif()
 
+# --- third-party notices ------------------------------------------------------
+# Every artifact must carry THIRD-PARTY-NOTICES.md and the license texts of the
+# components it redistributes.  The Qt LGPL text is taken from the deployed Qt
+# installation; when that installation does not ship it the release must supply
+# it (see THIRD-PARTY-NOTICES.md, "Open prerequisites").
+file(GLOB_RECURSE _notice_files "${STAGE_DIR}/*THIRD-PARTY-NOTICES.md")
+if(_notice_files)
+    list(GET _notice_files 0 NOTICE_FILE)
+    get_filename_component(NOTICE_DIR "${NOTICE_FILE}" DIRECTORY)
+    cnote_ok("third-party notice file: ${NOTICE_FILE}")
+    foreach(_notice_file
+        "microtex/LICENSE"
+        "microtex/fonts-licences/OFL.txt"
+        "tinyxml2/LICENSE.txt"
+        "pdfium/LICENSE"
+        "mingw-w64/DISCLAIMER.PD")
+        cnote_check_file("${NOTICE_DIR}/${_notice_file}" "notice file ${_notice_file}")
+    endforeach()
+    file(GLOB _pdfium_licenses "${NOTICE_DIR}/pdfium/licenses/*")
+    if(_pdfium_licenses)
+        cnote_ok("PDFium bundled licenses (${NOTICE_DIR}/pdfium/licenses)")
+    else()
+        cnote_fail("PDFium bundled licenses missing under ${NOTICE_DIR}/pdfium/licenses")
+    endif()
+    if(EXISTS "${NOTICE_DIR}/qt/LICENSE.LGPL3")
+        cnote_ok("Qt LGPL v3 text: ${NOTICE_DIR}/qt/LICENSE.LGPL3")
+    else()
+        message(STATUS "  [note] Qt LGPL v3 text is not staged (not present in the deployed Qt; release prerequisite)")
+    endif()
+else()
+    cnote_fail("THIRD-PARTY-NOTICES.md is not staged in the package")
+endif()
+
 # --- launch from an unrelated directory --------------------------------------
 if(SELF_CHECK)
     if(NOT DEFINED FIXTURE OR FIXTURE STREQUAL "")

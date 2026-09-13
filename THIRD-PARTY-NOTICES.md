@@ -139,18 +139,28 @@ document.
    sufficient evidence), and offering Qt source where the license requires it.
    This must be signed off by the distribution/legal review before any public
    release; nothing in this document claims that review has happened.
-2. **No third-party notices ship in the packages today.** The ZIP/TGZ contain
-   only the MicroTeX font licenses under `latex-res/fonts/licences`. MicroTeX
-   (MIT), tinyxml2 (zlib), PDFium and its bundled licenses, the MinGW runtime and
-   Qt have no notice file staged. Fixing this is a packaging change (install
-   rules), deliberately not made in this documentation-only update.
-3. **No root project license.** The repository has no `LICENSE`/`COPYING` file
+2. **Qt LGPL v3 text is not present in the deployed Qt installation.** The
+   install rules now stage `share/licenses/cnote/` with this notice and the
+   MicroTeX (MIT) plus its font licenses, tinyxml2 (zlib), PDFium (BSD-3-Clause)
+   plus its bundled licenses, and the MinGW-w64 public-domain disclaimer. The
+   LGPL v3 text is taken from the Qt installation that is being deployed
+   (`LICENSE.LGPL3`, `LICENSE.LGPLv3` or `LICENSES/LGPL-3.0-only.txt`); neither
+   the Qt 6.11.2 MinGW kit nor the Linux kit used here ships any of those files,
+   so the packaged notice set currently lacks the LGPL text and the build prints
+   a configure-time warning. Supply the file from the Qt source distribution
+   before publishing an artifact.
+3. **MinGW runtime DLLs.** The Windows packages ship `libgcc_s_seh-1.dll`,
+   `libstdc++-6.dll` and `libwinpthread-1.dll` from the Qt/MinGW toolchain.
+   Those are covered by the GCC Runtime Library Exception (GPLv3 with the
+   runtime exception), not by a separate license file staged here; the
+   corresponding source offer is the toolchain's own, outside this repository.
+4. **No root project license.** The repository has no `LICENSE`/`COPYING` file
    for cnote itself; the product's own license is undecided.
-4. **Artwork provenance.** `assets/cnote.ico` and `assets/icons/*.svg` have no
+5. **Artwork provenance.** `assets/cnote.ico` and `assets/icons/*.svg` have no
    authorship/license record in the tree.
-5. **macOS distribution.** The bundle, DMG, signing and notarization paths are
+6. **macOS distribution.** The bundle, DMG, signing and notarization paths are
    configured but unverified; macOS artifacts are not part of the currently
    verified release set.
-6. **Greek/Cyrillic MicroTeX packages** remain unavailable at runtime because
+7. **Greek/Cyrillic MicroTeX packages** remain unavailable at runtime because
    their GPLv3 resource directories stay stripped; restoring them would require
    resolving their license first.
