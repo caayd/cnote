@@ -4,8 +4,6 @@
 
 namespace cnote {
 
-class App;
-
 enum class HistoryActionType {
     AddStroke,
     RemoveStroke,
@@ -46,6 +44,7 @@ struct ProjectChange {
 
 // Accessed exclusively on the application's UI thread. All attached views share
 // content, history and save ownership; selections and interactions stay in App.
+// The set of attached views is owned by the window/session manager, not here.
 struct ProjectSession {
     Document document = Document::CreateBlank();
     std::vector<HistoryAction> undoActions;
@@ -53,7 +52,6 @@ struct ProjectSession {
     bool dirty = false;
     std::uint64_t revision = 0;
     unsigned int autoSaveIntervalSeconds = 60;
-    std::vector<App*> views;
 };
 
 } // namespace cnote

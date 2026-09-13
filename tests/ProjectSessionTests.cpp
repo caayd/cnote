@@ -46,7 +46,7 @@ struct ProjectSessionTests {
         Require(root.CreateAdditionalWindow(true, SW_HIDE), "create linked view");
         App& second = *root.childWindows_.back();
         Require(second.session_ == root.session_, "linked windows share a session");
-        Require(root.session_->views.size() == 2, "two registered views");
+        Require(root.SessionViews().size() == 2, "two registered views");
         second.SetViewPageIndex(1);
         second.zoom_ = second.targetZoom_ = 0.75f;
         second.panY_ = -300;
@@ -152,7 +152,7 @@ struct ProjectSessionTests {
         SendMessageW(root.window_, WM_CLOSE, 0, 0);
         Require(root.window_ == nullptr && IsWindow(second.window_), "original closes while linked view survives");
         Require(!QuitPending(), "original close does not post quit");
-        Require(originalSession->views.size() == 1 && second.AutoSaveOwner() == &second, "autosave ownership transfers");
+        Require(second.SessionViews().size() == 1 && second.AutoSaveOwner() == &second, "autosave ownership transfers");
         Require(second.CanAutoSaveCurrentDocument(), "remaining view can autosave dirty project");
         Require(second.pdfBackend_.ExportPdf(second.session_->document, scratch / L"after-close.pdf",
                     1.0f, 0.55f, 3, 2, std::span<const std::uint8_t> {}), "PDF rendering survives another window's destruction");
@@ -163,7 +163,7 @@ struct ProjectSessionTests {
         std::erase_if(root.childWindows_, [](const auto& view) { return view->window_ == nullptr; });
         SendMessageW(second.window_, WM_CLOSE, 0, 0);
         Require(QuitPending(), "last window posts quit");
-        Require(originalSession->views.empty() && !originalSession->dirty, "last close saves once and detaches");
+        Require(second.SessionViews().empty() && !originalSession->dirty, "last close saves once and detaches");
 
         VerifyDeactivationAutoSave(scratch);
         VerifyStaleHistoryAction();

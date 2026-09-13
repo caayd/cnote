@@ -50,6 +50,7 @@ add_library(cnote_core STATIC
     src/selection/StrokeSmoothing.cpp
     src/selection/Transforms.cpp
     src/shell/Startup.cpp
+    src/shell/AppManager.cpp
     src/ui/UiUtil.cpp
     src/shell/MessageLoop.cpp
     src/shell/ToolbarState.cpp
@@ -380,6 +381,15 @@ target_link_libraries(cnote_pdf_background_tests PRIVATE cnote_pdf_qt)
 add_test(NAME pdf_background_qt COMMAND cnote_pdf_background_tests)
 set_tests_properties(pdf_background_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_qt_plugins}")
+
+# Self-contained Qt session-lifetime / autosave manager test.
+add_executable(cnote_session_manager_tests
+    tests/SessionManagerTests.cpp
+    src/shell/AppManager.cpp
+    src/Unicode.cpp
+)
+target_link_libraries(cnote_session_manager_tests PRIVATE cnote_model Qt6::Core)
+add_test(NAME session_manager_qt COMMAND cnote_session_manager_tests)
 
 # --- Qt canvas and runnable migration frontend (plan steps 3.1/3.2/3.3/3.9) ---
 # CanvasWidget owns per-view viewport/transient state and its raster caches and

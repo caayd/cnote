@@ -3,22 +3,34 @@
 #include <algorithm>
 #include <filesystem>
 
+#include "shell/AppManager.h"
+
 namespace cnote {
 
 std::vector<App*> App::openWindows_;
 unsigned int App::appInstanceCount_ = 0;
 
+std::vector<App*> App::SessionViews() const {
+    std::vector<App*> views;
+    for (App* view : openWindows_) {
+        if (view->session_ == session_) {
+            views.push_back(view);
+        }
+    }
+    return views;
+}
+
 void App::DetachSession() {
-    std::erase(session_->views, this);
-    for (App* view : session_->views) {
-        view->UpdateAutoSaveTimer();
+    for (App* view : SessionViews()) {
+        if (view != this) {
+            view->UpdateAutoSaveTimer();
+        }
     }
 }
 
 void App::AttachSession(std::shared_ptr<ProjectSession> session) {
     DetachSession();
     session_ = std::move(session);
-    session_->views.push_back(this);
     currentPageIndex_ = session_->document.CurrentPageIndex();
     settings_.autoSaveIntervalSeconds = session_->autoSaveIntervalSeconds;
 }
@@ -38,7 +50,7 @@ bool App::SetViewPageIndex(std::size_t index) {
 
 std::vector<std::pair<App*, int>> App::CaptureViewPageAnchors() {
     std::vector<std::pair<App*, int>> anchors;
-    for (App* view : session_->views) {
+    for (App* view : SessionViews()) {
         if (view == this || view->window_ == nullptr) continue;
         view->StopSmoothScroll();
         RECT client {};
@@ -59,7 +71,7 @@ void App::RestoreViewPageAnchors(const std::vector<std::pair<App*, int>>& anchor
 std::size_t App::InsertDocumentPage(std::size_t index, Page page) {
     const auto anchors = CaptureViewPageAnchors();
     const auto inserted = session_->document.InsertPage(index, std::move(page));
-    for (App* view : session_->views) {
+    for (App* view : SessionViews()) {
         if (view->currentPageIndex_ >= inserted) ++view->currentPageIndex_;
     }
     RestoreViewPageAnchors(anchors);
@@ -72,7 +84,7 @@ std::size_t App::RemoveDocumentPage(std::size_t index) {
     }
     const auto anchors = CaptureViewPageAnchors();
     session_->document.RemovePage(index);
-    for (App* view : session_->views) {
+    for (App* view : SessionViews()) {
         if (view->currentPageIndex_ > index) --view->currentPageIndex_;
         view->currentPageIndex_ = view->CurrentPageIndex();
     }
@@ -98,19 +110,20 @@ void App::FinishDocumentInteraction() {
 void App::FinishOtherViewInteractions() {
     // One editing owner at a time. This also protects index-based selections
     // and whole-page history snapshots until object-level transactions exist.
-    for (App* view : session_->views) {
+    for (App* view : SessionViews()) {
         if (view != this) view->FinishDocumentInteraction();
     }
 }
 
 bool App::IsSessionInteractionActive() const {
-    return std::any_of(session_->views.begin(), session_->views.end(), [](const App* view) {
+    const std::vector<App*> views = SessionViews();
+    return std::any_of(views.begin(), views.end(), [](const App* view) {
         return view->IsDocumentInteractionActive() || view->isTransformingLatex_;
     });
 }
 
 App* App::AutoSaveOwner() const {
-    for (App* view : session_->views) {
+    for (App* view : SessionViews()) {
         if (view->window_ != nullptr) return view;
     }
     return nullptr;
@@ -118,7 +131,7 @@ App* App::AutoSaveOwner() const {
 
 void App::SetSessionAutoSaveInterval(unsigned int seconds) {
     session_->autoSaveIntervalSeconds = seconds;
-    for (App* view : session_->views) {
+    for (App* view : SessionViews()) {
         view->settings_.autoSaveIntervalSeconds = seconds;
         view->UpdateAutoSaveTimer();
     }
@@ -126,7 +139,7 @@ void App::SetSessionAutoSaveInterval(unsigned int seconds) {
 
 void App::BroadcastSessionChange(ProjectChange::Kind kind) {
     const ProjectChange change { kind, session_->revision };
-    for (App* view : session_->views) {
+    for (App* view : SessionViews()) {
         view->OnSessionChanged(change, view == this);
     }
 }
@@ -174,22 +187,7 @@ std::shared_ptr<ProjectSession> App::FindOpenSession(const std::filesystem::path
     for (App* view : openWindows_) {
         const auto& existing = view->session_->document.FilePath();
         if (existing.empty()) continue;
-        std::error_code error;
-        if (std::filesystem::equivalent(path, existing, error) && !error) return view->session_;
-        error.clear();
-        const auto requestedPath = std::filesystem::absolute(path, error).lexically_normal();
-        if (error) continue;
-        const auto existingPath = std::filesystem::absolute(existing, error).lexically_normal();
-        if (error) continue;
-#ifdef _WIN32
-        if (CompareStringOrdinal(requestedPath.c_str(), -1, existingPath.c_str(), -1, TRUE) == CSTR_EQUAL) {
-            return view->session_;
-        }
-#else
-        if (requestedPath == existingPath) {
-            return view->session_;
-        }
-#endif
+        if (AppManager::PathsReferToSameFile(path, existing)) return view->session_;
     }
     return {};
 }

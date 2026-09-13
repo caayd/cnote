@@ -285,6 +285,8 @@ private:
     void ResetDocumentView(bool resetBrushWidth = false);
     void AttachSession(std::shared_ptr<ProjectSession> session);
     void DetachSession();
+    // Live views attached to this view's session, in window creation order.
+    [[nodiscard]] std::vector<App*> SessionViews() const;
     void FinishDocumentInteraction();
     void FinishOtherViewInteractions();
     void OnSessionChanged(const ProjectChange& change, bool originatingView);

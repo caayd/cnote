@@ -205,7 +205,7 @@ void App::ApplyHistorySideEffects(
 void App::RemapViewsForPageInsertions(std::size_t index, std::size_t count) {
     for (std::size_t offset = 0; offset < count; ++offset) {
         const std::size_t inserted = index + offset;
-        for (App* view : session_->views) {
+        for (App* view : SessionViews()) {
             if (view->currentPageIndex_ >= inserted) {
                 ++view->currentPageIndex_;
             }
@@ -215,7 +215,7 @@ void App::RemapViewsForPageInsertions(std::size_t index, std::size_t count) {
 
 void App::RemapViewsForPageRemovals(std::size_t index, std::size_t count) {
     for (std::size_t offset = 0; offset < count; ++offset) {
-        for (App* view : session_->views) {
+        for (App* view : SessionViews()) {
             if (view->currentPageIndex_ > index) {
                 --view->currentPageIndex_;
             }
@@ -285,7 +285,7 @@ bool App::IsDocumentInteractionActive() const {
 
 bool App::ConfirmCloseWithUnsavedChanges() {
     FinishDocumentInteraction();
-    if (session_->views.size() > 1U) return true;
+    if (SessionViews().size() > 1U) return true;
     if (!session_->dirty) {
         return true;
     }

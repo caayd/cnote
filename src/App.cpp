@@ -2239,7 +2239,6 @@ float App::SnapBrushSize(float size) {
 
 App::App(HINSTANCE instance) : instance_(instance) {
     ++appInstanceCount_;
-    session_->views.push_back(this);
     Gdiplus::GdiplusStartupInput startupInput;
     ULONG_PTR token = 0;
     if (Gdiplus::GdiplusStartup(&token, &startupInput, nullptr) == Gdiplus::Ok) {
