@@ -99,10 +99,18 @@ public:
     // (App::QuickSizePreviewDiameterForTool).  Defaults to the reference 1.0.
     void SetPageScale(qreal scale);
     [[nodiscard]] qreal PageScale() const { return pageScale_; }
-    // Native OS decorations supply the window buttons (plan step 6.3), so the
-    // in-client caption cluster is off by default; the geometry reserve is kept.
+    // The reference frontend draws its own minimize/maximize/close cluster in
+    // the band (there is no native caption), so the Windows shell enables it;
+    // platforms that keep native decorations leave it off.  The cluster's
+    // geometry is always reserved by the layout either way.
     void SetCaptionButtonsVisible(bool visible);
     [[nodiscard]] bool CaptionButtonsVisible() const { return captionButtonsVisible_; }
+    // Native frame width the reference subtracts from the caption cluster's
+    // right edge while maximized (WindowFrameThicknessX, Layout.cpp:211) and the
+    // reveal band's top inset (App.cpp:2465).  Logical pixels; the shell supplies
+    // it from the window's DPI-scaled frame metrics.
+    void SetFrameThicknessX(qreal thickness);
+    [[nodiscard]] qreal FrameThicknessX() const { return frameThicknessX_; }
 
     // Text-format state for the popup's active buttons (filled from the active
     // edit; the popup is only shown while SetTextFormatAvailable(true)).
@@ -117,6 +125,15 @@ public:
     [[nodiscard]] ToolbarControl ControlAt(const QPointF& widgetPosition) const;
     [[nodiscard]] ToolbarControl HoveredControl() const { return hovered_; }
     [[nodiscard]] bool IsControlRect(const QPointF& widgetPosition) const;  // IsToolbarControlRect
+    // Same hit test in host (window client) coordinates: the widget is offset
+    // while the auto-hide reveal animation runs, so the native hit test cannot
+    // use raw client positions.  The shell's WM_NCHITTEST and the widget's own
+    // mouse routing must agree on where the controls are.
+    [[nodiscard]] ToolbarControl ControlAtHostPosition(const QPointF& hostPosition) const;
+    // Hover state driven from the native hit test, which also sees the moves
+    // Windows routes as non-client (the band's caption strip) and therefore
+    // never reaches the widget's own mouse handlers.
+    void UpdateHoverAtHostPosition(const QPointF& hostPosition);
     [[nodiscard]] static std::optional<settings::Tool> ToolForControl(ToolbarControl control);
     [[nodiscard]] static ToolbarControl ControlForTool(settings::Tool tool);
 
@@ -174,6 +191,11 @@ public:
     // Current vertical offset inside the host for the reveal animation
     // (App::ToolbarOffsetYForProgress).
     [[nodiscard]] qreal ToolbarOffsetY() const;
+    // App::VisibleToolbarHeight: the band height while the toolbar counts as
+    // visible - auto-hide off, revealed, mid-animation, or an editor/overlay
+    // owning the band - otherwise 0.  The native hit test uses it to decide
+    // whether the band's non-control strip is a caption drag area.
+    [[nodiscard]] qreal VisibleToolbarHeight() const;
 
     [[nodiscard]] QSize sizeHint() const override;
 
@@ -234,6 +256,7 @@ private:
     QString zoomLabel_ {};
     bool maximized_ = false;
     bool captionButtonsVisible_ = false;
+    qreal frameThicknessX_ = 0.0;
     qreal pageScale_ = 1.0;
     bool textFormatAvailable_ = false;
     std::optional<PageTextStyle> formatStyle_ {};

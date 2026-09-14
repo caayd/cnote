@@ -908,6 +908,26 @@ if(WIN32)
     )
 endif()
 
+# --- Window chrome (borderless custom caption) --------------------------------
+# The Windows shell removes the native caption through the window handle
+# (WM_NCCALCSIZE / WM_NCACTIVATE / WM_NCHITTEST, the reference App::HandleMessage
+# path) while keeping the WS_OVERLAPPEDWINDOW style, and the toolbar band carries
+# the app's own minimize/maximize/close cluster.  The native half needs a real
+# desktop; this test covers its platform-neutral arithmetic
+# (ResolveWindowChromeHit), the band/control geometry under the native frame
+# inset, the maximize/restore glyph and band-height transition, the auto-hide
+# band state machine and the caption-button command intents - all offscreen.
+add_executable(cnote_window_chrome_tests tests/WindowChromeTests.cpp)
+target_include_directories(cnote_window_chrome_tests PRIVATE src)
+target_compile_features(cnote_window_chrome_tests PRIVATE cxx_std_20)
+target_compile_options(cnote_window_chrome_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_window_chrome_tests PRIVATE cnote_ui cnote_model Qt6::Widgets)
+add_test(NAME window_chrome_qt COMMAND cnote_window_chrome_tests)
+set_tests_properties(window_chrome_qt PROPERTIES TIMEOUT 120
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
+
 # --- Test runtime staging (test hygiene) --------------------------------------
 # A fresh build directory has no Qt, PDFium or MinGW runtime on PATH, so every Qt
 # test executable gets the DLLs it needs next to it.  Without this the suite
@@ -956,7 +976,8 @@ if(WIN32)
         cnote_portability_tests
         cnote_font_fallback_tests
         cnote_xpress_codec_tests
-        cnote_persistence_tests)
+        cnote_persistence_tests
+        cnote_window_chrome_tests)
         if(TARGET ${_cnote_test_target})
             cnote_stage_test_runtime(${_cnote_test_target})
         endif()

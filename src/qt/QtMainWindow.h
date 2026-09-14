@@ -100,8 +100,33 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
+    // Windows custom caption (see kUsesCustomCaption): removes the native title
+    // bar from the frame and restores the reference's hit testing.
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
 
 private:
+    // The reference frontend has no native caption on Windows: the band carries
+    // the app's own minimize/maximize/close cluster and the title menu, and the
+    // whole band hides with the toolbar.  Platforms that keep native decorations
+    // must not draw a second set of window buttons inside the client area.
+#if defined(Q_OS_WIN)
+    static constexpr bool kUsesCustomCaption = true;
+#else
+    static constexpr bool kUsesCustomCaption = false;
+#endif
+    // Handles WM_NCCALCSIZE/WM_NCHITTEST; returns true when the message was
+    // consumed.  Defined on Windows only.
+    bool HandleNativeChromeMessage(void* message, qintptr* result);
+    // Maximized state that drives the band layout.  Maximizing never goes
+    // through Qt on Windows - double-clicking the band and Aero snap are system
+    // paths - so this asks the reference's own source of truth (IsZoomed) first
+    // and only falls back to Qt's cached window state.
+    [[nodiscard]] bool IsWindowMaximized() const;
+    // Feeds the toolbar the DPI-scaled native frame width (LayoutQt is logical,
+    // the frame metrics are physical): while maximized the reference insets the
+    // caption cluster from the window's right edge by that width because the
+    // maximized client area extends past the work area by the frame.
+    void UpdateNativeFrameThickness();
     void UpdateChrome();
     // Chrome geometry: the toolbar band and the sidebar host rect (both widgets
     // position themselves; the window only supplies their contract inputs).

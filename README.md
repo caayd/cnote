@@ -41,6 +41,35 @@ Linked views currently work within one app instance. Separate executable or
 Explorer launches do not join existing sessions. Window layouts are not restored
 after restarting, and live interaction previews are not broadcast to other views.
 
+## Window chrome
+
+On Windows the window has **no native title bar**: the band across the top of
+the client area is the application's own title bar. `QtMainWindow::nativeEvent`
+answers `WM_NCCALCSIZE` with the whole window rectangle as client area (what the
+removed Win32 frontend did) and `WM_NCACTIVATE` with `TRUE`, while the
+`WS_OVERLAPPEDWINDOW` style is deliberately kept - that is what preserves the
+DWM shadow, Aero snap, drag-to-move and double-click maximize/restore, the
+edge/corner resize zones and the work-area clamp when maximizing.
+`WM_NCHITTEST` supplies the DPI-scaled resize zones from the real frame metrics
+and splits the band into a drag strip (`HTCAPTION`) and the clickable controls
+(`HTCLIENT`), using the same hit test the band widget uses for its own mouse
+routing (`ResolveWindowChromeHit`, `src/ui/WindowBehaviorQt.h`).
+
+The band carries the title/file menu, the zoom indicator, undo/redo, the tool
+buttons, the palette swatch and - where the native caption would have been - the
+application's own minimize, maximize/restore (the glyph switches to the
+reference two-square restore glyph while maximized) and close controls. Its
+height is the reference 34 logical pixels, 39 while maximized with a 5-pixel top
+inset and the caption cluster inset from the right edge by the native frame
+width; the two pixels above the canvas show the window background, matching the
+reference's clipped toolbar surface.
+
+With **Auto-hide toolbar** enabled in Settings the entire band, window controls
+included, animates away and comes back when the pointer reaches the top edge
+(12 logical pixels normally, 22 while maximized); with the option disabled the
+band is always visible. Linux and macOS keep their native decorations, so the
+band there never draws the in-client window buttons.
+
 ## Default Controls
 
 - `D` draw
@@ -135,11 +164,15 @@ ctest --test-dir build-qt -E '^(xpress_codec|session_manager_qt|interaction_rout
 The headless set is `xpress_codec` (pure C++), `session_manager_qt`
 (`QCoreApplication` only), `interaction_router_qt` and
 `precision_input_router_qt` (no Qt application object). On Windows the suite
-has 20 tests; Linux and macOS have 19 because `precision_touchpad_qt` is
+has 21 tests; Linux and macOS have 20 because `precision_touchpad_qt` is
 Windows-only. On Windows, `selection_clipboard_qt` (real clipboard bridge),
 `layout_parity_qt` and `font_fallback_qt` (real font metrics) run on the
 native platform; `layout_parity_qt` compares the Qt chrome geometry against
 the frozen reference table captured from the removed Win32 frontend.
+`window_chrome_qt` covers the borderless window chrome offscreen (band
+geometry under the native frame inset, the maximize/restore glyph, the
+auto-hide band state machine and the caption-button intents); its native half
+(`WM_NCCALCSIZE`/`WM_NCHITTEST`) needs a real desktop and is verified there.
 
 ## Windows precision-touchpad header
 
@@ -243,7 +276,7 @@ default PerMonitorV2 context at startup.
 ## Release status
 
 Verified locally (Windows MinGW 13.1 and WSL Ubuntu 24.04): configure, build,
-the full CTest set (20 tests on Windows, 19 on Linux), `cmake --install`,
+the full CTest set (21 tests on Windows, 20 on Linux), `cmake --install`,
 CPack ZIP/TGZ, and `tools/verify-package.cmake` (25/25 checks on the ZIP,
 24/24 on the TGZ, including launching the packaged application headless).
 

@@ -1044,6 +1044,16 @@ void ToolbarWidget::SetCaptionButtonsVisible(bool visible) {
     update();
 }
 
+void ToolbarWidget::SetFrameThicknessX(qreal thickness) {
+    const qreal clamped = thickness > 0.0 ? thickness : 0.0;
+    if (qFuzzyCompare(frameThicknessX_ + 1.0, clamped + 1.0)) {
+        return;
+    }
+    frameThicknessX_ = clamped;
+    UpdateToolbarGeometry();
+    update();
+}
+
 void ToolbarWidget::SetTextFormatAvailable(bool available) {
     textFormatAvailable_ = available;
     if (!available) {
@@ -1062,7 +1072,7 @@ void ToolbarWidget::SetTextFormatState(const std::optional<PageTextStyle>& style
 
 appui::qt::ToolbarLayout ToolbarWidget::ComputeLayout() const {
     const QRectF clientRect(0.0, 0.0, static_cast<qreal>(width()), static_cast<qreal>(qt::ToolbarHeight(maximized_)));
-    return qt::BuildToolbarLayout(clientRect, settings_.palette.size(), maximized_, static_cast<int>(activeTool_), 0.0);
+    return qt::BuildToolbarLayout(clientRect, settings_.palette.size(), maximized_, static_cast<int>(activeTool_), frameThicknessX_);
 }
 
 appui::qt::ToolbarTitleLayout ToolbarWidget::ComputeTitleLayout() const {
@@ -1144,6 +1154,20 @@ bool ToolbarWidget::IsControlRect(const QPointF& widgetPosition) const {
     return ControlAt(widgetPosition) != ToolbarControl::None;
 }
 
+ToolbarControl ToolbarWidget::ControlAtHostPosition(const QPointF& hostPosition) const {
+    return ControlAt(hostPosition - QPointF(x(), y()));
+}
+
+void ToolbarWidget::UpdateHoverAtHostPosition(const QPointF& hostPosition) {
+    const QPointF widgetPosition = hostPosition - QPointF(x(), y());
+    const bool insideBand = widgetPosition.y() >= 0.0 && widgetPosition.y() < qt::ToolbarHeight(maximized_);
+    const ToolbarControl control = insideBand ? ControlAt(widgetPosition) : ToolbarControl::None;
+    if (control != hovered_) {
+        hovered_ = control;
+        update();
+    }
+}
+
 std::optional<settings::Tool> ToolbarWidget::ToolForControl(ToolbarControl control) {
     switch (control) {
     case ToolbarControl::SelectTool:
@@ -1211,6 +1235,21 @@ qreal ToolbarWidget::ToolbarOffsetY() const {
     return -(toolbarHeight + 2.0) * (1.0 - std::clamp(revealProgress_, 0.0, 1.0));
 }
 
+qreal ToolbarWidget::VisibleToolbarHeight() const {
+    if (!settings_.autoHideToolbar) {
+        return qt::ToolbarHeight(maximized_);
+    }
+    // App::IsToolbarVisible (App.cpp:2297-2310): the band stays up while the
+    // reveal animation runs, while it is revealed, or while an inline editor or
+    // an open overlay owns it.
+    const bool visible = revealProgress_ > 0.001
+        || revealed_
+        || zoomEditing_
+        || QuickSizeSliderDragging()
+        || AnyOverlayVisible();
+    return visible ? qt::ToolbarHeight(maximized_) : 0.0;
+}
+
 void ToolbarWidget::SetAutoHideEnabled(bool enabled) {
     if (settings_.autoHideToolbar == enabled) {
         return;
@@ -1246,7 +1285,7 @@ void ToolbarWidget::UpdateAutoHideForCursor(const QPointF& hostPosition, bool in
         return;
     }
     const qt::ToolbarAutoHide decision = qt::ResolveToolbarAutoHide(
-        hostPosition.y(), maximized_, revealed_, interactionActive, 0.0);
+        hostPosition.y(), maximized_, revealed_, interactionActive, frameThicknessX_);
     if (decision == qt::ToolbarAutoHide::Reveal) {
         SetRevealed(true);
     } else if (decision == qt::ToolbarAutoHide::Hide) {
@@ -1304,6 +1343,15 @@ void ToolbarWidget::paintEvent(QPaintEvent*) {
     const qreal toolbarHeight = qt::ToolbarHeight(maximized_);
     const QRectF toolbarRect(0.0, 0.0, static_cast<qreal>(width()), toolbarHeight);
     painter.fillRect(toolbarRect, ChromeColor(kChromeToolbarBackground));
+    // App::PaintToolbar clips the surface to ToolbarVisibleClipHeight
+    // (App.cpp:6487, 2354-2357): the last two logical pixels of the band show
+    // the window background, and the canvas starts at the full band height.
+    constexpr qreal kToolbarEdgeGuard = 2.0;
+    if (toolbarHeight > kToolbarEdgeGuard) {
+        painter.fillRect(
+            QRectF(0.0, toolbarHeight - kToolbarEdgeGuard, static_cast<qreal>(width()), kToolbarEdgeGuard),
+            ChromeColor(kChromeWindowBackground));
+    }
 
     const qt::ToolbarLayout layout = ComputeLayout();
     const qt::ToolbarTitleLayout titleLayout = ComputeTitleLayout();
@@ -1321,17 +1369,35 @@ void ToolbarWidget::paintEvent(QPaintEvent*) {
     };
 
     if (captionButtonsVisible_) {
+        // App::PaintToolbarContents::paintWindowButton (App.cpp:6570-6610): the
+        // hover fill covers the whole button rect (FillSolidRect, no rounding),
+        // unlike the rounded tool-button hover; the maximize button switches to
+        // the two-square restore glyph while the window is maximized.
         const auto paintWindowButton = [&](const QRectF& rect, int kind, ToolbarControl control) {
             if (hovered_ == control) {
-                ChromeFillRoundedRect(painter, rect.adjusted(1.0, 1.0, -1.0, -1.0), ChromeColor(kind == 2 ? kChromeCaptionCloseHover : kChromeCaptionHover), 4.0);
+                painter.fillRect(rect, ChromeColor(kind == 2 ? kChromeCaptionCloseHover : kChromeCaptionHover));
             }
             painter.setBrush(Qt::NoBrush);
             painter.setPen(QPen(ChromeColor(kChromeCaptionIcon), 1.0));
             const QPointF center = rect.center();
+            constexpr qreal kBoxHalfWidth = 6.0;
+            constexpr qreal kBoxHalfHeight = 5.0;
+            constexpr qreal kOverlapOffset = 3.0;
             if (kind == 0) {
                 painter.drawLine(QPointF(center.x() - 8.0, center.y() + 4.0), QPointF(center.x() + 9.0, center.y() + 4.0));
             } else if (kind == 1) {
-                painter.drawRect(QRectF(center.x() - 6.0, center.y() - 5.0, 13.0, 11.0));
+                if (maximized_) {
+                    // Front square plus the offset back square of the restore
+                    // glyph (App.cpp:6592-6599).
+                    painter.drawRect(QRectF(center.x() - kBoxHalfWidth, center.y() - 1.0, (kBoxHalfWidth * 2.0) + 1.0, kBoxHalfHeight + 2.0));
+                    const QPointF backLeft(center.x() - kBoxHalfWidth + kOverlapOffset, center.y() - kBoxHalfHeight - kOverlapOffset);
+                    const QPointF backRight(center.x() + kBoxHalfWidth + kOverlapOffset + 1.0, center.y() - kBoxHalfHeight - kOverlapOffset);
+                    painter.drawLine(backLeft, backRight);
+                    painter.drawLine(backRight, QPointF(backRight.x(), center.y() + kBoxHalfHeight - kOverlapOffset + 1.0));
+                    painter.drawLine(backLeft, QPointF(backLeft.x(), center.y() - kBoxHalfHeight + kOverlapOffset));
+                } else {
+                    painter.drawRect(QRectF(center.x() - kBoxHalfWidth, center.y() - kBoxHalfHeight, (kBoxHalfWidth * 2.0) + 1.0, (kBoxHalfHeight * 2.0) + 1.0));
+                }
             } else {
                 painter.drawLine(QPointF(center.x() - 7.0, center.y() - 7.0), QPointF(center.x() + 8.0, center.y() + 8.0));
                 painter.drawLine(QPointF(center.x() + 7.0, center.y() - 7.0), QPointF(center.x() - 8.0, center.y() + 8.0));

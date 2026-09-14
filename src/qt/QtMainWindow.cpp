@@ -18,6 +18,7 @@
 #include <QScreen>
 #include <QTextEdit>
 #include <QVBoxLayout>
+#include <QWindow>
 
 #include "Unicode.h"
 #include "document/SelectionClipboardQt.h"
@@ -31,9 +32,54 @@
 #include "ui/ToolbarWidget.h"
 #include "ui/WindowBehaviorQt.h"
 
+#if defined(Q_OS_WIN)
+#include <windows.h>
+#include <windowsx.h>
+
+// windows.h only declares the per-DPI metrics/DPI surface when WINVER >= 0x0605,
+// and cnote_ui pins _WIN32_WINNT=0x0602 for its Windows 8 API surface.  Qt 6.11
+// requires Windows 10, where both of these user32 exports exist on every
+// supported system, so they are declared here for this translation unit only
+// instead of raising the target version for the whole library.
+extern "C" {
+WINUSERAPI UINT WINAPI GetDpiForWindow(HWND hwnd);
+WINUSERAPI int WINAPI GetSystemMetricsForDpi(int nIndex, UINT dpi);
+}
+#endif
+
 namespace cnote::qt {
 
 namespace {
+
+#if defined(Q_OS_WIN)
+// Reference WindowFrameThicknessX/Y (Layout.cpp:110-113, MessageLoop.cpp:68-70):
+// the resize border plus the padded border at the window's DPI.
+int NativeFrameThicknessX(HWND window) {
+    const UINT dpi = GetDpiForWindow(window);
+    return GetSystemMetricsForDpi(SM_CXFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
+int NativeFrameThicknessY(HWND window) {
+    const UINT dpi = GetDpiForWindow(window);
+    return GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
+LRESULT HitCodeFor(ui::WindowChromeHit hit) {
+    switch (hit) {
+        case ui::WindowChromeHit::Caption: return HTCAPTION;
+        case ui::WindowChromeHit::Top: return HTTOP;
+        case ui::WindowChromeHit::Bottom: return HTBOTTOM;
+        case ui::WindowChromeHit::Left: return HTLEFT;
+        case ui::WindowChromeHit::Right: return HTRIGHT;
+        case ui::WindowChromeHit::TopLeft: return HTTOPLEFT;
+        case ui::WindowChromeHit::TopRight: return HTTOPRIGHT;
+        case ui::WindowChromeHit::BottomLeft: return HTBOTTOMLEFT;
+        case ui::WindowChromeHit::BottomRight: return HTBOTTOMRIGHT;
+        case ui::WindowChromeHit::Client: break;
+    }
+    return HTCLIENT;
+}
+#endif
 
 // settings::Tool and ui::Tool mirror each other one for one (settings cannot
 // include the router header); the switch keeps a future addition a compile
@@ -286,16 +332,18 @@ void QtMainWindow::CreateChrome() {
     RefreshRecentMenu();
 
     toolbar_ = new ui::ToolbarWidget(this);
-    toolbar_->SetCaptionButtonsVisible(false);
+    // The band carries the app's own window buttons where the native caption is
+    // removed (Windows); platforms with native decorations keep only the reserve.
+    toolbar_->SetCaptionButtonsVisible(kUsesCustomCaption);
     toolbar_->SetSettings(settings_);
     toolbar_->SetActiveTool(activeTool_);
-    toolbar_->SetMaximized(isMaximized());
+    toolbar_->SetMaximized(IsWindowMaximized());
     connect(toolbar_, &ui::ToolbarWidget::CommandTriggered, this, [this](ui::ToolbarCommand command) {
         switch (command) {
             case ui::ToolbarCommand::Undo: Undo(); break;
             case ui::ToolbarCommand::Redo: Redo(); break;
             case ui::ToolbarCommand::Minimize: showMinimized(); break;
-            case ui::ToolbarCommand::Maximize: isMaximized() ? showNormal() : showMaximized(); UpdateChrome(); break;
+            case ui::ToolbarCommand::Maximize: IsWindowMaximized() ? showNormal() : showMaximized(); UpdateChrome(); break;
             case ui::ToolbarCommand::Close: close(); break;
             case ui::ToolbarCommand::OpenTitleMenu: ShowTitleMenu(); break;
             case ui::ToolbarCommand::ToggleWheel:
@@ -435,14 +483,14 @@ void QtMainWindow::ApplySettingsToShell() {
         toolbar_->SetSettings(settings_);
         toolbar_->SetActiveTool(activeTool_);
         toolbar_->SetColorIndex(settings_.colorIndex);
-        toolbar_->SetCaptionButtonsVisible(false);
+        toolbar_->SetCaptionButtonsVisible(kUsesCustomCaption);
         toolbar_->SetAutoHideEnabled(settings_.autoHideToolbar);
         if (!settings_.autoHideToolbar) {
             toolbar_->SetRevealed(true);
         }
     }
     if (sidebar_ != nullptr) {
-        sidebar_->SetMaximized(isMaximized());
+        sidebar_->SetMaximized(IsWindowMaximized());
     }
 }
 
@@ -475,6 +523,16 @@ void QtMainWindow::RefreshShortcutBindings() {
     // KeyBindingQt is the reference shortcut table; the tool actions are the
     // ones that must stand down while a text/LaTeX editor owns the keyboard
     // (editor precedence, App::ShortcutAction::Tool*).
+    //
+    // The previous actions must be destroyed, not just forgotten: a QAction
+    // stays in its window's action list while it lives, and Qt treats two live
+    // actions with the same sequence as an *ambiguous* shortcut and fires
+    // neither - so dropping the vector silently killed every tool key as soon as
+    // the settings dialog re-ran this (it does so on each edit, e.g. the
+    // auto-hide toggle).
+    for (QAction* stale : toolShortcutActions_) {
+        delete stale;
+    }
     toolShortcutActions_.clear();
     const auto toolAction = [this](settings::ShortcutAction action, settings::Tool tool) {
         auto* item = new QAction(this);
@@ -970,6 +1028,16 @@ void QtMainWindow::ReportError(const QString& text) {
     QMessageBox::critical(this, QStringLiteral("cnote"), text);
 }
 
+bool QtMainWindow::IsWindowMaximized() const {
+#if defined(Q_OS_WIN)
+    const QWindow* handle = windowHandle();
+    if (handle != nullptr) {
+        return IsZoomed(reinterpret_cast<HWND>(handle->winId())) != FALSE;
+    }
+#endif
+    return isMaximized();
+}
+
 void QtMainWindow::showEvent(QShowEvent* event) {
     QMainWindow::showEvent(event);
     controller_.ReattachForShow();
@@ -985,12 +1053,113 @@ void QtMainWindow::showEvent(QShowEvent* event) {
     UpdateChromeGeometry();
 }
 
+bool QtMainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
+#if defined(Q_OS_WIN)
+    static const QByteArray kWindowsMessage = QByteArrayLiteral("windows_generic_MSG");
+    if (eventType == kWindowsMessage && HandleNativeChromeMessage(message, result)) {
+        return true;
+    }
+#else
+    static_cast<void>(eventType);
+    static_cast<void>(message);
+    static_cast<void>(result);
+#endif
+    return QMainWindow::nativeEvent(eventType, message, result);
+}
+
+#if defined(Q_OS_WIN)
+bool QtMainWindow::HandleNativeChromeMessage(void* message, qintptr* result) {
+    auto* msg = static_cast<MSG*>(message);
+    switch (msg->message) {
+    case WM_NCCALCSIZE:
+        // App::HandleMessage (MessageLoop.cpp:87): the whole window rectangle is
+        // client area, so the caption is never drawn.  The WS_OVERLAPPEDWINDOW
+        // style stays in place - that is what keeps the DWM shadow, Aero snap,
+        // double-click maximize/restore, the resize edges and the work-area
+        // maximize clamp, all of which Qt::FramelessWindowHint gives up.
+        *result = 0;
+        return true;
+    case WM_NCACTIVATE:
+        // App::HandleMessage (MessageLoop.cpp:85-86) answers TRUE: the frame has
+        // no non-client area left to repaint on activation, so the default
+        // handler is never allowed to draw one.
+        *result = TRUE;
+        return true;
+    case WM_NCHITTEST: {
+        const HWND window = reinterpret_cast<HWND>(winId());
+        RECT windowRect {};
+        GetWindowRect(window, &windowRect);
+        const QPoint screenCursor(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam));
+
+        POINT clientCursor { screenCursor.x(), screenCursor.y() };
+        ScreenToClient(window, &clientCursor);
+        const qreal ratio = devicePixelRatioF() > 0.0 ? devicePixelRatioF() : 1.0;
+        const QPointF clientPosition(
+            static_cast<qreal>(clientCursor.x) / ratio,
+            static_cast<qreal>(clientCursor.y) / ratio);
+
+        if (toolbar_ != nullptr) {
+            const bool interactionActive = canvas_ != nullptr
+                && canvas_->ActiveInteraction() != ui::InteractionKind::None;
+            // App::HandleMessage WM_NCHITTEST (MessageLoop.cpp:141-152): the hit
+            // test is what reveals an auto-hidden band.  It also carries the band
+            // hover state, because the caption strip's mouse moves arrive as
+            // non-client messages the widget never sees.
+            toolbar_->UpdateAutoHideForCursor(clientPosition, interactionActive);
+            toolbar_->UpdateHoverAtHostPosition(clientPosition);
+        }
+
+        ui::WindowChromeHitTest hit;
+        hit.windowRect = QRect(
+            QPoint(windowRect.left, windowRect.top),
+            QSize(windowRect.right - windowRect.left, windowRect.bottom - windowRect.top));
+        hit.cursor = screenCursor;
+        hit.frameThicknessX = NativeFrameThicknessX(window);
+        hit.frameThicknessY = NativeFrameThicknessY(window);
+        hit.maximized = IsZoomed(window) != FALSE;
+        hit.cursorInBand = toolbar_ != nullptr
+            && clientPosition.y() >= 0.0
+            && clientPosition.y() < toolbar_->VisibleToolbarHeight();
+        hit.cursorOverToolbarControl = hit.cursorInBand
+            && toolbar_->ControlAtHostPosition(clientPosition) != ui::ToolbarControl::None;
+
+        *result = static_cast<qintptr>(HitCodeFor(ui::ResolveWindowChromeHit(hit)));
+        return true;
+    }
+    default:
+        break;
+    }
+    return false;
+}
+#endif  // Q_OS_WIN
+
+void QtMainWindow::UpdateNativeFrameThickness() {
+    if (toolbar_ == nullptr) {
+        return;
+    }
+#if defined(Q_OS_WIN)
+    const QWindow* handle = windowHandle();
+    if (handle == nullptr) {
+        toolbar_->SetFrameThicknessX(0.0);
+        return;
+    }
+    const qreal ratio = devicePixelRatioF() > 0.0 ? devicePixelRatioF() : 1.0;
+    toolbar_->SetFrameThicknessX(static_cast<qreal>(NativeFrameThicknessX(reinterpret_cast<HWND>(handle->winId()))) / ratio);
+#else
+    // Only the Windows chrome removes the caption, so only Windows needs the
+    // frame inset the maximized layout subtracts from the caption cluster.
+    toolbar_->SetFrameThicknessX(0.0);
+#endif
+}
+
 void QtMainWindow::UpdateChromeGeometry() {
-    const int band = qRound(cnote::appui::qt::ToolbarHeight(isMaximized()));
+    const bool maximized = IsWindowMaximized();
+    const int band = qRound(cnote::appui::qt::ToolbarHeight(maximized));
     const int reserved = qRound(cnote::appui::qt::ReservedToolbarHeight(
-        toolbar_ != nullptr && toolbar_->AutoHideEnabled(), isMaximized()));
+        toolbar_ != nullptr && toolbar_->AutoHideEnabled(), maximized));
     if (toolbar_ != nullptr) {
-        toolbar_->SetMaximized(isMaximized());
+        UpdateNativeFrameThickness();
+        toolbar_->SetMaximized(maximized);
         // The widget owns the 120 ms reveal offset; the window only supplies the
         // band's width and the maximized state.
         toolbar_->setGeometry(0, qRound(toolbar_->ToolbarOffsetY()), width(), band);
@@ -1001,7 +1170,7 @@ void QtMainWindow::UpdateChromeGeometry() {
         contentLayout_->setContentsMargins(0, reserved, 0, 0);
     }
     if (sidebar_ != nullptr) {
-        sidebar_->SetMaximized(isMaximized());
+        sidebar_->SetMaximized(maximized);
         sidebar_->SetHostClientRect(rect(), reserved);
         sidebar_->raise();
     }
@@ -1071,7 +1240,7 @@ void QtMainWindow::UpdateChrome() {
         toolbar_->SetUndoRedoEnabled(controller_.CanUndo(), controller_.CanRedo());
         toolbar_->SetTitle(fileLabel);
         toolbar_->SetZoomLabel(QStringLiteral("%1%").arg(canvas_ != nullptr ? qRound(canvas_->Zoom() * 100.0) : 100));
-        toolbar_->SetMaximized(isMaximized());
+        toolbar_->SetMaximized(IsWindowMaximized());
         toolbar_->SetPageScale(canvas_ != nullptr ? canvas_->Zoom() : 1.0);
         toolbar_->SetColorIndex(settings_.colorIndex);
         toolbar_->SetTextFormatAvailable(controller_.EditingText());
