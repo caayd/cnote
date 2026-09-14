@@ -75,19 +75,20 @@ qreal ExpectedPreviewExtent(float brushSize, qreal pageScale) {
 
 // The anchor the reference resolves for a cursor position: the cursor itself
 // inside the canvas (exclusive right/bottom), otherwise the canvas centre
-// 120 px below its top.
-QPointF ReferenceAnchor(const QRectF& canvas, const QPointF& cursor) {
+// 120 device px (120/dpr logical) below its top.
+QPointF ReferenceAnchor(const QRectF& canvas, const QPointF& cursor, qreal dpr) {
     const bool inside = cursor.x() >= canvas.left() && cursor.x() < canvas.right()
         && cursor.y() >= canvas.top() && cursor.y() < canvas.bottom();
     if (inside) {
         return cursor;
     }
-    return QPointF((canvas.left() + canvas.right()) / 2.0, canvas.top() + 120.0);
+    const qreal scale = dpr > 0.0 ? dpr : 1.0;
+    return QPointF((canvas.left() + canvas.right()) / 2.0, canvas.top() + 120.0 / scale);
 }
 
-QRect ExpectedPopupBounds(const QRectF& canvas, const QPointF& cursor, float brushSize, qreal pageScale) {
+QRect ExpectedPopupBounds(const QRectF& canvas, const QPointF& cursor, float brushSize, qreal pageScale, qreal dpr) {
     const lq::QuickSizePopupLayout layout = lq::BuildQuickSizePopupLayout(
-        canvas, ReferenceAnchor(canvas, cursor), ExpectedPreviewExtent(brushSize, pageScale));
+        canvas, ReferenceAnchor(canvas, cursor, dpr), ExpectedPreviewExtent(brushSize, pageScale));
     return lq::QuickSizePopupBounds(layout).toAlignedRect();
 }
 
@@ -128,11 +129,15 @@ struct Harness {
     [[nodiscard]] QRectF CanvasRect() const { return toolbar->HostCanvasRect(); }
 
     // Places the cursor at a host position and fires the real Ctrl+W path.
-    void ToggleAt(const QPointF& hostPosition) {
+    // Returns the cursor's actual host position (a platform may clamp setPos
+    // to the screen, so expectations must follow where it really landed).
+    QPointF ToggleAt(const QPointF& hostPosition) {
         QCursor::setPos(window->mapToGlobal(hostPosition.toPoint()));
         QApplication::processEvents();
+        const QPointF actual = window->mapFromGlobal(QCursor::pos());
         QTest::keyClick(window->windowHandle(), Qt::Key_W, Qt::ControlModifier);
         QApplication::processEvents();
+        return actual;
     }
 };
 
@@ -163,11 +168,11 @@ void PopupFollowsCursor(const QSize& windowSize, const char* label) {
     };
 
     for (const auto& [name, hostPosition] : cases) {
-        harness.ToggleAt(hostPosition);
+        const QPointF actual = harness.ToggleAt(hostPosition);
         const std::string what = std::string(label) + " " + name;
         Check(harness.toolbar->QuickSizePopupVisible(), what + ": popup opens");
         const QRect got = harness.toolbar->QuickSizePopupBounds();
-        const QRect want = ExpectedPopupBounds(canvas, hostPosition, brushSize, pageScale);
+        const QRect want = ExpectedPopupBounds(canvas, actual, brushSize, pageScale, harness.window->devicePixelRatioF());
         Check(got == want, what + ": popup rect " + DescribeRect(got) + " == expected " + DescribeRect(want));
         Check(harness.window->rect().contains(got), what + ": popup stays inside the window");
 
@@ -175,6 +180,34 @@ void PopupFollowsCursor(const QSize& windowSize, const char* label) {
         harness.ToggleAt(hostPosition);
         Check(!harness.toolbar->QuickSizePopupVisible(), what + ": second Ctrl+W closes the popup");
     }
+}
+
+// The out-of-canvas fallback anchor is the reference's raw 120 device px below
+// the canvas top, i.e. 120/dpr logical px.  At dpr 1.0 the divided and
+// undivided values coincide, so this check only discriminates at dpr != 1
+// (the quick_popup_placement_dpr175_qt CTest runs this binary at
+// QT_SCALE_FACTOR=1.75).
+void FallbackAnchorScalesWithDpr() {
+    Harness harness(QSize(1000, 700));
+    const qreal dpr = harness.window->devicePixelRatioF();
+    std::printf("info window dpr=%.2f\n", static_cast<double>(dpr));
+
+    const QRectF canvas = harness.CanvasRect();
+    const float brushSize = harness.toolbar->Settings().drawBrushSize;
+    const qreal pageScale = harness.toolbar->PageScale();
+    // On the toolbar band: inside the window, outside the canvas -> fallback.
+    const QPointF band(canvas.center().x(), canvas.top() - 10.0);
+    const QPointF actual = harness.ToggleAt(band);
+    Check(harness.toolbar->QuickSizePopupVisible(), "dpr fallback: popup opens");
+    const QRect got = harness.toolbar->QuickSizePopupBounds();
+    const QRect want = ExpectedPopupBounds(canvas, actual, brushSize, pageScale, dpr);
+    Check(got == want, "dpr fallback: popup rect " + DescribeRect(got) + " == expected " + DescribeRect(want));
+    if (dpr > 1.0) {
+        const QRect undivided = ExpectedPopupBounds(canvas, actual, brushSize, pageScale, 1.0);
+        Check(got != undivided,
+            "dpr fallback: at dpr " + std::to_string(dpr) + " the anchor is 120/dpr, not 120 logical px");
+    }
+    harness.ToggleAt(band);
 }
 
 void PopupTracksLargerBrushPreview() {
@@ -189,7 +222,7 @@ void PopupTracksLargerBrushPreview() {
     const QPointF centre = canvas.center();
     harness.ToggleAt(centre);
     const QRect got = harness.toolbar->QuickSizePopupBounds();
-    const QRect want = ExpectedPopupBounds(canvas, centre, 60.0f, harness.toolbar->PageScale());
+    const QRect want = ExpectedPopupBounds(canvas, centre, 60.0f, harness.toolbar->PageScale(), harness.window->devicePixelRatioF());
     Check(got == want, "large brush: popup rect " + DescribeRect(got) + " == expected " + DescribeRect(want));
     Check(got.bottom() < centre.y(), "large brush: popup still hangs above the cursor");
     harness.ToggleAt(centre);
@@ -229,6 +262,7 @@ int main(int argc, char** argv) {
     PopupFollowsCursor(QSize(1200, 800), "normal");
     PopupFollowsCursor(QSize(420, 500), "compact");
     PopupTracksLargerBrushPreview();
+    FallbackAnchorScalesWithDpr();
 
     if (gFailures != 0) {
         std::printf("%d quick-popup placement check(s) failed\n", gFailures);

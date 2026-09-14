@@ -1082,6 +1082,11 @@ target_link_libraries(cnote_quick_popup_tests PRIVATE cnote_ui Qt6::Widgets Qt6:
 add_test(NAME quick_popup_placement_qt COMMAND cnote_quick_popup_tests)
 set_tests_properties(quick_popup_placement_qt PROPERTIES TIMEOUT 120
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
+# A second run at QT_SCALE_FACTOR=1.75 covers the device-pixel-ratio division
+# in the out-of-canvas fallback anchor (120 device px = 120/dpr logical).
+add_test(NAME quick_popup_placement_dpr175_qt COMMAND cnote_quick_popup_tests)
+set_tests_properties(quick_popup_placement_dpr175_qt PROPERTIES TIMEOUT 120
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins};QT_SCALE_FACTOR=1.75")
 if(WIN32)
     cnote_stage_test_runtime(cnote_quick_popup_tests)
     add_custom_command(TARGET cnote_quick_popup_tests POST_BUILD
