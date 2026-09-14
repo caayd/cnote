@@ -231,6 +231,15 @@ run `bin/cnote` - resources and plugins are resolved relative to the
 executable, so the working directory does not matter and no environment
 variables are needed.
 
+The Windows executable is a GUI-subsystem application, so a double-click from
+Explorer or the Start menu opens the window without a console window, and
+launching it from a shell returns the prompt immediately.  `--self-check`
+diagnostics still reach stdout/stderr whenever those handles are redirected
+(a shell or `tools/verify-package.cmake`), and the process attaches to a
+parent console when one exists without ever allocating a new one.  DPI
+awareness is deliberately not declared in `src/cnote.manifest`: Qt applies its
+default PerMonitorV2 context at startup.
+
 ## Release status
 
 Verified locally (Windows MinGW 13.1 and WSL Ubuntu 24.04): configure, build,

@@ -26,6 +26,10 @@
 #include <optional>
 #include <string>
 
+#if defined(Q_OS_WIN)
+#include <windows.h>
+#endif
+
 #include "Unicode.h"
 #include "platform/AppResourcePaths.h"
 #include "qt/QtDocumentController.h"
@@ -33,6 +37,42 @@
 #include "shell/AppManager.h"
 
 namespace {
+
+#if defined(Q_OS_WIN)
+// The product is a GUI-subsystem executable, so Windows gives it no console of
+// its own.  Two cases matter:
+//   * started from a shell (or the packaging verifier) with stdout/stderr
+//     redirected - the inherited handles carry the diagnostics, so they must be
+//     left exactly as they are;
+//   * started from Explorer or the Start menu - there are no usable handles,
+//     and there is nothing to attach to, so the launch stays silent.
+// When the handles are missing but the parent has a console (an interactive
+// shell launch), attach to it so diagnostics remain visible.  AttachConsole
+// never opens a console window, so a double-click cannot produce one.
+void AdoptParentConsole() {
+    const HANDLE out = ::GetStdHandle(STD_OUTPUT_HANDLE);
+    const HANDLE err = ::GetStdHandle(STD_ERROR_HANDLE);
+    const auto usable = [](HANDLE handle) {
+        return handle != nullptr && handle != INVALID_HANDLE_VALUE
+            && ::GetFileType(handle) != FILE_TYPE_UNKNOWN;
+    };
+    const bool haveOut = usable(out);
+    const bool haveErr = usable(err);
+    if (haveOut && haveErr) {
+        return;
+    }
+    if (::AttachConsole(ATTACH_PARENT_PROCESS) == FALSE) {
+        return;
+    }
+    if (!haveOut) {
+        std::freopen("CONOUT$", "w", stdout);
+    }
+    if (!haveErr) {
+        std::freopen("CONOUT$", "w", stderr);
+    }
+    std::freopen("CONIN$", "r", stdin);
+}
+#endif
 
 // Autosave: the manager's initiating view saves its session and only clears the
 // dirty flag when the write succeeded (cnote::QtDocumentController::SaveTo does
@@ -95,6 +135,9 @@ void AutoSaveSession(const std::shared_ptr<cnote::ProjectSession>& session, QObj
 }  // namespace
 
 int main(int argc, char** argv) {
+#if defined(Q_OS_WIN)
+    AdoptParentConsole();
+#endif
     CnoteApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("cnote"));
     // No organization name: Windows settings keep the %APPDATA%/cnote location

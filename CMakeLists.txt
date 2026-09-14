@@ -274,7 +274,15 @@ if(MINGW)
         PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/include")
 endif()
 
-add_executable(cnote src/main.cpp)
+# The Windows product is a GUI-subsystem executable: launching it from Explorer
+# or the Start menu must not open a console window.  Its stdout/stderr still
+# reach inherited handles (a shell redirect, or the pipes the packaging
+# verifier uses), so the --self-check diagnostics and exit codes are unchanged.
+if(WIN32)
+    add_executable(cnote WIN32 src/main.cpp)
+else()
+    add_executable(cnote src/main.cpp)
+endif()
 target_link_libraries(cnote PRIVATE cnote_ui)
 
 # MicroTeX's font/XML resources ship as real files next to the executable.
