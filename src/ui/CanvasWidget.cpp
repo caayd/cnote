@@ -536,10 +536,19 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
         // The cached surface already has this scale * DPR resolution and carries
         // its device pixel ratio, so blit it 1:1: drawing it into a target rect
         // would resample the whole (up to ~8 MP) image every frame, which is what
-        // made dense-page panning and drawing crawl.  Snapshots at another scale
-        // still take the scaled path.
-        if (!surface->image.isNull()
-            && std::abs(surface->image.devicePixelRatio() - cachedDevicePixelRatio_) < 0.001) {
+        // made dense-page panning and drawing crawl.  The device pixel ratio
+        // alone does not prove the raster is at this view's scale: during a zoom
+        // session FindSurface misses and the newest raster (a snapshot at the
+        // previous scale) is reused, and it must be resampled into view.rect or
+        // the page renders at the stale zoom for the whole gesture.
+        const qreal rasterDpr = surface->image.devicePixelRatio() > 0.0
+            ? surface->image.devicePixelRatio()
+            : 1.0;
+        const bool rasterMatchesView = !surface->image.isNull()
+            && std::abs(rasterDpr - cachedDevicePixelRatio_) < 0.001
+            && std::abs((surface->image.width() / rasterDpr) - view.rect.width()) < 1.0
+            && std::abs((surface->image.height() / rasterDpr) - view.rect.height()) < 1.0;
+        if (rasterMatchesView) {
             painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
             painter.drawImage(view.rect.topLeft(), surface->image);
         } else {
@@ -1521,19 +1530,30 @@ void CanvasWidget::CommitStroke() {
     const CanvasPageView view = CalculatePageView(pageIndex);
     const float devicePixelRatio = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
     render::PageSurfaceCache* cache = MutableSurface(pageIndex, view.scale, devicePixelRatio);
+    // Same raster-resolution arithmetic as render::RenderPageSurface
+    // (deviceScale = params.scale * params.devicePixelRatio, then page width *
+    // deviceScale); a different float association rounds to 1124 vs 1123 on
+    // a 612 pt page at zoom 2 / dpr 1.75 and dropped this fast path.
+    const float deviceScale = view.scale * devicePixelRatio;
 
     // Composite the finished stroke into the cached page raster instead of
     // dropping it: a dense page costs about a second to re-render from scratch,
     // while the reference keeps drawing at refresh rate on the same fixture
-    // (its incremental stroke commit). The cached raster is page-space, so the
-    // stroke is drawn with the device-space params RenderPageSurface uses.
+    // (its incremental stroke commit).
+    //
+    // The cached raster is keyed by (logical scale, devicePixelRatio) and the
+    // QImage carries that device pixel ratio, so QPainter maps the painter's
+    // logical coordinates to device pixels itself.  The stroke must therefore
+    // be drawn with the *logical* render params, exactly like the transient
+    // preview on the widget; passing the device-space scale here applied the
+    // DPR a second time and displaced/scaled the committed stroke (reported:
+    // committed stroke lands away from the live preview at non-1 DPR, growing
+    // with zoom).
     if (hasPending && view.valid && cache != nullptr && !cache->image.isNull()
         && cache->image.size() == QSize(
-            std::max(1, static_cast<int>(std::lround(pendingPage->width * view.scale * devicePixelRatio))),
-            std::max(1, static_cast<int>(std::lround(pendingPage->height * view.scale * devicePixelRatio))))) {
+            std::max(1, static_cast<int>(std::lround(pendingPage->width * deviceScale))),
+            std::max(1, static_cast<int>(std::lround(pendingPage->height * deviceScale))))) {
         render::PageRenderParams params = RenderParamsFor(view);
-        params.scale = view.scale * devicePixelRatio;
-        params.devicePixelRatio = 1.0f;
         QPainter painter(&cache->image);
         painter.setRenderHint(QPainter::Antialiasing, true);
         painter.setRenderHint(QPainter::SmoothPixmapTransform, true);

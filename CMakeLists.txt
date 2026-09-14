@@ -962,3 +962,23 @@ if(WIN32)
         endif()
     endforeach()
 endif()
+
+# --- Canvas geometry/placement regression (plan steps 3.1-3.3) -----------------
+# Widget geometry is logical pixels, document geometry is page units and
+# devicePixelRatio is used only to allocate raster surfaces.  The same binary
+# runs at dpr 1.0 and 1.75 (QT_SCALE_FACTOR) so a device pixel ratio applied
+# twice (or not at all) in the stroke composite into the cached page raster is
+# caught at non-1 DPR, and at several zoom levels.
+add_executable(cnote_canvas_geometry_tests tests/CanvasGeometryTests.cpp)
+target_compile_definitions(cnote_canvas_geometry_tests PRIVATE
+    CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
+target_link_libraries(cnote_canvas_geometry_tests PRIVATE cnote_ui)
+add_test(NAME canvas_geometry_dpr1_qt COMMAND cnote_canvas_geometry_tests)
+set_tests_properties(canvas_geometry_dpr1_qt PROPERTIES TIMEOUT 180
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins};QT_SCALE_FACTOR=1.0")
+add_test(NAME canvas_geometry_dpr175_qt COMMAND cnote_canvas_geometry_tests)
+set_tests_properties(canvas_geometry_dpr175_qt PROPERTIES TIMEOUT 180
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins};QT_SCALE_FACTOR=1.75")
+if(WIN32)
+    cnote_stage_test_runtime(cnote_canvas_geometry_tests)
+endif()
