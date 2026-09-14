@@ -721,26 +721,41 @@ void CanvasWidget::SyncEditOverlay() {
 }
 
 void CanvasWidget::CommitActiveEdit() {
-    if (textEditor_ != nullptr && controller_.EditingTextIndex().has_value()) {
-        PageText edited = controller_.EditingTextObject() != nullptr ? *controller_.EditingTextObject() : PageText {};
+    const bool committingText = textEditor_ != nullptr && controller_.EditingTextIndex().has_value();
+    const bool committingLatex = !committingText && latexEditor_ != nullptr && controller_.EditingLatexIndex().has_value();
+    PageText edited {};
+    QString latexSource;
+    if (committingText) {
+        edited = controller_.EditingTextObject() != nullptr ? *controller_.EditingTextObject() : PageText {};
         edited.content = ToUtf16(textEditor_->toPlainText());
         edited.styleSpans = text::CapturePageTextFormatting(*textEditor_->document(), edited);
-        controller_.CommitTextEdit(std::move(edited));
-    } else if (latexEditor_ != nullptr && controller_.EditingLatexIndex().has_value()) {
-        controller_.CommitLatexEdit(latexEditor_->toPlainText());
+    } else if (committingLatex) {
+        latexSource = latexEditor_->toPlainText();
     }
+    // Drop the overlay state before notifying the controller: EditStateChanged is
+    // delivered synchronously, and a consumer that gates on whether an editor owns
+    // the keyboard must never observe an overlay that is already being closed.
     HideOverlays();
+    if (committingText) {
+        controller_.CommitTextEdit(std::move(edited));
+    } else if (committingLatex) {
+        controller_.CommitLatexEdit(latexSource);
+    }
     update();
 }
 
 void CanvasWidget::CancelActiveEdit() {
-    if (controller_.EditingTextIndex().has_value()) {
+    const bool cancellingText = controller_.EditingTextIndex().has_value();
+    const bool cancellingLatex = controller_.EditingLatexIndex().has_value();
+    // Same ordering as CommitActiveEdit: the overlay goes away before the
+    // controller notifies its EditStateChanged consumers.
+    HideOverlays();
+    if (cancellingText) {
         controller_.CancelTextEdit();
     }
-    if (controller_.EditingLatexIndex().has_value()) {
+    if (cancellingLatex) {
         controller_.CancelLatexEdit();
     }
-    HideOverlays();
     update();
 }
 

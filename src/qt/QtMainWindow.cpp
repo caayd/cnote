@@ -511,15 +511,17 @@ void QtMainWindow::ApplyToolToCanvas() {
 
 // Whether a text/LaTeX editor owns the keyboard right now.
 //
-// This deliberately asks the controller, not CanvasWidget::EditOverlayActive():
-// the canvas clears its overlay indices *after* the controller has already
-// emitted EditStateChanged (CanvasWidget::CommitActiveEdit/CancelActiveEdit call
-// HideOverlays() once the controller call returns), so an UpdateChrome driven by
-// that signal would sample a stale "editor active" flag and leave the tool
-// actions disabled after the editor had closed - the reported bug where tool
-// keys did nothing with the Text tool selected but no editor open.  The
-// controller resets its edit indices before emitting, so its state is the one
-// that agrees with the signal.
+// This asks the controller, which is the authoritative source at the moment its
+// EditStateChanged is delivered: BeginTextEdit sets its index *before* emitting,
+// and Commit/CancelTextEdit reset it before emitting, so the answer is correct in
+// both directions.  CanvasWidget::EditOverlayActive() is not: it is a view-state
+// cache that opens only when SyncEditOverlay/ShowTextOverlay runs *after*
+// BeginTextEdit has already emitted, so a gate keyed on it would read "no editor"
+// while one is opening (and it used to read "editor" while one was closing -
+// CommitActiveEdit/CancelActiveEdit cleared it after the controller call, which
+// left the tool actions disabled after the editor had closed).  That close-side
+// ordering is now fixed in CanvasWidget too, but the controller remains the
+// single state that is never stale at signal time.
 bool QtMainWindow::EditorOwnsKeyboard() const {
     return controller_.EditingText() || controller_.EditingLatex();
 }
