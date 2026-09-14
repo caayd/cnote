@@ -123,6 +123,9 @@ void PrecisionInputRouter::HandleTouchpadSample(const TouchpadGestureSample& sam
 }
 
 bool PrecisionInputRouter::HandleNativeGestureBegin(const QPoint& globalPosition) {
+    if (NativeGestureIsDuplicate()) {
+        return true;
+    }
     if (gestureActive_) {
         return false;
     }
@@ -134,6 +137,9 @@ bool PrecisionInputRouter::HandleNativeGestureBegin(const QPoint& globalPosition
 }
 
 bool PrecisionInputRouter::HandleNativeGestureZoom(qreal value, const QPoint& globalPosition) {
+    if (NativeGestureIsDuplicate()) {
+        return true;
+    }
     if (!gestureActive_ || !AcceptGestureAt(globalPosition)) {
         return false;
     }
@@ -143,6 +149,9 @@ bool PrecisionInputRouter::HandleNativeGestureZoom(qreal value, const QPoint& gl
 }
 
 bool PrecisionInputRouter::HandleNativeGesturePan(const QPointF& delta, const QPoint& globalPosition) {
+    if (NativeGestureIsDuplicate()) {
+        return true;
+    }
     if (!gestureActive_ || !AcceptGestureAt(globalPosition)) {
         return false;
     }
@@ -151,6 +160,13 @@ bool PrecisionInputRouter::HandleNativeGesturePan(const QPointF& delta, const QP
 }
 
 bool PrecisionInputRouter::HandleNativeGestureEnd() {
+    if (NativeGestureIsDuplicate()) {
+        // Qt's copy of a gesture the native adapter already owns: consume it so
+        // nothing applies a second pan/zoom, and stop suppressing.  The native
+        // side finishes its own bookkeeping from the adapter's end callback.
+        suppressDuplicates_ = false;
+        return true;
+    }
     if (!gestureActive_) {
         return false;
     }

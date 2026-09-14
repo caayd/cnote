@@ -9,8 +9,14 @@
 namespace cnote::ui {
 
 PrecisionInputFilterQt::PrecisionInputFilterQt(PrecisionInputSink& sink, QObject* parent)
+    : QObject(parent) {
+    ownedRouter_.emplace(sink);
+    router_ = &*ownedRouter_;
+}
+
+PrecisionInputFilterQt::PrecisionInputFilterQt(PrecisionInputRouter& router, QObject* parent)
     : QObject(parent),
-      router_(sink) {
+      router_(&router) {
 }
 
 bool PrecisionInputFilterQt::eventFilter(QObject*, QEvent* event) {
@@ -18,7 +24,7 @@ bool PrecisionInputFilterQt::eventFilter(QObject*, QEvent* event) {
     case QEvent::Wheel: {
         // Only the duplicate of an already-consumed native touchpad frame is
         // dropped; the widget's own wheel handling runs otherwise.
-        if (router_.ShouldDropWheelDuplicate()) {
+        if (router_->ShouldDropWheelDuplicate()) {
             event->accept();
             return true;
         }
@@ -30,16 +36,16 @@ bool PrecisionInputFilterQt::eventFilter(QObject*, QEvent* event) {
         bool handled = false;
         switch (gesture->gestureType()) {
         case Qt::BeginNativeGesture:
-            handled = router_.HandleNativeGestureBegin(global);
+            handled = router_->HandleNativeGestureBegin(global);
             break;
         case Qt::ZoomNativeGesture:
-            handled = router_.HandleNativeGestureZoom(gesture->value(), global);
+            handled = router_->HandleNativeGestureZoom(gesture->value(), global);
             break;
         case Qt::PanNativeGesture:
-            handled = router_.HandleNativeGesturePan(gesture->delta(), global);
+            handled = router_->HandleNativeGesturePan(gesture->delta(), global);
             break;
         case Qt::EndNativeGesture:
-            handled = router_.HandleNativeGestureEnd();
+            handled = router_->HandleNativeGestureEnd();
             break;
         default:
             // Rotate/SmartZoom and anything else stay with the widget.
@@ -57,7 +63,7 @@ bool PrecisionInputFilterQt::eventFilter(QObject*, QEvent* event) {
     case QEvent::TouchEnd: {
         auto* touch = static_cast<QTouchEvent*>(event);
         if (event->type() == QEvent::TouchEnd) {
-            if (!router_.HandleTouchEnd()) {
+            if (!router_->HandleTouchEnd()) {
                 return false;
             }
             event->accept();
@@ -77,10 +83,10 @@ bool PrecisionInputFilterQt::eventFilter(QObject*, QEvent* event) {
         bool handled = false;
         if (event->type() == QEvent::TouchBegin) {
             touchStartDistance_ = metrics.distance;
-            handled = router_.HandleTouchBegin(metrics.centroid.toPoint());
+            handled = router_->HandleTouchBegin(metrics.centroid.toPoint());
         } else {
             const qreal scale = touchStartDistance_ > 0.0 ? metrics.distance / touchStartDistance_ : 1.0;
-            handled = router_.HandleTouchUpdate(metrics.centroid.toPoint(), scale);
+            handled = router_->HandleTouchUpdate(metrics.centroid.toPoint(), scale);
         }
         if (handled) {
             event->accept();

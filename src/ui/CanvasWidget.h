@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <QElapsedTimer>
+#include <QCursor>
 #include <QPointF>
 #include <QRectF>
 #include <QString>
@@ -16,6 +17,7 @@
 #include "Document.h"
 #include "latex/LatexCompletion.h"
 #include "render/PageRenderer.h"
+#include "settings/SettingsStoreQt.h"
 #include "ui/CanvasController.h"
 #include "ui/InteractionRouter.h"
 #include "ui/PrecisionInputSink.h"
@@ -98,11 +100,24 @@ public:
     void HandlePointerMove(const PointerSample& sample);
     void HandlePointerRelease(const PointerSample& sample);
     void HandlePointerCancel(CancelReason reason);
-    void SetTool(Tool tool) { router_->SetTool(tool); }
+    // Sets the tool and shows its cursor: only the canvas can build the
+    // configured drawing cursor (settings + device pixel ratio), so the cursor
+    // call belongs here rather than in the router (MessageLoop.cpp:669-678
+    // re-derived it per WM_SETCURSOR in the reference).
+    void SetTool(Tool tool);
     void SetSelectionMode(SelectionMode mode) { router_->SetSelectionMode(mode); }
     void SetInteractionModifiers(InteractionModifiers modifiers) { router_->SetModifiers(modifiers); }
     [[nodiscard]] InteractionRouter& Router() { return *router_; }
     [[nodiscard]] InteractionKind ActiveInteraction() const { return router_ != nullptr ? router_->ActiveInteraction() : InteractionKind::None; }
+
+    // --- cursor ---------------------------------------------------------
+    // Draw-cursor appearance from the application settings (draw_cursor_kind /
+    // draw_cursor_size, App::DrawCursorForCurrentSize).  Dot draws the reference
+    // filled disc of this logical diameter in the widget's device pixels;
+    // PrecisionCrosshair uses the system crosshair.  The canvas rebuilds the
+    // pixmap whenever the setting or its device pixel ratio changes and
+    // re-applies it while the drawing tool is active.
+    void SetDrawCursorSettings(settings::DrawCursorKind kind, float logicalPixels);
     // Builds the sample the Qt event handlers feed to the router.
     [[nodiscard]] PointerSample SampleFromEvent(const QMouseEvent& event);
 
@@ -121,6 +136,9 @@ public:
     void ZoomByWheelSteps(int steps, const QPointF& anchor) override;
     void ScrollBy(const QPointF& logicalDelta) override;
     void SetViewPage(std::size_t pageIndex) override;
+    // Cursor the interaction asks for.  CursorKind::Draw shows the configured
+    // drawing cursor (dot or precision crosshair, see SetDrawCursorSettings);
+    // CursorKind::Arrow restores the plain default arrow.
     void SetCursor(CursorKind cursor) override;
     void InvalidateCanvas() override;
     void SetPointerCapture(bool captured) override;
@@ -207,6 +225,12 @@ signals:
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    // The cursor is re-applied when the pointer crosses the widget boundary: a
+    // child (the text/LaTeX overlay) or the window chrome can leave the canvas
+    // without its configured cursor, and entering is where the reference's
+    // WM_SETCURSOR ran for the new position.
+    void enterEvent(QEnterEvent* event) override;
+    void leaveEvent(QEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
@@ -241,6 +265,12 @@ private:
     void StartSmoothScroll(const QPointF& delta);
     void StopSmoothScroll();
     void UpdateSmoothScroll();
+
+    // Cursor plumbing.  ApplyCursor() maps the kind the interaction asked for to
+    // a real QCursor; the drawing cursor's pixmap is built from the settings at
+    // the widget's device pixel ratio and cached until either changes.
+    void ApplyCursor();
+    [[nodiscard]] QCursor BuildDrawCursor() const;
 
     // Selection / erase rendering helpers.
     [[nodiscard]] std::optional<SelectionBounds> SelectionBoundsForPage(std::size_t pageIndex) const;
@@ -297,6 +327,14 @@ private:
     QPointF scrollTarget_ {};
     bool scrolling_ = false;
     qreal precisionStartZoom_ = 1.0;
+
+    // Cursor: the kind the current interaction/tool wants, the drawing cursor
+    // settings and the pixmap cache keyed by device pixel ratio.
+    CursorKind cursorKind_ = CursorKind::Arrow;
+    settings::DrawCursorKind drawCursorKind_ = settings::DrawCursorKind::Dot;
+    float drawCursorSize_ = 8.0f;
+    std::optional<QCursor> drawCursor_ {};
+    qreal drawCursorDevicePixelRatio_ = 0.0;
 
     // Transient selection/erase overlay state (never part of cache signatures).
     bool selectionOverlayActive_ = false;

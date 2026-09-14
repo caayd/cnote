@@ -53,9 +53,13 @@ public:
     [[nodiscard]] bool NativeAdapterAvailable() const { return nativeAvailable_; }
 
     // --- duplicate suppression ---------------------------------------------
-    // The native adapter consumed a pointer frame for the active gesture; the
-    // wheel/gesture event Qt synthesises from it must be dropped.  Suppression
-    // lasts until the gesture ends or is cancelled.
+    // The native adapter consumed a pointer frame for the active gesture; every
+    // event Qt synthesises from that same physical input must be dropped
+    // instead of being applied a second time: the duplicate wheel
+    // (ShouldDropWheelDuplicate) and the duplicate QNativeGestureEvent
+    // pan/zoom/begin/end, which the HandleNativeGesture* entry points consume
+    // without applying while this flag is set.  Suppression lasts until the
+    // gesture ends or is cancelled.
     void NoteNativeFrameConsumed();
     [[nodiscard]] bool ShouldDropWheelDuplicate() const;
     [[nodiscard]] bool SuppressingDuplicates() const { return suppressDuplicates_; }
@@ -98,6 +102,9 @@ private:
     // says otherwise the gesture stays ignored but tracked, so a later frame can
     // still be accepted exactly like the legacy WM_POINTER behaviour.
     bool AcceptGestureAt(const QPoint& globalPosition);
+    // True while the adapter is consuming frames for the current gesture: a Qt
+    // native gesture arriving now is that gesture's duplicate.
+    [[nodiscard]] bool NativeGestureIsDuplicate() const { return nativeAvailable_ && suppressDuplicates_; }
     void FinishGesture();
     void ApplyZoom(qreal cumulativeScale, const QPoint& globalAnchor);
     void ApplyPan(qreal deltaX, qreal deltaY);

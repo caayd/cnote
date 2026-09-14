@@ -755,16 +755,32 @@ void TestWheelIntents() {
     horizontal.position = QPointF(300.0, 200.0);
     horizontal.angleDeltaX = 120;
     router.HandleWheel(horizontal);
-    Check(host.HasOp("ScrollBy(-54.000,0.000)"), "horizontal wheel scrolls left for a positive delta (MessageLoop.cpp:533-539)\n" + host.Dump());
+    // Qt negates WM_MOUSEHWHEEL's delta, so the reference's
+    // SmoothPanBy(-WheelScrollPixels(wmDelta)) is +scrollPixels(angleDeltaX) in
+    // Qt's convention (MessageLoop.cpp:533-539; Qt 6.11
+    // qwindowspointerhandler.cpp:748-752).
+    Check(host.HasOp("ScrollBy(54.000,0.000)"), "horizontal wheel keeps the native direction for a positive delta\n" + host.Dump());
+
+    host.Reset();
+    ui::WheelSample horizontalBack;
+    horizontalBack.position = QPointF(300.0, 200.0);
+    horizontalBack.angleDeltaX = -240;
+    router.HandleWheel(horizontalBack);
+    Check(host.HasOp("ScrollBy(-108.000,0.000)"), "the opposite horizontal delta scrolls the other way\n" + host.Dump());
 
     host.Reset();
     ui::WheelSample precision;
     precision.position = QPointF(300.0, 200.0);
     precision.pixelDelta = QPointF(3.0, -4.0);
     router.HandleWheel(precision);
-    // Same sign convention as the canvas wheel handler and the angle path:
-    // -x for horizontal, +y for vertical (CanvasWidget.cpp:1192).
-    Check(host.HasOp("ScrollBy(-3.000,-4.000)"), "pixel deltas are applied directly, never through the line model\n" + host.Dump());
+    // A precision device's pixel delta is already smooth and carries the OS
+    // momentum: it pans the viewport 1:1 in this event (InteractionHost::PanBy,
+    // the reference App::PanBy) and never goes through the animating
+    // ScrollBy/WheelScrollPixels line model.
+    Check(host.HasOp("PanBy(3.000,-4.000)"), "pixel deltas pan directly, never through the line model\n" + host.Dump());
+    Check(!host.HasOp("ScrollBy("), "a precision wheel sample is not animated\n" + host.Dump());
+    Check(host.IndexOfOp("PanBy(3.000,-4.000)") == static_cast<int>(host.ops.size()) - 1,
+        "the pixel delta is applied once, within its own event\n" + host.Dump());
 
     host.Reset();
     ui::WheelSample empty;

@@ -131,6 +131,24 @@ void InteractionRouter::SetTool(Tool tool) {
     tool_ = tool;
 }
 
+CursorKind InteractionRouter::CursorForTool(Tool tool) {
+    switch (tool) {
+    case Tool::Draw:
+        return CursorKind::Draw;
+    case Tool::Erase:
+        return CursorKind::Eraser;
+    case Tool::Pan:
+        return CursorKind::OpenHand;
+    case Tool::Select:
+    case Tool::Move:
+    case Tool::Text:
+    case Tool::Latex:
+    case Tool::Zoom:
+    default:
+        return CursorKind::Arrow;
+    }
+}
+
 void InteractionRouter::SetSelectionMode(SelectionMode mode) {
     selectionMode_ = mode;
 }
@@ -342,18 +360,32 @@ bool InteractionRouter::HandleWheel(const WheelSample& sample) {
             * static_cast<qreal>(kWheelScrollUnitPixels);
     };
 
+    if (!sample.pixelDelta.isNull()) {
+        // Precision devices deliver pixel deltas that are already smooth and
+        // carry the OS momentum: Qt's contract is "use the value directly to
+        // scroll content on screen" (QWheelEvent::pixelDelta), so the canvas
+        // pans 1:1 in this event and never re-animates or re-smooths it
+        // (plan step 5.3).  The sign convention is pixelDelta's own, i.e. the
+        // same one angleDelta uses: +y scrolls the content down, +x moves it
+        // right, which is what the canvas pan does with the delta as-is.
+        host_.PanBy(sample.pixelDelta);
+        return true;
+    }
     if (sample.angleDeltaY != 0) {
+        // One notch is 54 logical pixels (3 lines x 18) and keeps the reference
+        // 90 ms smooth scroll; the canvas animates this path only.
         host_.ScrollBy(QPointF(0.0, scrollPixels(sample.angleDeltaY)));
         return true;
     }
     if (sample.angleDeltaX != 0) {
-        host_.ScrollBy(QPointF(-scrollPixels(sample.angleDeltaX), 0.0));
-        return true;
-    }
-    if (!sample.pixelDelta.isNull()) {
-        // Precision devices deliver pixel deltas (plan 5.3): translate directly
-        // and never apply the line/step model twice.
-        host_.ScrollBy(QPointF(-sample.pixelDelta.x(), sample.pixelDelta.y()));
+        // Qt negates WM_MOUSEHWHEEL's delta (Qt 6.11
+        // qwindowspointerhandler.cpp:748-752: "Qt horizontal wheel rotation
+        // orientation is opposite to the one in WM_MOUSEHWHEEL"), while the
+        // reference panned with the raw Win32 delta
+        // (MessageLoop.cpp:539 SmoothPanBy(-WheelScrollPixels(wheelDelta), 0)).
+        // Reproducing that motion in Qt's convention therefore negates the
+        // negation: pan x by +scrollPixels(angleDelta().x()).
+        host_.ScrollBy(QPointF(scrollPixels(sample.angleDeltaX), 0.0));
         return true;
     }
     return false;
@@ -425,7 +457,10 @@ void InteractionRouter::UpdatePan(const QPointF& logical) {
 void InteractionRouter::EndPan() {
     SetActive(InteractionKind::None);
     panFromMiddleButton_ = false;
-    host_.SetCursor(tool_ == Tool::Pan ? CursorKind::OpenHand : CursorKind::Arrow);
+    // The pan's closed hand is replaced by whatever the active tool shows
+    // (MessageLoop.cpp:643-647 puts the SizeAll cursor back only for the pan
+    // states; every other tool falls through to its own cursor).
+    host_.SetCursor(CursorForTool(tool_));
     UpdateCapture();
     host_.InvalidateCanvas();
 }

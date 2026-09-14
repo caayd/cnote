@@ -7,6 +7,8 @@
 #include <vector>
 
 #include <QColor>
+#include <QCursor>
+#include <QEnterEvent>
 #include <QImage>
 #include <QKeyEvent>
 #include <QListView>
@@ -14,6 +16,7 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPixmap>
 #include <QScreen>
 #include <QPen>
 #include <QPlainTextEdit>
@@ -52,6 +55,11 @@ constexpr float kMinimumPageScale = 0.1f;
 // Page units of extra repaint margin around a live stroke segment.
 constexpr float kStrokeDirtyMarginPixels = 12.0f;
 
+// Reference App.cpp:170-171: the drawing cursor's diameter bounds in logical
+// pixels (SettingsStoreQt clamps the persisted value to the same 4..24 range).
+constexpr float kMinDrawCursorDiameter = 4.0f;
+constexpr float kMaxDrawCursorDiameter = 24.0f;
+
 // LaTeX source box and completion popup metrics (logical pixels).
 constexpr int kLatexSourceBoxHeight = 120;
 constexpr int kLatexSourceBoxGap = 6;
@@ -89,6 +97,10 @@ CanvasWidget::~CanvasWidget() = default;
 // --- view state ------------------------------------------------------------
 
 void CanvasWidget::SetZoom(float zoom, std::optional<QPointF> anchor) {
+    // Reference App::SetZoom/App::ZoomAt (Viewport.cpp:382/676) end an in-flight
+    // smooth scroll before changing the scale: the animation carries pan targets
+    // computed at the old scale and would overwrite the anchored pan below.
+    StopSmoothScroll();
     const float clamped = std::clamp(zoom, kMinZoom, kMaxZoom);
     if (std::abs(clamped - zoom_) < 0.001f) {
         update();
@@ -130,6 +142,10 @@ void CanvasWidget::FitToWindow() {
 }
 
 void CanvasWidget::ResetView() {
+    // Reference App::ResetView (Viewport.cpp:62-64) stops the smooth scroll
+    // before zeroing the pan; a running animation would restore it on its next
+    // tick.
+    StopSmoothScroll();
     zoomSettleTimer_->stop();
     zoomSessionActive_ = false;
     zoomAnchorValid_ = false;
@@ -163,6 +179,11 @@ void CanvasWidget::EndZoomSession() {
 // --- panning ---------------------------------------------------------------
 
 void CanvasWidget::PanBy(const QPointF& delta) {
+    // Reference App::PanBy (Viewport.cpp:116-119) cancels an in-flight smooth
+    // scroll before applying the delta: a precision pan (native touchpad frame
+    // or a pixelDelta event) must land 1:1 and must not fight the 90 ms
+    // animation of an earlier wheel notch for the same viewport.
+    StopSmoothScroll();
     panX_ += static_cast<float>(delta.x());
     panY_ += static_cast<float>(delta.y());
     ClampViewportPan();
@@ -181,6 +202,8 @@ void CanvasWidget::CenterOnPage(std::size_t pageIndex) {
         return;
     }
 
+    // Reference App::FocusPage (Viewport.cpp:94-95).
+    StopSmoothScroll();
     const QRectF canvasRect = VisibleCanvasRect();
     const qreal pageCenterY = view.rect.top() + (view.rect.height() / 2.0);
     const qreal desiredCenterY = canvasRect.top() + (canvasRect.height() / 2.0);
@@ -1465,18 +1488,124 @@ void CanvasWidget::SetViewPage(std::size_t pageIndex) {
 }
 
 void CanvasWidget::SetCursor(CursorKind cursor) {
-    switch (cursor) {
-    case CursorKind::Arrow: setCursor(Qt::ArrowCursor); break;
-    case CursorKind::Cross: setCursor(Qt::CrossCursor); break;
-    case CursorKind::OpenHand: setCursor(Qt::OpenHandCursor); break;
-    case CursorKind::ClosedHand: setCursor(Qt::ClosedHandCursor); break;
-    case CursorKind::Text: setCursor(Qt::IBeamCursor); break;
-    case CursorKind::Move: setCursor(Qt::SizeAllCursor); break;
+    cursorKind_ = cursor;
+    ApplyCursor();
+}
+
+void CanvasWidget::SetTool(Tool tool) {
+    router_->SetTool(tool);
+    SetCursor(InteractionRouter::CursorForTool(tool));
+}
+
+void CanvasWidget::SetDrawCursorSettings(settings::DrawCursorKind kind, float logicalPixels) {
+    // SettingsStoreQt already clamps the persisted value; clamp again so a
+    // programmatic set cannot build a degenerate pixmap.
+    const float clamped = std::clamp(logicalPixels, kMinDrawCursorDiameter, kMaxDrawCursorDiameter);
+    if (kind == drawCursorKind_ && std::abs(clamped - drawCursorSize_) < 0.001f) {
+        return;
+    }
+    drawCursorKind_ = kind;
+    drawCursorSize_ = clamped;
+    // The cached pixmap encodes the old appearance; the next apply rebuilds it.
+    drawCursor_.reset();
+    drawCursorDevicePixelRatio_ = 0.0;
+    if (cursorKind_ == CursorKind::Draw) {
+        ApplyCursor();
+    }
+}
+
+QCursor CanvasWidget::BuildDrawCursor() const {
+    // Reference App::CreateBrushCursor (App.cpp:468-577): a filled disc whose
+    // outer edge is the configured diameter with an inset black ring, hotspot at
+    // its centre.  The ring keeps the dot legible on a white page and the white
+    // fill keeps it legible on the dark canvas backdrop.  The image must be
+    // painted with an alpha channel: a default QPixmap is opaque, and an opaque
+    // cursor would show the drawing tool as a black square.
+    constexpr qreal kOutlinePixels = 0.75f;   // App.cpp:169 kEraserOutlinePixels
+    constexpr int kMarginPixels = 1;          // antialiasing bleed room, device px
+    const qreal ratio = devicePixelRatioF();
+    const qreal deviceDiameter = std::max<qreal>(1.0, static_cast<qreal>(drawCursorSize_) * ratio);
+    const int extent = static_cast<int>(std::lround(deviceDiameter)) + (kMarginPixels * 2);
+
+    QImage image(extent, extent, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    {
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const qreal penWidth = std::max<qreal>(1.0, kOutlinePixels * ratio);
+        const QRectF outer(
+            static_cast<qreal>(kMarginPixels),
+            static_cast<qreal>(kMarginPixels),
+            deviceDiameter,
+            deviceDiameter);
+        painter.setBrush(Qt::white);
+        painter.setPen(QPen(Qt::black, penWidth));
+        // The pen is centred on the path, so insetting the path by half the pen
+        // width puts the stroke's outer edge exactly on the configured diameter.
+        painter.drawEllipse(outer.adjusted(penWidth * 0.5, penWidth * 0.5, -penWidth * 0.5, -penWidth * 0.5));
+        painter.end();
+    }
+
+    QPixmap pixmap = QPixmap::fromImage(image);
+    pixmap.setDevicePixelRatio(ratio);
+
+    // The hotspot is in pixmap (device) coordinates, matching the bitmap the
+    // platform cursor is built from.
+    const QPoint hotspot(extent / 2, extent / 2);
+    return QCursor(pixmap, hotspot.x(), hotspot.y());
+}
+
+void CanvasWidget::ApplyCursor() {
+    switch (cursorKind_) {
+    case CursorKind::Arrow:
+        // The configured default: the plain system arrow, never a custom pixmap.
+        setCursor(Qt::ArrowCursor);
+        return;
+    case CursorKind::Cross:
+        setCursor(Qt::CrossCursor);
+        return;
+    case CursorKind::OpenHand:
+        setCursor(Qt::OpenHandCursor);
+        return;
+    case CursorKind::ClosedHand:
+        setCursor(Qt::ClosedHandCursor);
+        return;
+    case CursorKind::Text:
+        setCursor(Qt::IBeamCursor);
+        return;
+    case CursorKind::Move:
+        setCursor(Qt::SizeAllCursor);
+        return;
     case CursorKind::Eraser:
         // No system eraser cursor: a small cross keeps the erase tool legible.
         setCursor(Qt::CrossCursor);
+        return;
+    case CursorKind::Draw:
         break;
     }
+
+    // Reference App::DrawCursorForCurrentSize (App.cpp:7465-7485): the precision
+    // crosshair is the system cross, otherwise the configured brush disc.
+    if (drawCursorKind_ == settings::DrawCursorKind::PrecisionCrosshair) {
+        setCursor(Qt::CrossCursor);
+        return;
+    }
+    const qreal ratio = devicePixelRatioF();
+    if (!drawCursor_.has_value() || drawCursorDevicePixelRatio_ != ratio) {
+        drawCursor_ = BuildDrawCursor();
+        drawCursorDevicePixelRatio_ = ratio;
+    }
+    setCursor(drawCursor_.has_value() ? *drawCursor_ : QCursor(Qt::CrossCursor));
+}
+
+void CanvasWidget::enterEvent(QEnterEvent* event) {
+    ApplyCursor();
+    QWidget::enterEvent(event);
+}
+
+void CanvasWidget::leaveEvent(QEvent* event) {
+    ApplyCursor();
+    QWidget::leaveEvent(event);
 }
 
 void CanvasWidget::InvalidateCanvas() {
@@ -1823,7 +1952,9 @@ void CanvasWidget::BeginPrecisionGesture() {
 }
 
 void CanvasWidget::SetPrecisionGestureCursor(bool active) {
-    SetCursor(active ? CursorKind::ClosedHand : CursorKind::Arrow);
+    // The gesture's closed hand replaces whatever the active tool shows; ending
+    // it must restore that tool's cursor (the same rule as EndPan).
+    SetCursor(active ? CursorKind::ClosedHand : InteractionRouter::CursorForTool(router_->ActiveTool()));
 }
 
 void CanvasWidget::ZoomAtAnchor(qreal cumulativeScale, const QPoint& globalAnchor) {
@@ -1836,7 +1967,7 @@ void CanvasWidget::PanBy(qreal deltaX, qreal deltaY) {
 }
 
 void CanvasWidget::EndPrecisionGesture() {
-    SetCursor(CursorKind::Arrow);
+    SetCursor(InteractionRouter::CursorForTool(router_->ActiveTool()));
 }
 
 // --- smooth scroll, selection helpers and transient painting ----------------

@@ -63,6 +63,11 @@ enum class CursorKind {
     Text,
     Eraser,
     Move,
+    // The configured drawing cursor: the canvas builds it from the application
+    // settings (dot diameter / precision crosshair), the reference
+    // App::DrawCursorForCurrentSize (App.cpp:7465-7485).  It is not a system
+    // shape, so it carries no Qt::CursorShape equivalent.
+    Draw,
 };
 
 // App::ImageTransformHandle order (App.h).
@@ -280,6 +285,13 @@ public:
 
     void SetTool(Tool tool);
     [[nodiscard]] Tool ActiveTool() const { return tool_; }
+    // The cursor a tool shows when no interaction overrides it: the reference
+    // App::HandleMessage WM_SETCURSOR branches (MessageLoop.cpp:669-678: the
+    // drawing tool gets App::DrawCursorForCurrentSize, the eraser its square
+    // brush cursor, Pan SizeAll, everything else the arrow).  The canvas maps
+    // the kind to a real cursor, because only it knows its device pixel ratio
+    // and the configured cursor settings.
+    [[nodiscard]] static CursorKind CursorForTool(Tool tool);
     void SetSelectionMode(SelectionMode mode);
     [[nodiscard]] SelectionMode ActiveSelectionMode() const { return selectionMode_; }
     void SetModifiers(InteractionModifiers modifiers);

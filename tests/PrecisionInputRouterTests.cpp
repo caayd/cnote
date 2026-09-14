@@ -140,12 +140,19 @@ void ConsumeAndSuppressDuplicates() {
     Check(router.ShouldDropWheelDuplicate(), "a consumed native frame drops the Qt duplicate wheel");
     Check(router.SuppressingDuplicates(), "suppression is reported while the gesture runs");
 
+    // Qt's copies of the gesture the adapter owns are consumed without ever
+    // reaching the canvas: the adapter's own frames already panned/zoomed for
+    // them, so applying them would move the viewport twice for one physical
+    // gesture.
     Check(router.HandleNativeGestureBegin(QPoint(20, 20)), "native gesture begin is consumed");
+    Check(sink.calls.empty(), "a gesture duplicated from a consumed native frame never reaches the canvas");
     router.NoteNativeFrameConsumed();
     Check(router.ShouldDropWheelDuplicate(), "duplicate suppression persists during the gesture");
+    Check(router.HandleNativeGesturePan(QPointF(30.0, -20.0), QPoint(20, 20)), "the duplicate native pan is consumed");
     Check(router.HandleNativeGestureEnd(), "native gesture end is consumed");
     Check(!router.ShouldDropWheelDuplicate(), "suppression ends with the gesture");
-    Check(sink.Count("cursor-off") == 1U, "cursor hint is released at the end");
+    Check(sink.Count("pan") == 0U && sink.Count("zoom") == 0U && sink.Count("begin") == 0U && sink.Count("end") == 0U,
+        "no duplicate pan, zoom or gesture lifecycle reaches the canvas");
 
     // Cancel clears suppression and inertia too.
     sink.calls.clear();

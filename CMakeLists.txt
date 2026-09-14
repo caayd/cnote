@@ -1028,3 +1028,37 @@ if(WIN32)
             "$<TARGET_FILE:Qt6::Test>"
             "$<TARGET_FILE_DIR:cnote_shortcut_routing_tests>")
 endif()
+
+# --- Canvas input feel (precision scrolling and the configured cursor) --------
+# Two user-reported defects on a precision-touchpad laptop: touchpad scrolling
+# felt laggy/slow and its horizontal direction was inverted, and the configured
+# draw cursor (dot / precision crosshair) never appeared.
+#
+# The test injects real QWheelEvents into the real CanvasWidget and prints the
+# viewport delta and the mode (direct vs animated) of every event, so it pins:
+# reference behaviour for ordinary notches (three 18-px lines per 120-unit
+# notch, 90 ms cubic smooth scroll), a 1:1 direct application for precision
+# pixel deltas (QVariant::pixelDelta is not re-animated or re-smoothed), the
+# native horizontal direction, and that one physical gesture is never applied
+# twice (native touchpad frame plus the wheel/native gesture Qt synthesises on
+# top of it).  It also asserts the configured canvas cursor: the drawing tool
+# shows the dot / crosshair at the configured logical size in a device-pixel-
+# ratio-correct pixmap, the default tool keeps the system arrow, and the cursor
+# is rebuilt on a settings change and re-applied on enter/leave.
+#
+# The same binary runs at QT_SCALE_FACTOR 1.0 and 1.75 (like the canvas geometry
+# test) so the cursor pixmap's device pixel ratio is checked at a non-1 DPR too.
+add_executable(cnote_input_feel_tests tests/InputFeelTests.cpp)
+target_compile_options(cnote_input_feel_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_input_feel_tests PRIVATE cnote_ui Qt6::Widgets)
+add_test(NAME input_feel_qt COMMAND cnote_input_feel_tests)
+set_tests_properties(input_feel_qt PROPERTIES TIMEOUT 120
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins};QT_SCALE_FACTOR=1.0")
+add_test(NAME input_feel_dpr175_qt COMMAND cnote_input_feel_tests)
+set_tests_properties(input_feel_dpr175_qt PROPERTIES TIMEOUT 120
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins};QT_SCALE_FACTOR=1.75")
+if(WIN32)
+    cnote_stage_test_runtime(cnote_input_feel_tests)
+endif()
