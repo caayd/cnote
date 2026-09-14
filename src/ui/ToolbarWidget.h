@@ -56,7 +56,6 @@ enum class ToolbarCommand {
     OpenTitleMenu,
     ToggleWheel,
     OpenPalettePicker,
-    ToggleQuickSize,
 };
 
 // The reference compact toolbar (plan steps 6.1/6.3).

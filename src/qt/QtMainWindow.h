@@ -152,10 +152,11 @@ private:
     void NextPage();
     // Reference App::ToggleQuickSizePopup (ToolbarState.cpp): text formatting
     // while a text edit is open, the brush-size popup for the pen tools, inert
-    // otherwise.  Shared by the Ctrl+W binding and the toolbar control.
-    void ToggleQuickPopup(const QPointF& hostAnchor);
-    // The shortcut path's anchor: the cursor in host coordinates, falling back
-    // to the canvas centre 120 px below its top when the cursor is outside the
+    // otherwise.  The Ctrl+W binding is its only caller; the reference toolbar
+    // has no quick-size control (HandleToolbarClick, App.cpp:5904).
+    void ToggleQuickPopup();
+    // The popup's anchor: the cursor in host coordinates, falling back to the
+    // canvas centre 120 device px below its top when the cursor is outside the
     // canvas (App::ToggleQuickSizePopup, ToolbarState.cpp:246-258).
     [[nodiscard]] QPointF QuickPopupCursorAnchor() const;
     // Whether a text/LaTeX edit is active; the tool shortcuts stand down then.

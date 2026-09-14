@@ -269,7 +269,7 @@ void QtMainWindow::CreateChrome() {
     connect(sidebarAction_, &QAction::triggered, this, &QtMainWindow::ToggleSidebar);
 
     quickSizeAction_ = new QAction(QStringLiteral("Brush Size"), this);
-    connect(quickSizeAction_, &QAction::triggered, this, [this]() { ToggleQuickPopup(QuickPopupCursorAnchor()); });
+    connect(quickSizeAction_, &QAction::triggered, this, [this]() { ToggleQuickPopup(); });
 
     wheelAction_ = new QAction(QStringLiteral("Tool Wheel"), this);
     connect(wheelAction_, &QAction::triggered, this, [this]() {
@@ -380,9 +380,6 @@ void QtMainWindow::CreateChrome() {
                 toolbar_->TogglePaletteWheel(QPointF(canvas_->rect().center()));
                 break;
             case ui::ToolbarCommand::OpenPalettePicker: ToggleSettingsDialog(); break;
-            case ui::ToolbarCommand::ToggleQuickSize:
-                ToggleQuickPopup(toolbar_->ControlRect(ui::ToolbarControl::CurrentColor).center());
-                break;
         }
     });
     connect(toolbar_, &ui::ToolbarWidget::ToolSelected, this, [this](settings::Tool tool) {
@@ -670,7 +667,7 @@ void QtMainWindow::NextPage() {
     FocusPage(current + 1U);  // FocusPage ignores an out-of-range page
 }
 
-void QtMainWindow::ToggleQuickPopup(const QPointF& hostAnchor) {
+void QtMainWindow::ToggleQuickPopup() {
     if (toolbar_ == nullptr) {
         return;
     }
@@ -697,7 +694,7 @@ void QtMainWindow::ToggleQuickPopup(const QPointF& hostAnchor) {
         toolbar_->HideQuickSizePopup();
         return;
     }
-    toolbar_->ShowQuickSizePopup(activeTool_, hostAnchor);
+    toolbar_->ShowQuickSizePopup(activeTool_, QuickPopupCursorAnchor());
 }
 
 QPointF QtMainWindow::QuickPopupCursorAnchor() const {
