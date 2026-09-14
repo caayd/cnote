@@ -24,8 +24,8 @@
 //     popup, and Ctrl+B inside the editors stays the editor's key;
 //   * PgUp/PgDn page navigation stands down while an editor owns the keyboard
 //     (the reference editor child window consumed them for caret/scroll);
-//   * a selection change enables Copy/Cut immediately (no unrelated UpdateChrome
-//     needed) and Ctrl+C then fires;
+//   * a selection change enables Copy/Cut immediately, including one set through
+//     the controller or by a paste (no unrelated UpdateChrome needed);
 //   * the unshifted Ctrl+'=' key aliases the Zoom In accelerator;
 //   * a binding remapped through the settings store is the one that fires.
 //
@@ -59,6 +59,7 @@
 #include <QtTest/QTest>
 
 #include "Unicode.h"
+#include "document/SelectionClipboardCodec.h"
 #include "qt/QtMainWindow.h"
 #include "settings/KeyBindingQt.h"
 #include "settings/SettingsStoreQt.h"
@@ -507,25 +508,44 @@ void SelectionEnablesCopyAndCutImmediately() {
     Check(copy != nullptr && !copy->isEnabled(), "Copy is disabled with no selection");
     Check(cut != nullptr && !cut->isEnabled(), "Cut is disabled with no selection");
 
-    // Select through the canvas host path (the same path click/lasso selection
-    // uses) and read the action state immediately - no viewport/zoom action in
-    // between, which is where the enablement used to be refreshed.
-    harness.canvas->AddObjectToSelection(cnote::ui::ObjectRef { 0, cnote::ui::ObjectKind::Text, 0 });
+    // The exact case an external harness cannot observe: a selection set through
+    // the controller (not a canvas gesture), read back immediately with no
+    // intervening viewport/zoom action.
+    cnote::ui::PageSelection selection;
+    selection.texts.push_back(0U);
+    harness.window->Controller().SelectObjects(0U, selection);
     const bool copyEnabled = copy != nullptr && copy->isEnabled();
     const bool cutEnabled = cut != nullptr && cut->isEnabled();
-    std::printf("after AddObjectToSelection: copy=%d cut=%d\n", copyEnabled ? 1 : 0, cutEnabled ? 1 : 0);
-    Check(copyEnabled, "selecting an object enables Copy immediately");
-    Check(cutEnabled, "selecting an object enables Cut immediately");
+    std::printf("after Controller::SelectObjects: copy=%d cut=%d\n", copyEnabled ? 1 : 0, cutEnabled ? 1 : 0);
+    Check(copyEnabled, "a controller-level selection enables Copy immediately");
+    Check(cutEnabled, "a controller-level selection enables Cut immediately");
 
     ShortcutProbe probe;
     probe.Install(*harness.window);
     harness.FocusCanvas();
     probe.Reset();
     harness.PressSequence(copySequence);
-    Check(probe.Last() == copy, "Ctrl+C fires immediately after a selection");
+    Check(probe.Last() == copy, "Ctrl+C fires immediately after a controller-level selection");
 
-    harness.canvas->ClearSelection();
+    // Paste selects what it inserted (QtDocumentController::PastePayload), so it
+    // must refresh Copy/Cut the same way.
+    harness.window->Controller().ClearSelection();
     Check(copy != nullptr && !copy->isEnabled(), "clearing the selection disables Copy again");
+    cnote::SelectionClipboardData payload;
+    cnote::PageText pastedText;
+    pastedText.content = u"p";
+    pastedText.x = 10.0f;
+    pastedText.y = 20.0f;
+    payload.texts.push_back(pastedText);
+    payload.minX = 10.0f;
+    payload.minY = 20.0f;
+    payload.maxX = 30.0f;
+    payload.maxY = 40.0f;
+    const bool pasted = harness.window->Controller().PastePayload(0U, cnote::Vec2 { 100.0f, 100.0f }, payload);
+    std::printf("after PastePayload: pasted=%d copy=%d\n", pasted ? 1 : 0,
+        copy != nullptr && copy->isEnabled() ? 1 : 0);
+    Check(pasted, "PastePayload inserts the selection payload");
+    Check(copy != nullptr && copy->isEnabled(), "a paste that selects what it inserted enables Copy immediately");
 }
 
 void ZoomInKeysAreNotDead() {

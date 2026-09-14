@@ -176,6 +176,11 @@ signals:
     void SessionChanged();
     // The active edit started or ended (overlays show/hide, chrome updates).
     void EditStateChanged();
+    // The object selection changed, whatever the origin: a canvas gesture
+    // (ClearSelection/AddObjectToSelection/SelectObjects), a cut
+    // (RemoveSelection) or a paste that selects what it inserted.  The shell
+    // refreshes its selection-gated actions (copy/cut) on this.
+    void SelectionChanged();
 
 private:
     void NotifySessionChanged(bool originating);

@@ -762,6 +762,7 @@ const ui::PageSelection& QtDocumentController::SelectionFor(std::size_t pageInde
 
 void QtDocumentController::ClearSelection() {
     selection_.clear();
+    emit SelectionChanged();
 }
 
 void QtDocumentController::AddObjectToSelection(const ui::ObjectRef& object) {
@@ -780,14 +781,16 @@ void QtDocumentController::AddObjectToSelection(const ui::ObjectRef& object) {
         selection.latexes.push_back(object.objectIndex);
         break;
     }
+    emit SelectionChanged();
 }
 
 void QtDocumentController::SelectObjects(std::size_t pageIndex, ui::PageSelection selection) {
     if (selection.Empty()) {
         selection_.erase(pageIndex);
-        return;
+    } else {
+        selection_[pageIndex] = std::move(selection);
     }
-    selection_[pageIndex] = std::move(selection);
+    emit SelectionChanged();
 }
 
 void QtDocumentController::BeginPageGesture(std::size_t pageIndex) {
@@ -1255,6 +1258,7 @@ bool QtDocumentController::RemoveSelection() {
     session_->dirty = true;
     ++session_->revision;
     selection_.clear();
+    emit SelectionChanged();
     NotifySessionChanged(true);
     return true;
 }
@@ -1329,6 +1333,7 @@ bool QtDocumentController::PastePayload(
     selection_.clear();
     selection_[pageIndex] = std::move(pasted);
     currentPage_ = pageIndex;
+    emit SelectionChanged();
     NotifySessionChanged(true);
     return true;
 }

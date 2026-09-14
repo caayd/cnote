@@ -177,9 +177,10 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
     ApplySettingsToShell();
 
     connect(canvas_, &ui::CanvasWidget::ViewportChanged, this, &QtMainWindow::UpdateChrome);
-    // Refresh the selection-gated actions (copy/cut) the moment the selection
-    // changes; nothing else notifies the shell on a lasso/click selection.
-    connect(canvas_, &ui::CanvasWidget::SelectionChanged, this, &QtMainWindow::UpdateChrome);
+    // Refresh the selection-gated actions (copy/cut) on every selection change,
+    // whatever its origin (a canvas gesture, a cut, or a paste that selects what
+    // it inserted): the controller owns the selection state.
+    connect(&controller_, &QtDocumentController::SelectionChanged, this, &QtMainWindow::UpdateChrome);
     connect(&controller_, &QtDocumentController::SessionChanged, this, [this]() {
         canvas_->NotifyDocumentChanged();
         if (sidebar_ != nullptr) {
