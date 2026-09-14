@@ -1,5 +1,6 @@
 #include "qt/QtMainWindow.h"
 
+#include <algorithm>
 #include <optional>
 #include <utility>
 
@@ -9,11 +10,13 @@
 #include <QCloseEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QPlainTextEdit>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QTextEdit>
@@ -195,16 +198,13 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
 void QtMainWindow::CreateChrome() {
     // One QAction per command (plan 6.2), shared by the window's shortcuts, the
     // title menu and the ported toolbar widget, which only reports intents.
-    QAction* newAction = new QAction(QStringLiteral("New"), this);
-    newAction->setShortcut(QKeySequence::New);
-    connect(newAction, &QAction::triggered, this, &QtMainWindow::NewDocument);
+    newAction_ = new QAction(QStringLiteral("New"), this);
+    connect(newAction_, &QAction::triggered, this, &QtMainWindow::NewDocument);
 
-    QAction* openAction = new QAction(QStringLiteral("Open"), this);
-    openAction->setShortcut(QKeySequence::Open);
-    connect(openAction, &QAction::triggered, this, &QtMainWindow::OpenFileDialog);
+    openAction_ = new QAction(QStringLiteral("Open"), this);
+    connect(openAction_, &QAction::triggered, this, &QtMainWindow::OpenFileDialog);
 
     saveAction_ = new QAction(QStringLiteral("Save"), this);
-    saveAction_->setShortcut(QKeySequence::Save);
     connect(saveAction_, &QAction::triggered, this, &QtMainWindow::Save);
 
     QAction* saveAsAction = new QAction(QStringLiteral("Save As"), this);
@@ -218,23 +218,18 @@ void QtMainWindow::CreateChrome() {
     connect(exportFlatAction_, &QAction::triggered, this, [this]() { ExportPdf(false); });
 
     undoAction_ = new QAction(QStringLiteral("Undo"), this);
-    undoAction_->setShortcut(QKeySequence::Undo);
     connect(undoAction_, &QAction::triggered, this, &QtMainWindow::Undo);
 
     redoAction_ = new QAction(QStringLiteral("Redo"), this);
-    redoAction_->setShortcut(QKeySequence::Redo);
     connect(redoAction_, &QAction::triggered, this, &QtMainWindow::Redo);
 
     copyAction_ = new QAction(QStringLiteral("Copy"), this);
-    copyAction_->setShortcut(QKeySequence::Copy);
     connect(copyAction_, &QAction::triggered, this, &QtMainWindow::CopySelection);
 
     cutAction_ = new QAction(QStringLiteral("Cut"), this);
-    cutAction_->setShortcut(QKeySequence::Cut);
     connect(cutAction_, &QAction::triggered, this, &QtMainWindow::CutSelection);
 
     pasteAction_ = new QAction(QStringLiteral("Paste"), this);
-    pasteAction_->setShortcut(QKeySequence::Paste);
     connect(pasteAction_, &QAction::triggered, this, &QtMainWindow::PasteSelection);
 
     addTextAction_ = new QAction(QStringLiteral("Add Text"), this);
@@ -257,11 +252,7 @@ void QtMainWindow::CreateChrome() {
     connect(sidebarAction_, &QAction::triggered, this, &QtMainWindow::ToggleSidebar);
 
     quickSizeAction_ = new QAction(QStringLiteral("Brush Size"), this);
-    connect(quickSizeAction_, &QAction::triggered, this, [this]() {
-        if (toolbar_ != nullptr) {
-            toolbar_->ShowQuickSizePopup(activeTool_, QPointF(0.0, 0.0));
-        }
-    });
+    connect(quickSizeAction_, &QAction::triggered, this, [this]() { ToggleQuickPopup(QPointF(0.0, 0.0)); });
 
     wheelAction_ = new QAction(QStringLiteral("Tool Wheel"), this);
     connect(wheelAction_, &QAction::triggered, this, [this]() {
@@ -284,16 +275,35 @@ void QtMainWindow::CreateChrome() {
     connect(zoomOutAction, &QAction::triggered, this, &QtMainWindow::ZoomOut);
 
     QAction* quitAction = new QAction(QStringLiteral("Quit"), this);
-    quitAction->setShortcut(QKeySequence::Quit);
     connect(quitAction, &QAction::triggered, this, [this]() { close(); });
 
-    const std::vector<QAction*> actions {
-        newAction, openAction, saveAction_, saveAsAction, exportAction_, exportFlatAction_,
+    // Commands that exist as settings bindings without a chrome control of their
+    // own (the reference table is authoritative: Reset View, the five zoom
+    // presets and the page keys).  They are window actions so the settings
+    // dialog can remap them like every other command.
+    resetViewAction_ = new QAction(QStringLiteral("Reset View"), this);
+    connect(resetViewAction_, &QAction::triggered, this, &QtMainWindow::ResetView);
+
+    for (std::size_t index = 0; index < zoomPresetActions_.size(); ++index) {
+        zoomPresetActions_[index] = new QAction(QStringLiteral("Zoom Preset %1").arg(index + 1U), this);
+        connect(zoomPresetActions_[index], &QAction::triggered, this, [this, index]() { ApplyZoomPreset(index); });
+    }
+
+    previousPageAction_ = new QAction(QStringLiteral("Previous Page"), this);
+    connect(previousPageAction_, &QAction::triggered, this, &QtMainWindow::PreviousPage);
+
+    nextPageAction_ = new QAction(QStringLiteral("Next Page"), this);
+    connect(nextPageAction_, &QAction::triggered, this, &QtMainWindow::NextPage);
+
+    std::vector<QAction*> actions {
+        newAction_, openAction_, saveAction_, saveAsAction, exportAction_, exportFlatAction_,
         undoAction_, redoAction_, copyAction_, cutAction_, pasteAction_,
         addTextAction_, addLatexAction_, addPageAction_, newPageSettingsAction_,
         settingsAction_, sidebarAction_, quickSizeAction_, wheelAction_,
         fitAction, zoomInAction, zoomOutAction, quitAction,
+        resetViewAction_, previousPageAction_, nextPageAction_,
     };
+    actions.insert(actions.end(), zoomPresetActions_.begin(), zoomPresetActions_.end());
     for (QAction* action : actions) {
         addAction(action);
     }
@@ -301,8 +311,8 @@ void QtMainWindow::CreateChrome() {
     // Title menu: the reference caption menu (New/Open/Save/Export/Page/Settings
     // plus the recent documents).
     titleMenu_ = new QMenu(this);
-    titleMenu_->addAction(newAction);
-    titleMenu_->addAction(openAction);
+    titleMenu_->addAction(newAction_);
+    titleMenu_->addAction(openAction_);
     recentMenu_ = titleMenu_->addMenu(QStringLiteral("Open Recent"));
     recentMenuAction_ = recentMenu_->menuAction();
     titleMenu_->addSeparator();
@@ -351,11 +361,7 @@ void QtMainWindow::CreateChrome() {
                 break;
             case ui::ToolbarCommand::OpenPalettePicker: ToggleSettingsDialog(); break;
             case ui::ToolbarCommand::ToggleQuickSize:
-                if (toolbar_->QuickSizePopupVisible()) {
-                    toolbar_->HideQuickSizePopup();
-                } else {
-                    toolbar_->ShowQuickSizePopup(activeTool_, toolbar_->ControlRect(ui::ToolbarControl::CurrentColor).center());
-                }
+                ToggleQuickPopup(toolbar_->ControlRect(ui::ToolbarControl::CurrentColor).center());
                 break;
         }
     });
@@ -435,16 +441,10 @@ void QtMainWindow::CreateChrome() {
     sidebar_ = new ui::SidebarWidget(this);
     sidebar_->SetDocument(&controller_.DocumentRef(), controller_.PdfBackground());
     connect(sidebar_, &ui::SidebarWidget::PageActivated, this, [this](std::size_t pageIndex) {
-        canvas_->CenterOnPage(pageIndex);
-        controller_.SetCurrentPageIndex(pageIndex);
-        sidebar_->SetCurrentPage(pageIndex);
-        UpdateChrome();
+        FocusPage(pageIndex);
     });
     connect(sidebar_, &ui::SidebarWidget::PageJumpRequested, this, [this](std::size_t pageIndex) {
-        canvas_->CenterOnPage(pageIndex);
-        controller_.SetCurrentPageIndex(pageIndex);
-        sidebar_->SetCurrentPage(pageIndex);
-        UpdateChrome();
+        FocusPage(pageIndex);
     });
     connect(sidebar_, &ui::SidebarWidget::AddPageRequested, this, &QtMainWindow::AddPage);
     connect(sidebar_, &ui::SidebarWidget::NewPageSettingsRequested, this, &QtMainWindow::OpenNewPageSettings);
@@ -505,8 +505,23 @@ void QtMainWindow::ApplyToolToCanvas() {
         settings_.inputSmoothing,
     });
     for (QAction* action : toolShortcutActions_) {
-        action->setEnabled(!canvas_->EditOverlayActive());
+        action->setEnabled(!EditorOwnsKeyboard());
     }
+}
+
+// Whether a text/LaTeX editor owns the keyboard right now.
+//
+// This deliberately asks the controller, not CanvasWidget::EditOverlayActive():
+// the canvas clears its overlay indices *after* the controller has already
+// emitted EditStateChanged (CanvasWidget::CommitActiveEdit/CancelActiveEdit call
+// HideOverlays() once the controller call returns), so an UpdateChrome driven by
+// that signal would sample a stale "editor active" flag and leave the tool
+// actions disabled after the editor had closed - the reported bug where tool
+// keys did nothing with the Text tool selected but no editor open.  The
+// controller resets its edit indices before emitting, so its state is the one
+// that agrees with the signal.
+bool QtMainWindow::EditorOwnsKeyboard() const {
+    return controller_.EditingText() || controller_.EditingLatex();
 }
 
 void QtMainWindow::SetActiveTool(settings::Tool tool) {
@@ -520,11 +535,14 @@ void QtMainWindow::SetActiveTool(settings::Tool tool) {
 }
 
 void QtMainWindow::RefreshShortcutBindings() {
-    // KeyBindingQt is the reference shortcut table; the tool actions are the
-    // ones that must stand down while a text/LaTeX editor owns the keyboard
-    // (editor precedence, App::ShortcutAction::Tool*).
+    // KeyBindingQt is the reference shortcut table and the settings store is the
+    // only source of a runtime binding: every action below takes its sequence
+    // from settings_.shortcuts, so a remap reaches all of them.  The tool
+    // actions are the ones that must stand down while a text/LaTeX editor owns
+    // the keyboard (editor precedence, App::ShortcutAction::Tool*), which is the
+    // editor-overlay state - never the active tool.
     //
-    // The previous actions must be destroyed, not just forgotten: a QAction
+    // The previous tool actions must be destroyed, not just forgotten: a QAction
     // stays in its window's action list while it lives, and Qt treats two live
     // actions with the same sequence as an *ambiguous* shortcut and fires
     // neither - so dropping the vector silently killed every tool key as soon as
@@ -545,11 +563,116 @@ void QtMainWindow::RefreshShortcutBindings() {
     toolAction(settings::ShortcutAction::ToolSelect, settings::Tool::Select);
     toolAction(settings::ShortcutAction::ToolMove, settings::Tool::Move);
     toolAction(settings::ShortcutAction::ToolText, settings::Tool::Text);
+    toolAction(settings::ShortcutAction::ToolLatex, settings::Tool::Latex);
     toolAction(settings::ShortcutAction::ToolErase, settings::Tool::Erase);
     toolAction(settings::ShortcutAction::ToolPan, settings::Tool::Pan);
-    for (QAction* action : toolShortcutActions_) {
-        action->setEnabled(!canvas_->EditOverlayActive());
+
+    const auto bind = [this](settings::ShortcutAction action, QAction* target) {
+        if (target != nullptr) {
+            target->setShortcut(settings_.shortcuts[static_cast<std::size_t>(action)].sequence);
+        }
+    };
+    bind(settings::ShortcutAction::New, newAction_);
+    bind(settings::ShortcutAction::Open, openAction_);
+    bind(settings::ShortcutAction::Save, saveAction_);
+    bind(settings::ShortcutAction::ExportPdf, exportAction_);
+    bind(settings::ShortcutAction::Undo, undoAction_);
+    bind(settings::ShortcutAction::Redo, redoAction_);
+    bind(settings::ShortcutAction::Copy, copyAction_);
+    bind(settings::ShortcutAction::Cut, cutAction_);
+    bind(settings::ShortcutAction::Paste, pasteAction_);
+    bind(settings::ShortcutAction::ResetView, resetViewAction_);
+    bind(settings::ShortcutAction::PreviousPage, previousPageAction_);
+    bind(settings::ShortcutAction::NextPage, nextPageAction_);
+    bind(settings::ShortcutAction::ToggleSettings, settingsAction_);
+    bind(settings::ShortcutAction::TogglePdfSidebar, sidebarAction_);
+    bind(settings::ShortcutAction::ToggleQuickSize, quickSizeAction_);
+    bind(settings::ShortcutAction::ToggleWheel, wheelAction_);
+    constexpr std::array<settings::ShortcutAction, settings::kZoomPresetCount> kZoomPresetActions {
+        settings::ShortcutAction::ZoomPreset1,
+        settings::ShortcutAction::ZoomPreset2,
+        settings::ShortcutAction::ZoomPreset3,
+        settings::ShortcutAction::ZoomPreset4,
+        settings::ShortcutAction::ZoomPreset5,
+    };
+    for (std::size_t index = 0; index < zoomPresetActions_.size(); ++index) {
+        bind(kZoomPresetActions[index], zoomPresetActions_[index]);
     }
+
+    for (QAction* action : toolShortcutActions_) {
+        action->setEnabled(!EditorOwnsKeyboard());
+    }
+}
+
+void QtMainWindow::ResetView() {
+    canvas_->ResetView();
+    UpdateChrome();
+}
+
+void QtMainWindow::ApplyZoomPreset(std::size_t index) {
+    if (index >= settings_.zoomPresets.size()) {
+        return;
+    }
+    const float preset = settings_.zoomPresets[index];
+    if (preset <= 0.0f) {
+        return;
+    }
+    canvas_->SetZoom(std::clamp(preset, settings::kMinZoom, settings::kMaxZoom));
+    UpdateChrome();
+}
+
+void QtMainWindow::FocusPage(std::size_t pageIndex) {
+    if (pageIndex >= controller_.DocumentRef().PageCount()) {
+        return;
+    }
+    canvas_->CenterOnPage(pageIndex);
+    controller_.SetCurrentPageIndex(pageIndex);
+    if (sidebar_ != nullptr) {
+        sidebar_->SetCurrentPage(pageIndex);
+    }
+    UpdateChrome();
+}
+
+void QtMainWindow::PreviousPage() {
+    const std::size_t current = controller_.CurrentPageIndex();
+    if (current > 0U) {
+        FocusPage(current - 1U);
+    }
+}
+
+void QtMainWindow::NextPage() {
+    const std::size_t current = controller_.CurrentPageIndex();
+    FocusPage(current + 1U);  // FocusPage ignores an out-of-range page
+}
+
+void QtMainWindow::ToggleQuickPopup(const QPointF& hostAnchor) {
+    if (toolbar_ == nullptr) {
+        return;
+    }
+    // Reference TextEditProc WM_KEYDOWN ctrl+W (MessageLoop.cpp): a text edit
+    // owns Ctrl+W and toggles the text-format popup.  A LaTeX edit does not, and
+    // the brush popup only belongs to the pen tools (IsToolbarBrushTool); every
+    // other state is inert, exactly like App::ToggleQuickSizePopup.
+    if (controller_.EditingText()) {
+        if (toolbar_->TextFormatPopupVisible()) {
+            toolbar_->HideTextFormatPopup();
+            return;
+        }
+        QTextEdit* editor = canvas_->TextEditor();
+        const QRectF editRect = editor != nullptr
+            ? QRectF(canvas_->mapTo(this, editor->pos()), QSizeF(editor->size()))
+            : QRectF();
+        toolbar_->ShowTextFormatPopup(editRect);
+        return;
+    }
+    if (activeTool_ != settings::Tool::Draw && activeTool_ != settings::Tool::Erase) {
+        return;
+    }
+    if (toolbar_->QuickSizePopupVisible() && toolbar_->QuickSizeTool() == activeTool_) {
+        toolbar_->HideQuickSizePopup();
+        return;
+    }
+    toolbar_->ShowQuickSizePopup(activeTool_, hostAnchor);
 }
 
 void QtMainWindow::RecordRecentPath(const std::filesystem::path& path) {
@@ -1208,6 +1331,27 @@ bool QtMainWindow::eventFilter(QObject* watched, QEvent* event) {
                 break;
         }
     }
+
+    // Reference TextEditProc (MessageLoop.cpp): inside a text edit Ctrl+B is the
+    // editor's bold command, and in a LaTeX edit it does nothing - in both cases
+    // it never reaches the window's sidebar binding.  QTextEdit with
+    // acceptRichText(false) does not claim Ctrl+B itself, so the editor accepts
+    // the ShortcutOverride here and the reference action runs on the key press.
+    const bool inTextEditor = canvas_ != nullptr && watched == canvas_->TextEditor();
+    const bool inLatexEditor = canvas_ != nullptr && watched == canvas_->LatexEditor();
+    if ((inTextEditor || inLatexEditor)
+        && (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress)) {
+        auto* key = static_cast<QKeyEvent*>(event);
+        if (key->key() == Qt::Key_B && key->modifiers() == Qt::ControlModifier) {
+            if (event->type() == QEvent::KeyPress && inTextEditor) {
+                ApplyTextFormat([](QTextCharFormat& format) {
+                    format.setFontWeight(format.fontWeight() >= QFont::Bold ? QFont::Normal : QFont::Bold);
+                });
+            }
+            event->accept();
+            return true;
+        }
+    }
     return QMainWindow::eventFilter(watched, event);
 }
 
@@ -1252,6 +1396,15 @@ void QtMainWindow::UpdateChrome() {
             toolbar_->SetTextFormatState(std::nullopt, TextAlignment::Left);
         }
     }
+    // The overlay editors are created lazily by the canvas; their Ctrl+B
+    // precedence (reference TextEditProc) needs this window as a filter.  Qt
+    // deduplicates repeated installs.
+    if (QTextEdit* textEditor = canvas_ != nullptr ? canvas_->TextEditor() : nullptr; textEditor != nullptr) {
+        textEditor->installEventFilter(this);
+    }
+    if (QPlainTextEdit* latexEditor = canvas_ != nullptr ? canvas_->LatexEditor() : nullptr; latexEditor != nullptr) {
+        latexEditor->installEventFilter(this);
+    }
     if (sidebar_ != nullptr) {
         sidebar_->SetDocument(&document, controller_.PdfBackground());
         sidebar_->SetCurrentPage(current);
@@ -1263,9 +1416,11 @@ void QtMainWindow::UpdateChrome() {
         newPageDialog_->setDefaults(controller_.NewPageDefaults(), recentPageColors_);
     }
     // Editor focus precedence: the single-letter tool shortcuts stand down while
-    // a text/LaTeX editor owns the keyboard (App::ShortcutAction::Tool*).
+    // a text/LaTeX editor owns the keyboard (App::ShortcutAction::Tool*).  The
+    // gate follows the controller's edit state, which is already cleared by the
+    // time its EditStateChanged reaches this function (see EditorOwnsKeyboard).
     for (QAction* action : toolShortcutActions_) {
-        action->setEnabled(!canvas_->EditOverlayActive());
+        action->setEnabled(!EditorOwnsKeyboard());
     }
     if (toolbar_ != nullptr) {
         toolbar_->SetAutoHideEnabled(settings_.autoHideToolbar);

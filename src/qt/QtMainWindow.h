@@ -4,6 +4,8 @@
 #include <functional>
 #include <string>
 
+#include <array>
+
 #include <QMainWindow>
 #include <QPoint>
 #include <QTextCharFormat>
@@ -137,6 +139,17 @@ private:
     void ApplyTextFormat(const std::function<void(QTextCharFormat&)>& apply);
     void ApplyToolToCanvas();
     void ApplyStrokeStyle();
+    void ResetView();
+    void ApplyZoomPreset(std::size_t index);
+    void FocusPage(std::size_t pageIndex);
+    void PreviousPage();
+    void NextPage();
+    // Reference App::ToggleQuickSizePopup (ToolbarState.cpp): text formatting
+    // while a text edit is open, the brush-size popup for the pen tools, inert
+    // otherwise.  Shared by the Ctrl+W binding and the toolbar control.
+    void ToggleQuickPopup(const QPointF& hostAnchor);
+    // Whether a text/LaTeX edit is active; the tool shortcuts stand down then.
+    [[nodiscard]] bool EditorOwnsKeyboard() const;
     void RefreshShortcutBindings();
     void RefreshRecentMenu();
     void RecordRecentPath(const std::filesystem::path& path);
@@ -158,6 +171,12 @@ private:
     QAction* saveAction_ = nullptr;
     QAction* exportAction_ = nullptr;
     QAction* exportFlatAction_ = nullptr;
+    QAction* newAction_ = nullptr;
+    QAction* openAction_ = nullptr;
+    QAction* resetViewAction_ = nullptr;
+    std::array<QAction*, settings::kZoomPresetCount> zoomPresetActions_ {};
+    QAction* previousPageAction_ = nullptr;
+    QAction* nextPageAction_ = nullptr;
     QAction* undoAction_ = nullptr;
     QAction* redoAction_ = nullptr;
     QAction* addTextAction_ = nullptr;

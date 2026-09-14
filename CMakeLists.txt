@@ -1003,3 +1003,28 @@ set_tests_properties(canvas_geometry_dpr175_qt PROPERTIES TIMEOUT 180
 if(WIN32)
     cnote_stage_test_runtime(cnote_canvas_geometry_tests)
 endif()
+
+# --- Keyboard-shortcut routing ------------------------------------------------
+# One QAction per command; the settings store is the single source of every
+# runtime binding.  This test drives real key events through the real window
+# (QTest on the QWindow: the platform -> QWidgetWindow -> QShortcutMap path) and
+# asserts tool switching, editor precedence, the quick popup/wheel/sidebar
+# commands and settings-driven remapping offscreen.
+find_package(Qt6 6.11.2 REQUIRED COMPONENTS Test)
+add_executable(cnote_shortcut_routing_tests tests/ShortcutRoutingTests.cpp)
+target_include_directories(cnote_shortcut_routing_tests PRIVATE src)
+target_compile_features(cnote_shortcut_routing_tests PRIVATE cxx_std_20)
+target_compile_options(cnote_shortcut_routing_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_shortcut_routing_tests PRIVATE cnote_ui Qt6::Widgets Qt6::Test)
+add_test(NAME shortcut_routing_qt COMMAND cnote_shortcut_routing_tests)
+set_tests_properties(shortcut_routing_qt PROPERTIES TIMEOUT 120
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
+if(WIN32)
+    cnote_stage_test_runtime(cnote_shortcut_routing_tests)
+    add_custom_command(TARGET cnote_shortcut_routing_tests POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:Qt6::Test>"
+            "$<TARGET_FILE_DIR:cnote_shortcut_routing_tests>")
+endif()
