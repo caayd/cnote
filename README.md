@@ -164,7 +164,7 @@ ctest --test-dir build-qt -E '^(xpress_codec|session_manager_qt|interaction_rout
 The headless set is `xpress_codec` (pure C++), `session_manager_qt`
 (`QCoreApplication` only), `interaction_router_qt` and
 `precision_input_router_qt` (no Qt application object). On Windows the suite
-has 21 tests; Linux and macOS have 20 because `precision_touchpad_qt` is
+has 23 tests; Linux and macOS have 22 because `precision_touchpad_qt` is
 Windows-only. On Windows, `selection_clipboard_qt` (real clipboard bridge),
 `layout_parity_qt` and `font_fallback_qt` (real font metrics) run on the
 native platform; `layout_parity_qt` compares the Qt chrome geometry against
@@ -173,6 +173,10 @@ the frozen reference table captured from the removed Win32 frontend.
 geometry under the native frame inset, the maximize/restore glyph, the
 auto-hide band state machine and the caption-button intents); its native half
 (`WM_NCCALCSIZE`/`WM_NCHITTEST`) needs a real desktop and is verified there.
+`canvas_geometry_dpr1_qt` and `canvas_geometry_dpr175_qt` run the same binary
+offscreen at `QT_SCALE_FACTOR` 1.0 and 1.75, asserting widget/page mapping,
+committed stroke page coordinates, preview-vs-committed pixels and the
+zoom-session snapshot scale at zooms 0.5/1.0/2.0.
 
 ## Windows precision-touchpad header
 
@@ -276,7 +280,7 @@ default PerMonitorV2 context at startup.
 ## Release status
 
 Verified locally (Windows MinGW 13.1 and WSL Ubuntu 24.04): configure, build,
-the full CTest set (21 tests on Windows, 20 on Linux), `cmake --install`,
+the full CTest set (23 tests on Windows, 22 on Linux), `cmake --install`,
 CPack ZIP/TGZ, and `tools/verify-package.cmake` (25/25 checks on the ZIP,
 24/24 on the TGZ, including launching the packaged application headless).
 
