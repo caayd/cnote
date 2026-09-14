@@ -177,6 +177,9 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
     ApplySettingsToShell();
 
     connect(canvas_, &ui::CanvasWidget::ViewportChanged, this, &QtMainWindow::UpdateChrome);
+    // Refresh the selection-gated actions (copy/cut) the moment the selection
+    // changes; nothing else notifies the shell on a lasso/click selection.
+    connect(canvas_, &ui::CanvasWidget::SelectionChanged, this, &QtMainWindow::UpdateChrome);
     connect(&controller_, &QtDocumentController::SessionChanged, this, [this]() {
         canvas_->NotifyDocumentChanged();
         if (sidebar_ != nullptr) {
@@ -267,7 +270,10 @@ void QtMainWindow::CreateChrome() {
     connect(fitAction, &QAction::triggered, this, &QtMainWindow::FitToWindow);
 
     QAction* zoomInAction = new QAction(QStringLiteral("Zoom In"), this);
-    zoomInAction->setShortcut(QKeySequence::ZoomIn);
+    // QKeySequence::ZoomIn resolves to Ctrl+'+' (Qt::Key_Plus) only, so the
+    // unshifted Ctrl+'=' key on a US layout would be dead; bind it as an alias
+    // of the same action.
+    zoomInAction->setShortcuts({ QKeySequence::ZoomIn, QKeySequence(QStringLiteral("Ctrl+=")) });
     connect(zoomInAction, &QAction::triggered, this, &QtMainWindow::ZoomIn);
 
     QAction* zoomOutAction = new QAction(QStringLiteral("Zoom Out"), this);
@@ -1339,19 +1345,31 @@ bool QtMainWindow::eventFilter(QObject* watched, QEvent* event) {
     // it never reaches the window's sidebar binding.  QTextEdit with
     // acceptRichText(false) does not claim Ctrl+B itself, so the editor accepts
     // the ShortcutOverride here and the reference action runs on the key press.
+    // The LaTeX source box is left inert: QPlainTextEdit owns Ctrl+B as its
+    // standard bold key (as the reference's edit control did), so the window
+    // stands down rather than stealing it for the sidebar.
     const bool inTextEditor = canvas_ != nullptr && watched == canvas_->TextEditor();
     const bool inLatexEditor = canvas_ != nullptr && watched == canvas_->LatexEditor();
     if ((inTextEditor || inLatexEditor)
         && (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress)) {
         auto* key = static_cast<QKeyEvent*>(event);
         if (key->key() == Qt::Key_B && key->modifiers() == Qt::ControlModifier) {
-            if (event->type() == QEvent::KeyPress && inTextEditor) {
+            if (event->type() == QEvent::ShortcutOverride) {
+                // Neither editor claims Ctrl+B themselves, so claim the window
+                // shortcut back for them; otherwise the sidebar binding fires.
+                event->accept();
+                return true;
+            }
+            if (inTextEditor) {
                 ApplyTextFormat([](QTextCharFormat& format) {
                     format.setFontWeight(format.fontWeight() >= QFont::Bold ? QFont::Normal : QFont::Bold);
                 });
+                event->accept();
+                return true;
             }
-            event->accept();
-            return true;
+            // LaTeX source box: leave the key to the editor (its own standard
+            // bold key), which is what the reference's edit control did.
+            return false;
         }
     }
     return QMainWindow::eventFilter(watched, event);
@@ -1418,11 +1436,21 @@ void QtMainWindow::UpdateChrome() {
         newPageDialog_->setDefaults(controller_.NewPageDefaults(), recentPageColors_);
     }
     // Editor focus precedence: the single-letter tool shortcuts stand down while
-    // a text/LaTeX editor owns the keyboard (App::ShortcutAction::Tool*).  The
-    // gate follows the controller's edit state, which is already cleared by the
-    // time its EditStateChanged reaches this function (see EditorOwnsKeyboard).
+    // a text/LaTeX editor owns the keyboard (App::ShortcutAction::Tool*), and so
+    // do the page keys - the legacy editor child window consumed PgUp/PgDn for
+    // caret/scroll movement, so page navigation was only reachable from the
+    // canvas.  The gate follows the controller's edit state, which is already
+    // cleared by the time its EditStateChanged reaches this function (see
+    // EditorOwnsKeyboard).
+    const bool editorOwnsKeyboard = EditorOwnsKeyboard();
     for (QAction* action : toolShortcutActions_) {
-        action->setEnabled(!EditorOwnsKeyboard());
+        action->setEnabled(!editorOwnsKeyboard);
+    }
+    if (previousPageAction_ != nullptr) {
+        previousPageAction_->setEnabled(!editorOwnsKeyboard);
+    }
+    if (nextPageAction_ != nullptr) {
+        nextPageAction_->setEnabled(!editorOwnsKeyboard);
     }
     if (toolbar_ != nullptr) {
         toolbar_->SetAutoHideEnabled(settings_.autoHideToolbar);

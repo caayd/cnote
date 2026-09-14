@@ -21,7 +21,12 @@
 //     (PDF sidebar) fire from both focus hosts and in any tool state;
 //   * Ctrl+W while a text edit is open routes to the text-format popup (the
 //     reference TextEditProc WM_KEYDOWN ctrl+W branch) rather than the brush
-//     popup;
+//     popup, and Ctrl+B inside the editors stays the editor's key;
+//   * PgUp/PgDn page navigation stands down while an editor owns the keyboard
+//     (the reference editor child window consumed them for caret/scroll);
+//   * a selection change enables Copy/Cut immediately (no unrelated UpdateChrome
+//     needed) and Ctrl+C then fires;
+//   * the unshifted Ctrl+'=' key aliases the Zoom In accelerator;
 //   * a binding remapped through the settings store is the one that fires.
 //
 // Acceptance is observed through the public seam the shell exposes: the canvas
@@ -183,6 +188,17 @@ void MakeUndoableEdit(Harness& harness) {
     }
     harness.canvas->CommitActiveEdit();
     QApplication::processEvents();
+}
+
+// Finds the single window action carrying `sequence` (empty when none, exactly
+// one for every wired settings binding).
+QAction* FindActionBySequence(cnote::qt::QtMainWindow& window, const QKeySequence& sequence) {
+    for (QAction* action : window.findChildren<QAction*>()) {
+        if (action->shortcut() == sequence) {
+            return action;
+        }
+    }
+    return nullptr;
 }
 
 // Records which QAction Qt's QShortcutMap dispatches a key to, without letting
@@ -480,6 +496,51 @@ void UndoRedoFireWhenApplicable() {
     Check(probe.Count() == 1 && probe.Last() == redoAction, "Ctrl+Y fires Redo once the redo stack is non-empty");
 }
 
+void SelectionEnablesCopyAndCutImmediately() {
+    Harness harness;
+    MakeUndoableEdit(harness);  // one text object exists at page 0, index 0
+    const QKeySequence copySequence = cnote::settings::DefaultKeySequence(cnote::settings::ShortcutAction::Copy);
+    const QKeySequence cutSequence = cnote::settings::DefaultKeySequence(cnote::settings::ShortcutAction::Cut);
+    QAction* copy = FindActionBySequence(*harness.window, copySequence);
+    QAction* cut = FindActionBySequence(*harness.window, cutSequence);
+    Check(copy != nullptr && cut != nullptr, "copy and cut actions exist");
+    Check(copy != nullptr && !copy->isEnabled(), "Copy is disabled with no selection");
+    Check(cut != nullptr && !cut->isEnabled(), "Cut is disabled with no selection");
+
+    // Select through the canvas host path (the same path click/lasso selection
+    // uses) and read the action state immediately - no viewport/zoom action in
+    // between, which is where the enablement used to be refreshed.
+    harness.canvas->AddObjectToSelection(cnote::ui::ObjectRef { 0, cnote::ui::ObjectKind::Text, 0 });
+    const bool copyEnabled = copy != nullptr && copy->isEnabled();
+    const bool cutEnabled = cut != nullptr && cut->isEnabled();
+    std::printf("after AddObjectToSelection: copy=%d cut=%d\n", copyEnabled ? 1 : 0, cutEnabled ? 1 : 0);
+    Check(copyEnabled, "selecting an object enables Copy immediately");
+    Check(cutEnabled, "selecting an object enables Cut immediately");
+
+    ShortcutProbe probe;
+    probe.Install(*harness.window);
+    harness.FocusCanvas();
+    probe.Reset();
+    harness.PressSequence(copySequence);
+    Check(probe.Last() == copy, "Ctrl+C fires immediately after a selection");
+
+    harness.canvas->ClearSelection();
+    Check(copy != nullptr && !copy->isEnabled(), "clearing the selection disables Copy again");
+}
+
+void ZoomInKeysAreNotDead() {
+    Harness harness;
+    harness.FocusCanvas();
+    const float before = harness.canvas->Zoom();
+    harness.Press(Qt::Key_Equal, Qt::ControlModifier);
+    const float afterEqual = harness.canvas->Zoom();
+    std::printf("zoom %.2f -> Ctrl+= -> %.2f\n", before, afterEqual);
+    Check(afterEqual != before, "Ctrl+= (unshifted) zooms in");
+    harness.Press(Qt::Key_Plus, Qt::ControlModifier);
+    std::printf("Ctrl++ -> %.2f\n", harness.canvas->Zoom());
+    Check(harness.canvas->Zoom() != afterEqual, "Ctrl++ still zooms in");
+}
+
 void ToolKeysRecoverAfterEditorCloses() {
     Harness harness;
     // The reported scenario: the Text tool is selected, an editor is opened and
@@ -497,6 +558,55 @@ void ToolKeysRecoverAfterEditorCloses() {
     harness.Press(Qt::Key_D);
     std::printf("after committing the editor, D -> tool=%s\n", ToolName(harness.ActiveTool()));
     Check(harness.ActiveTool() == cnote::settings::Tool::Draw, "tool keys work again after the editor closes");
+}
+
+void PageNavigationIsGatedWhileEditing() {
+    // Reference: the legacy editor child window consumed PgUp/PgDn (caret/scroll
+    // movement), so the page-navigation shortcuts were only reachable from the
+    // canvas.  The Qt page actions must stand down the same way while a text or
+    // LaTeX editor owns the keyboard.
+    Harness harness;
+    harness.window->AddPage();  // two pages; current is the inserted page
+    QApplication::processEvents();
+    const std::size_t secondPage = harness.window->Controller().CurrentPageIndex();
+    Check(secondPage == 1U, "the new page is current");
+
+    harness.FocusCanvas();
+    harness.Press(Qt::Key_PageUp);
+    const std::size_t afterUp = harness.window->Controller().CurrentPageIndex();
+    std::printf("canvas PgUp: page %zu -> %zu\n", secondPage, afterUp);
+    Check(afterUp == secondPage - 1U, "PgUp navigates from the canvas");
+    harness.Press(Qt::Key_PageDown);
+    std::printf("canvas PgDn: page %zu\n", harness.window->Controller().CurrentPageIndex());
+    Check(harness.window->Controller().CurrentPageIndex() == secondPage, "PgDn navigates from the canvas");
+
+    harness.window->AddTextObject();
+    QApplication::processEvents();
+    Check(harness.canvas->EditOverlayActive(), "the text edit owns the keyboard");
+    const std::size_t beforeTextUp = harness.window->Controller().CurrentPageIndex();
+    harness.Press(Qt::Key_PageUp);
+    harness.Press(Qt::Key_PageDown);
+    std::printf("text-editing PgUp/PgDn: page %zu -> %zu\n", beforeTextUp,
+        harness.window->Controller().CurrentPageIndex());
+    Check(harness.window->Controller().CurrentPageIndex() == beforeTextUp, "PgUp/PgDn stay inert while editing text");
+    harness.canvas->CommitActiveEdit();
+    QApplication::processEvents();
+
+    harness.window->AddLatexObject();
+    QApplication::processEvents();
+    Check(harness.canvas->EditOverlayActive(), "the LaTeX edit owns the keyboard");
+    const std::size_t beforeLatexUp = harness.window->Controller().CurrentPageIndex();
+    harness.Press(Qt::Key_PageUp);
+    harness.Press(Qt::Key_PageDown);
+    std::printf("latex-editing PgUp/PgDn: page %zu -> %zu\n", beforeLatexUp,
+        harness.window->Controller().CurrentPageIndex());
+    Check(harness.window->Controller().CurrentPageIndex() == beforeLatexUp, "PgUp/PgDn stay inert while editing LaTeX");
+    harness.canvas->CancelActiveEdit();
+    QApplication::processEvents();
+
+    harness.FocusCanvas();
+    harness.Press(Qt::Key_PageUp);
+    Check(harness.window->Controller().CurrentPageIndex() < secondPage, "PgUp works again after the editor closes");
 }
 
 // --- 5. a remapped binding from the settings store ---------------------------
@@ -564,9 +674,12 @@ int main(int argc, char** argv) {
     ToolKeysSwitchToolsWhileTextToolActive();
     EditorOwnsToolKeys();
     ToolKeysRecoverAfterEditorCloses();
+    PageNavigationIsGatedWhileEditing();
     QuickActionsFireEverywhere();
     QuickPopupIsTextFormattingWhileEditing();
     EditorKeepsCtrlBWhileEditingText();
+    SelectionEnablesCopyAndCutImmediately();
+    ZoomInKeysAreNotDead();
     SettingsTableShortcutsAreBoundAndFire();
     UndoRedoFireWhenApplicable();
     RemappedBindingIsHonoured();

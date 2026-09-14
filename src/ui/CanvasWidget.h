@@ -203,6 +203,11 @@ public:
 
 signals:
     void ViewportChanged();
+    // Emitted whenever the object selection changes (lasso/box/click select,
+    // shift-add, clear, or an erase that drops selected objects).  The shell
+    // uses it to refresh the selection-gated actions (copy/cut) immediately,
+    // instead of waiting for an unrelated viewport change.
+    void SelectionChanged();
 
 protected:
     void paintEvent(QPaintEvent* event) override;

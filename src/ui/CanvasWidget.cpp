@@ -1597,6 +1597,7 @@ void CanvasWidget::DiscardStroke() {
 void CanvasWidget::ClearSelection() {
     controller_.ClearSelection();
     update();
+    emit SelectionChanged();
 }
 
 void CanvasWidget::UpdateSelectionOverlay(
@@ -1617,6 +1618,7 @@ void CanvasWidget::CommitSelection(
     if (!view.has_value()) {
         controller_.ClearSelection();
         update();
+        emit SelectionChanged();
         return;
     }
 
@@ -1722,11 +1724,13 @@ void CanvasWidget::CommitSelection(
 
     controller_.SelectObjects(view->pageIndex, std::move(selection));
     update();
+    emit SelectionChanged();
 }
 
 void CanvasWidget::AddObjectToSelection(ObjectRef object) {
     controller_.AddObjectToSelection(object);
     update();
+    emit SelectionChanged();
 }
 
 void CanvasWidget::BeginMoveSelection(std::size_t pageIndex) {
@@ -1787,6 +1791,7 @@ void CanvasWidget::CommitErase(const std::vector<ObjectRef>& pending) {
     }
     pendingErase_.clear();
     update();
+    emit SelectionChanged();
 }
 
 void CanvasWidget::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) {
