@@ -8,6 +8,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QCursor>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QKeyEvent>
@@ -176,6 +177,18 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
     CreateChrome();
     ApplySettingsToShell();
 
+#if defined(Q_OS_WIN)
+    // Precision touchpad (plan 5.4): the Windows adapter consumes WM_POINTER
+    // frames for the canvas and applies its pan/inertia frames 1:1, while this
+    // filter drops the wheel/native-gesture events Qt synthesises on top of a
+    // consumed frame.  Both must share ONE router (the adapter's), otherwise
+    // suppression state is invisible to the filter and one gesture pans twice.
+    precisionTouchpad_ = std::make_unique<ui::PrecisionTouchpadQt>(*canvas_);
+    precisionFilter_ = std::make_unique<ui::PrecisionInputFilterQt>(precisionTouchpad_->Router());
+    canvas_->installEventFilter(precisionFilter_.get());
+    precisionTouchpad_->Install(winId());
+#endif
+
     connect(canvas_, &ui::CanvasWidget::ViewportChanged, this, &QtMainWindow::UpdateChrome);
     // Refresh the selection-gated actions (copy/cut) on every selection change,
     // whatever its origin (a canvas gesture, a cut, or a paste that selects what
@@ -256,7 +269,7 @@ void QtMainWindow::CreateChrome() {
     connect(sidebarAction_, &QAction::triggered, this, &QtMainWindow::ToggleSidebar);
 
     quickSizeAction_ = new QAction(QStringLiteral("Brush Size"), this);
-    connect(quickSizeAction_, &QAction::triggered, this, [this]() { ToggleQuickPopup(QPointF(0.0, 0.0)); });
+    connect(quickSizeAction_, &QAction::triggered, this, [this]() { ToggleQuickPopup(QuickPopupCursorAnchor()); });
 
     wheelAction_ = new QAction(QStringLiteral("Tool Wheel"), this);
     connect(wheelAction_, &QAction::triggered, this, [this]() {
@@ -486,6 +499,9 @@ void QtMainWindow::ApplySettingsToShell() {
     });
     ApplyStrokeStyle();
     ApplyToolToCanvas();
+    // Draw cursor: the canvas builds the configured dot/crosshair at its own
+    // device pixel ratio and shows it while the drawing tool is active.
+    canvas_->SetDrawCursorSettings(settings_.drawCursorKind, settings_.drawCursorSize);
     if (toolbar_ != nullptr) {
         toolbar_->SetSettings(settings_);
         toolbar_->SetActiveTool(activeTool_);
@@ -683,6 +699,22 @@ void QtMainWindow::ToggleQuickPopup(const QPointF& hostAnchor) {
     }
     toolbar_->ShowQuickSizePopup(activeTool_, hostAnchor);
 }
+
+QPointF QtMainWindow::QuickPopupCursorAnchor() const {
+    // App::ToggleQuickSizePopup (ToolbarState.cpp:246-258): the popup anchors at
+    // the cursor in client coordinates; when the cursor is outside the canvas
+    // (exclusive right/bottom edges, like the reference PtInRect-style check)
+    // the anchor falls back to the canvas centre 120 px below its top.
+    const QPointF cursor = mapFromGlobal(QCursor::pos());
+    const QRectF canvas = toolbar_ != nullptr ? toolbar_->HostCanvasRect() : QRectF();
+    const bool inside = cursor.x() >= canvas.left() && cursor.x() < canvas.right()
+        && cursor.y() >= canvas.top() && cursor.y() < canvas.bottom();
+    if (inside) {
+        return cursor;
+    }
+    return QPointF((canvas.left() + canvas.right()) / 2.0, canvas.top() + 120.0);
+}
+
 
 void QtMainWindow::RecordRecentPath(const std::filesystem::path& path) {
     const bool acceptable = AppManager::HasCnoteExtension(path) || AppManager::HasPdfExtension(path);

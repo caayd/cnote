@@ -145,6 +145,11 @@ public:
     [[nodiscard]] QString ZoomEditText() const { return zoomEditText_; }
 
     // --- overlays ---------------------------------------------------------
+    // The host-space canvas rect (client area below the reserved toolbar band)
+    // that anchors and clamps the overlays - the reference App::CanvasRect.
+    // The shell needs it to resolve the Ctrl+W cursor anchor's out-of-canvas
+    // fallback (App::ToggleQuickSizePopup, ToolbarState.cpp).
+    [[nodiscard]] QRectF HostCanvasRect() const;
     void ShowQuickSizePopup(settings::Tool tool, const QPointF& hostAnchor);
     void HideQuickSizePopup();
     [[nodiscard]] bool QuickSizePopupVisible() const;
@@ -245,7 +250,6 @@ private:
     void ToggleTextFormatItalic();
     void ToggleTextFormatUnderline();
     void ZoomCommitIfEditing();
-    [[nodiscard]] QRectF HostCanvasRect() const;
     [[nodiscard]] QRectF HostClientRect() const;
 
     settings::Settings settings_ {};

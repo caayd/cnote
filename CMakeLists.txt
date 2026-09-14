@@ -1062,3 +1062,30 @@ set_tests_properties(input_feel_dpr175_qt PROPERTIES TIMEOUT 120
 if(WIN32)
     cnote_stage_test_runtime(cnote_input_feel_tests)
 endif()
+
+# --- Ctrl+W quick-size popup placement ---------------------------------------
+# The shortcut path must anchor the popup at the cursor (with the reference's
+# out-of-canvas fallback) and clamp it inside the canvas; the regression this
+# guards against passed a fixed (0,0) host anchor so the popup always landed at
+# the canvas top-left.  The test drives the real window offscreen: QCursor::
+# setPos places the pointer, QTest fires the real Ctrl+W shortcut, and the
+# popup's host-space rect is compared against LayoutQt's expected geometry for
+# a matrix of cursor positions, window sizes and brush sizes.
+find_package(Qt6 6.11.2 REQUIRED COMPONENTS Test)
+add_executable(cnote_quick_popup_tests tests/QuickPopupPlacementTests.cpp)
+target_include_directories(cnote_quick_popup_tests PRIVATE src)
+target_compile_features(cnote_quick_popup_tests PRIVATE cxx_std_20)
+target_compile_options(cnote_quick_popup_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_quick_popup_tests PRIVATE cnote_ui Qt6::Widgets Qt6::Test)
+add_test(NAME quick_popup_placement_qt COMMAND cnote_quick_popup_tests)
+set_tests_properties(quick_popup_placement_qt PROPERTIES TIMEOUT 120
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
+if(WIN32)
+    cnote_stage_test_runtime(cnote_quick_popup_tests)
+    add_custom_command(TARGET cnote_quick_popup_tests POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:Qt6::Test>"
+            "$<TARGET_FILE_DIR:cnote_quick_popup_tests>")
+endif()

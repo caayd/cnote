@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string>
 
 #include <array>
@@ -12,6 +13,11 @@
 
 #include "qt/QtDocumentController.h"
 #include "settings/SettingsStoreQt.h"
+#include "ui/PrecisionInputFilterQt.h"
+
+#if defined(Q_OS_WIN)
+#include "platform/windows/PrecisionTouchpadQt.h"
+#endif
 
 class QAction;
 class QMenu;
@@ -148,6 +154,10 @@ private:
     // while a text edit is open, the brush-size popup for the pen tools, inert
     // otherwise.  Shared by the Ctrl+W binding and the toolbar control.
     void ToggleQuickPopup(const QPointF& hostAnchor);
+    // The shortcut path's anchor: the cursor in host coordinates, falling back
+    // to the canvas centre 120 px below its top when the cursor is outside the
+    // canvas (App::ToggleQuickSizePopup, ToolbarState.cpp:246-258).
+    [[nodiscard]] QPointF QuickPopupCursorAnchor() const;
     // Whether a text/LaTeX edit is active; the tool shortcuts stand down then.
     [[nodiscard]] bool EditorOwnsKeyboard() const;
     void RefreshShortcutBindings();
@@ -196,9 +206,14 @@ private:
     settings::Tool activeTool_ = settings::Tool::Draw;
     std::vector<std::uint32_t> recentPageColors_ {};
     std::vector<QAction*> toolShortcutActions_ {};
-
     ui::ToolbarWidget* toolbar_ = nullptr;
     ui::SidebarWidget* sidebar_ = nullptr;
+#if defined(Q_OS_WIN)
+    // Precision touchpad adapter + the Qt-side suppression filter sharing its
+    // router (plan 5.4); constructed in the constructor on Windows only.
+    std::unique_ptr<ui::PrecisionTouchpadQt> precisionTouchpad_;
+    std::unique_ptr<ui::PrecisionInputFilterQt> precisionFilter_;
+#endif
     ui::SettingsDialogQt* settingsDialog_ = nullptr;
     ui::NewPageDialogQt* newPageDialog_ = nullptr;
     QMenu* titleMenu_ = nullptr;
