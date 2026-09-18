@@ -404,13 +404,18 @@ void ConfiguredCursorIsShown(ui::CanvasWidget& canvas) {
     const qreal ratio = canvas.devicePixelRatioF();
     std::printf("-- configured canvas cursor at dpr %.4f\n", ratio);
 
+    // The active palette slot the reference passes to CreateBrushCursor
+    // (App::DrawCursorForCurrentSize App.cpp:7481).
+    constexpr std::uint32_t kCursorColor = 0xFF3366CCU;
+    constexpr std::uint32_t kOtherCursorColor = 0xFFCC3366U;
+
     // Default: no custom pixmap, the plain system arrow.
     canvas.SetTool(ui::Tool::Select);
     Check(canvas.cursor().shape() == Qt::ArrowCursor, "the default tool shows the system arrow");
     Check(canvas.cursor().pixmap().isNull(), "the default cursor carries no custom pixmap");
 
     // Dot: the reference brush disc at the configured logical diameter.
-    canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::Dot, 8.0f);
+    canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::Dot, 8.0f, kCursorColor);
     Check(canvas.cursor().shape() == Qt::ArrowCursor && canvas.cursor().pixmap().isNull(),
         "the setting change alone does not put the drawing cursor on a non-drawing tool");
     canvas.SetTool(ui::Tool::Draw);
@@ -424,23 +429,80 @@ void ConfiguredCursorIsShown(ui::CanvasWidget& canvas) {
     CheckNear(static_cast<double>(dot.opaqueBottom - dot.opaqueTop + 1), 8.0 * ratio, 2.0, "the dot's drawn height matches its width");
     Check(dot.cornersTransparent, "the dot cursor is a disc, not an opaque square");
 
+    // The hotspot is a DEVICE-INDEPENDENT pixel - Qt multiplies it by the
+    // pixmap's device pixel ratio when it builds the native cursor - so it must
+    // be the pixmap's DIP centre, not its extent/2 device-pixel centre.  Passing
+    // the device centre put the hotspot `ratio` times too far down and to the
+    // right, which is why every stroke on a scaled display landed at the dot's
+    // bottom-right corner.
+    const QPoint hotspot = canvas.cursor().hotSpot();
+    const int dipCentre = static_cast<int>(std::lround(static_cast<double>(dot.width) / (2.0 * ratio)));
+    CheckNear(static_cast<double>(hotspot.x()), dipCentre, 0.5, "the draw cursor's hotspot is the pixmap's DIP centre on x");
+    CheckNear(static_cast<double>(hotspot.y()), dipCentre, 0.5, "the draw cursor's hotspot is the pixmap's DIP centre on y");
+
+    // The disc carries the active palette colour (App.cpp:7481), not the fixed
+    // white the port filled it with before; the centre pixel is opaque fill.
+    const QImage dotImage = canvas.cursor().pixmap().toImage();
+    const QRgb dotCentre = dotImage.pixel(dotImage.width() / 2, dotImage.height() / 2);
+    Check(qAlpha(dotCentre) == 255, "the dot's centre is fully opaque");
+    Check((dotCentre & 0x00FFFFFFU) == (kCursorColor & 0x00FFFFFFU), "the dot is filled with the configured palette colour");
+    // The reference caches on diameter *and* colour (App.cpp:7482-7484).
+    canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::Dot, 8.0f, kOtherCursorColor);
+    const QRgb recoloured = canvas.cursor().pixmap().toImage().pixel(dotImage.width() / 2, dotImage.height() / 2);
+    Check((recoloured & 0x00FFFFFFU) == (kOtherCursorColor & 0x00FFFFFFU), "a palette colour change rebuilds the dot cursor");
+
     // Size setting: applied without touching the tool.
-    canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::Dot, 20.0f);
+    canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::Dot, 20.0f, kCursorColor);
     const CursorShape bigger = MeasureCursorShape(canvas.cursor());
     CheckNear(static_cast<double>(bigger.opaqueRight - bigger.opaqueLeft + 1), 20.0 * ratio, 2.0, "the cursor size setting resizes the dot");
-    canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::Dot, 100.0f);
+    canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::Dot, 100.0f, kCursorColor);
     const CursorShape clampedLarge = MeasureCursorShape(canvas.cursor());
     CheckNear(static_cast<double>(clampedLarge.opaqueRight - clampedLarge.opaqueLeft + 1), 24.0 * ratio, 2.0, "the dot diameter clamps at 24 logical px (App.cpp:171)");
-    canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::Dot, 1.0f);
+    canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::Dot, 1.0f, kCursorColor);
     const CursorShape clampedSmall = MeasureCursorShape(canvas.cursor());
     CheckNear(static_cast<double>(clampedSmall.opaqueRight - clampedSmall.opaqueLeft + 1), 4.0 * ratio, 2.0, "the dot diameter clamps at 4 logical px (App.cpp:170)");
 
     // Precision crosshair: the reference uses the system cross, no pixmap.
-    canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::PrecisionCrosshair, 8.0f);
+    canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::PrecisionCrosshair, 8.0f, kCursorColor);
     Check(canvas.cursor().shape() == Qt::CrossCursor, "the precision crosshair uses the system crosshair");
     Check(canvas.cursor().pixmap().isNull(), "the crosshair needs no custom pixmap");
-    canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::Dot, 8.0f);
+    canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::Dot, 8.0f, kCursorColor);
     Check(!canvas.cursor().pixmap().isNull(), "switching back to the dot rebuilds the pixmap");
+
+    // Eraser: App::EraserCursorForCurrentSize (App.cpp:7459-7468) builds
+    // CreateSquareBrushCursor(diameter, RGB(255,255,255)) - a white square with a
+    // black outline, side EraserDiameterPixels() = max(3.5, eraseBrushSize * 4)
+    // * 2 logical pixels (App.cpp:7426-7432) - instead of the system cross.
+    canvas.SetEraseBrushSize(3.0f);
+    canvas.SetTool(ui::Tool::Erase);
+    Check(!canvas.cursor().pixmap().isNull(), "the eraser tool shows the reference square cursor");
+    const QImage eraserImage = canvas.cursor().pixmap().toImage();
+    const CursorShape eraser = MeasureCursorShape(canvas.cursor());
+    const double eraserSide = std::max(3.5, 3.0 * 4.0) * 2.0 * ratio;
+    std::printf("CURSOR eraser logical=24.0 device=%dx%d opaque=%s\n",
+        eraser.width, eraser.height,
+        (std::to_string(eraser.opaqueRight - eraser.opaqueLeft + 1) + "x" + std::to_string(eraser.opaqueBottom - eraser.opaqueTop + 1)).c_str());
+    // The image keeps a 1px transparent margin, so "square" means the opaque
+    // bounding box's own corner is filled - a disc's would be transparent.
+    Check(qAlpha(eraserImage.pixel(eraser.opaqueLeft, eraser.opaqueTop)) >= 32,
+        "the eraser cursor is a square, not a disc");
+    CheckNear(static_cast<double>(eraser.opaqueRight - eraser.opaqueLeft + 1), eraserSide, 2.0, "the eraser square's side is max(3.5, eraseBrushSize * 4) * 2 logical px (App.cpp:7430-7432)");
+    CheckNear(static_cast<double>(eraser.opaqueBottom - eraser.opaqueTop + 1), eraserSide, 2.0, "the eraser square's height matches its side");
+    const QRgb eraserCentre = eraserImage.pixel(eraserImage.width() / 2, eraserImage.height() / 2);
+    Check(qAlpha(eraserCentre) == 255 && qRed(eraserCentre) > 240 && qGreen(eraserCentre) > 240 && qBlue(eraserCentre) > 240,
+        "the eraser square is filled white");
+    const QRgb eraserEdge = eraserImage.pixel((eraser.opaqueLeft + eraser.opaqueRight) / 2, eraser.opaqueTop);
+    Check(qAlpha(eraserEdge) >= 32 && qRed(eraserEdge) < 96 && qGreen(eraserEdge) < 96 && qBlue(eraserEdge) < 96,
+        "the eraser square is outlined in black");
+    // The same setter also feeds the erase hit test's radius, so a size change
+    // must resize the cursor.
+    canvas.SetEraseBrushSize(6.0f);
+    const CursorShape biggerEraser = MeasureCursorShape(canvas.cursor());
+    CheckNear(static_cast<double>(biggerEraser.opaqueRight - biggerEraser.opaqueLeft + 1), std::max(3.5, 6.0 * 4.0) * 2.0 * ratio, 2.0,
+        "the erase brush size resizes the eraser square");
+    canvas.SetEraseBrushSize(3.0f);
+    canvas.SetTool(ui::Tool::Draw);
+    Check(!canvas.cursor().pixmap().isNull(), "the draw tool shows its disc again after erasing");
 
     // The interaction still wins: a pan shows the closed hand and hands the
     // drawing cursor back when it ends.

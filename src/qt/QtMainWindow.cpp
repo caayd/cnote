@@ -274,8 +274,9 @@ void QtMainWindow::CreateChrome() {
     wheelAction_ = new QAction(QStringLiteral("Tool Wheel"), this);
     connect(wheelAction_, &QAction::triggered, this, [this]() {
         if (toolbar_ != nullptr) {
-            const QPointF center(canvas_->rect().center());
-            toolbar_->TogglePaletteWheel(center);
+            // App::TogglePaletteWheel (ToolbarState.cpp:127-159): the wheel
+            // anchors at the cursor; the toolbar computes the fallback.
+            toolbar_->TogglePaletteWheel();
         }
     });
 
@@ -376,9 +377,6 @@ void QtMainWindow::CreateChrome() {
             case ui::ToolbarCommand::Maximize: IsWindowMaximized() ? showNormal() : showMaximized(); UpdateChrome(); break;
             case ui::ToolbarCommand::Close: close(); break;
             case ui::ToolbarCommand::OpenTitleMenu: ShowTitleMenu(); break;
-            case ui::ToolbarCommand::ToggleWheel:
-                toolbar_->TogglePaletteWheel(QPointF(canvas_->rect().center()));
-                break;
             case ui::ToolbarCommand::OpenPalettePicker: ToggleSettingsDialog(); break;
         }
     });
@@ -390,6 +388,18 @@ void QtMainWindow::CreateChrome() {
         ApplyStrokeStyle();
         settingsStore_.Save(settings_);
         UpdateChrome();
+    });
+    connect(toolbar_, &ui::ToolbarWidget::WheelToolToggled, this, [this](settings::Tool tool) {
+        // App::ToggleToolInWheel (ToolbarState.cpp:87-99): membership toggles
+        // in place and persists immediately.
+        const auto existing = std::find(settings_.wheelTools.begin(), settings_.wheelTools.end(), tool);
+        if (existing != settings_.wheelTools.end()) {
+            settings_.wheelTools.erase(existing);
+        } else {
+            settings_.wheelTools.push_back(tool);
+        }
+        settingsStore_.Save(settings_);
+        ApplySettingsToShell();
     });
     connect(toolbar_, &ui::ToolbarWidget::PalettePickerRequested, this, &QtMainWindow::ToggleSettingsDialog);
     connect(toolbar_, &ui::ToolbarWidget::ZoomTextCommitted, this, [this](const QString& text) {
@@ -496,9 +506,6 @@ void QtMainWindow::ApplySettingsToShell() {
     });
     ApplyStrokeStyle();
     ApplyToolToCanvas();
-    // Draw cursor: the canvas builds the configured dot/crosshair at its own
-    // device pixel ratio and shows it while the drawing tool is active.
-    canvas_->SetDrawCursorSettings(settings_.drawCursorKind, settings_.drawCursorSize);
     if (toolbar_ != nullptr) {
         toolbar_->SetSettings(settings_);
         toolbar_->SetActiveTool(activeTool_);
@@ -515,7 +522,14 @@ void QtMainWindow::ApplySettingsToShell() {
 }
 
 void QtMainWindow::ApplyStrokeStyle() {
-    controller_.SetActiveStrokeStyle(StrokeStyleFor(settings_, activeTool_, 0.0f));
+    const StrokeStyle style = StrokeStyleFor(settings_, activeTool_, 0.0f);
+    controller_.SetActiveStrokeStyle(style);
+    // The cursors track the same settings: the dot fills with the active
+    // palette colour (App::DrawCursorForCurrentSize, App.cpp:7471-7489) and the
+    // eraser square sizes from eraseBrushSize (App::EraserCursorForCurrentSize,
+    // App.cpp:7459-7468).  Both setters early-out when nothing changed.
+    canvas_->SetDrawCursorSettings(settings_.drawCursorKind, settings_.drawCursorSize, style.color);
+    canvas_->SetEraseBrushSize(settings_.eraseBrushSize);
 }
 
 void QtMainWindow::ApplyToolToCanvas() {

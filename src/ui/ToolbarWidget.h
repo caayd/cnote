@@ -54,7 +54,6 @@ enum class ToolbarCommand {
     Maximize,
     Close,
     OpenTitleMenu,
-    ToggleWheel,
     OpenPalettePicker,
 };
 
@@ -168,6 +167,12 @@ public:
     [[nodiscard]] bool PaletteMenuVisible() const;
     [[nodiscard]] QRectF PaletteMenuBounds() const;
 
+    // Reference entry (App::TogglePaletteWheel, ToolbarState.cpp:127-159): the
+    // wheel opens centred on the cursor, or - when the cursor is outside the
+    // host client rect - below the toolbar's current-colour swatch.  The shell
+    // uses this overload; the explicit-anchor one stays public for callers and
+    // tests that already know the host-space centre.
+    void TogglePaletteWheel();
     void TogglePaletteWheel(const QPointF& hostCenter);
     void HidePaletteWheel();
     [[nodiscard]] bool PaletteWheelVisible() const;
@@ -219,6 +224,10 @@ signals:
     void TextFontFamilyChanged(TextFontFamily family);
     void PaletteOverlayToggled(bool open);
     void ZoomPresetRequested(float zoom);
+    // The reference tool-button context menu (App::HandleToolbarRightClick,
+    // App.cpp:6195-6239) toggles a tool's Quick Wheel membership; the shell
+    // owns persisting it into settings.
+    void WheelToolToggled(settings::Tool tool);
     void RevealProgressChanged(qreal progress);
     void RevealStateChanged(bool revealed);
     void ToolbarGeometryChanged();
@@ -243,6 +252,11 @@ private:
     void OnTextFormatChanged();
     void OnPaletteSelection(std::size_t index);
     void OnPaletteToolSelection(settings::Tool tool);
+    // Right-click on a tool button or the zoom indicator shows the "Add/Remove
+    // from Quick Wheel" menu (App::HandleToolbarRightClick).  Returns true when
+    // the click landed on a tool rect and the menu was shown.
+    bool ShowWheelToolMenu(const QPointF& widgetPosition, const QPoint& globalPosition);
+    [[nodiscard]] bool IsToolInWheel(settings::Tool tool) const;
     void OnWheelZoomModeChanged(bool zoomPresetMode);
     void SetTextFormatFontMenuOpen(bool open);
     void ToggleTextFormatBold();

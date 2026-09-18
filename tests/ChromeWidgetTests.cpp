@@ -17,6 +17,7 @@
 #include <vector>
 
 #include <QApplication>
+#include <QCursor>
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QEventLoop>
@@ -324,6 +325,77 @@ void TestPaletteWheelIntents() {
     }
 }
 
+// The no-argument entry resolves the reference anchor itself
+// (App::TogglePaletteWheel, ToolbarState.cpp:127-159): centred on the cursor
+// when it is inside the window, otherwise 72 device pixels below the toolbar's
+// current-colour swatch.  QCursor::setPos is the only way to drive it, and a
+// platform may clamp it, so every expectation follows the cursor position read
+// back from the host instead of the requested one.
+void TestPaletteWheelAnchor() {
+    QWidget host;
+    host.resize(1400, 900);
+    cnote::ui::ToolbarWidget* toolbar = new cnote::ui::ToolbarWidget(&host);
+    toolbar->SetSettings(BuildSettings());
+    toolbar->resize(1400, 34);
+    host.show();
+    QApplication::processEvents();
+
+    const std::size_t entryCount = toolbar->Settings().palette.size() + toolbar->PaletteWheelDisplayedTools().size();
+    const QRectF clientRect(0.0, 0.0, static_cast<qreal>(host.width()), static_cast<qreal>(host.height()));
+
+    // The wheel's hit test is the public way to observe where it was centred:
+    // drive a pointer position through the overlay and read the slice it lands on.
+    const auto hoverAfterProbe = [&](const QPointF& probe) {
+        std::optional<std::size_t> hover;
+        if (QWidget* wheel = host.findChild<QWidget*>(QStringLiteral("cnotePaletteWheel")); wheel != nullptr) {
+            SendMouse(*wheel, QEvent::MouseMove, probe, Qt::NoButton, Qt::NoButton);
+            hover = toolbar->PaletteWheelHoverIndex();
+        }
+        return hover;
+    };
+
+    QCursor::setPos(host.mapToGlobal(QPoint(700, 500)));
+    QApplication::processEvents();
+    const QPointF cursorInHost(host.mapFromGlobal(QCursor::pos()));
+    const bool cursorInside = cursorInHost.x() >= 0.0 && cursorInHost.y() >= 0.0
+        && cursorInHost.x() < clientRect.width() && cursorInHost.y() < clientRect.height();
+    if (cursorInside) {
+        toolbar->TogglePaletteWheel();
+        Check(toolbar->PaletteWheelVisible(), "the wheel opens without an explicit anchor");
+        const qt::PaletteWheelLayout layout = qt::BuildPaletteWheelLayout(clientRect, cursorInHost, entryCount, qt::ToolbarHeight(false));
+        Check(toolbar->PaletteWheelHoverIndex() == qt::PaletteWheelIndexAtPoint(layout, cursorInHost, entryCount),
+            "the opened wheel seeds the hover slice under the cursor");
+        const QPointF probe(layout.center.x(), layout.center.y() + 62.0);
+        const std::optional<std::size_t> expected = qt::PaletteWheelIndexAtPoint(layout, probe, entryCount);
+        Check(expected.has_value() && hoverAfterProbe(probe) == expected, "the wheel is centred on the cursor");
+        toolbar->HidePaletteWheel();
+    }
+
+    // Moving the window off the pointer puts the cursor outside the host client
+    // rect, which switches to the reference swatch fallback anchor.
+    host.move(host.pos() + QPoint(host.width() + 400, 0));
+    QApplication::processEvents();
+    QCursor::setPos(QPoint(10, 10));
+    QApplication::processEvents();
+    const QPointF cursorOutside(host.mapFromGlobal(QCursor::pos()));
+    const bool fallbackAnchor = cursorOutside.x() < 0.0 || cursorOutside.y() < 0.0
+        || cursorOutside.x() >= clientRect.width() || cursorOutside.y() >= clientRect.height();
+    if (fallbackAnchor) {
+        const QPointF hostOrigin(toolbar->mapTo(&host, QPoint(0, 0)));
+        const QRectF colorRect = toolbar->ControlRect(cnote::ui::ToolbarControl::CurrentColor).translated(hostOrigin);
+        const qreal dpr = host.devicePixelRatioF() > 0.0 ? host.devicePixelRatioF() : 1.0;
+        const QPointF anchor(colorRect.center().x(), colorRect.bottom() + (72.0 / dpr));
+        toolbar->TogglePaletteWheel();
+        Check(toolbar->PaletteWheelVisible(), "the wheel opens with the swatch fallback anchor");
+        const qt::PaletteWheelLayout layout = qt::BuildPaletteWheelLayout(clientRect, anchor, entryCount, qt::ToolbarHeight(false));
+        const QPointF probe(layout.center.x(), layout.center.y() + 62.0);
+        const std::optional<std::size_t> expected = qt::PaletteWheelIndexAtPoint(layout, probe, entryCount);
+        Check(expected.has_value() && hoverAfterProbe(probe) == expected, "the fallback anchor sits below the colour swatch");
+        toolbar->HidePaletteWheel();
+        Check(!toolbar->PaletteWheelHoverIndex().has_value(), "closing the wheel clears the hover slice");
+    }
+}
+
 void TestPopupPlacementAndClamping() {
     QWidget host;
     host.resize(1000, 700);
@@ -614,6 +686,7 @@ int main(int argc, char** argv) {
     TestToolbarLayoutMatrix();
     TestToolbarIntentsAndHover();
     TestPaletteWheelIntents();
+    TestPaletteWheelAnchor();
     TestPopupPlacementAndClamping();
     TestSidebarListAndNavigation();
     TestSidebarWheelIsolation();

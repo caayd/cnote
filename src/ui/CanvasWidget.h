@@ -113,11 +113,16 @@ public:
     // --- cursor ---------------------------------------------------------
     // Draw-cursor appearance from the application settings (draw_cursor_kind /
     // draw_cursor_size, App::DrawCursorForCurrentSize).  Dot draws the reference
-    // filled disc of this logical diameter in the widget's device pixels;
-    // PrecisionCrosshair uses the system crosshair.  The canvas rebuilds the
-    // pixmap whenever the setting or its device pixel ratio changes and
-    // re-applies it while the drawing tool is active.
-    void SetDrawCursorSettings(settings::DrawCursorKind kind, float logicalPixels);
+    // disc of this logical diameter, filled with the active palette colour
+    // (argbColor), in the widget's device pixels; PrecisionCrosshair uses the
+    // system crosshair.  The canvas rebuilds the pixmap whenever the setting,
+    // its colour or its device pixel ratio changes and re-applies it while the
+    // drawing tool is active.
+    void SetDrawCursorSettings(settings::DrawCursorKind kind, float logicalPixels, std::uint32_t argbColor);
+    // Eraser brush size from the application settings (eraseBrushSize,
+    // App::EraserRadiusPixels App.cpp:7426-7428).  It sizes both the square
+    // erase cursor and the erase hit-test radius.
+    void SetEraseBrushSize(float brushSize);
     // Builds the sample the Qt event handlers feed to the router.
     [[nodiscard]] PointerSample SampleFromEvent(const QMouseEvent& event);
 
@@ -267,10 +272,12 @@ private:
     void UpdateSmoothScroll();
 
     // Cursor plumbing.  ApplyCursor() maps the kind the interaction asked for to
-    // a real QCursor; the drawing cursor's pixmap is built from the settings at
-    // the widget's device pixel ratio and cached until either changes.
+    // a real QCursor; the drawing and eraser cursors' pixmaps are built from the
+    // settings at the widget's device pixel ratio and cached until either
+    // changes.
     void ApplyCursor();
     [[nodiscard]] QCursor BuildDrawCursor() const;
+    [[nodiscard]] QCursor BuildEraserCursor() const;
 
     // Selection / erase rendering helpers.
     [[nodiscard]] std::optional<SelectionBounds> SelectionBoundsForPage(std::size_t pageIndex) const;
@@ -329,12 +336,20 @@ private:
     qreal precisionStartZoom_ = 1.0;
 
     // Cursor: the kind the current interaction/tool wants, the drawing cursor
-    // settings and the pixmap cache keyed by device pixel ratio.
+    // settings and the pixmap caches keyed by device pixel ratio.  The draw
+    // cursor's colour is the active palette slot (App::DrawCursorForCurrentSize
+    // App.cpp:7481 falls back to opaque black when the palette is empty).
     CursorKind cursorKind_ = CursorKind::Arrow;
     settings::DrawCursorKind drawCursorKind_ = settings::DrawCursorKind::Dot;
     float drawCursorSize_ = 8.0f;
+    std::uint32_t drawCursorColor_ = 0xFF000000U;
     std::optional<QCursor> drawCursor_ {};
     qreal drawCursorDevicePixelRatio_ = 0.0;
+    // Eraser brush size in logical pixels, defaulting as settings::Settings
+    // does (SettingsStoreQt.h:84).
+    float eraseBrushSize_ = 3.0f;
+    std::optional<QCursor> eraserCursor_ {};
+    qreal eraserCursorDevicePixelRatio_ = 0.0;
 
     // Transient selection/erase overlay state (never part of cache signatures).
     bool selectionOverlayActive_ = false;

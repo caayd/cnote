@@ -60,6 +60,12 @@ constexpr float kStrokeDirtyMarginPixels = 12.0f;
 constexpr float kMinDrawCursorDiameter = 4.0f;
 constexpr float kMaxDrawCursorDiameter = 24.0f;
 
+// Reference App.cpp:168-169: eraser geometry in logical pixels.  The minimum
+// radius floors the brush size (App::EraserRadiusPixels, App.cpp:7426-7428) and
+// the outline width is the ring the erase cursor is drawn with.
+constexpr float kEraserMinRadiusPixels = 3.5f;
+constexpr qreal kEraserOutlinePixels = 0.75f;
+
 // LaTeX source box and completion popup metrics (logical pixels).
 constexpr int kLatexSourceBoxHeight = 120;
 constexpr int kLatexSourceBoxGap = 6;
@@ -1443,10 +1449,9 @@ std::vector<ObjectRef> CanvasWidget::EraseTargetsAt(const QPointF& logical) cons
     const Vec2 pagePoint = ScreenToPage(*view, logical, false);
 
     // Reference App::EraseAt: the eraser radius is max(3.5, eraseBrushSize * 4)
-    // logical pixels (App.cpp:168/7420) scaled into page units.
-    constexpr float kEraserMinRadiusPixels = 3.5f;
-    constexpr float kEraseBrushSizePixels = 3.0f;
-    const float radiusPage = std::max(kEraserMinRadiusPixels, kEraseBrushSizePixels * 4.0f) / std::max(0.1f, view->scale);
+    // logical pixels (App::EraserRadiusPixels, App.cpp:7426-7428) scaled into
+    // page units (App.cpp:5736).
+    const float radiusPage = std::max(kEraserMinRadiusPixels, eraseBrushSize_ * 4.0f) / std::max(0.1f, view->scale);
     const Vec2 a { pagePoint.x - radiusPage, pagePoint.y - radiusPage };
     const Vec2 b { pagePoint.x + radiusPage, pagePoint.y + radiusPage };
 
@@ -1497,15 +1502,16 @@ void CanvasWidget::SetTool(Tool tool) {
     SetCursor(InteractionRouter::CursorForTool(tool));
 }
 
-void CanvasWidget::SetDrawCursorSettings(settings::DrawCursorKind kind, float logicalPixels) {
+void CanvasWidget::SetDrawCursorSettings(settings::DrawCursorKind kind, float logicalPixels, std::uint32_t argbColor) {
     // SettingsStoreQt already clamps the persisted value; clamp again so a
     // programmatic set cannot build a degenerate pixmap.
     const float clamped = std::clamp(logicalPixels, kMinDrawCursorDiameter, kMaxDrawCursorDiameter);
-    if (kind == drawCursorKind_ && std::abs(clamped - drawCursorSize_) < 0.001f) {
+    if (kind == drawCursorKind_ && std::abs(clamped - drawCursorSize_) < 0.001f && argbColor == drawCursorColor_) {
         return;
     }
     drawCursorKind_ = kind;
     drawCursorSize_ = clamped;
+    drawCursorColor_ = argbColor;
     // The cached pixmap encodes the old appearance; the next apply rebuilds it.
     drawCursor_.reset();
     drawCursorDevicePixelRatio_ = 0.0;
@@ -1514,14 +1520,31 @@ void CanvasWidget::SetDrawCursorSettings(settings::DrawCursorKind kind, float lo
     }
 }
 
+void CanvasWidget::SetEraseBrushSize(float brushSize) {
+    // No clamp: App::EraserRadiusPixels floors the value at the minimum radius
+    // (App.cpp:7426-7428), so a degenerate brush size cannot build a degenerate
+    // pixmap.
+    if (std::abs(brushSize - eraseBrushSize_) < 0.001f) {
+        return;
+    }
+    eraseBrushSize_ = brushSize;
+    // The cached pixmap encodes the old diameter; the next apply rebuilds it.
+    eraserCursor_.reset();
+    eraserCursorDevicePixelRatio_ = 0.0;
+    if (cursorKind_ == CursorKind::Eraser) {
+        ApplyCursor();
+    }
+}
+
 QCursor CanvasWidget::BuildDrawCursor() const {
-    // Reference App::CreateBrushCursor (App.cpp:468-577): a filled disc whose
-    // outer edge is the configured diameter with an inset black ring, hotspot at
-    // its centre.  The ring keeps the dot legible on a white page and the white
-    // fill keeps it legible on the dark canvas backdrop.  The image must be
-    // painted with an alpha channel: a default QPixmap is opaque, and an opaque
-    // cursor would show the drawing tool as a black square.
-    constexpr qreal kOutlinePixels = 0.75f;   // App.cpp:169 kEraserOutlinePixels
+    // Reference App::CreateBrushCursor (App.cpp:468-577): a disc of the active
+    // palette colour - App::DrawCursorForCurrentSize (App.cpp:7471-7489) passes
+    // the palette slot, or opaque black for an empty palette - whose outer edge
+    // is the configured diameter with an inset black ring and the hotspot at its
+    // centre.  The black ring keeps the disc visible whatever colour the palette
+    // slot carries.  The image must be painted with an alpha channel: a default
+    // QPixmap is opaque, and an opaque cursor would show the drawing tool as a
+    // black square.
     constexpr int kMarginPixels = 1;          // antialiasing bleed room, device px
     const qreal ratio = devicePixelRatioF();
     const qreal deviceDiameter = std::max<qreal>(1.0, static_cast<qreal>(drawCursorSize_) * ratio);
@@ -1532,13 +1555,13 @@ QCursor CanvasWidget::BuildDrawCursor() const {
     {
         QPainter painter(&image);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        const qreal penWidth = std::max<qreal>(1.0, kOutlinePixels * ratio);
+        const qreal penWidth = std::max<qreal>(1.0, kEraserOutlinePixels * ratio);
         const QRectF outer(
             static_cast<qreal>(kMarginPixels),
             static_cast<qreal>(kMarginPixels),
             deviceDiameter,
             deviceDiameter);
-        painter.setBrush(Qt::white);
+        painter.setBrush(QColor::fromRgba(drawCursorColor_));
         painter.setPen(QPen(Qt::black, penWidth));
         // The pen is centred on the path, so insetting the path by half the pen
         // width puts the stroke's outer edge exactly on the configured diameter.
@@ -1549,10 +1572,52 @@ QCursor CanvasWidget::BuildDrawCursor() const {
     QPixmap pixmap = QPixmap::fromImage(image);
     pixmap.setDevicePixelRatio(ratio);
 
-    // The hotspot is in pixmap (device) coordinates, matching the bitmap the
-    // platform cursor is built from.
-    const QPoint hotspot(extent / 2, extent / 2);
-    return QCursor(pixmap, hotspot.x(), hotspot.y());
+    // QCursor's hotspot is in DEVICE-INDEPENDENT pixels: Qt multiplies it by the
+    // pixmap's device pixel ratio when it builds the native cursor.  The centre
+    // of an `extent`-device-pixel pixmap is therefore extent / (2 * ratio), not
+    // extent / 2 (which would place the hotspot beyond the bottom-right corner).
+    const int hotspot = static_cast<int>(std::lround(extent / (2.0 * ratio)));
+    return QCursor(pixmap, hotspot, hotspot);
+}
+
+QCursor CanvasWidget::BuildEraserCursor() const {
+    // Reference App::EraserCursorForCurrentSize (App.cpp:7459-7468):
+    // CreateSquareBrushCursor(diameter, RGB(255,255,255)) (App.cpp:579-691) is a
+    // white-filled square with an inset black kEraserOutlinePixels outline and a
+    // centred hotspot, where the diameter is App::EraserDiameterPixels
+    // (App.cpp:7430-7432): max(3.5, eraseBrushSize * 4) * 2 logical pixels.
+    constexpr int kMarginPixels = 1;          // antialiasing bleed room, device px
+    const qreal ratio = devicePixelRatioF();
+    const qreal logicalSide =
+        std::max<qreal>(kEraserMinRadiusPixels, static_cast<qreal>(eraseBrushSize_) * 4.0) * 2.0;
+    const qreal deviceSide = std::max<qreal>(1.0, logicalSide * ratio);
+    const int extent = static_cast<int>(std::lround(deviceSide)) + (kMarginPixels * 2);
+
+    QImage image(extent, extent, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    {
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const qreal penWidth = std::max<qreal>(1.0, kEraserOutlinePixels * ratio);
+        const QRectF outer(
+            static_cast<qreal>(kMarginPixels),
+            static_cast<qreal>(kMarginPixels),
+            deviceSide,
+            deviceSide);
+        painter.setBrush(Qt::white);
+        painter.setPen(QPen(Qt::black, penWidth));
+        // Same half-pen inset as the brush disc: the outline's outer edge lands
+        // exactly on the eraser diameter.
+        painter.drawRect(outer.adjusted(penWidth * 0.5, penWidth * 0.5, -penWidth * 0.5, -penWidth * 0.5));
+        painter.end();
+    }
+
+    QPixmap pixmap = QPixmap::fromImage(image);
+    pixmap.setDevicePixelRatio(ratio);
+
+    // Device-independent hotspot, same rule as BuildDrawCursor.
+    const int hotspot = static_cast<int>(std::lround(extent / (2.0 * ratio)));
+    return QCursor(pixmap, hotspot, hotspot);
 }
 
 void CanvasWidget::ApplyCursor() {
@@ -1576,10 +1641,18 @@ void CanvasWidget::ApplyCursor() {
     case CursorKind::Move:
         setCursor(Qt::SizeAllCursor);
         return;
-    case CursorKind::Eraser:
-        // No system eraser cursor: a small cross keeps the erase tool legible.
-        setCursor(Qt::CrossCursor);
+    case CursorKind::Eraser: {
+        // Reference App::EraserCursorForCurrentSize (App.cpp:7459-7468): the
+        // erase tool shows the brush-sized white square rather than a system
+        // cursor, so the user can see what the erase radius will hit.
+        const qreal ratio = devicePixelRatioF();
+        if (!eraserCursor_.has_value() || eraserCursorDevicePixelRatio_ != ratio) {
+            eraserCursor_ = BuildEraserCursor();
+            eraserCursorDevicePixelRatio_ = ratio;
+        }
+        setCursor(eraserCursor_.has_value() ? *eraserCursor_ : QCursor(Qt::CrossCursor));
         return;
+    }
     case CursorKind::Draw:
         break;
     }
