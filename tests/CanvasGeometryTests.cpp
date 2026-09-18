@@ -437,6 +437,58 @@ int main(int argc, char** argv) {
         Check(controller.DocumentRef().PageAt(0).latexes.empty(), "cancelled LaTeX leaves no object at zoom " + std::to_string(zoom));
     }
 
+    // (f) Pending-erase feedback (App.cpp:172 kPendingEraseObjectOpacity,
+    // App.cpp:9453-9568): while the eraser drag has marked an object, the page
+    // skips the cached surface and repaints it at 0.5 opacity; clearing the
+    // mark restores full opacity.  The probe stroke is pure red, so the faded
+    // frame keeps red high while green/blue rise to ~128 over the white page.
+    canvas.SetTool(ui::Tool::Draw);
+    canvas.SetZoom(1.0f);
+    Pump(160);
+    canvas.CenterOnPage(0);
+    Pump(20);
+    canvas.repaint();
+    {
+        const QPointF center(canvas.rect().center());
+        ui::InteractionModifiers modifiers = canvas.Router().Modifiers();
+        modifiers.straightLine = true;
+        canvas.SetInteractionModifiers(modifiers);
+        SendMouse(canvas, QEvent::MouseButtonPress, center + QPointF(-40.0, 0.0), Qt::LeftButton, Qt::LeftButton);
+        SendMouse(canvas, QEvent::MouseMove, center + QPointF(40.0, 0.0), Qt::NoButton, Qt::LeftButton);
+        SendMouse(canvas, QEvent::MouseButtonRelease, center + QPointF(40.0, 0.0), Qt::LeftButton, Qt::NoButton);
+        QCoreApplication::processEvents();
+        modifiers.straightLine = false;
+        canvas.SetInteractionModifiers(modifiers);
+    }
+    Check(controller.DocumentRef().PageAt(0).strokes.size() == 1U, "pending-erase probe stroke committed");
+    const QImage fullFrame = canvas.grab().toImage();
+    const InkBox fullInk = RedInk(fullFrame);
+    Check(fullInk.valid(), "pending-erase probe stroke has ink");
+    if (fullInk.valid()) {
+        const QPoint inkCenter((fullInk.x0 + fullInk.x1) / 2, (fullInk.y0 + fullInk.y1) / 2);
+        const QRgb fullPixel = fullFrame.pixel(inkCenter);
+
+        canvas.UpdatePendingErase({ ui::ObjectRef { 0U, ui::ObjectKind::Stroke, 0U } });
+        const QImage fadedFrame = canvas.grab().toImage();
+        const QRgb fadedPixel = fadedFrame.pixel(inkCenter);
+        std::printf("PENDING-ERASE full=(%d,%d,%d) faded=(%d,%d,%d)\n",
+                    qRed(fullPixel), qGreen(fullPixel), qBlue(fullPixel),
+                    qRed(fadedPixel), qGreen(fadedPixel), qBlue(fadedPixel));
+        Check(qRed(fadedPixel) > 200, "the pending stroke keeps its red channel");
+        Check(qGreen(fadedPixel) > 90 && qGreen(fadedPixel) < 170,
+              "the pending stroke fades to 0.5 opacity over the white page");
+        Check(qGreen(fadedPixel) > qGreen(fullPixel) + 60,
+              "the pending stroke is visibly lighter than the committed one");
+
+        canvas.UpdatePendingErase({});
+        const QImage restoredFrame = canvas.grab().toImage();
+        const QRgb restoredPixel = restoredFrame.pixel(inkCenter);
+        Check(qRed(restoredPixel) > 200 && qGreen(restoredPixel) < 60,
+              "clearing the pending mark restores full opacity");
+    }
+    Check(controller.Undo(), "undo removes the pending-erase probe stroke");
+    QCoreApplication::processEvents();
+
     Check(canvas.SurfaceRenderCount() > 0U, "the cached page surface was rendered at least once");
 
     cnote::latex::Shutdown();

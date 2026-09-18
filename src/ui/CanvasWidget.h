@@ -284,7 +284,9 @@ private:
     [[nodiscard]] std::optional<ObjectRef> TopmostObjectAt(const QPointF& logical, bool includeStrokes) const;
     [[nodiscard]] bool EditOverlayOwnsPoint(const QPointF& logical) const;
     void PaintSelectionOverlay(QPainter& painter);
-    void PaintPendingErase(QPainter& painter, const CanvasPageView& view);
+    // Per-kind pending-erase index sets for one page; the renderer fades them
+    // (App.cpp:5572-5628 pendingErase*Indices_).
+    [[nodiscard]] render::PendingEraseIndices PendingEraseFor(std::size_t pageIndex) const;
 
     void BeginZoomSession(const QPointF& anchor);
     void EndZoomSession();

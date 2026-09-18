@@ -544,44 +544,57 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
         const Page& page = document.PageAt(view.pageIndex);
         const bool liveStrokeOnPage = controller_.PendingStroke() != nullptr
             && controller_.PendingStrokePage() == view.pageIndex;
+        // Reference App::PaintPage (App.cpp:9453-9472): a page with pending-erase
+        // objects skips the surface cache and repaints live so the marked
+        // objects can draw at kPendingEraseObjectOpacity.
+        const render::PendingEraseIndices pendingErase = PendingEraseFor(view.pageIndex);
+        const bool pageHasPendingErase = !pendingErase.Empty();
         const render::PageSurfaceCache* surface = nullptr;
 
-        if (zoomSessionActive_ && !liveStrokeOnPage) {
-            surface = FindSurface(view.pageIndex, view.scale, cachedDevicePixelRatio_);
-            if (surface == nullptr) {
-                // Zoom snapshot: reuse the newest raster (drawn scaled) until the
-                // session settles, instead of re-rendering the page mid-gesture.
-                surface = NewestSurface(view.pageIndex);
-            }
-            if (surface == nullptr) {
+        if (!pageHasPendingErase) {
+            if (zoomSessionActive_ && !liveStrokeOnPage) {
+                surface = FindSurface(view.pageIndex, view.scale, cachedDevicePixelRatio_);
+                if (surface == nullptr) {
+                    // Zoom snapshot: reuse the newest raster (drawn scaled) until the
+                    // session settles, instead of re-rendering the page mid-gesture.
+                    surface = NewestSurface(view.pageIndex);
+                }
+                if (surface == nullptr) {
+                    surface = &EnsureSurface(view, page);
+                }
+            } else {
                 surface = &EnsureSurface(view, page);
             }
-        } else {
-            surface = &EnsureSurface(view, page);
         }
 
         painter.save();
         painter.setClipRect(view.rect);
-        // The cached surface already has this scale * DPR resolution and carries
-        // its device pixel ratio, so blit it 1:1: drawing it into a target rect
-        // would resample the whole (up to ~8 MP) image every frame, which is what
-        // made dense-page panning and drawing crawl.  The device pixel ratio
-        // alone does not prove the raster is at this view's scale: during a zoom
-        // session FindSurface misses and the newest raster (a snapshot at the
-        // previous scale) is reused, and it must be resampled into view.rect or
-        // the page renders at the stale zoom for the whole gesture.
-        const qreal rasterDpr = surface->image.devicePixelRatio() > 0.0
-            ? surface->image.devicePixelRatio()
-            : 1.0;
-        const bool rasterMatchesView = !surface->image.isNull()
-            && std::abs(rasterDpr - cachedDevicePixelRatio_) < 0.001
-            && std::abs((surface->image.width() / rasterDpr) - view.rect.width()) < 1.0
-            && std::abs((surface->image.height() / rasterDpr) - view.rect.height()) < 1.0;
-        if (rasterMatchesView) {
-            painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-            painter.drawImage(view.rect.topLeft(), surface->image);
+        if (pageHasPendingErase) {
+            render::PageRenderParams params = RenderParamsFor(view);
+            params.pendingErase = pendingErase;
+            render::PaintPage(painter, page, view.rect.topLeft(), params);
         } else {
-            painter.drawImage(view.rect, surface->image);
+            // The cached surface already has this scale * DPR resolution and carries
+            // its device pixel ratio, so blit it 1:1: drawing it into a target rect
+            // would resample the whole (up to ~8 MP) image every frame, which is what
+            // made dense-page panning and drawing crawl.  The device pixel ratio
+            // alone does not prove the raster is at this view's scale: during a zoom
+            // session FindSurface misses and the newest raster (a snapshot at the
+            // previous scale) is reused, and it must be resampled into view.rect or
+            // the page renders at the stale zoom for the whole gesture.
+            const qreal rasterDpr = surface->image.devicePixelRatio() > 0.0
+                ? surface->image.devicePixelRatio()
+                : 1.0;
+            const bool rasterMatchesView = !surface->image.isNull()
+                && std::abs(rasterDpr - cachedDevicePixelRatio_) < 0.001
+                && std::abs((surface->image.width() / rasterDpr) - view.rect.width()) < 1.0
+                && std::abs((surface->image.height() / rasterDpr) - view.rect.height()) < 1.0;
+            if (rasterMatchesView) {
+                painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+                painter.drawImage(view.rect.topLeft(), surface->image);
+            } else {
+                painter.drawImage(view.rect, surface->image);
+            }
         }
 
         if (liveStrokeOnPage) {
@@ -608,7 +621,6 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                 }
             }
         }
-        PaintPendingErase(painter, view);
         painter.restore();
 
         // Page border, drawn on top of the page edge like the reference.
@@ -2203,25 +2215,30 @@ void CanvasWidget::PaintSelectionOverlay(QPainter& painter) {
     painter.restore();
 }
 
-void CanvasWidget::PaintPendingErase(QPainter& painter, const CanvasPageView& view) {
-    if (pendingErase_.empty()) {
-        return;
-    }
-    painter.save();
-    painter.translate(view.rect.topLeft());
+render::PendingEraseIndices CanvasWidget::PendingEraseFor(std::size_t pageIndex) const {
+    // The router's ObjectRef list becomes the per-kind index sets the renderer
+    // fades (App.cpp:5572-5628 pendingErase*Indices_).
+    render::PendingEraseIndices indices;
     for (const ObjectRef& object : pendingErase_) {
-        if (object.pageIndex != view.pageIndex || object.kind != ObjectKind::Stroke) {
+        if (object.pageIndex != pageIndex) {
             continue;
         }
-        const Document& document = controller_.DocumentRef();
-        const Page& page = document.PageAt(view.pageIndex);
-        if (object.objectIndex >= page.strokes.size()) {
-            continue;
+        switch (object.kind) {
+        case ObjectKind::Stroke:
+            indices.strokes.push_back(object.objectIndex);
+            break;
+        case ObjectKind::Image:
+            indices.images.push_back(object.objectIndex);
+            break;
+        case ObjectKind::Text:
+            indices.texts.push_back(object.objectIndex);
+            break;
+        case ObjectKind::Latex:
+            indices.latexes.push_back(object.objectIndex);
+            break;
         }
-        // 50% pending-erase feedback (App.cpp:172 kPendingEraseOpacity).
-        render::PaintStrokePreview(painter, page.strokes[object.objectIndex], RenderParamsFor(view), 0.5f);
     }
-    painter.restore();
+    return indices;
 }
 
 }  // namespace cnote::ui

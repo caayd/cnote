@@ -187,29 +187,37 @@ void PaintPage(QPainter& painter, const Page& page, const QPointF& pageOrigin, c
 
     PaintPageBackground(painter, page, params);
 
-    for (const PageImage& image : page.images) {
-        PaintImage(painter, image, params, 1.0f);
+    // Pending-erase objects paint faded (App.cpp:9519-9568); everything else
+    // keeps full opacity.
+    const auto pendingOpacity = [](const std::vector<std::size_t>& pending, std::size_t index) {
+        return std::find(pending.begin(), pending.end(), index) != pending.end()
+            ? kPendingEraseObjectOpacity
+            : 1.0f;
+    };
+
+    for (std::size_t index = 0; index < page.images.size(); ++index) {
+        PaintImage(painter, page.images[index], params, pendingOpacity(params.pendingErase.images, index));
     }
 
     for (std::size_t index = 0; index < page.texts.size(); ++index) {
         if (params.excludedTextIndex.has_value() && *params.excludedTextIndex == index) {
             continue;
         }
-        PaintText(painter, page.texts[index], page.width, scale, 1.0f);
+        PaintText(painter, page.texts[index], page.width, scale, pendingOpacity(params.pendingErase.texts, index));
     }
 
     for (std::size_t index = 0; index < page.latexes.size(); ++index) {
         if (params.excludedLatexIndex.has_value() && *params.excludedLatexIndex == index) {
             continue;
         }
-        PaintLatex(painter, page.latexes[index], scale, 1.0f);
+        PaintLatex(painter, page.latexes[index], scale, pendingOpacity(params.pendingErase.latexes, index));
     }
 
     for (std::size_t index = 0; index < page.strokes.size(); ++index) {
         if (params.excludedStrokeIndex.has_value() && *params.excludedStrokeIndex == index) {
             continue;
         }
-        PaintStrokePreview(painter, page.strokes[index], params, 1.0f);
+        PaintStrokePreview(painter, page.strokes[index], params, pendingOpacity(params.pendingErase.strokes, index));
     }
 
     painter.restore();
@@ -254,6 +262,16 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     hash = HashValue(hash, params.excludedTextIndex.value_or(static_cast<std::size_t>(-1)));
     hash = HashValue(hash, params.excludedLatexIndex.value_or(static_cast<std::size_t>(-1)));
     hash = HashValue(hash, params.excludedStrokeIndex.value_or(static_cast<std::size_t>(-1)));
+    const auto hashPending = [&hash](const std::vector<std::size_t>& pending) {
+        hash = HashValue(hash, pending.size());
+        for (const std::size_t index : pending) {
+            hash = HashValue(hash, index);
+        }
+    };
+    hashPending(params.pendingErase.images);
+    hashPending(params.pendingErase.texts);
+    hashPending(params.pendingErase.latexes);
+    hashPending(params.pendingErase.strokes);
 
     hash = HashValue(hash, page.raster.width);
     hash = HashValue(hash, page.raster.height);

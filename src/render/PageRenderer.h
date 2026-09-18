@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 #include <QImage>
 #include <QPointF>
@@ -14,6 +15,24 @@ class QPainter;
 namespace cnote::render {
 
 class PdfBackgroundProvider;
+
+// Opacity committed objects render at while the eraser drag has marked them
+// for deletion (App.cpp:172 kPendingEraseObjectOpacity).
+inline constexpr float kPendingEraseObjectOpacity = 0.5f;
+
+// Indices of committed objects marked by an in-progress erase drag; they paint
+// at kPendingEraseObjectOpacity instead of full opacity (the reference's
+// pendingErase*Indices_ sets, App.cpp:5572-5628).
+struct PendingEraseIndices {
+    std::vector<std::size_t> images;
+    std::vector<std::size_t> texts;
+    std::vector<std::size_t> latexes;
+    std::vector<std::size_t> strokes;
+
+    [[nodiscard]] bool Empty() const {
+        return images.empty() && texts.empty() && latexes.empty() && strokes.empty();
+    }
+};
 
 // Committed-object render parameters. `scale` maps page units to painter units;
 // `devicePixelRatio` is applied only when allocating a raster surface.
@@ -31,6 +50,10 @@ struct PageRenderParams {
     std::optional<std::size_t> excludedTextIndex;
     std::optional<std::size_t> excludedLatexIndex;
     std::optional<std::size_t> excludedStrokeIndex;
+    // Objects marked by an in-progress erase drag paint at
+    // kPendingEraseObjectOpacity (App.cpp:9519-9568).  Part of the surface
+    // signature, like the excluded indices.
+    PendingEraseIndices pendingErase;
 };
 
 // Draws the committed objects of one page in layer order: page/PDF background,
