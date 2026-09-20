@@ -259,7 +259,7 @@ void InteractionRouter::HandlePointerMove(const PointerSample& sample) {
         ExtendSelection(sample);
         return;
     case InteractionKind::Transform:
-        host_.UpdateTransform(sample.position);
+        host_.UpdateTransform(sample.position, sample.modifiers);
         host_.InvalidateCanvas();
         return;
     case InteractionKind::MoveSelection:

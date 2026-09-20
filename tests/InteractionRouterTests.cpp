@@ -144,7 +144,7 @@ public:
         ops.push_back("BeginTransform(target=" + std::to_string(static_cast<int>(request.target)) + ",page=" + std::to_string(request.pageIndex)
             + ",index=" + std::to_string(request.objectIndex) + ",handle=" + std::to_string(static_cast<int>(request.handle)) + ")");
     }
-    void UpdateTransform(const QPointF& logical) override { ops.push_back("UpdateTransform(" + Format(logical.x()) + "," + Format(logical.y()) + ")"); }
+    void UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers) override { ops.push_back("UpdateTransform(" + Format(logical.x()) + "," + Format(logical.y()) + ")"); }
     void CommitTransform() override { ops.push_back("CommitTransform"); }
 
     void UpdatePendingErase(const std::vector<ui::ObjectRef>& pending) override {

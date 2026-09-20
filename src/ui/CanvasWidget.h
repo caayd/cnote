@@ -162,7 +162,7 @@ public:
     void UpdateMoveSelection(const QPointF& logicalDelta) override;
     void CommitMoveSelection() override;
     void BeginTransform(const TransformRequest& request) override;
-    void UpdateTransform(const QPointF& logical) override;
+    void UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers modifiers) override;
     void CommitTransform() override;
     void UpdatePendingErase(const std::vector<ObjectRef>& pending) override;
     void CommitErase(const std::vector<ObjectRef>& pending) override;

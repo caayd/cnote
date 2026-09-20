@@ -263,7 +263,7 @@ public:
 
     // --- transforms -------------------------------------------------------
     virtual void BeginTransform(const TransformRequest& request) = 0;
-    virtual void UpdateTransform(const QPointF& logical) = 0;
+    virtual void UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers modifiers) = 0;
     virtual void CommitTransform() = 0;
 
     // --- erase ------------------------------------------------------------

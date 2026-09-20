@@ -2051,7 +2051,7 @@ void CanvasWidget::BeginTransform(const TransformRequest& request) {
     controller_.BeginPageGesture(request.pageIndex);
 }
 
-void CanvasWidget::UpdateTransform(const QPointF& logical) {
+void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers modifiers) {
     const std::optional<std::size_t> pageIndex = controller_.GesturePageIndex();
     if (!pageIndex.has_value() || !transformHandle_.has_value()) {
         return;
@@ -2071,6 +2071,7 @@ void CanvasWidget::UpdateTransform(const QPointF& logical) {
     transform.from = transformFrom_;
     transform.to = transformFrom_;
 
+    const bool shiftPressed = modifiers.testFlag(Qt::ShiftModifier);
     if (handle == TransformHandle::Rotate) {
         const Vec2 center {
             (transformFrom_.left + transformFrom_.right) * 0.5f,
@@ -2080,6 +2081,10 @@ void CanvasWidget::UpdateTransform(const QPointF& logical) {
         const float pointerAngle = std::atan2(pagePoint.y - center.y, pagePoint.x - center.x);
         const float pressAngle = std::atan2(press.y - center.y, press.x - center.x);
         transform.rotateDegrees = (pointerAngle - pressAngle) * (180.0f / kPi);
+        if (shiftPressed) {
+            // Reference App.cpp:8997-8999: Shift snaps rotation to 15 degrees.
+            transform.rotateDegrees = std::round(transform.rotateDegrees / 15.0f) * 15.0f;
+        }
     } else {
         // Resize: each dragged side follows the pointer while the opposite side
         // stays fixed, so the selection scales about the opposite edge/corner.
@@ -2118,6 +2123,60 @@ void CanvasWidget::UpdateTransform(const QPointF& logical) {
         }
         if (movesBottom && (transform.to.bottom - transform.to.top) < kMinSelectionExtent) {
             transform.to.bottom = transform.to.top + kMinSelectionExtent;
+        }
+
+        if (shiftPressed) {
+            // Reference App.cpp:9044-9095: Shift locks the aspect ratio.
+            // Corner handles scale uniformly about the opposite corner; edge
+            // handles derive the perpendicular extent from the dragged one,
+            // centered on the original frame.
+            const float initialWidth = std::max(kMinSelectionExtent,
+                transformFrom_.right - transformFrom_.left);
+            const float initialHeight = std::max(kMinSelectionExtent,
+                transformFrom_.bottom - transformFrom_.top);
+            const float aspect = initialWidth / initialHeight;
+            const bool corner = (movesLeft || movesRight) && (movesTop || movesBottom);
+            if (corner) {
+                const float widthScale = (transform.to.right - transform.to.left) / initialWidth;
+                const float heightScale = (transform.to.bottom - transform.to.top) / initialHeight;
+                const float scale = std::max(widthScale, heightScale);
+                const float newWidth = std::max(kMinSelectionExtent, initialWidth * scale);
+                const float newHeight = std::max(kMinSelectionExtent, initialHeight * scale);
+                if (movesLeft) {
+                    transform.to.left = transform.to.right - newWidth;
+                } else {
+                    transform.to.right = transform.to.left + newWidth;
+                }
+                if (movesTop) {
+                    transform.to.top = transform.to.bottom - newHeight;
+                } else {
+                    transform.to.bottom = transform.to.top + newHeight;
+                }
+            } else if (movesLeft || movesRight) {
+                const float newWidth = std::max(kMinSelectionExtent,
+                    transform.to.right - transform.to.left);
+                const float newHeight = std::max(kMinSelectionExtent, newWidth / aspect);
+                if (movesLeft) {
+                    transform.to.left = transform.to.right - newWidth;
+                } else {
+                    transform.to.right = transform.to.left + newWidth;
+                }
+                const float centerY = (transformFrom_.top + transformFrom_.bottom) * 0.5f;
+                transform.to.top = centerY - (newHeight * 0.5f);
+                transform.to.bottom = centerY + (newHeight * 0.5f);
+            } else {
+                const float newHeight = std::max(kMinSelectionExtent,
+                    transform.to.bottom - transform.to.top);
+                const float newWidth = std::max(kMinSelectionExtent, newHeight * aspect);
+                if (movesTop) {
+                    transform.to.top = transform.to.bottom - newHeight;
+                } else {
+                    transform.to.bottom = transform.to.top + newHeight;
+                }
+                const float centerX = (transformFrom_.left + transformFrom_.right) * 0.5f;
+                transform.to.left = centerX - (newWidth * 0.5f);
+                transform.to.right = centerX + (newWidth * 0.5f);
+            }
         }
     }
 
