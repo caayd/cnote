@@ -306,9 +306,9 @@ void SidebarWidget::UpdateVisibility() {
     if (visible != isVisible()) {
         setVisible(visible);
     }
-    if (visible && open_ && slideProgress_ >= 0.999) {
-        raise();
-    }
+    // Z-order is the host's call: the sidebar sits above the canvas but below
+    // the toolbar band, so it never raises itself (QtMainWindow
+    // UpdateChromeGeometry raises it before the toolbar).
 }
 
 void SidebarWidget::SetHostClientRect(const QRect& clientRect, int reservedTop) {

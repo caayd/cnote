@@ -1353,6 +1353,13 @@ void QtMainWindow::UpdateChromeGeometry() {
     const int band = qRound(cnote::appui::qt::ToolbarHeight(maximized));
     const int reserved = qRound(cnote::appui::qt::ReservedToolbarHeight(
         toolbar_ != nullptr && toolbar_->AutoHideEnabled(), maximized));
+    if (sidebar_ != nullptr) {
+        sidebar_->SetMaximized(maximized);
+        sidebar_->SetHostClientRect(rect(), reserved);
+        // The sidebar overlays the canvas but stays below the toolbar band:
+        // raise it first so the toolbar's raise keeps it on top.
+        sidebar_->raise();
+    }
     if (toolbar_ != nullptr) {
         UpdateNativeFrameThickness();
         toolbar_->SetMaximized(maximized);
@@ -1364,11 +1371,6 @@ void QtMainWindow::UpdateChromeGeometry() {
     if (contentLayout_ != nullptr && reservedTop_ != reserved) {
         reservedTop_ = reserved;
         contentLayout_->setContentsMargins(0, reserved, 0, 0);
-    }
-    if (sidebar_ != nullptr) {
-        sidebar_->SetMaximized(maximized);
-        sidebar_->SetHostClientRect(rect(), reserved);
-        sidebar_->raise();
     }
 }
 
