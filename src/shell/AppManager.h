@@ -5,6 +5,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -78,6 +79,14 @@ public:
     [[nodiscard]] static bool HasPdfExtension(const std::filesystem::path& path);
     [[nodiscard]] static bool IsAutoSaveEligible(const Document& document);
 
+    // In-process page clipboard for the sidebar's copy/cut/paste page
+    // management.  Process-global like the OS selection clipboard, so a page
+    // copied in one window pastes into another view of the same or a
+    // different document.
+    void SetClipboardPage(const Page& page) { clipboardPage_ = page; }
+    [[nodiscard]] const std::optional<Page>& ClipboardPage() const { return clipboardPage_; }
+    [[nodiscard]] bool HasClipboardPage() const { return clipboardPage_.has_value(); }
+
 private:
     struct Entry {
         QPointer<QObject> owner;
@@ -93,6 +102,7 @@ private:
     AutoSaveHandler autoSaveHandler_;
     std::vector<Entry> entries_;
     std::map<ProjectSession*, std::unique_ptr<QTimer>> timers_;
+    std::optional<Page> clipboardPage_;
 };
 
 }  // namespace cnote

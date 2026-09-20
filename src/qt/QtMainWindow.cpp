@@ -459,6 +459,26 @@ void QtMainWindow::CreateChrome() {
     });
     connect(sidebar_, &ui::SidebarWidget::AddPageRequested, this, &QtMainWindow::AddPage);
     connect(sidebar_, &ui::SidebarWidget::NewPageSettingsRequested, this, &QtMainWindow::OpenNewPageSettings);
+    connect(sidebar_, &ui::SidebarWidget::PageContextMenuRequested, this,
+        [this](std::size_t pageIndex, const QPoint& globalPosition) {
+            QMenu menu(this);
+            QAction* copy = menu.addAction(QStringLiteral("Copy Page"));
+            QAction* cut = menu.addAction(QStringLiteral("Cut Page"));
+            QAction* paste = menu.addAction(QStringLiteral("Paste Page"));
+            QAction* deletePage = menu.addAction(QStringLiteral("Delete Page"));
+            paste->setEnabled(manager_.HasClipboardPage());
+            deletePage->setEnabled(controller_.DocumentRef().PageCount() > 1U);
+            QAction* chosen = menu.exec(globalPosition);
+            if (chosen == copy) {
+                static_cast<void>(controller_.CopyPage(pageIndex));
+            } else if (chosen == cut) {
+                static_cast<void>(controller_.CutPage(pageIndex));
+            } else if (chosen == paste) {
+                static_cast<void>(controller_.PastePage(pageIndex));
+            } else if (chosen == deletePage) {
+                static_cast<void>(controller_.RemovePage(pageIndex));
+            }
+        });
     connect(sidebar_, &ui::SidebarWidget::OpenChanged, this, [this](bool open) {
         if (sidebarAction_ != nullptr) {
             sidebarAction_->setChecked(open);
@@ -1381,6 +1401,47 @@ bool QtMainWindow::eventFilter(QObject* watched, QEvent* event) {
                 break;
             default:
                 break;
+        }
+    }
+
+    // Reference SidebarOwnsKeyboardShortcuts (App.cpp:4069-4081): while the
+    // cursor is over the open pages panel, clipboard keys and Delete act on
+    // the current page instead of the canvas selection.  The canvas normally
+    // owns focus, so the claim happens on ShortcutOverride and the action on
+    // the key press itself.
+    if (watched == canvas_ && sidebar_ != nullptr && sidebar_->SidebarVisible()
+        && (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress)) {
+        auto* key = static_cast<QKeyEvent*>(event);
+        const bool ctrl = key->modifiers().testFlag(Qt::ControlModifier);
+        const bool pageKey = (ctrl && (key->key() == Qt::Key_C || key->key() == Qt::Key_X || key->key() == Qt::Key_V))
+            || key->key() == Qt::Key_Delete;
+        if (pageKey && sidebar_->rect().contains(sidebar_->mapFromGlobal(QCursor::pos()))) {
+            const std::size_t page = controller_.CurrentPageIndex();
+            if (event->type() == QEvent::ShortcutOverride) {
+                // Claim C/X/Delete unconditionally (copy/cut/delete always own
+                // the key); V only when a page is actually on the clipboard,
+                // otherwise an empty page clipboard would swallow a selection
+                // paste.
+                if (key->key() != Qt::Key_V || manager_.HasClipboardPage()) {
+                    event->accept();
+                    return true;
+                }
+            } else {
+                bool handled = false;
+                if (key->key() == Qt::Key_C) {
+                    handled = controller_.CopyPage(page);
+                } else if (key->key() == Qt::Key_X) {
+                    handled = controller_.CutPage(page);
+                } else if (key->key() == Qt::Key_V) {
+                    handled = controller_.PastePage(page);
+                } else {
+                    handled = controller_.RemovePage(page);
+                }
+                if (handled || key->key() != Qt::Key_V) {
+                    event->accept();
+                    return true;
+                }
+            }
         }
     }
 

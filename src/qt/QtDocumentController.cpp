@@ -1099,6 +1099,15 @@ std::size_t QtDocumentController::InsertPages(std::size_t index, std::size_t cou
     }
     document.SetCurrentPageIndex(insertIndex);
 
+    // Selection indices are per-page positions: every selection at or after
+    // the insertion point shifts by the inserted count.
+    if (!selection_.empty()) {
+        std::map<std::size_t, ui::PageSelection> remapped;
+        for (auto& entry : selection_) {
+            remapped[entry.first >= insertIndex ? entry.first + count : entry.first] = std::move(entry.second);
+        }
+        selection_ = std::move(remapped);
+    }
     HistoryAction action {};
     action.type = HistoryActionType::AddPages;
     action.pages = std::move(pages);
@@ -1111,6 +1120,93 @@ std::size_t QtDocumentController::InsertPages(std::size_t index, std::size_t cou
     currentPage_ = insertIndex;
     NotifySessionChanged(true);
     return insertIndex;
+}
+
+bool QtDocumentController::CopyPage(std::size_t index) {
+    if (session_ == nullptr || index >= DocumentRef().PageCount()) {
+        return false;
+    }
+    manager_.SetClipboardPage(DocumentRef().PageAt(index));
+    return true;
+}
+
+bool QtDocumentController::CutPage(std::size_t index) {
+    return CopyPage(index) && RemovePage(index);
+}
+
+bool QtDocumentController::RemovePage(std::size_t index) {
+    if (session_ == nullptr) {
+        return false;
+    }
+    Document& document = session_->document;
+    if (index >= document.PageCount() || document.PageCount() <= 1U) {
+        return false;
+    }
+
+    const Page removed = document.PageAt(index);
+    document.RemovePage(index);
+
+    // Selection indices are per-page positions: the removed page's selection
+    // dies with it and every later selection shifts down one.
+    if (!selection_.empty()) {
+        std::map<std::size_t, ui::PageSelection> remapped;
+        for (auto& entry : selection_) {
+            if (entry.first < index) {
+                remapped[entry.first] = std::move(entry.second);
+            } else if (entry.first > index) {
+                remapped[entry.first - 1U] = std::move(entry.second);
+            }
+        }
+        selection_ = std::move(remapped);
+    }
+
+    HistoryAction action {};
+    action.type = HistoryActionType::RemovePages;
+    action.pages = { removed };
+    action.index = index;
+    action.focusPageIndex = document.CurrentPageIndex();
+    session_->undoActions.push_back(std::move(action));
+    session_->redoActions.clear();
+    session_->dirty = true;
+    ++session_->revision;
+    currentPage_ = document.CurrentPageIndex();
+    emit SelectionChanged();
+    NotifySessionChanged(true);
+    return true;
+}
+
+bool QtDocumentController::PastePage(std::size_t index) {
+    if (session_ == nullptr || !manager_.HasClipboardPage()) {
+        return false;
+    }
+    Document& document = session_->document;
+    const std::size_t insertIndex = std::min(index + 1U, document.PageCount());
+
+    const Page pasted = *manager_.ClipboardPage();
+    document.InsertPage(insertIndex, pasted);
+    document.SetCurrentPageIndex(insertIndex);
+
+    // Same per-page index shift as InsertPages.
+    if (!selection_.empty()) {
+        std::map<std::size_t, ui::PageSelection> remapped;
+        for (auto& entry : selection_) {
+            remapped[entry.first >= insertIndex ? entry.first + 1U : entry.first] = std::move(entry.second);
+        }
+        selection_ = std::move(remapped);
+    }
+
+    HistoryAction action {};
+    action.type = HistoryActionType::AddPages;
+    action.pages = { pasted };
+    action.index = insertIndex;
+    action.focusPageIndex = insertIndex;
+    session_->undoActions.push_back(std::move(action));
+    session_->redoActions.clear();
+    session_->dirty = true;
+    ++session_->revision;
+    currentPage_ = insertIndex;
+    NotifySessionChanged(true);
+    return true;
 }
 
 void QtDocumentController::ApplyNewPageDraft(const ui::NewPageDraft& draft, ui::NewPageApplyScope scope) {

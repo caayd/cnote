@@ -113,6 +113,21 @@ public:
     void SetNewPageDefaults(const ui::NewPageDefaults& defaults);
     [[nodiscard]] ui::NewPageDefaults NewPageDefaults() const;
 
+    // --- page clipboard (sidebar page management) ---------------------------
+    // Copies page `index` into the process-global page clipboard
+    // (AppManager::SetClipboardPage); false when the index is out of range.
+    bool CopyPage(std::size_t index);
+    // Copy + remove as one undo step; false when the page cannot be removed
+    // (out of range or the document's last page).
+    bool CutPage(std::size_t index);
+    // Removes page `index` as one RemovePages undo step; false when out of
+    // range or it is the document's last page.
+    bool RemovePage(std::size_t index);
+    // Inserts the clipboard page after `index` (clamped to the page count),
+    // focuses the inserted page and records one AddPages undo step; false
+    // when the page clipboard is empty.
+    bool PastePage(std::size_t index);
+
     // --- selection clipboard, document side (the shell owns QClipboard) ------
     // Collects the selected objects of every page the view has a selection on,
     // with the bounds the paste centers on. False when nothing is selected.

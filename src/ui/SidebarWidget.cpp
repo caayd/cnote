@@ -585,6 +585,14 @@ void SidebarWidget::CommitPageJumpEdit() {
 }
 
 void SidebarWidget::mousePressEvent(QMouseEvent* event) {
+    if (event->button() == Qt::RightButton) {
+        if (const auto page = PageAtWidgetPosition(event->position().toPoint()); page.has_value()) {
+            emit PageActivated(*page);
+            emit PageContextMenuRequested(*page, event->globalPosition().toPoint());
+        }
+        event->accept();
+        return;
+    }
     if (event->button() != Qt::LeftButton) {
         event->ignore();
         return;

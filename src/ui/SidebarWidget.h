@@ -109,6 +109,10 @@ signals:
     void PageJumpRequested(std::size_t pageIndex);
     void AddPageRequested();
     void NewPageSettingsRequested();
+    // Right-click on a page thumbnail: the host shows the page-management
+    // menu (copy/cut/paste/delete).  The page is activated first, so the
+    // actions always target the page under the cursor.
+    void PageContextMenuRequested(std::size_t pageIndex, const QPoint& globalPosition);
     void OpenChanged(bool open);
     void SlideProgressChanged(qreal progress);
     void ScrollChanged(int scrollY);
