@@ -879,18 +879,32 @@ void QtMainWindow::PasteSelection() {
             return;
         }
         case cnote::clipboard::ClipboardKind::Image: {
-            const PageImage image = cnote::clipboard::PageImageFromQImage(content.image);
+            PageImage image = cnote::clipboard::PageImageFromQImage(content.image);
             if (image.pixelWidth <= 0 || image.pixelHeight <= 0) {
                 return;
             }
+
+            // Reference Clipboard.cpp:391-401 PasteImageFromClipboard: the
+            // pasted image keeps its on-screen pixel size (pixels / view
+            // scale), capped at 75% of the page width, aspect preserved.
+            const std::size_t pageIndex = controller_.CurrentPageIndex();
+            const Page& page = controller_.DocumentRef().PageAt(pageIndex);
+            const ui::CanvasPageView view = canvas_->CalculatePageView(pageIndex);
+            const float pageScale = std::max(0.1f, view.valid ? view.scale : 1.0f);
+            image.width = std::min(page.width * 0.75f,
+                static_cast<float>(image.pixelWidth) / pageScale);
+            image.height = image.width
+                * (static_cast<float>(image.pixelHeight)
+                    / std::max(1.0f, static_cast<float>(image.pixelWidth)));
+
             cnote::SelectionClipboardData payload;
             payload.images.push_back(image);
             payload.minX = 0.0f;
             payload.minY = 0.0f;
-            payload.maxX = static_cast<float>(image.pixelWidth);
-            payload.maxY = static_cast<float>(image.pixelHeight);
+            payload.maxX = image.width;
+            payload.maxY = image.height;
             const Vec2 target = canvas_->ScreenToPage(canvas_->rect().center(), true);
-            if (controller_.PastePayload(controller_.CurrentPageIndex(), target, payload)) {
+            if (controller_.PastePayload(pageIndex, target, payload)) {
                 canvas_->NotifyDocumentChanged();
                 UpdateChrome();
             }
