@@ -1645,7 +1645,7 @@ void ToolbarWidget::paintEvent(QPaintEvent*) {
     if (titleLayout.fileTitleRect.isValid()) {
         painter.setFont(ChromeFont(15));
         painter.setPen(hovered_ == ToolbarControl::TitleMenu ? ChromeColor(kChromeAccent) : ChromeColor(kChromeTextMuted));
-        painter.drawText(titleLayout.titleTextRect, Qt::AlignLeft | Qt::AlignVCenter, QFontMetricsF(ChromeFont(15)).elidedText(title_, Qt::ElideRight, static_cast<int>(titleLayout.titleTextRect.width())));
+        painter.drawText(titleLayout.titleTextRect, Qt::AlignLeft | Qt::AlignVCenter, QFontMetricsF(ChromeFont(15)).elidedText(title_, Qt::ElideRight, titleLayout.titleTextRect.width()));
     }
 
     if (titleLayout.fileTitleRect.isValid() && titleLayout.zoomRect.isValid()) {
