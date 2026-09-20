@@ -486,6 +486,7 @@ void QtMainWindow::CreateChrome() {
         UpdateChrome();
     });
     connect(sidebar_, &ui::SidebarWidget::ScrollChanged, this, [this](int) { UpdateChrome(); });
+    sidebar_->installEventFilter(this);
 
     RefreshShortcutBindings();
     UpdateChromeGeometry();
@@ -1405,17 +1406,20 @@ bool QtMainWindow::eventFilter(QObject* watched, QEvent* event) {
     }
 
     // Reference SidebarOwnsKeyboardShortcuts (App.cpp:4069-4081): while the
-    // cursor is over the open pages panel, clipboard keys and Delete act on
-    // the current page instead of the canvas selection.  The canvas normally
-    // owns focus, so the claim happens on ShortcutOverride and the action on
-    // the key press itself.
-    if (watched == canvas_ && sidebar_ != nullptr && sidebar_->SidebarVisible()
+    // pages panel owns the keyboard - the cursor is over it, or the sidebar
+    // widget itself has focus (it is ClickFocus) - clipboard keys and Delete
+    // act on the current page instead of the canvas selection.  The claim
+    // happens on ShortcutOverride and the action on the key press itself.
+    if ((watched == canvas_ || watched == sidebar_) && sidebar_ != nullptr && sidebar_->SidebarVisible()
+        && !sidebar_->PageJumpEditing()
         && (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress)) {
         auto* key = static_cast<QKeyEvent*>(event);
         const bool ctrl = key->modifiers().testFlag(Qt::ControlModifier);
         const bool pageKey = (ctrl && (key->key() == Qt::Key_C || key->key() == Qt::Key_X || key->key() == Qt::Key_V))
             || key->key() == Qt::Key_Delete;
-        if (pageKey && sidebar_->rect().contains(sidebar_->mapFromGlobal(QCursor::pos()))) {
+        const bool sidebarOwnsKeys = watched == sidebar_
+            || sidebar_->rect().contains(sidebar_->mapFromGlobal(QCursor::pos()));
+        if (pageKey && sidebarOwnsKeys) {
             const std::size_t page = controller_.CurrentPageIndex();
             if (event->type() == QEvent::ShortcutOverride) {
                 // Claim C/X/Delete unconditionally (copy/cut/delete always own
