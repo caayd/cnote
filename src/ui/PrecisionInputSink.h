@@ -29,8 +29,7 @@ enum class PrecisionInputRoute {
 //                           and wheel panning;
 //   ZoomAtAnchor         -> the canvas zoom-at-anchor primitive behind
 //                           ZoomByWheelSteps, applied with the gesture's
-//                           cumulative scale;
-//   SetPrecisionGestureCursor -> SetCursor(...).
+//                           cumulative scale.
 // Pointer samples, wheel policy (ctrl-zoom steps, angle/pixel scrolling) and
 // tool routing stay in ui::InteractionRouter; this slice only adds native
 // precision gestures and the duplicate-suppression decision for events Qt
@@ -45,8 +44,6 @@ public:
 
     // Gesture lifecycle.  The sink captures its own start zoom on begin.
     virtual void BeginPrecisionGesture() = 0;
-    // Cursor shape hint: true while a pan/zoom gesture owns the canvas.
-    virtual void SetPrecisionGestureCursor(bool active) = 0;
     // Multiplicative scale relative to the gesture start, anchored at the
     // screen position (cursor-anchored zoom).
     virtual void ZoomAtAnchor(qreal cumulativeScale, const QPoint& globalAnchor) = 0;

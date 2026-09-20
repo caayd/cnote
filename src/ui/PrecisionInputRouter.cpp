@@ -55,14 +55,12 @@ bool PrecisionInputRouter::AcceptGestureAt(const QPoint& globalPosition) {
     gestureIgnored_ = false;
     gestureScale_ = 1.0;
     sink_.BeginPrecisionGesture();
-    sink_.SetPrecisionGestureCursor(true);
     return true;
 }
 
 void PrecisionInputRouter::FinishGesture() {
     if (gestureAccepted_) {
         sink_.EndPrecisionGesture();
-        sink_.SetPrecisionGestureCursor(false);
     }
     gestureActive_ = false;
     gestureIgnored_ = false;

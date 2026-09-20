@@ -174,7 +174,6 @@ public:
     // ui::PrecisionInputSink -------------------------------------------------
     [[nodiscard]] PrecisionInputRoute RoutePrecisionInput(const QPoint& globalPosition) const override;
     void BeginPrecisionGesture() override;
-    void SetPrecisionGestureCursor(bool active) override;
     void ZoomAtAnchor(qreal cumulativeScale, const QPoint& globalAnchor) override;
     void PanBy(qreal deltaX, qreal deltaY) override;
     void EndPrecisionGesture() override;

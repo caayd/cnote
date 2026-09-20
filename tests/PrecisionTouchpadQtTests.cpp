@@ -35,8 +35,6 @@ struct FakeSink final : cnote::ui::PrecisionInputSink {
     cnote::ui::PrecisionInputRoute route = cnote::ui::PrecisionInputRoute::Canvas;
     int beginCount = 0;
     int endCount = 0;
-    int cursorOnCount = 0;
-    int cursorOffCount = 0;
     int zoomCount = 0;
     int panCount = 0;
     qreal lastZoomScale = 0.0;
@@ -48,13 +46,6 @@ struct FakeSink final : cnote::ui::PrecisionInputSink {
         return route;
     }
     void BeginPrecisionGesture() override { ++beginCount; }
-    void SetPrecisionGestureCursor(bool active) override {
-        if (active) {
-            ++cursorOnCount;
-        } else {
-            ++cursorOffCount;
-        }
-    }
     void ZoomAtAnchor(qreal cumulativeScale, const QPoint& globalAnchor) override {
         ++zoomCount;
         lastZoomScale = cumulativeScale;
@@ -138,7 +129,7 @@ void InstallLifecycle() {
         router.SetNativeAdapterAvailable(true);
 
         touchpad.ApplyTouchpadSample(MakeSample(cnote::ui::TouchpadGestureSample::Phase::Begin));
-        Check(sink.beginCount == 1 && sink.cursorOnCount == 1, "touchpad begin reaches the sink");
+        Check(sink.beginCount == 1, "touchpad begin reaches the sink");
 
         cnote::ui::TouchpadGestureSample update = MakeSample(cnote::ui::TouchpadGestureSample::Phase::Update, QPoint(420, 260));
         update.cumulativeScale = 1.5f;
@@ -154,7 +145,7 @@ void InstallLifecycle() {
         cnote::ui::TouchpadGestureSample end = MakeSample(cnote::ui::TouchpadGestureSample::Phase::End, QPoint(420, 260));
         end.inertiaActive = false;
         touchpad.ApplyTouchpadSample(end);
-        Check(sink.endCount == 1 && sink.cursorOffCount == 1, "touchpad end reaches the sink");
+        Check(sink.endCount == 1, "touchpad end reaches the sink");
         Check(!touchpad.InertiaTimerRunning(), "inertia stop stops the timer");
 
         // Sidebar exclusion uses the same route seam as the portable path.

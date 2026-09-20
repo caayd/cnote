@@ -45,7 +45,6 @@ struct FakeSink final : cnote::ui::PrecisionInputSink {
         return route;
     }
     void BeginPrecisionGesture() override { calls.push_back({ "begin" }); }
-    void SetPrecisionGestureCursor(bool active) override { calls.push_back({ active ? "cursor-on" : "cursor-off" }); }
     void ZoomAtAnchor(qreal cumulativeScale, const QPoint& globalAnchor) override {
         calls.push_back({ "zoom", cumulativeScale, 0.0, globalAnchor });
     }
@@ -113,7 +112,7 @@ void RoutingExcludesSidebar() {
     // accepted, so a gesture that moves onto the canvas is picked up.
     sink.route = cnote::ui::PrecisionInputRoute::Canvas;
     Check(router.HandleNativeGestureZoom(0.5, QPoint(600, 400)), "gesture accepted once it reaches the canvas");
-    Check(sink.Count("begin") == 1U && sink.Count("cursor-on") == 1U, "accepted gesture begins on the canvas");
+    Check(sink.Count("begin") == 1U, "accepted gesture begins on the canvas");
     Check(sink.Count("zoom") == 1U, "accepted gesture applies the pinch");
     Check(router.HandleNativeGestureEnd(), "accepted gesture ends");
 
@@ -171,7 +170,7 @@ void ConsumeAndSuppressDuplicates() {
     router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::Cancel));
     Check(router.InertiaActive() == false, "cancel stops inertia");
     Check(!router.ShouldDropWheelDuplicate(), "cancel clears duplicate suppression");
-    Check(sink.Count("end") == 1U && sink.Count("cursor-off") == 1U, "cancel finishes the sink gesture once");
+    Check(sink.Count("end") == 1U, "cancel finishes the sink gesture once");
     Check(!router.GestureActive(), "cancel ends the gesture");
 
     // Inertia ending with no live gesture clears suppression too, so the
@@ -237,8 +236,8 @@ void ThresholdsAndAnchoring() {
     router.SetNativeAdapterAvailable(true);
 
     static_cast<void>(router.HandleNativeGestureBegin(QPoint(100, 200)));
-    Check(sink.calls.size() == 2U && sink.calls[0].kind == "begin" && sink.calls[1].kind == "cursor-on",
-        "begin reports the canvas gesture and the cursor hint");
+    Check(sink.calls.size() == 1U && sink.calls[0].kind == "begin",
+        "begin reports the canvas gesture without a cursor hint");
 
     // Below the legacy epsilon nothing is applied.
     static_cast<void>(router.HandleNativeGestureZoom(cnote::ui::PrecisionInputRouter::kScaleEpsilon / 2.0, QPoint(100, 200)));

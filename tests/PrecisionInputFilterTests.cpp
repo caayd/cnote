@@ -52,8 +52,6 @@ public:
 
     int beginCount = 0;
     int endCount = 0;
-    int cursorOnCount = 0;
-    int cursorOffCount = 0;
     int zoomCount = 0;
     int panCount = 0;
     qreal lastZoomScale = 0.0;
@@ -66,13 +64,6 @@ public:
         return route;
     }
     void BeginPrecisionGesture() override { ++beginCount; }
-    void SetPrecisionGestureCursor(bool active) override {
-        if (active) {
-            ++cursorOnCount;
-        } else {
-            ++cursorOffCount;
-        }
-    }
     void ZoomAtAnchor(qreal cumulativeScale, const QPoint& globalAnchor) override {
         ++zoomCount;
         lastZoomScale = cumulativeScale;
@@ -193,7 +184,7 @@ void NativePinchAndPan() {
     canvas.installEventFilter(&filter);
 
     SendNativeGesture(canvas, Qt::BeginNativeGesture);
-    Check(canvas.beginCount == 1 && canvas.cursorOnCount == 1, "native gesture begins on the canvas");
+    Check(canvas.beginCount == 1, "native gesture begins on the canvas");
     Check(canvas.nativeGestureEvents == 0, "the consumed begin gesture never reaches the widget");
 
     SendNativeGesture(canvas, Qt::ZoomNativeGesture, QPointF(), 0.5);
@@ -204,7 +195,7 @@ void NativePinchAndPan() {
     Check(canvas.panCount == 1 && canvas.lastPanDelta == QPointF(-8.0, 5.0), "native pan applies the OS delta once");
 
     SendNativeGesture(canvas, Qt::EndNativeGesture);
-    Check(canvas.endCount == 1 && canvas.cursorOffCount == 1, "native gesture ends and releases the cursor");
+    Check(canvas.endCount == 1, "native gesture ends on the canvas");
     Check(canvas.nativeGestureEvents == 0, "begin/zoom/pan/end are all consumed; nothing reaches the widget");
 
     // Rotate/SmartZoom are not ours: the widget still receives them.

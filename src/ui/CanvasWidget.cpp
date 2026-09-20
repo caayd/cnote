@@ -2189,11 +2189,6 @@ void CanvasWidget::BeginPrecisionGesture() {
     precisionStartZoom_ = zoom_;
 }
 
-void CanvasWidget::SetPrecisionGestureCursor(bool active) {
-    // The gesture's closed hand replaces whatever the active tool shows; ending
-    // it must restore that tool's cursor (the same rule as EndPan).
-    SetCursor(active ? CursorKind::ClosedHand : InteractionRouter::CursorForTool(router_->ActiveTool()));
-}
 
 void CanvasWidget::ZoomAtAnchor(qreal cumulativeScale, const QPoint& globalAnchor) {
     const QPointF logical = mapFromGlobal(globalAnchor);
@@ -2205,7 +2200,6 @@ void CanvasWidget::PanBy(qreal deltaX, qreal deltaY) {
 }
 
 void CanvasWidget::EndPrecisionGesture() {
-    SetCursor(InteractionRouter::CursorForTool(router_->ActiveTool()));
 }
 
 // --- smooth scroll, selection helpers and transient painting ----------------
