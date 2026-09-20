@@ -695,8 +695,30 @@ void InteractionRouter::EndSelection() {
         return;
     }
     const bool lasso = !selectionBoxOverride_ && selectionMode_ == SelectionMode::Lasso;
-    const bool click = SquaredDistance(selectionAnchor_, selectionCurrent_)
+    bool click = SquaredDistance(selectionAnchor_, selectionCurrent_)
         <= (kSelectionClickRadius * kSelectionClickRadius);
+    if (lasso) {
+        // Selection.cpp:1269: a lasso is a click only while its whole path stays
+        // inside the click radius.  The anchor-to-release distance alone reads a
+        // closed loop that travels away and returns as a click, and a click
+        // commits a rectangle around the anchor instead of the polygon.
+        click = true;
+        for (const QPointF& point : selectionLassoPoints_) {
+            if (SquaredDistance(selectionAnchor_, point) > (kSelectionClickRadius * kSelectionClickRadius)) {
+                click = false;
+                break;
+            }
+        }
+        // The release can sit up to 6 px past the last sampled point
+        // (Selection.cpp:1252), so keep it in the polygon.  Publishing the
+        // overlay before the commit (the EndErase ordering) hands the appended
+        // point to the canvas, which builds the polygon from its overlay copy.
+        if (!selectionLassoPoints_.empty()
+            && SquaredDistance(selectionCurrent_, selectionLassoPoints_.back()) > 1.0f) {
+            selectionLassoPoints_.push_back(selectionCurrent_);
+            host_.UpdateSelectionOverlay(selectionAnchor_, selectionCurrent_, true, selectionLassoPoints_);
+        }
+    }
     host_.CommitSelection(selectionAnchor_, selectionCurrent_, lasso, selectionBoxOverride_, click);
     selectionLassoPoints_.clear();
     selectionBoxOverride_ = false;

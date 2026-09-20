@@ -593,6 +593,41 @@ void TestSelectionLassoAccumulation() {
         "the lasso commit reports the effective mode\n" + host.Dump());
 }
 
+// Selection.cpp:1269: the click radius is measured against the whole lasso path,
+// so a loop that travels away and returns commits as a polygon even though its
+// release lands back near the anchor.
+void TestSelectionLassoClickVersusLoop() {
+    {
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Select);
+        router.SetSelectionMode(ui::SelectionMode::Lasso);
+        router.HandlePointerPress(Press(100.0, 100.0));
+        router.HandlePointerMove(Move(160.0, 100.0));
+        router.HandlePointerMove(Move(160.0, 160.0));
+        // The router tracks the release position through the pointer moves.
+        router.HandlePointerMove(Move(102.0, 102.0));
+        router.HandlePointerRelease(Release(102.0, 102.0));
+        Check(host.HasOp("CommitSelection(anchor=100.000,100.000,current=102.000,102.000,lasso=1,boxOverride=0,click=0)"),
+            "a lasso loop that returns near its anchor is not a click\n" + host.Dump());
+    }
+    {
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Select);
+        router.SetSelectionMode(ui::SelectionMode::Lasso);
+        router.HandlePointerPress(Press(100.0, 100.0));
+        router.HandlePointerMove(Move(104.0, 103.0));
+        router.HandlePointerRelease(Release(104.0, 103.0));
+        Check(host.HasOp("CommitSelection(anchor=100.000,100.000,current=104.000,103.000,lasso=1,boxOverride=0,click=1)"),
+            "a lasso tap inside the click radius is still a click\n" + host.Dump());
+        // The 5-px move is under the 6-px sampling spacing, so the release point
+        // only reaches the polygon through the final append.
+        Check(host.HasOp("UpdateSelectionOverlay(lasso=1,points=2)"),
+            "the release point joins the lasso polygon\n" + host.Dump());
+    }
+}
+
 // MessageLoop.cpp:213-236 precedence: PDF text beats the move path; an existing
 // selection interception wins over starting a new selection.
 void TestSelectionPrecedence() {
@@ -898,6 +933,7 @@ int main() {
     TestErasePendingSingleCommit();
     TestSelectionClickVersusMarquee();
     TestSelectionLassoAccumulation();
+    TestSelectionLassoClickVersusLoop();
     TestSelectionPrecedence();
     TestTextClickVersusDrag();
     TestFinishInteractionIdempotent();
