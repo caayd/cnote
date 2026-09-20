@@ -398,7 +398,9 @@ private:
     friend class ToolbarWidget;
 
     void UpdateFromPointer(qreal localX) {
-        const QRectF track = qt::ToolbarBrushTrackRect(layout_.sliderRect);
+        // localX is popup-local; the layout rects are host coordinates, so the
+        // track is translated like paintEvent does before comparing.
+        const QRectF track = qt::ToolbarBrushTrackRect(layout_.sliderRect).translated(-QPointF(bounds_.topLeft()));
         if (track.right() <= track.left()) {
             return;
         }

@@ -227,6 +227,53 @@ void PopupTracksLargerBrushPreview() {
     Check(got.bottom() < centre.y(), "large brush: popup still hangs above the cursor");
     harness.ToggleAt(centre);
 }
+// The popup's slider maps pointer x to brush size in popup-local coordinates;
+// the layout rects are host coordinates, so the track must be translated by
+// the popup origin before comparing.  A regression made UpdateFromPointer use
+// the untranslated track, clamping every drag to the minimum size.
+void SliderDragTracksPointer() {
+    Harness harness(QSize(1000, 700));
+    const QRectF canvas = harness.CanvasRect();
+    harness.ToggleAt(canvas.center());
+    Check(harness.toolbar->QuickSizePopupVisible(), "slider drag: popup opens");
+
+    QWidget* popup = harness.window->findChild<QWidget*>(QStringLiteral("cnoteQuickSizePopup"));
+    Check(popup != nullptr, "slider drag: popup widget exists");
+    if (popup == nullptr) {
+        return;
+    }
+
+    const float brushSize = harness.toolbar->Settings().drawBrushSize;
+    const lq::QuickSizePopupLayout layout = lq::BuildQuickSizePopupLayout(
+        canvas, canvas.center(), ExpectedPreviewExtent(brushSize, harness.toolbar->PageScale()));
+    const QRectF track = lq::ToolbarBrushTrackRect(layout.sliderRect).translated(-QPointF(popup->geometry().topLeft()));
+    Check(track.isValid() && popup->rect().contains(track.toRect()), "slider drag: track is inside the popup");
+
+    const auto dragTo = [&](qreal fraction) {
+        const QPoint point(
+            static_cast<int>(track.left() + ((track.right() - track.left() - 1.0) * fraction)),
+            static_cast<int>(track.center().y()));
+        QTest::mousePress(popup, Qt::LeftButton, Qt::NoModifier, point);
+        QTest::mouseMove(popup, point);
+        QApplication::processEvents();
+    };
+
+    dragTo(1.0);
+    const float atRight = harness.toolbar->QuickSizeValue();
+    Check(atRight > harness.toolbar->Settings().quickSizeSliderMax * 0.9f,
+        "slider drag: the right edge reaches the slider max, not the minimum");
+
+    dragTo(0.5);
+    const float atMiddle = harness.toolbar->QuickSizeValue();
+    Check(atMiddle < atRight, "slider drag: moving left lowers the size");
+    Check(atMiddle > 1.0f, "slider drag: the middle is above the minimum");
+
+    QTest::mouseRelease(popup, Qt::LeftButton, Qt::NoModifier,
+        QPoint(static_cast<int>(track.center().x()), static_cast<int>(track.center().y())));
+    Check(!harness.toolbar->QuickSizeSliderDragging(), "slider drag: release ends the drag");
+    harness.ToggleAt(canvas.center());
+}
+
 
 std::filesystem::path MakeTempDir(const std::string& name) {
     std::error_code error;
@@ -263,6 +310,7 @@ int main(int argc, char** argv) {
     PopupFollowsCursor(QSize(420, 500), "compact");
     PopupTracksLargerBrushPreview();
     FallbackAnchorScalesWithDpr();
+    SliderDragTracksPointer();
 
     if (gFailures != 0) {
         std::printf("%d quick-popup placement check(s) failed\n", gFailures);
