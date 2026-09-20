@@ -31,7 +31,11 @@ sptr<Box> MathAtom::createBox(Environment& env) {
   if (_style > style) {
     e.setStyle(_style);
   }
-  auto box = _base->createBox(e);
+  // An empty math group ("$", "$ $", a whitespace-only \[...\]) parses to a
+  // MathAtom with no base; box it as empty instead of dereferencing null,
+  // the same substitution TeXRenderBuilder::build makes for a null root.
+  const sptr<Atom> base = _base == nullptr ? sptrOf<EmptyAtom>() : _base;
+  auto box = base->createBox(e);
   e.setStyle(style);
   return box;
 }

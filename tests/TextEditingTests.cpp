@@ -13,6 +13,8 @@
 #include <QTextDocument>
 
 #include "Document.h"
+#include "Unicode.h"
+#include "latex/LatexEngine.h"
 #include "text/TextEditingQt.h"
 #include "text/TextLayoutQt.h"
 
@@ -153,6 +155,23 @@ int main(int argc, char** argv) {
         "Down moves the suggestion selection");
     Check(cnote::text::LatexSuggestionActionForKey(Qt::Key_Escape) == cnote::text::LatexSuggestionKeyAction::Dismiss,
         "Escape dismisses the suggestion");
+
+    // --- LaTeX engine: empty math groups must not crash ---------------------
+    // MicroTeX's MathAtom dereferenced a null base for empty math groups, so
+    // the live preview crashed the whole app on "$", whitespace-only source
+    // or "$ $" mid-typing.  These must all parse to a (possibly empty)
+    // formula instead of aborting.
+    Check(cnote::latex::Initialize(std::filesystem::path(CNOTE_LATEX_RES_ROOT)),
+        "latex engine initializes for the parse checks");
+    if (cnote::latex::IsInitialized()) {
+        for (const char16_t* source : { u"$", u" ", u"$ $", u"\\[$\\]", u"  $  " }) {
+            Check(cnote::latex::Parse(std::u16string_view(source), 28.0f, true) != nullptr,
+                std::string("empty math group parses without crashing: ") + cnote::Utf16ToUtf8(source));
+        }
+        Check(cnote::latex::Parse(u"\\frac{1}{2}", 28.0f, true) != nullptr,
+            "a real formula still parses");
+        cnote::latex::Shutdown();
+    }
 
     std::printf(g_failures == 0 ? "ALL TEXT EDITING CHECKS PASSED\n" : "%d TEXT EDITING CHECK(S) FAILED\n", g_failures);
     return g_failures == 0 ? 0 : 1;
