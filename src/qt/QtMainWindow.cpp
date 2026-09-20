@@ -228,11 +228,10 @@ void QtMainWindow::CreateChrome() {
     saveAsAction->setShortcut(QKeySequence::SaveAs);
     connect(saveAsAction, &QAction::triggered, this, [this]() { SaveAs(); });
 
+    // Whether the project embeds in the export is the settings toggle
+    // (embed_project_in_exported_pdfs), read at export time.
     exportAction_ = new QAction(QStringLiteral("Export PDF"), this);
-    connect(exportAction_, &QAction::triggered, this, [this]() { ExportPdf(true); });
-
-    exportFlatAction_ = new QAction(QStringLiteral("Export PDF (no project)"), this);
-    connect(exportFlatAction_, &QAction::triggered, this, [this]() { ExportPdf(false); });
+    connect(exportAction_, &QAction::triggered, this, [this]() { ExportPdf(settings_.embedProjectInExportedPdfs); });
 
     undoAction_ = new QAction(QStringLiteral("Undo"), this);
     connect(undoAction_, &QAction::triggered, this, &QtMainWindow::Undo);
@@ -317,7 +316,7 @@ void QtMainWindow::CreateChrome() {
     connect(nextPageAction_, &QAction::triggered, this, &QtMainWindow::NextPage);
 
     std::vector<QAction*> actions {
-        newAction_, openAction_, saveAction_, saveAsAction, exportAction_, exportFlatAction_,
+        newAction_, openAction_, saveAction_, saveAsAction, exportAction_,
         undoAction_, redoAction_, copyAction_, cutAction_, pasteAction_,
         addTextAction_, addLatexAction_, addPageAction_, newPageSettingsAction_,
         settingsAction_, sidebarAction_, quickSizeAction_, wheelAction_,
@@ -329,8 +328,9 @@ void QtMainWindow::CreateChrome() {
         addAction(action);
     }
 
-    // Title menu: the reference caption menu (New/Open/Save/Export/Page/Settings
-    // plus the recent documents).
+    // Title menu: project/file management only.  Tool selection, editing and
+    // zoom commands stay bound to their shortcuts (the actions are still
+    // registered on the window above) but no longer appear here.
     titleMenu_ = new QMenu(this);
     titleMenu_->addAction(newAction_);
     titleMenu_->addAction(openAction_);
@@ -340,25 +340,9 @@ void QtMainWindow::CreateChrome() {
     titleMenu_->addAction(saveAction_);
     titleMenu_->addAction(saveAsAction);
     titleMenu_->addAction(exportAction_);
-    titleMenu_->addAction(exportFlatAction_);
-    titleMenu_->addSeparator();
-    titleMenu_->addAction(addPageAction_);
-    titleMenu_->addAction(newPageSettingsAction_);
-    titleMenu_->addSeparator();
-    titleMenu_->addAction(undoAction_);
-    titleMenu_->addAction(redoAction_);
-    titleMenu_->addAction(copyAction_);
-    titleMenu_->addAction(cutAction_);
-    titleMenu_->addAction(pasteAction_);
-    titleMenu_->addSeparator();
-    titleMenu_->addAction(fitAction);
-    titleMenu_->addAction(zoomInAction);
-    titleMenu_->addAction(zoomOutAction);
-    titleMenu_->addAction(sidebarAction_);
-    titleMenu_->addAction(quickSizeAction_);
-    titleMenu_->addAction(wheelAction_);
     titleMenu_->addSeparator();
     titleMenu_->addAction(settingsAction_);
+    titleMenu_->addSeparator();
     titleMenu_->addAction(quitAction);
     RefreshRecentMenu();
 

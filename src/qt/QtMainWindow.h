@@ -181,7 +181,6 @@ private:
     int reservedTop_ = -1;
     QAction* saveAction_ = nullptr;
     QAction* exportAction_ = nullptr;
-    QAction* exportFlatAction_ = nullptr;
     QAction* newAction_ = nullptr;
     QAction* openAction_ = nullptr;
     QAction* resetViewAction_ = nullptr;
