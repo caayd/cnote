@@ -119,7 +119,7 @@ public:
     [[nodiscard]] bool BuildSelectionPayload(cnote::SelectionClipboardData& data) const;
     // Removes the selected objects as one undo step; false when nothing was
     // selected.
-    bool RemoveSelection();
+    bool RemoveSelection() override;
     // Inserts `data` into `pageIndex` with the payload's bounds centered on
     // `target` (clamped to stay inside the page), selects the pasted objects and
     // records one undo step.

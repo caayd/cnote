@@ -1215,6 +1215,14 @@ void CanvasWidget::keyPressEvent(QKeyEvent* event) {
         event->accept();
         return;
     }
+    if (event->key() == Qt::Key_Delete) {
+        // Deleting the selection is a document mutation, so it goes through the
+        // controller like the cut path (QtMainWindow::CutSelection).
+        if (controller_.RemoveSelection()) {
+            event->accept();
+            return;
+        }
+    }
     InteractionModifiers modifiers = router_->Modifiers();
     if (event->key() == Qt::Key_A) {
         modifiers.straightLine = true;

@@ -114,6 +114,9 @@ public:
     virtual void ClearSelection() = 0;
     virtual void AddObjectToSelection(const ObjectRef& object) = 0;
     virtual void SelectObjects(std::size_t pageIndex, PageSelection selection) = 0;
+    // Removes every selected object as one undo step and clears the selection
+    // (the Delete key path); false when nothing was selected.
+    virtual bool RemoveSelection() = 0;
     virtual void SetCurrentPageIndex(std::size_t index) = 0;
 
     // One transaction per gesture: snapshot on begin, one ReplacePages action on
