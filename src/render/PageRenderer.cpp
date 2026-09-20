@@ -140,6 +140,9 @@ void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRende
     painter.setPen(pen);
     painter.setBrush(Qt::NoBrush);
     if (points.size() == 1U) {
+        // Fill only: leaving the pen active would stroke the ellipse outline
+        // with the full pen width and double the dot's diameter.
+        painter.setPen(Qt::NoPen);
         painter.setBrush(color);
         const qreal radius = static_cast<qreal>(penWidth * 0.5f);
         painter.drawEllipse(

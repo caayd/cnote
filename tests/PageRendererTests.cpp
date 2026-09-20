@@ -206,6 +206,46 @@ int main(int argc, char** argv) {
             && text.styleSpans.size() == 1U && text.styleSpans.front().start == 0U && text.styleSpans.front().length == 3U,
         "model geometry and text are unchanged after rendering");
 
+    // A single-point stroke paints a filled dot whose diameter is the pen
+    // width; a regression stroked the dot's outline on top of the fill and
+    // doubled it.  Compare the dot's vertical extent against a two-point
+    // stroke of the same width.
+    {
+        cnote::Page dotPage;
+        dotPage.width = 300.0f;
+        dotPage.height = 120.0f;
+        cnote::Stroke dot;
+        dot.style.width = 10.0f;
+        dot.style.color = 0xFF000000U;
+        dot.smoothing = 0.0f;
+        dot.points = { { 60.0f, 60.0f } };
+        cnote::Stroke line = dot;
+        line.points = { { 120.0f, 60.0f }, { 240.0f, 60.0f } };
+        dotPage.strokes = { dot, line };
+
+        cnote::render::PageRenderParams dotParams;
+        dotParams.scale = 2.0f;
+        const QImage dotSurface = cnote::render::RenderPageSurface(dotPage, dotParams);
+        const auto extentAt = [&dotSurface](int x) {
+            int top = -1;
+            int bottom = -1;
+            for (int y = 0; y < dotSurface.height(); ++y) {
+                if (qGray(dotSurface.pixel(x, y)) < 128) {
+                    if (top < 0) {
+                        top = y;
+                    }
+                    bottom = y;
+                }
+            }
+            return bottom - top + 1;
+        };
+        const int dotExtent = extentAt(120);
+        const int lineExtent = extentAt(360);
+        Check(dotExtent > 0 && std::abs(dotExtent - lineExtent) <= 2,
+            "single-point dot matches stroke thickness (dot=" + std::to_string(dotExtent)
+                + " line=" + std::to_string(lineExtent) + ")");
+    }
+
     std::printf("surface sha256: %s\n", firstHash.c_str());
     cnote::latex::Shutdown();
     std::printf(g_failures == 0 ? "ALL PAGE RENDERER CHECKS PASSED\n" : "%d PAGE RENDERER CHECK(S) FAILED\n", g_failures);
