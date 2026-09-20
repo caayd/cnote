@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QPoint>
+#include <QWindow>
 
 namespace cnote::ui {
 
@@ -9,6 +10,39 @@ namespace {
 
 // Reference front end used a 15 ms Win32 timer for native inertia frames.
 constexpr int kInertiaTimerIntervalMs = 15;
+
+// The native adapter reports physical screen pixels (POINTER_INFO
+// ptPixelLocation and INTERACTION_CONTEXT_MEASUREMENT_UNITS_SCREEN), while
+// the router and the canvas sink work in Qt device-independent pixels.  On a
+// DPR != 1 display an unconverted anchor misses the canvas route check and
+// unconverted translations pan DPR-times too far, so every point crosses the
+// boundary through the window's device pixel ratio.
+qreal WindowDevicePixelRatio(HWND window) {
+    if (window == nullptr) {
+        return 1.0;
+    }
+    QWindow* handle = QWindow::fromWinId(reinterpret_cast<WId>(window));
+    return handle != nullptr ? handle->devicePixelRatio() : 1.0;
+}
+
+// Physical screen point -> Qt logical global point.  Mapping through the
+// window's client area keeps the conversion correct on multi-monitor setups
+// where a simple physical/dpr division would misplace secondary screens.
+QPoint LogicalGlobalFromPhysicalScreen(HWND window, const QPoint& physical) {
+    if (window == nullptr) {
+        return physical;
+    }
+    POINT client = { physical.x(), physical.y() };
+    if (ScreenToClient(window, &client) == FALSE) {
+        return physical;
+    }
+    QWindow* handle = QWindow::fromWinId(reinterpret_cast<WId>(window));
+    if (handle == nullptr) {
+        return physical;
+    }
+    const qreal dpr = handle->devicePixelRatio();
+    return handle->mapToGlobal(QPointF(client.x / dpr, client.y / dpr)).toPoint();
+}
 
 }  // namespace
 
@@ -136,10 +170,12 @@ void PrecisionTouchpadQt::HandleNativeGesture(const PrecisionTouchpadGesture& ge
         sample.phase = TouchpadGestureSample::Phase::Update;
         break;
     }
-    sample.screenAnchor = QPoint(gesture.screenAnchor.x, gesture.screenAnchor.y);
+    const qreal dpr = WindowDevicePixelRatio(window_);
+    sample.screenAnchor = LogicalGlobalFromPhysicalScreen(
+        window_, QPoint(gesture.screenAnchor.x, gesture.screenAnchor.y));
     sample.cumulativeScale = gesture.cumulativeScale;
-    sample.translationX = gesture.translationX;
-    sample.translationY = gesture.translationY;
+    sample.translationX = static_cast<float>(gesture.translationX / dpr);
+    sample.translationY = static_cast<float>(gesture.translationY / dpr);
     sample.inertiaActive = gesture.inertiaActive;
 
     ApplyTouchpadSample(sample);
@@ -176,7 +212,11 @@ bool PrecisionTouchpadQt::RouteThunk(void* clientData, POINT clientCursor) {
     if (ClientToScreen(self->window_, &screenPoint) == FALSE) {
         return false;
     }
-    return self->router_.RoutesToCanvas(QPoint(screenPoint.x, screenPoint.y));
+    // The adapter reports physical pixels; the router routes in Qt logical
+    // global coordinates.
+    const QPoint logical = LogicalGlobalFromPhysicalScreen(
+        self->window_, QPoint(screenPoint.x, screenPoint.y));
+    return self->router_.RoutesToCanvas(logical);
 }
 
 }  // namespace cnote::ui

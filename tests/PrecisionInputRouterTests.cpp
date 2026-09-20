@@ -9,6 +9,7 @@
 #include <QPoint>
 #include <QPointF>
 #include <QString>
+#include <QThread>
 
 #include <cmath>
 #include <cstdio>
@@ -154,6 +155,14 @@ void ConsumeAndSuppressDuplicates() {
     Check(sink.Count("pan") == 0U && sink.Count("zoom") == 0U && sink.Count("begin") == 0U && sink.Count("end") == 0U,
         "no duplicate pan, zoom or gesture lifecycle reaches the canvas");
 
+    // A native frame consumed after the gesture ended (the trailing
+    // POINTERUP) re-arms suppression only briefly: it must expire instead of
+    // dropping real wheel events until the next gesture happens to clear it.
+    router.NoteNativeFrameConsumed();
+    Check(router.ShouldDropWheelDuplicate(), "a trailing consumed frame suppresses immediate duplicates");
+    QThread::msleep(static_cast<unsigned long>(cnote::ui::PrecisionInputRouter::kDuplicateSuppressionWindowMs) + 50UL);
+    Check(!router.ShouldDropWheelDuplicate(), "stale suppression expires after the duplicate window");
+
     // Cancel clears suppression and inertia too.
     sink.calls.clear();
     static_cast<void>(router.HandleNativeGestureBegin(QPoint(20, 20)));
@@ -164,6 +173,14 @@ void ConsumeAndSuppressDuplicates() {
     Check(!router.ShouldDropWheelDuplicate(), "cancel clears duplicate suppression");
     Check(sink.Count("end") == 1U && sink.Count("cursor-off") == 1U, "cancel finishes the sink gesture once");
     Check(!router.GestureActive(), "cancel ends the gesture");
+
+    // Inertia ending with no live gesture clears suppression too, so the
+    // first real wheel event after a flick is never dropped.
+    router.NoteNativeFrameConsumed();
+    router.SetInertiaActive(true);
+    Check(router.ShouldDropWheelDuplicate(), "inertia frames keep suppressing duplicates");
+    router.SetInertiaActive(false);
+    Check(!router.ShouldDropWheelDuplicate(), "inertia end clears suppression");
 }
 
 // 4. Inertia start/stop and inertia panning after the manipulation ends.

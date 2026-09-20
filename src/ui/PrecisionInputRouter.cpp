@@ -25,11 +25,22 @@ void PrecisionInputRouter::SetNativeAdapterAvailable(bool available) {
 void PrecisionInputRouter::NoteNativeFrameConsumed() {
     if (nativeAvailable_) {
         suppressDuplicates_ = true;
+        lastConsumedFrame_.start();
     }
 }
 
+bool PrecisionInputRouter::SuppressionFresh() const {
+    return suppressDuplicates_
+        && lastConsumedFrame_.isValid()
+        && lastConsumedFrame_.elapsed() <= kDuplicateSuppressionWindowMs;
+}
+
 bool PrecisionInputRouter::ShouldDropWheelDuplicate() const {
-    return nativeAvailable_ && suppressDuplicates_;
+    return nativeAvailable_ && SuppressionFresh();
+}
+
+bool PrecisionInputRouter::NativeGestureIsDuplicate() const {
+    return nativeAvailable_ && SuppressionFresh();
 }
 
 bool PrecisionInputRouter::AcceptGestureAt(const QPoint& globalPosition) {
@@ -236,6 +247,11 @@ bool PrecisionInputRouter::HandleTouchEnd() {
 
 void PrecisionInputRouter::SetInertiaActive(bool active) {
     inertiaActive_ = active;
+    if (!active && !gestureActive_) {
+        // Inertia ended with no live gesture: Qt's own events are authoritative
+        // again, so stale suppression must not outlive it.
+        suppressDuplicates_ = false;
+    }
 }
 
 bool PrecisionInputRouter::RoutesToCanvas(const QPoint& globalPosition) const {

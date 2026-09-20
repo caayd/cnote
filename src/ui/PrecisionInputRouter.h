@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QElapsedTimer>
 #include <QList>
 #include <QPoint>
 #include <QPointF>
@@ -58,11 +59,16 @@ public:
     // instead of being applied a second time: the duplicate wheel
     // (ShouldDropWheelDuplicate) and the duplicate QNativeGestureEvent
     // pan/zoom/begin/end, which the HandleNativeGesture* entry points consume
-    // without applying while this flag is set.  Suppression lasts until the
-    // gesture ends or is cancelled.
+    // without applying while suppression is fresh.  Suppression is armed by a
+    // consumed frame, cleared when the gesture ends, and expires
+    // kDuplicateSuppressionWindow after the last consumed frame, so a frame
+    // consumed after the gesture ended (the trailing POINTERUP) cannot leave
+    // real wheel events dropped forever.
     void NoteNativeFrameConsumed();
     [[nodiscard]] bool ShouldDropWheelDuplicate() const;
     [[nodiscard]] bool SuppressingDuplicates() const { return suppressDuplicates_; }
+    // How long a consumed native frame keeps suppressing Qt duplicates.
+    static constexpr double kDuplicateSuppressionWindowMs = 200.0;
 
     // --- Windows precision-touchpad frames ---------------------------------
     void HandleTouchpadSample(const TouchpadGestureSample& sample);
@@ -102,9 +108,10 @@ private:
     // says otherwise the gesture stays ignored but tracked, so a later frame can
     // still be accepted exactly like the legacy WM_POINTER behaviour.
     bool AcceptGestureAt(const QPoint& globalPosition);
-    // True while the adapter is consuming frames for the current gesture: a Qt
-    // native gesture arriving now is that gesture's duplicate.
-    [[nodiscard]] bool NativeGestureIsDuplicate() const { return nativeAvailable_ && suppressDuplicates_; }
+    // True while a consumed native frame is still fresh: a Qt native gesture
+    // arriving now is that gesture's duplicate.
+    [[nodiscard]] bool NativeGestureIsDuplicate() const;
+    [[nodiscard]] bool SuppressionFresh() const;
     void FinishGesture();
     void ApplyZoom(qreal cumulativeScale, const QPoint& globalAnchor);
     void ApplyPan(qreal deltaX, qreal deltaY);
@@ -112,6 +119,7 @@ private:
     PrecisionInputSink& sink_;
     bool nativeAvailable_ = false;
     bool suppressDuplicates_ = false;
+    QElapsedTimer lastConsumedFrame_;
     bool gestureActive_ = false;
     bool gestureIgnored_ = false;
     bool gestureAccepted_ = false;
