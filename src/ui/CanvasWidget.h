@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -281,6 +282,12 @@ private:
 
     // Selection / erase rendering helpers.
     [[nodiscard]] std::optional<SelectionBounds> SelectionBoundsForPage(std::size_t pageIndex) const;
+    // Selection frame geometry in logical pixels, shared by the overlay painter
+    // and the handle hit test.  Eight resize handle centres in the order the
+    // overlay draws them (four corners, then the four edge midpoints) and the
+    // rotate handle above the top edge midpoint.
+    [[nodiscard]] static std::array<QPointF, 8> SelectionHandlePositions(const QRectF& frame);
+    [[nodiscard]] static QPointF SelectionRotateHandlePosition(const QRectF& frame);
     [[nodiscard]] std::optional<ObjectRef> TopmostObjectAt(const QPointF& logical, bool includeStrokes) const;
     [[nodiscard]] bool EditOverlayOwnsPoint(const QPointF& logical) const;
     void PaintSelectionOverlay(QPainter& painter);
@@ -361,6 +368,15 @@ private:
     std::vector<QPointF> lassoPoints_;
     std::vector<ObjectRef> pendingErase_;
 
+    // Transform gesture state: the handle being dragged, the selection bounds
+    // captured at BeginTransform and the logical press position (rotation
+    // measures the pointer's start angle from it).  Cleared on commit.
+    std::optional<TransformHandle> transformHandle_ {};
+    SelectionBounds transformFrom_ {};
+    QPointF transformPressLogical_ {};
+    // Position of the last HitTestSelectionHandle probe: BeginTransform runs
+    // right after it and captures the press point this way.
+    mutable QPointF lastHandleProbeLogical_ {};
 
     QTextEdit* textEditor_ = nullptr;
     QPlainTextEdit* latexEditor_ = nullptr;

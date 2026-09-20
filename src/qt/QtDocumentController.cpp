@@ -916,6 +916,81 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
     }
 }
 
+void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::SelectionTransform& transform) {
+    Page* page = GesturePage();
+    if (page == nullptr || !transform.from.valid) {
+        return;
+    }
+
+    // Absolute, not cumulative: every update restores the gesture snapshot and
+    // re-applies the transform, so repeated UpdateTransform calls cannot drift.
+    *page = gestureBefore_;
+
+    const float fromWidth = transform.from.right - transform.from.left;
+    const float fromHeight = transform.from.bottom - transform.from.top;
+    // Degenerate source extents keep the source scale (the canvas clamps a
+    // resize to 1 page unit, but a selection can legitimately be flat).
+    const float scaleX = fromWidth > 0.0001f ? (transform.to.right - transform.to.left) / fromWidth : 1.0f;
+    const float scaleY = fromHeight > 0.0001f ? (transform.to.bottom - transform.to.top) / fromHeight : 1.0f;
+
+    const ui::PageSelection& selection = SelectionFor(pageIndex);
+    for (const std::size_t index : selection.strokes) {
+        if (index >= page->strokes.size()) {
+            continue;
+        }
+        for (Vec2& point : page->strokes[index].points) {
+            point = ui::MapSelectionTransformPoint(point, transform.from, transform.to, transform.rotateDegrees);
+        }
+        gestureChanged_ = true;
+    }
+    for (const std::size_t index : selection.images) {
+        if (index >= page->images.size()) {
+            continue;
+        }
+        PageImage& image = page->images[index];
+        // Scale about the mapped centre: the rotated frame is not axis aligned,
+        // so the rotated image keeps its own rotation and accumulates the
+        // gesture's.
+        const Vec2 mappedCenter = ui::MapSelectionTransformPoint(
+            ui::ImageCenter(image), transform.from, transform.to, transform.rotateDegrees);
+        image.width *= scaleX;
+        image.height *= scaleY;
+        image.x = mappedCenter.x - (image.width * 0.5f);
+        image.y = mappedCenter.y - (image.height * 0.5f);
+        image.rotationDegrees += transform.rotateDegrees;
+        gestureChanged_ = true;
+    }
+    for (const std::size_t index : selection.texts) {
+        if (index >= page->texts.size()) {
+            continue;
+        }
+        PageText& text = page->texts[index];
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page->width);
+        const Vec2 mapped = ui::MapSelectionTransformPoint(
+            { bounds.left, bounds.top }, transform.from, transform.to, transform.rotateDegrees);
+        text.x += mapped.x - bounds.left;
+        text.y += mapped.y - bounds.top;
+        text.fontSize *= scaleY;
+        for (PageTextStyleSpan& span : text.styleSpans) {
+            span.style.fontSize *= scaleY;
+        }
+        gestureChanged_ = true;
+    }
+    for (const std::size_t index : selection.latexes) {
+        if (index >= page->latexes.size()) {
+            continue;
+        }
+        PageLatex& object = page->latexes[index];
+        const ui::LatexBounds bounds = ui::MeasurePageLatexBounds(object, page->width);
+        const Vec2 mapped = ui::MapSelectionTransformPoint(
+            { bounds.left, bounds.top }, transform.from, transform.to, transform.rotateDegrees);
+        object.x += mapped.x - bounds.left;
+        object.y += mapped.y - bounds.top;
+        object.fontSize *= scaleY;
+        gestureChanged_ = true;
+    }
+}
+
 void QtDocumentController::CommitErase(std::size_t pageIndex, const std::vector<ui::ObjectRef>& targets) {
     Page* page = PageAt(pageIndex);
     if (page == nullptr || targets.empty()) {

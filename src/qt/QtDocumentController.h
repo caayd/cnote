@@ -88,6 +88,9 @@ public:
     [[nodiscard]] std::optional<std::size_t> GesturePageIndex() const override { return gesturePage_; }
     [[nodiscard]] Page* GesturePage();
     void MoveSelectionBy(std::size_t pageIndex, Vec2 delta) override;
+    // Whole-selection affine transform for a resize/rotate gesture: restores
+    // the gesture snapshot first, so `transform` is absolute, not cumulative.
+    void TransformSelection(std::size_t pageIndex, const ui::SelectionTransform& transform) override;
     void CommitErase(std::size_t pageIndex, const std::vector<ui::ObjectRef>& targets) override;
 
     // Stroke effects the interaction router drives (line/oval modes replace the

@@ -78,6 +78,13 @@ struct SelectionBounds {
     bool valid = false;
 };
 
+// Maps a page-space point through the selection transform.  New helper for the
+// Qt transform gesture; it has no legacy counterpart (the reference applies its
+// handle transforms per object kind inside App).  Translates `from` to the
+// origin, scales by the `to`/`from` extent ratio, translates back to `to`, then
+// rotates about the `from` centre.
+Vec2 MapSelectionTransformPoint(Vec2 point, const SelectionBounds& from, const SelectionBounds& to, float rotateDegrees);
+
 namespace {
 
 // DpiUtil::ScaleForDpi in logical pixels (the Qt canvas is a 96-DPI reference
@@ -395,6 +402,27 @@ inline Vec2 RotatePointAround(Vec2 point, Vec2 center, float degrees) {
         center.x + (translatedX * cosine) - (translatedY * sine),
         center.y + (translatedX * sine) + (translatedY * cosine),
     };
+}
+
+inline Vec2 MapSelectionTransformPoint(Vec2 point, const SelectionBounds& from, const SelectionBounds& to, float rotateDegrees) {
+    const float fromWidth = from.right - from.left;
+    const float fromHeight = from.bottom - from.top;
+    // A degenerate `from` (a selection that collapsed to a point or a line)
+    // keeps the source scale instead of dividing by zero.
+    const float scaleX = fromWidth > 0.0001f ? (to.right - to.left) / fromWidth : 1.0f;
+    const float scaleY = fromHeight > 0.0001f ? (to.bottom - to.top) / fromHeight : 1.0f;
+    const Vec2 mapped {
+        to.left + ((point.x - from.left) * scaleX),
+        to.top + ((point.y - from.top) * scaleY),
+    };
+    if (rotateDegrees == 0.0f) {
+        return mapped;
+    }
+    const Vec2 center {
+        (from.left + from.right) * 0.5f,
+        (from.top + from.bottom) * 0.5f,
+    };
+    return RotatePointAround(mapped, center, rotateDegrees);
 }
 
 inline Vec2 ImageCenter(const PageImage& image) {

@@ -406,6 +406,35 @@ int main(int argc, char** argv) {
 
     VerifyProbe(ported, "");
 
+    // MapSelectionTransformPoint is a new helper with no legacy counterpart, so
+    // it is checked with direct expectations rather than the frozen table.
+    {
+        const cnote::ui::SelectionBounds from { 100.0f, 200.0f, 300.0f, 400.0f, true };
+        const cnote::Vec2 identity = cnote::ui::MapSelectionTransformPoint(cnote::Vec2 { 150.0f, 250.0f }, from, from, 0.0f);
+        CheckNear(identity.x, 150.0, "map.identity.x");
+        CheckNear(identity.y, 250.0, "map.identity.y");
+
+        // `to` doubles both extents, anchored at the `from` origin.
+        const cnote::ui::SelectionBounds to { 100.0f, 200.0f, 500.0f, 600.0f, true };
+        const cnote::Vec2 scaled = cnote::ui::MapSelectionTransformPoint(cnote::Vec2 { 150.0f, 250.0f }, from, to, 0.0f);
+        CheckNear(scaled.x, 200.0, "map.scale.x");
+        CheckNear(scaled.y, 300.0, "map.scale.y");
+
+        // 90 degrees about the `from` centre (200, 300): the point 50 above the
+        // centre orbits onto its right.
+        const cnote::Vec2 rotated = cnote::ui::MapSelectionTransformPoint(cnote::Vec2 { 200.0f, 250.0f }, from, from, 90.0f);
+        CheckNear(rotated.x, 250.0, "map.rotate90.x");
+        CheckNear(rotated.y, 300.0, "map.rotate90.y");
+    }
+    {
+        // A zero-size `from` keeps scale 1 instead of dividing by zero.
+        const cnote::ui::SelectionBounds point { 10.0f, 20.0f, 10.0f, 20.0f, true };
+        const cnote::ui::SelectionBounds to { 10.0f, 20.0f, 110.0f, 220.0f, true };
+        const cnote::Vec2 mapped = cnote::ui::MapSelectionTransformPoint(cnote::Vec2 { 30.0f, 40.0f }, point, to, 0.0f);
+        CheckNear(mapped.x, 30.0, "map.zeroFrom.x");
+        CheckNear(mapped.y, 40.0, "map.zeroFrom.y");
+    }
+
 #ifdef CNOTE_SELECTION_LEGACY_REFERENCE
     // Live differential comparison against the legacy implementation, which is
     // only linkable on Windows (UiUtil.h includes <windows.h>).

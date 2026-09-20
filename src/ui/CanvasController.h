@@ -8,6 +8,7 @@
 
 #include "Document.h"
 #include "ui/InteractionRouter.h"
+#include "ui/SelectionMath.h"
 
 namespace cnote::ui {
 
@@ -40,6 +41,16 @@ struct CanvasInputSettings {
     float inputSpacing = 0.85f;     // page units at scale 1 (App::Settings default)
     float inputSmoothing = 0.3f;    // 0..1 pointer follow factor
     float strokeSmoothing = 0.55f;  // render-time smoothing strength
+};
+
+// One resize/rotate step of the whole selection on a page: the selection bounds
+// captured at BeginTransform (`from`), the dragged bounds (`to`) and the
+// additional rotation about the `from` centre.  `rotateDegrees` is 0 for pure
+// resizes.
+struct SelectionTransform {
+    SelectionBounds from;
+    SelectionBounds to;
+    float rotateDegrees = 0.0f;
 };
 
 // Per-view seam between CanvasWidget (viewport, transient interaction state,
@@ -112,6 +123,12 @@ public:
     virtual void CancelPageGesture() = 0;
     [[nodiscard]] virtual std::optional<std::size_t> GesturePageIndex() const = 0;
     virtual void MoveSelectionBy(std::size_t pageIndex, Vec2 delta) = 0;
+    // One affine transform of the whole selection on `pageIndex`, applied on top
+    // of the gesture's begin snapshot (implementations restore the snapshot before
+    // applying, so calls are absolute, not cumulative). `from` is the selection
+    // bounds captured at BeginTransform; `to` is the dragged bounds; `rotateDegrees`
+    // is the additional rotation about the `from` center (0 for pure resizes).
+    virtual void TransformSelection(std::size_t pageIndex, const SelectionTransform& transform) = 0;
     virtual void CommitErase(std::size_t pageIndex, const std::vector<ObjectRef>& targets) = 0;
 
     [[nodiscard]] virtual bool CanUndo() const = 0;

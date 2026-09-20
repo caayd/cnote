@@ -1326,6 +1326,12 @@ bool CanvasWidget::CursorInteractsWithSelection(const QPointF& logical) const {
     if (!bounds.has_value()) {
         return false;
     }
+    // The rotate handle sits outside the frame, and a Select-tool press here
+    // must reach the transform probe instead of clearing the selection; the
+    // router only calls BeginMoveSelection when this returns true.
+    if (HitTestSelectionHandle(logical).has_value()) {
+        return true;
+    }
 
     // Legacy App::CursorHitsSelectionMoveGrip (Selection.cpp:711): the grip is
     // the frame's centre square; selected objects also count (Selection.cpp:823).
@@ -1443,10 +1449,63 @@ std::optional<SelectionHit> CanvasWidget::HitTestSelectionObject(const QPointF& 
 }
 
 std::optional<TransformRequest> CanvasWidget::HitTestSelectionHandle(const QPointF& logical) const {
-    // Transform handles (resize/rotate) are not ported in this slice; returning
-    // nullopt keeps the router out of a transform gesture it cannot apply yet
-    // instead of starting a no-op.
-    static_cast<void>(logical);
+    // The press point is cached for BeginTransform, which the router calls
+    // immediately after this probe and which needs the interaction's origin to
+    // measure a rotation from.
+    lastHandleProbeLogical_ = logical;
+
+    const std::optional<CanvasPageView> view = HitTestPageView(logical);
+    if (!view.has_value() || !view->valid) {
+        return std::nullopt;
+    }
+    const std::optional<SelectionBounds> bounds = SelectionBoundsForPage(view->pageIndex);
+    if (!bounds.has_value()) {
+        return std::nullopt;
+    }
+
+    const QRectF frame(
+        view->rect.left() + (static_cast<qreal>(bounds->left) * view->scale),
+        view->rect.top() + (static_cast<qreal>(bounds->top) * view->scale),
+        static_cast<qreal>(bounds->right - bounds->left) * view->scale,
+        static_cast<qreal>(bounds->bottom - bounds->top) * view->scale);
+
+    const qreal hitRadius = static_cast<qreal>(SelectionHandleHitRadiusPixels(96));
+    const qreal hitRadiusSquared = hitRadius * hitRadius;
+    const auto hits = [&logical, hitRadiusSquared](const QPointF& position) {
+        const qreal dx = logical.x() - position.x();
+        const qreal dy = logical.y() - position.y();
+        return ((dx * dx) + (dy * dy)) <= hitRadiusSquared;
+    };
+
+    // The transform spans the whole selection on the page, so `target` and
+    // `objectIndex` keep their Stroke/0 defaults and are ignored by the canvas.
+    TransformRequest request;
+    request.pageIndex = view->pageIndex;
+
+    // The rotate handle's radius overlaps the top edge handle's, so it is
+    // checked first and wins a tie.
+    if (hits(SelectionRotateHandlePosition(frame))) {
+        request.handle = TransformHandle::Rotate;
+        return request;
+    }
+
+    const std::array<QPointF, 8> positions = SelectionHandlePositions(frame);
+    constexpr std::array<TransformHandle, 8> kHandles {{
+        TransformHandle::TopLeft,
+        TransformHandle::TopRight,
+        TransformHandle::BottomRight,
+        TransformHandle::BottomLeft,
+        TransformHandle::Top,
+        TransformHandle::Bottom,
+        TransformHandle::Left,
+        TransformHandle::Right,
+    }};
+    for (std::size_t index = 0; index < positions.size(); ++index) {
+        if (hits(positions[index])) {
+            request.handle = kHandles[index];
+            return request;
+        }
+    }
     return std::nullopt;
 }
 
@@ -1971,17 +2030,103 @@ void CanvasWidget::CommitMoveSelection() {
 }
 
 void CanvasWidget::BeginTransform(const TransformRequest& request) {
-    // Transform handles are not hit-tested in this slice (see
-    // HitTestSelectionHandle), so this path is unreachable; keep the contract
-    // explicit instead of mutating geometry we cannot yet preview.
-    static_cast<void>(request);
+    const std::optional<SelectionBounds> from = SelectionBoundsForPage(request.pageIndex);
+    if (!from.has_value()) {
+        return;
+    }
+    transformFrom_ = *from;
+    transformHandle_ = request.handle;
+    transformPressLogical_ = lastHandleProbeLogical_;
+    // Same one-transaction-per-gesture machinery as the selection move: the
+    // controller snapshots the page and CommitTransform records one
+    // ReplacePages action.
+    controller_.BeginPageGesture(request.pageIndex);
 }
 
 void CanvasWidget::UpdateTransform(const QPointF& logical) {
-    static_cast<void>(logical);
+    const std::optional<std::size_t> pageIndex = controller_.GesturePageIndex();
+    if (!pageIndex.has_value() || !transformHandle_.has_value()) {
+        return;
+    }
+    const CanvasPageView view = CalculatePageView(*pageIndex);
+    if (!view.valid || view.scale <= 0.0f) {
+        return;
+    }
+    const TransformHandle handle = *transformHandle_;
+    if (handle == TransformHandle::Move) {
+        // Moving is its own interaction (BeginMoveSelection).
+        return;
+    }
+
+    const Vec2 pagePoint = ScreenToPage(view, logical, false);
+    SelectionTransform transform;
+    transform.from = transformFrom_;
+    transform.to = transformFrom_;
+
+    if (handle == TransformHandle::Rotate) {
+        const Vec2 center {
+            (transformFrom_.left + transformFrom_.right) * 0.5f,
+            (transformFrom_.top + transformFrom_.bottom) * 0.5f,
+        };
+        const Vec2 press = ScreenToPage(view, transformPressLogical_, false);
+        const float pointerAngle = std::atan2(pagePoint.y - center.y, pagePoint.x - center.x);
+        const float pressAngle = std::atan2(press.y - center.y, press.x - center.x);
+        transform.rotateDegrees = (pointerAngle - pressAngle) * (180.0f / kPi);
+    } else {
+        // Resize: each dragged side follows the pointer while the opposite side
+        // stays fixed, so the selection scales about the opposite edge/corner.
+        const bool movesLeft = handle == TransformHandle::Left
+            || handle == TransformHandle::TopLeft || handle == TransformHandle::BottomLeft;
+        const bool movesRight = handle == TransformHandle::Right
+            || handle == TransformHandle::TopRight || handle == TransformHandle::BottomRight;
+        const bool movesTop = handle == TransformHandle::Top
+            || handle == TransformHandle::TopLeft || handle == TransformHandle::TopRight;
+        const bool movesBottom = handle == TransformHandle::Bottom
+            || handle == TransformHandle::BottomLeft || handle == TransformHandle::BottomRight;
+        if (movesLeft) {
+            transform.to.left = pagePoint.x;
+        }
+        if (movesRight) {
+            transform.to.right = pagePoint.x;
+        }
+        if (movesTop) {
+            transform.to.top = pagePoint.y;
+        }
+        if (movesBottom) {
+            transform.to.bottom = pagePoint.y;
+        }
+
+        // Keep both extents positive (never mirrored), clamped to the fixed
+        // opposite side.
+        constexpr float kMinSelectionExtent = 1.0f;
+        if (movesLeft && (transform.to.right - transform.to.left) < kMinSelectionExtent) {
+            transform.to.left = transform.to.right - kMinSelectionExtent;
+        }
+        if (movesRight && (transform.to.right - transform.to.left) < kMinSelectionExtent) {
+            transform.to.right = transform.to.left + kMinSelectionExtent;
+        }
+        if (movesTop && (transform.to.bottom - transform.to.top) < kMinSelectionExtent) {
+            transform.to.top = transform.to.bottom - kMinSelectionExtent;
+        }
+        if (movesBottom && (transform.to.bottom - transform.to.top) < kMinSelectionExtent) {
+            transform.to.bottom = transform.to.top + kMinSelectionExtent;
+        }
+    }
+
+    controller_.TransformSelection(*pageIndex, transform);
+    if (const auto page = surfaces_.find(*pageIndex); page != surfaces_.end()) {
+        surfaces_.erase(page);
+    }
+    update();
 }
 
-void CanvasWidget::CommitTransform() {}
+void CanvasWidget::CommitTransform() {
+    controller_.CommitPageGesture();
+    transformHandle_.reset();
+    transformFrom_ = SelectionBounds {};
+    transformPressLogical_ = QPointF();
+    update();
+}
 
 void CanvasWidget::UpdatePendingErase(const std::vector<ObjectRef>& pending) {
     pendingErase_ = pending;
@@ -2156,6 +2301,23 @@ std::optional<SelectionBounds> CanvasWidget::SelectionBoundsForPage(std::size_t 
     return bounds.valid ? std::optional<SelectionBounds>(bounds) : std::nullopt;
 }
 
+std::array<QPointF, 8> CanvasWidget::SelectionHandlePositions(const QRectF& frame) {
+    return {{
+        frame.topLeft(),
+        frame.topRight(),
+        frame.bottomRight(),
+        frame.bottomLeft(),
+        QPointF(frame.center().x(), frame.top()),
+        QPointF(frame.center().x(), frame.bottom()),
+        QPointF(frame.left(), frame.center().y()),
+        QPointF(frame.right(), frame.center().y()),
+    }};
+}
+
+QPointF CanvasWidget::SelectionRotateHandlePosition(const QRectF& frame) {
+    return QPointF(frame.center().x(), frame.top() - static_cast<qreal>(kSelectionRotateOffsetDip));
+}
+
 void CanvasWidget::PaintSelectionOverlay(QPainter& painter) {
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
@@ -2183,14 +2345,18 @@ void CanvasWidget::PaintSelectionOverlay(QPainter& painter) {
         const qreal handleHalf = 4.0;
         painter.setPen(QPen(QColor(59, 130, 246), 1.0));
         painter.setBrush(QColor(255, 255, 255));
-        const std::array<QPointF, 8> handles {{
-            frame.topLeft(), frame.topRight(), frame.bottomRight(), frame.bottomLeft(),
-            QPointF(frame.center().x(), frame.top()), QPointF(frame.center().x(), frame.bottom()),
-            QPointF(frame.left(), frame.center().y()), QPointF(frame.right(), frame.center().y()),
-        }};
-        for (const QPointF& handle : handles) {
+        for (const QPointF& handle : SelectionHandlePositions(frame)) {
             painter.drawRect(QRectF(handle.x() - handleHalf, handle.y() - handleHalf, handleHalf * 2.0, handleHalf * 2.0));
         }
+
+        // Rotate handle: a stem from the top edge midpoint to a circular knob
+        // (the same colours as the square handles).
+        const QPointF rotate = SelectionRotateHandlePosition(frame);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawLine(QPointF(frame.center().x(), frame.top()), rotate);
+        painter.setBrush(QColor(255, 255, 255));
+        painter.drawEllipse(rotate, 4.0, 4.0);
+
         // Move grip at the frame centre (reference App::CursorHitsSelectionMoveGrip).
         painter.setBrush(QColor(59, 130, 246));
         painter.drawEllipse(frame.center(), 3.0, 3.0);
