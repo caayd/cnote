@@ -623,6 +623,55 @@ void TestSelectionPrecedence() {
         Check(host.CountOp("CommitTransform") == 1, "the transform commits exactly once");
     }
     {
+        // Selection.cpp:1553-1582: pressing inside the selection bounds with no
+        // object under the cursor moves the whole selection instead of clearing
+        // it and starting a fresh marquee.
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Select);
+        host.hasSelection = true;
+        host.cursorInteractsWithSelection = true;
+        router.HandlePointerPress(Press(50.0, 50.0));
+        Check(host.HasOp("BeginMoveSelection(0)"), "a Select press inside the selection bounds starts a move\n" + host.Dump());
+        Check(router.ActiveInteraction() == ui::InteractionKind::MoveSelection, "the inside-selection press is a move interaction");
+        Check(host.CountOp("ClearSelection") == 0, "the inside-selection press keeps the existing selection");
+        Check(host.CountOp("UpdateSelectionOverlay") == 0, "the inside-selection press never starts a marquee");
+
+        host.Reset();
+        router.HandlePointerMove(Move(70.0, 80.0));
+        Check(host.HasOp("UpdateMoveSelection(20.000,30.000)"), "the whole selection follows the pointer\n" + host.Dump());
+
+        host.Reset();
+        router.HandlePointerRelease(Release(70.0, 80.0));
+        Check(host.CountOp("CommitMoveSelection") == 1, "releasing inside the selection commits exactly one move");
+    }
+    {
+        // The Move tool routes unconditionally into BeginMoveSelection
+        // (MessageLoop.cpp:228), so the inside-selection check must live there.
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Move);
+        host.hasSelection = true;
+        host.cursorInteractsWithSelection = true;
+        router.HandlePointerPress(Press(50.0, 50.0));
+        Check(host.HasOp("BeginMoveSelection(0)"), "a Move press inside the selection bounds starts a move\n" + host.Dump());
+        Check(router.ActiveInteraction() == ui::InteractionKind::MoveSelection, "the Move-tool inside-selection press is a move interaction");
+        Check(host.CountOp("ClearSelection") == 0 && host.CountOp("UpdateSelectionOverlay") == 0,
+            "the Move-tool inside-selection press neither clears nor marquees");
+    }
+    {
+        // A press outside the selection bounds still clears it and starts the
+        // box-override marquee (Selection.cpp:1578-1582).
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Move);
+        host.hasSelection = true;
+        router.HandlePointerPress(Press(50.0, 50.0));
+        Check(host.CountOp("ClearSelection") == 1, "a press outside the selection bounds clears it");
+        Check(host.HasOp("UpdateSelectionOverlay(lasso=0,points=1)"), "a press outside the selection bounds starts a box override\n" + host.Dump());
+        Check(router.ActiveInteraction() == ui::InteractionKind::Select, "a press outside the selection bounds starts a selection drag");
+    }
+    {
         // Selection.cpp:1578-1582: no object under the cursor in the move path
         // falls back to a box-override selection.
         RecordingHost host;

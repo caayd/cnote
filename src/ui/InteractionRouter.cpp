@@ -735,6 +735,18 @@ void InteractionRouter::BeginMoveSelection(const QPointF& logical) {
 
     const std::optional<SelectionHit> objectHit = host_.HitTestSelectionObject(logical, pageIndex);
     if (!objectHit.has_value()) {
+        if (host_.HasSelection() && host_.CursorInteractsWithSelection(logical)) {
+            // No object under the cursor but the press is inside the selection
+            // frame: the reference moves the whole selection instead of
+            // starting a new one (Selection.cpp:1553-1582).
+            SetActive(InteractionKind::MoveSelection);
+            movePageIndex_ = pageIndex;
+            moveLastPosition_ = logical;
+            UpdateCapture();
+            host_.BeginMoveSelection(pageIndex);
+            host_.InvalidateCanvas();
+            return;
+        }
         // Nothing under the cursor: the reference falls back to a box selection
         // (Selection.cpp:1578-1582).
         host_.ClearSelection();
