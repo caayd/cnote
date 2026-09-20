@@ -94,7 +94,6 @@ private:
         std::shared_ptr<ProjectSession> session;
     };
 
-    [[nodiscard]] Entry* FindEntry(QObject* owner);
     [[nodiscard]] bool AnyInteractionActive(const std::shared_ptr<ProjectSession>& session) const;
     void OnAutoSaveTimeout(ProjectSession* session);
 

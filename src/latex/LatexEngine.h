@@ -12,11 +12,7 @@
 // as red text in place, which doubles as the live-preview error indication.
 //
 // Backends: the parse/measure core is backend-independent (LatexEngine.cpp).
-// Drawing is provided by two mutually exclusive platform translation units,
-// selected at compile time so neither backend sees the other's toolkit:
-//   * Qt (CNOTE_LATEX_QT_BACKEND):  LatexEngineQt.cpp  — QPainter
-//   * legacy Win32 (default):       LatexEngineGdi.cpp — Gdiplus/HDC
-// Never link both into the same target (plan step 1.5).
+// Drawing is provided solely by LatexEngineQt.cpp (QPainter).
 
 #include <cstdint>
 #include <filesystem>
@@ -29,14 +25,7 @@ namespace tex {
 class Graphics2D;
 }
 
-#if defined(CNOTE_LATEX_QT_BACKEND)
 class QPainter;
-#else
-#include <windows.h>
-namespace Gdiplus {
-class Graphics;
-}
-#endif
 
 namespace cnote::latex {
 
@@ -69,7 +58,6 @@ bool IsInitialized();
 
 // Convenience for model objects.
 [[nodiscard]] FormulaHandle Parse(const PageLatex& latex);
-[[nodiscard]] FormulaMetrics Measure(const PageLatex& latex);
 
 namespace detail {
 
@@ -80,21 +68,10 @@ void DrawRender(const FormulaHandle& formula, tex::Graphics2D& graphics, std::ui
 
 }  // namespace detail
 
-#if defined(CNOTE_LATEX_QT_BACKEND)
-
 // Draws with the formula's top-left at (x, y) in the painter's current
 // coordinate space, scaled by `scale` (page units -> target units). Vector
 // output at any scale. The painter state and the caller's transform are
 // preserved. Safe to call with a null handle (no-op).
 void Draw(const FormulaHandle& formula, QPainter& painter, float x, float y, float scale, std::uint32_t argb);
-void Draw(const PageLatex& latex, QPainter& painter, float x, float y, float scale);
-
-#else
-
-void Draw(const FormulaHandle& formula, Gdiplus::Graphics& graphics, float x, float y, float scale, std::uint32_t argb);
-void Draw(const FormulaHandle& formula, HDC dc, float x, float y, float scale, std::uint32_t argb);
-void Draw(const PageLatex& latex, HDC dc, float x, float y, float scale);
-
-#endif
 
 }  // namespace cnote::latex

@@ -59,7 +59,7 @@ constexpr qreal kPaletteWheelStrokeDip = 1.2f;                // App.cpp:161
 constexpr qreal kPaletteWheelSelectedStrokeDip = 3.0f;        // App.cpp:160
 constexpr qreal kPaletteWheelBorderDip = 1.5f;                // App.cpp:162
 constexpr qreal kPaletteWheelCenterIconHalfDip = 13.0;        // App.cpp:7027 ScaleForDpi(13)
-constexpr qreal kPaletteWheelSwatchDropDip = 72.0;            // ToolbarState.cpp:135 (raw device px)
+constexpr qreal kPaletteWheelSwatchDropDip = 72.0;            // ToolbarState.cpp:135 (logical px)
 
 // Win32 PtInRect semantics: the right/bottom edges are exclusive.
 bool ContainsPoint(const QRectF& rect, const QPointF& point) {
@@ -1350,10 +1350,6 @@ ToolbarControl ToolbarWidget::ControlAt(const QPointF& widgetPosition) const {
     return ToolbarControl::None;
 }
 
-bool ToolbarWidget::IsControlRect(const QPointF& widgetPosition) const {
-    return ControlAt(widgetPosition) != ToolbarControl::None;
-}
-
 ToolbarControl ToolbarWidget::ControlAtHostPosition(const QPointF& hostPosition) const {
     return ControlAt(hostPosition - QPointF(x(), y()));
 }
@@ -1948,10 +1944,6 @@ QRect ToolbarWidget::TextFormatPopupBounds() const {
     return textFormatPopup_ != nullptr ? textFormatPopup_->geometry() : QRect();
 }
 
-bool ToolbarWidget::TextFormatFontMenuOpen() const {
-    return textFormatPopup_ != nullptr && textFormatPopup_->FontMenuOpen();
-}
-
 void ToolbarWidget::TogglePaletteMenu() {
     EnsureOverlays();
     const bool open = !paletteMenuPopup_->isVisible();
@@ -2001,8 +1993,9 @@ std::vector<settings::Tool> ToolbarWidget::PaletteWheelDisplayedTools() const {
 // Reference App::TogglePaletteWheel (ToolbarState.cpp:127-159): the wheel opens
 // centred on the cursor, and - when the cursor is outside the host client rect
 // (Win32 PtInRect, right/bottom exclusive) - below the toolbar's current-colour
-// swatch.  The reference's 72 is raw device pixels, so it is divided by the
-// window's device pixel ratio here.
+// swatch, one kPaletteWheelSwatchDropDip below its bottom edge.  Every
+// coordinate here is a host logical pixel and the constant is in the same unit,
+// so no device-pixel-ratio conversion is involved.
 void ToolbarWidget::TogglePaletteWheel() {
     QWidget* host = window();
     if (host == nullptr) {
@@ -2012,8 +2005,7 @@ void ToolbarWidget::TogglePaletteWheel() {
     if (!ContainsPoint(HostClientRect(), anchor)) {
         const QPointF hostOrigin(mapTo(host, QPoint(0, 0)));
         const QRectF colorRect = ControlRect(ToolbarControl::CurrentColor).translated(hostOrigin);
-        const qreal dpr = host->devicePixelRatioF() > 0.0 ? host->devicePixelRatioF() : 1.0;
-        anchor = QPointF(colorRect.center().x(), colorRect.bottom() + (kPaletteWheelSwatchDropDip / dpr));
+        anchor = QPointF(colorRect.center().x(), colorRect.bottom() + kPaletteWheelSwatchDropDip);
     }
     TogglePaletteWheel(anchor);
 }
@@ -2052,10 +2044,6 @@ void ToolbarWidget::HidePaletteWheel() {
 
 bool ToolbarWidget::PaletteWheelVisible() const {
     return paletteWheel_ != nullptr && paletteWheel_->isVisible();
-}
-
-QRectF ToolbarWidget::PaletteWheelBounds() const {
-    return paletteWheel_ != nullptr ? QRectF(paletteWheel_->geometry()) : QRectF();
 }
 
 void ToolbarWidget::CloseOverlays() {

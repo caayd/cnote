@@ -1,11 +1,15 @@
 #include "ProjectFile.h"
 
+#include <QByteArray>
+#include <QFile>
+#include <QSaveFile>
+#include <QString>
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -50,40 +54,30 @@ constexpr std::uint32_t kPayloadEncodingRaw = 0U;
 constexpr std::uint32_t kPayloadEncodingXpressHuff = 1U;
 
 std::optional<std::vector<std::uint8_t>> ReadAllBytes(const std::filesystem::path& filePath) {
-    std::ifstream input(filePath, std::ios::binary);
-    if (!input) {
+    QFile file(QString::fromUtf8(PathToUtf8(filePath).c_str()));
+    if (!file.open(QIODevice::ReadOnly)) {
         return std::nullopt;
     }
 
-    input.seekg(0, std::ios::end);
-    const std::streamoff size = input.tellg();
-    if (size < 0) {
-        return std::nullopt;
-    }
-    input.seekg(0, std::ios::beg);
-
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if (!bytes.empty()) {
-        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        if (!input) {
-            return std::nullopt;
-        }
-    }
-
-    return bytes;
+    const QByteArray bytes = file.readAll();
+    return std::vector<std::uint8_t>(bytes.begin(), bytes.end());
 }
 
 bool WriteAllBytes(const std::filesystem::path& filePath, const std::vector<std::uint8_t>& bytes) {
-    std::ofstream output(filePath, std::ios::binary | std::ios::trunc);
-    if (!output) {
+    QSaveFile file(QString::fromUtf8(PathToUtf8(filePath).c_str()));
+    file.setDirectWriteFallback(false);
+    if (!file.open(QIODevice::WriteOnly)) {
         return false;
     }
 
-    if (!bytes.empty()) {
-        output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!bytes.empty()
+        && file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<qint64>(bytes.size()))
+            != static_cast<qint64>(bytes.size())) {
+        file.cancelWriting();
+        return false;
     }
 
-    return static_cast<bool>(output);
+    return file.commit();
 }
 
 struct ByteReader {

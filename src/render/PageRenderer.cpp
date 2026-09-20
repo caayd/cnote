@@ -243,16 +243,6 @@ QImage RenderPageSurface(const Page& page, const PageRenderParams& params) {
     return image;
 }
 
-QImage RenderPageThumbnail(const Page& page, int width) {
-    if (width <= 0 || page.width <= 0.0f || page.height <= 0.0f) {
-        return {};
-    }
-    PageRenderParams params;
-    params.scale = static_cast<float>(width) / page.width;
-    params.devicePixelRatio = 1.0f;
-    return RenderPageSurface(page, params);
-}
-
 std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& params) {
     std::uint64_t hash = 14695981039346656037ULL;
     hash = HashFloat(hash, page.width);

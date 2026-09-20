@@ -1,17 +1,10 @@
 // Layout parity evidence (migration plan step 6.1).
 //
-// Two layers, one input matrix:
-//
-//  1. Live legacy comparison (Windows only, CNOTE_LAYOUT_LEGACY_PARITY): the
-//     same matrix drives cnote::appui (src/ui/Layout.cpp, the call path used by
-//     src/shell/MessageLoop.cpp and src/shell/ToolbarState.cpp) and
-//     cnote::appui::qt, and the produced rectangles must agree.
-//  2. Frozen reference table (all platforms): the rectangle values below were
-//     emitted from the legacy path by this executable's --emit-reference mode
-//     on Windows and are re-verified against the live legacy path on every
-//     Windows run, so the table cannot rot.  Non-Windows runs compare the Qt
-//     port against those reference values, which is the only portable way to
-//     exercise the legacy geometry.
+// One input matrix drives cnote::appui::qt, and every rectangle it produces is
+// compared against the frozen reference table below.  The reference geometry
+// itself no longer exists in this tree: the table is the expectation, and its
+// values were captured from the Win32 reference layout implementation (they are
+// re-derived by reading that table, never by re-measuring here).
 //
 // Tolerance, and why:
 //   * Pure geometry is compared exactly (0 px).  Both sides are integer
@@ -19,20 +12,9 @@
 //     reference's int truncation (LegacyDiv), so no tolerance is needed.
 //   * Title/zoom rectangles are text-driven, and they are also compared
 //     exactly: the reference's own measured advances (Win32
-//     GetTextExtentPoint32W with the reference toolbar font) drive the Qt
-//     clamp/edge arithmetic through ResolveToolbarTitleLayoutWithWidths, so the
-//     rectangles must be identical.  Frozen title cases do the same on every
-//     platform.
-//   * The remaining, genuinely toolkit-dependent quantity is text measurement
-//     itself.  It is checked separately, like for like: GDI CreateFontW takes a
-//     cell height while QFont uses an em size, so the equivalent GDI font is
-//     the cell height Qt reports for the Qt font (QFontMetricsF::height(), 20
-//     for Segoe UI at pixelSize 15).  With one shared em the two measurers must
-//     agree within kMaxTextMetricDelta = 2 logical px per string (sub-pixel
-//     advance rounding plus integer GDI extents); the measured maximum is
-//     printed.  The nominal legacy cell height 15 against Qt pixelSize 15 is a
-//     4/3 larger em, and its advance difference is reported as information, not
-//     used as a parity tolerance.
+//     GetTextExtentPoint32W with the reference toolbar font) are frozen into
+//     the table and drive the Qt clamp/edge arithmetic through
+//     ResolveToolbarTitleLayoutWithWidths, so the rectangles must be identical.
 //
 // Coverage: window client sizes including compact widths (< 760 logical px),
 // palette/color counts 0/1/5/10, maximized and normal frame state, all eight
@@ -42,7 +24,6 @@
 // toolbar auto-hide trigger boundaries (App.cpp:2442-2479) with the
 // reserved/visible toolbox height rule.
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -56,26 +37,16 @@
 
 #include <QByteArray>
 #include <QFont>
-#include <QFontMetricsF>
 #include <QGuiApplication>
 #include <QRectF>
 #include <QString>
 
 #include "ui/LayoutQt.h"
 
-#ifdef CNOTE_LAYOUT_LEGACY_PARITY
-#include "ui/Layout.h"
-#endif
-
 namespace {
 
 namespace lq = cnote::appui::qt;
 
-constexpr int kReferenceDpi = 96;
-// Per-string bound on the same-em Win32-GDI vs Qt advance difference (logical
-// px): two measurers of one font differ only by sub-pixel rounding and integer
-// GDI extents, which stays under 2 px for the <= 64 glyph strings in the matrix.
-constexpr double kMaxTextMetricDelta = 2.0;
 constexpr int kMaxPrintedFailures = 40;
 
 int g_checks = 0;
@@ -201,8 +172,8 @@ Rects BuildQtRects(const Scenario& scenario, const QFont& font) {
     }
     case Kind::Title:
         // Title/zoom rectangles depend on text metrics, so they are compared
-        // through BuildQtTitleRectsWithWidths (reference widths) plus the
-        // same-em font-metric check in RunLiveMatrix; never through this path.
+        // through BuildQtTitleRectsWithWidths (frozen reference widths); never
+        // through this path.
         break;
     case Kind::Sidebar: {
         const lq::SidebarMetrics metrics = lq::BuildSidebarMetrics();
@@ -298,163 +269,6 @@ Rects BuildQtTitleRectsWithWidths(const Scenario& scenario, double measuredTitle
     return rects;
 }
 
-// ------------------------------------------------------- legacy-side builders --
-
-#ifdef CNOTE_LAYOUT_LEGACY_PARITY
-
-Rects BuildLegacyRects(const Scenario& scenario, HDC dc) {
-    Rects rects;
-    switch (scenario.kind) {
-    case Kind::Toolbar: {
-        const cnote::appui::ToolbarLayout layout = cnote::appui::BuildToolbarLayout(
-            RECT { static_cast<LONG>(scenario.clientRect.left()), static_cast<LONG>(scenario.clientRect.top()),
-                static_cast<LONG>(scenario.clientRect.right()), static_cast<LONG>(scenario.clientRect.bottom()) },
-            scenario.colorCount, scenario.maximized, static_cast<cnote::App::Tool>(scenario.activeTool),
-            static_cast<UINT>(kReferenceDpi));
-        const RECT* names[] = { &layout.titleAreaRect, &layout.minimizeRect, &layout.maximizeRect, &layout.closeRect,
-            &layout.undoRect, &layout.redoRect, &layout.selectToolRect, &layout.textToolRect, &layout.moveToolRect,
-            &layout.drawToolRect, &layout.panToolRect, &layout.eraseToolRect, &layout.currentColorRect };
-        const char* labels[] = { "titleAreaRect", "minimizeRect", "maximizeRect", "closeRect", "undoRect", "redoRect",
-            "selectToolRect", "textToolRect", "moveToolRect", "drawToolRect", "panToolRect", "eraseToolRect", "currentColorRect" };
-        for (std::size_t index = 0; index < 13U; ++index) {
-            const RECT& rect = *names[index];
-            rects.push_back(FrozenRect { labels[index], static_cast<double>(rect.left), static_cast<double>(rect.top),
-                static_cast<double>(rect.right), static_cast<double>(rect.bottom) });
-        }
-        break;
-    }
-    case Kind::Title: {
-        const RECT clientRect { static_cast<LONG>(scenario.clientRect.left()), static_cast<LONG>(scenario.clientRect.top()),
-            static_cast<LONG>(scenario.clientRect.right()), static_cast<LONG>(scenario.clientRect.bottom()) };
-        const cnote::appui::ToolbarLayout layout = cnote::appui::BuildToolbarLayout(
-            clientRect, scenario.colorCount, scenario.maximized, static_cast<cnote::App::Tool>(scenario.activeTool),
-            static_cast<UINT>(kReferenceDpi));
-        const std::wstring title(scenario.title.begin(), scenario.title.end());
-        const std::wstring zoomLabel(scenario.zoomLabel.begin(), scenario.zoomLabel.end());
-        const cnote::appui::ToolbarTitleLayout resolved = cnote::appui::ResolveToolbarTitleLayout(
-            layout, dc, title, zoomLabel, static_cast<UINT>(kReferenceDpi));
-        rects.push_back(FrozenRect { "fileTitleRect", static_cast<double>(resolved.fileTitleRect.left), static_cast<double>(resolved.fileTitleRect.top),
-            static_cast<double>(resolved.fileTitleRect.right), static_cast<double>(resolved.fileTitleRect.bottom) });
-        rects.push_back(FrozenRect { "titleTextRect", static_cast<double>(resolved.titleTextRect.left), static_cast<double>(resolved.titleTextRect.top),
-            static_cast<double>(resolved.titleTextRect.right), static_cast<double>(resolved.titleTextRect.bottom) });
-        rects.push_back(FrozenRect { "zoomRect", static_cast<double>(resolved.zoomRect.left), static_cast<double>(resolved.zoomRect.top),
-            static_cast<double>(resolved.zoomRect.right), static_cast<double>(resolved.zoomRect.bottom) });
-        rects.push_back(FrozenRect { "zoomTextRect", static_cast<double>(resolved.zoomTextRect.left), static_cast<double>(resolved.zoomTextRect.top),
-            static_cast<double>(resolved.zoomTextRect.right), static_cast<double>(resolved.zoomTextRect.bottom) });
-        AddValue(rects, "dividerX", static_cast<double>(resolved.dividerX));
-        break;
-    }
-    case Kind::Sidebar: {
-        const cnote::appui::SidebarMetrics metrics = cnote::appui::BuildSidebarMetrics(static_cast<UINT>(kReferenceDpi));
-        AddValue(rects, "metric.width", static_cast<double>(metrics.width));
-        AddValue(rects, "metric.itemInset", static_cast<double>(metrics.itemInset));
-        AddValue(rects, "metric.contentPadding", static_cast<double>(metrics.contentPadding));
-        AddValue(rects, "metric.itemGap", static_cast<double>(metrics.itemGap));
-        AddValue(rects, "metric.labelHeight", static_cast<double>(metrics.labelHeight));
-        AddValue(rects, "metric.minThumbHeight", static_cast<double>(metrics.minThumbHeight));
-        AddValue(rects, "metric.placeholderInset", static_cast<double>(metrics.placeholderInset));
-        AddValue(rects, "metric.placeholderLineGap", static_cast<double>(metrics.placeholderLineGap));
-        const RECT sidebarRect { static_cast<LONG>(scenario.sidebarRect.left()), static_cast<LONG>(scenario.sidebarRect.top()),
-            static_cast<LONG>(scenario.sidebarRect.right()), static_cast<LONG>(scenario.sidebarRect.bottom()) };
-        const cnote::appui::SidebarHeaderLayout header = cnote::appui::BuildSidebarHeaderLayout(
-            sidebarRect, static_cast<UINT>(kReferenceDpi), scenario.maximized);
-        const RECT* names[] = { &header.headerRect, &header.pageLabelRect, &header.addPageRect, &header.newPageSettingsRect, &header.contentRect };
-        const char* labels[] = { "headerRect", "pageLabelRect", "addPageRect", "newPageSettingsRect", "contentRect" };
-        for (std::size_t index = 0; index < 5U; ++index) {
-            const RECT& rect = *names[index];
-            rects.push_back(FrozenRect { labels[index], static_cast<double>(rect.left), static_cast<double>(rect.top),
-                static_cast<double>(rect.right), static_cast<double>(rect.bottom) });
-        }
-        break;
-    }
-    case Kind::QuickSize: {
-        const RECT clientRect { static_cast<LONG>(scenario.clientRect.left()), static_cast<LONG>(scenario.clientRect.top()),
-            static_cast<LONG>(scenario.clientRect.right()), static_cast<LONG>(scenario.clientRect.bottom()) };
-        const POINT anchor { static_cast<LONG>(scenario.anchor.x()), static_cast<LONG>(scenario.anchor.y()) };
-        const cnote::appui::QuickSizePopupLayout popup = cnote::appui::BuildQuickSizePopupLayout(
-            clientRect, anchor, static_cast<UINT>(kReferenceDpi), static_cast<int>(scenario.previewExtent));
-        const RECT bounds = cnote::appui::QuickSizePopupBounds(popup, static_cast<UINT>(kReferenceDpi));
-        const RECT* names[] = { &popup.panelRect, &popup.previewRect, &popup.sliderRect, &popup.valueRect, &bounds };
-        const char* labels[] = { "panelRect", "previewRect", "sliderRect", "valueRect", "bounds" };
-        for (std::size_t index = 0; index < 5U; ++index) {
-            const RECT& rect = *names[index];
-            rects.push_back(FrozenRect { labels[index], static_cast<double>(rect.left), static_cast<double>(rect.top),
-                static_cast<double>(rect.right), static_cast<double>(rect.bottom) });
-        }
-        break;
-    }
-    case Kind::TextFormat: {
-        const RECT clientRect { static_cast<LONG>(scenario.clientRect.left()), static_cast<LONG>(scenario.clientRect.top()),
-            static_cast<LONG>(scenario.clientRect.right()), static_cast<LONG>(scenario.clientRect.bottom()) };
-        const RECT editRect { static_cast<LONG>(scenario.editRect.left()), static_cast<LONG>(scenario.editRect.top()),
-            static_cast<LONG>(scenario.editRect.right()), static_cast<LONG>(scenario.editRect.bottom()) };
-        const cnote::appui::TextFormatPopupLayout popup = cnote::appui::BuildTextFormatPopupLayout(
-            clientRect, editRect, scenario.fontMenuOpen, static_cast<UINT>(kReferenceDpi));
-        const RECT bounds = cnote::appui::TextFormatPopupBounds(popup, static_cast<UINT>(kReferenceDpi));
-        const RECT* names[] = { &popup.panelRect, &popup.alignCycleRect, &popup.boldRect, &popup.italicRect,
-            &popup.underlineRect, &popup.textSizeInputRect, &popup.fontDropdownRect, &popup.fontMenuRect,
-            &popup.fontOptionRects[0], &popup.fontOptionRects[1], &popup.fontOptionRects[2], &bounds };
-        const char* labels[] = { "panelRect", "alignCycleRect", "boldRect", "italicRect", "underlineRect",
-            "textSizeInputRect", "fontDropdownRect", "fontMenuRect", "fontOptionRect", "fontOptionRect", "fontOptionRect", "bounds" };
-        for (std::size_t index = 0; index < 12U; ++index) {
-            const RECT& rect = *names[index];
-            rects.push_back(FrozenRect { labels[index], static_cast<double>(rect.left), static_cast<double>(rect.top),
-                static_cast<double>(rect.right), static_cast<double>(rect.bottom) });
-        }
-        break;
-    }
-    case Kind::PaletteMenu: {
-        const RECT clientRect { static_cast<LONG>(scenario.clientRect.left()), static_cast<LONG>(scenario.clientRect.top()),
-            static_cast<LONG>(scenario.clientRect.right()), static_cast<LONG>(scenario.clientRect.bottom()) };
-        const cnote::appui::ToolbarLayout toolbar = cnote::appui::BuildToolbarLayout(
-            clientRect, scenario.colorCount, scenario.maximized, static_cast<cnote::App::Tool>(scenario.activeTool),
-            static_cast<UINT>(kReferenceDpi));
-        const cnote::appui::PaletteMenuLayout menu = cnote::appui::BuildPaletteMenuLayout(
-            toolbar, scenario.colorCount, static_cast<UINT>(kReferenceDpi));
-        rects.push_back(FrozenRect { "panelRect", static_cast<double>(menu.panelRect.left), static_cast<double>(menu.panelRect.top),
-            static_cast<double>(menu.panelRect.right), static_cast<double>(menu.panelRect.bottom) });
-        for (const RECT& swatch : menu.swatchRects) {
-            rects.push_back(FrozenRect { "swatchRect", static_cast<double>(swatch.left), static_cast<double>(swatch.top),
-                static_cast<double>(swatch.right), static_cast<double>(swatch.bottom) });
-        }
-        rects.push_back(FrozenRect { "palettePickerRect", static_cast<double>(menu.palettePickerRect.left), static_cast<double>(menu.palettePickerRect.top),
-            static_cast<double>(menu.palettePickerRect.right), static_cast<double>(menu.palettePickerRect.bottom) });
-        break;
-    }
-    case Kind::Wheel: {
-        const RECT clientRect { static_cast<LONG>(scenario.clientRect.left()), static_cast<LONG>(scenario.clientRect.top()),
-            static_cast<LONG>(scenario.clientRect.right()), static_cast<LONG>(scenario.clientRect.bottom()) };
-        const POINT center { static_cast<LONG>(scenario.anchor.x()), static_cast<LONG>(scenario.anchor.y()) };
-        const cnote::appui::PaletteWheelLayout wheel = cnote::appui::BuildPaletteWheelLayout(
-            clientRect, center, scenario.colorCount, static_cast<int>(scenario.toolbarHeight), static_cast<UINT>(kReferenceDpi));
-        const double centerX = wheel.center.x;
-        const double centerY = wheel.center.y;
-        rects.push_back(FrozenRect { "innerCircle", centerX - wheel.innerRadius, centerY - wheel.innerRadius,
-            centerX + wheel.innerRadius, centerY + wheel.innerRadius });
-        rects.push_back(FrozenRect { "outerCircle", centerX - wheel.outerRadius, centerY - wheel.outerRadius,
-            centerX + wheel.outerRadius, centerY + wheel.outerRadius });
-        rects.push_back(FrozenRect { "hitOuterCircle", centerX - wheel.hitOuterRadius, centerY - wheel.hitOuterRadius,
-            centerX + wheel.hitOuterRadius, centerY + wheel.hitOuterRadius });
-        break;
-    }
-    case Kind::BrushSlider: {
-        const RECT sliderRect { static_cast<LONG>(scenario.editRect.left()), static_cast<LONG>(scenario.editRect.top()),
-            static_cast<LONG>(scenario.editRect.right()), static_cast<LONG>(scenario.editRect.bottom()) };
-        const RECT track = cnote::appui::ToolbarBrushTrackRect(sliderRect, static_cast<UINT>(kReferenceDpi));
-        rects.push_back(FrozenRect { "trackRect", static_cast<double>(track.left), static_cast<double>(track.top),
-            static_cast<double>(track.right), static_cast<double>(track.bottom) });
-        const std::array<float, 5> sizes { 0.5f, 1.0f, 3.25f, 12.0f, 20.0f };
-        for (float size : sizes) {
-            AddValue(rects, "thumbCenterX", static_cast<double>(cnote::appui::ToolbarBrushThumbCenterX(sliderRect, size)));
-        }
-        break;
-    }
-    }
-    return rects;
-}
-
-#endif  // CNOTE_LAYOUT_LEGACY_PARITY
-
 // ------------------------------------------------------------- comparisons ---
 
 void CompareRects(const std::string& context, const Rects& expected, const Rects& actual, double tolerance) {
@@ -478,14 +292,6 @@ void CompareRects(const std::string& context, const Rects& expected, const Rects
             + Format(got.right) + "," + Format(got.bottom) + ") tolerance=" + Format(tolerance));
     }
 }
-
-#ifdef CNOTE_LAYOUT_LEGACY_PARITY
-
-double MaxMetricDelta(double& current, double delta) {
-    return std::max(current, delta);
-}
-
-#endif  // CNOTE_LAYOUT_LEGACY_PARITY
 
 // ------------------------------------------------------------- frozen scenarios
 
@@ -623,8 +429,8 @@ std::vector<Scenario> FrozenTitleScenarios() {
     return scenarios;
 }
 
-// Frozen reference values emitted by --emit-reference (Windows) from
-// cnote::appui; re-verified against the live legacy path on every Windows run.
+// Frozen reference values captured from the Win32 reference implementation:
+// they are the expectations the Qt port is compared against below.
 // FROZEN-GEOMETRY-BEGIN
 const std::vector<FrozenCase> kFrozenGeometry {
     { "toolbar 1400x960 colors=5", {
@@ -865,277 +671,6 @@ const char* AutoHideName(lq::ToolbarAutoHide action) {
     return "?";
 }
 
-// ------------------------------------------------------- live legacy matrix ---
-
-#ifdef CNOTE_LAYOUT_LEGACY_PARITY
-
-// The toolbar body font of App::PaintToolbar (App.cpp:6519-6520):
-// FontHeightForDpi(15, 96) == 15, family Segoe UI.
-HFONT CreateReferenceToolbarFont() {
-    return CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
-}
-
-void RunLiveMatrix(HDC dc, const QFont& font) {
-    const std::vector<QRectF> clientSizes {
-        QRectF(0.0, 0.0, 1400.0, 960.0),
-        QRectF(0.0, 0.0, 900.0, 700.0),
-        QRectF(0.0, 0.0, 700.0, 600.0),
-        QRectF(0.0, 0.0, 500.0, 400.0),
-        QRectF(0.0, 0.0, 1920.0, 1080.0),
-    };
-    const std::vector<std::size_t> colorCounts { 0U, 1U, 5U, 10U };
-    const std::vector<bool> maximizedStates { false, true };
-    const std::vector<int> tools { 0, 1, 2, 3, 4, 5, 6, 7 };
-    const std::vector<std::string> titles { "", "cnote", "notes-2026.cnote", "a-very-long-document-name-that-should-clamp.cnote" };
-    const std::vector<std::string> zoomLabels { "", "100%", "125%", "1250%" };
-    const std::vector<double> previewExtents { 0.0, 28.0, 29.0, 64.0 };
-    const std::vector<double> anchors { -50.0, 0.0, 200.0, 700.0, 1400.0, 1500.0 };
-
-    double maxTitleDelta = 0.0;
-    double maxZoomDelta = 0.0;
-    double maxNominalTitleDelta = 0.0;
-
-    // Qt reports the cell height (ascent + descent + leading) of the reference
-    // font; GDI's CreateFontW height is that same cell height, so an equally
-    // sized GDI font is the Qt line height, not the Qt em size.
-    const int equivalentCellHeight = static_cast<int>(std::lround(QFontMetricsF(font).height()));
-    HDC equivalentDc = CreateCompatibleDC(dc);
-    HFONT equivalentFont = CreateFontW(equivalentCellHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
-    HGDIOBJ equivalentPrevious = equivalentDc != nullptr && equivalentFont != nullptr
-        ? SelectObject(equivalentDc, equivalentFont) : nullptr;
-    Check(equivalentDc != nullptr && equivalentFont != nullptr, "layout parity needs an equivalent-height GDI font");
-
-    for (const QRectF& clientRect : clientSizes) {
-        for (std::size_t colorCount : colorCounts) {
-            for (bool maximized : maximizedStates) {
-                for (int tool : tools) {
-                    Scenario scenario;
-                    scenario.label = "live toolbar";
-                    scenario.kind = Kind::Toolbar;
-                    scenario.clientRect = clientRect;
-                    scenario.colorCount = colorCount;
-                    scenario.maximized = maximized;
-                    scenario.activeTool = tool;
-                    scenario.frameThicknessX = maximized
-                        ? static_cast<double>(cnote::appui::WindowFrameThicknessX(kReferenceDpi))
-                        : 0.0;
-                    const std::string context = "toolbar client=" + Format(clientRect.right()) + "x" + Format(clientRect.bottom())
-                        + " colors=" + std::to_string(colorCount) + " maximized=" + (maximized ? "1" : "0")
-                        + " tool=" + std::to_string(tool);
-                    CompareRects(context, BuildLegacyRects(scenario, dc), BuildQtRects(scenario, font), 0.0);
-
-                    for (const std::string& title : titles) {
-                        for (const std::string& zoomLabel : zoomLabels) {
-                            scenario.kind = Kind::Title;
-                            scenario.title = title;
-                            scenario.zoomLabel = zoomLabel;
-                            const std::string titleContext = context + " title=" + std::to_string(title.size())
-                                + " zoom=" + std::to_string(zoomLabel.size());
-                            const std::wstring wideTitle(title.begin(), title.end());
-                            const std::wstring wideZoom(zoomLabel.begin(), zoomLabel.end());
-                            // Exact algebra parity: the reference advances drive the
-                            // Qt clamp/edge arithmetic, so the rectangles must match
-                            // the legacy ones with no tolerance at all.
-                            const double referenceTitleWidth = static_cast<double>(
-                                cnote::appui::MeasureToolbarTextWidth(dc, wideTitle));
-                            const double referenceZoomWidth = static_cast<double>(
-                                cnote::appui::MeasureToolbarTextWidth(dc, wideZoom));
-                            CompareRects(titleContext, BuildLegacyRects(scenario, dc),
-                                BuildQtTitleRectsWithWidths(scenario, referenceTitleWidth, referenceZoomWidth), 0.0);
-
-                            // Font-metric parity: Qt QFontMetricsF at pixelSize 15
-                            // against GDI at the cell height Qt itself reports for
-                            // that font (the two then share one em).  See the file
-                            // comment for why the nominal legacy cell height 15 is
-                            // not the same em size.
-                            const double titleDelta = std::abs(static_cast<double>(
-                                cnote::appui::MeasureToolbarTextWidth(equivalentDc, wideTitle))
-                                - lq::MeasureChromeTextWidth(font, QString::fromUtf8(title.c_str())));
-                            const double zoomDelta = std::abs(static_cast<double>(
-                                cnote::appui::MeasureToolbarTextWidth(equivalentDc, wideZoom))
-                                - lq::MeasureChromeTextWidth(font, QString::fromUtf8(zoomLabel.c_str())));
-                            maxTitleDelta = MaxMetricDelta(maxTitleDelta, titleDelta);
-                            maxZoomDelta = MaxMetricDelta(maxZoomDelta, zoomDelta);
-                            Check(titleDelta <= kMaxTextMetricDelta, titleContext + " title same-em metric delta=" + Format(titleDelta));
-                            Check(zoomDelta <= kMaxTextMetricDelta, titleContext + " zoom same-em metric delta=" + Format(zoomDelta));
-
-                            // Record the documented nominal-size difference (legacy
-                            // cell height 15 vs Qt em 15) instead of hiding it.
-                            maxNominalTitleDelta = MaxMetricDelta(maxNominalTitleDelta,
-                                std::abs(referenceTitleWidth - lq::MeasureChromeTextWidth(font, QString::fromUtf8(title.c_str()))));
-                        }
-                    }
-                    scenario.kind = Kind::Toolbar;
-                }
-            }
-        }
-    }
-
-    for (const QRectF& clientRect : clientSizes) {
-        for (bool maximized : maximizedStates) {
-            Scenario scenario;
-            scenario.label = "live sidebar";
-            scenario.kind = Kind::Sidebar;
-            scenario.sidebarRect = QRectF(clientRect.left(), clientRect.top(), clientRect.left() + 176.0, clientRect.bottom());
-            scenario.maximized = maximized;
-            const std::string context = "sidebar width=176 height=" + Format(clientRect.bottom())
-                + " maximized=" + (maximized ? "1" : "0");
-            CompareRects(context, BuildLegacyRects(scenario, dc), BuildQtRects(scenario, font), 0.0);
-        }
-    }
-
-    for (const QRectF& clientRect : clientSizes) {
-        for (double previewExtent : previewExtents) {
-            for (double anchorX : anchors) {
-                for (double anchorY : { 0.0, 40.0, 960.0 }) {
-                    Scenario scenario;
-                    scenario.label = "live quick-size";
-                    scenario.kind = Kind::QuickSize;
-                    scenario.clientRect = clientRect;
-                    scenario.anchor = QPointF(anchorX, anchorY);
-                    scenario.previewExtent = previewExtent;
-                    const std::string context = "quick-size client=" + Format(clientRect.right()) + "x" + Format(clientRect.bottom())
-                        + " preview=" + Format(previewExtent) + " anchor=" + Format(anchorX) + "," + Format(anchorY);
-                    CompareRects(context, BuildLegacyRects(scenario, dc), BuildQtRects(scenario, font), 0.0);
-                }
-            }
-        }
-    }
-
-    for (const QRectF& clientRect : clientSizes) {
-        for (const QRectF& editRect : { QRectF(100.0, 300.0, 500.0, 360.0), QRectF(0.0, 0.0, 200.0, 40.0),
-                 QRectF(0.0, 930.0, 200.0, 970.0), QRectF(1300.0, 300.0, 1500.0, 360.0) }) {
-            for (bool fontMenuOpen : { false, true }) {
-                Scenario scenario;
-                scenario.label = "live text-format";
-                scenario.kind = Kind::TextFormat;
-                scenario.clientRect = clientRect;
-                scenario.editRect = editRect;
-                scenario.fontMenuOpen = fontMenuOpen;
-                const std::string context = "text-format client=" + Format(clientRect.right()) + "x" + Format(clientRect.bottom())
-                    + " edit=" + Format(editRect.left()) + "," + Format(editRect.top()) + " menu=" + (fontMenuOpen ? "1" : "0");
-                CompareRects(context, BuildLegacyRects(scenario, dc), BuildQtRects(scenario, font), 0.0);
-            }
-        }
-    }
-
-    for (const QRectF& clientRect : clientSizes) {
-        for (std::size_t colorCount : colorCounts) {
-            Scenario scenario;
-            scenario.label = "live palette menu";
-            scenario.kind = Kind::PaletteMenu;
-            scenario.clientRect = clientRect;
-            scenario.colorCount = colorCount;
-            const std::string context = "palette-menu client=" + Format(clientRect.right()) + " colors=" + std::to_string(colorCount);
-            CompareRects(context, BuildLegacyRects(scenario, dc), BuildQtRects(scenario, font), 0.0);
-
-            scenario.kind = Kind::Wheel;
-            scenario.anchor = QPointF(clientRect.right() / 2.0, clientRect.bottom() / 2.0);
-            scenario.toolbarHeight = 34.0;
-            const std::string wheelContext = "palette-wheel client=" + Format(clientRect.right()) + " colors=" + std::to_string(colorCount);
-            const Rects legacyWheel = BuildLegacyRects(scenario, dc);
-            CompareRects(wheelContext, legacyWheel, BuildQtRects(scenario, font), 0.0);
-
-            const cnote::appui::PaletteWheelLayout legacyLayout = cnote::appui::BuildPaletteWheelLayout(
-                RECT { 0, 0, static_cast<LONG>(clientRect.right()), static_cast<LONG>(clientRect.bottom()) },
-                POINT { static_cast<LONG>(clientRect.right() / 2.0), static_cast<LONG>(clientRect.bottom() / 2.0) },
-                colorCount, 34, static_cast<UINT>(kReferenceDpi));
-            const lq::PaletteWheelLayout qtLayout = lq::BuildPaletteWheelLayout(
-                clientRect, scenario.anchor, colorCount, 34.0);
-            for (int dx = -140; dx <= 140; dx += 20) {
-                for (int dy = -140; dy <= 140; dy += 20) {
-                    const POINT cursor { legacyLayout.center.x + dx, legacyLayout.center.y + dy };
-                    const auto legacyIndex = cnote::appui::PaletteWheelIndexAtPoint(legacyLayout, cursor, colorCount);
-                    const auto qtIndex = lq::PaletteWheelIndexAtPoint(qtLayout, QPointF(cursor.x, cursor.y), colorCount);
-                    Check(legacyIndex == qtIndex, wheelContext + " slice index at " + std::to_string(dx) + "," + std::to_string(dy)
-                        + " legacy=" + (legacyIndex.has_value() ? std::to_string(*legacyIndex) : std::string("none"))
-                        + " qt=" + (qtIndex.has_value() ? std::to_string(*qtIndex) : std::string("none")));
-                }
-            }
-        }
-    }
-
-    for (const QRectF& sliderRect : { QRectF(0.0, 0.0, 134.0, 18.0), QRectF(10.0, 20.0, 200.0, 40.0), QRectF(0.0, 0.0, 134.0, 19.0) }) {
-        Scenario scenario;
-        scenario.label = "live brush slider";
-        scenario.kind = Kind::BrushSlider;
-        scenario.editRect = sliderRect;
-        CompareRects("brush-slider " + Format(sliderRect.right()) + "x" + Format(sliderRect.bottom()),
-            BuildLegacyRects(scenario, dc), BuildQtRects(scenario, font), 0.0);
-    }
-
-    std::printf("INFO: same-em max Win32-vs-Qt advance delta title=%.3f zoom=%.3f (cap %.1f)\n",
-        maxTitleDelta, maxZoomDelta, kMaxTextMetricDelta);
-    std::printf("INFO: Qt font pixelSize=15 reports cell height %d; legacy GDI cell height 15, so the nominal-size "
-        "advance difference reaches %.3f (documented Win32-vs-Qt font sizing, not a layout difference)\n",
-        equivalentCellHeight, maxNominalTitleDelta);
-    if (equivalentPrevious != nullptr) {
-        SelectObject(equivalentDc, equivalentPrevious);
-    }
-    if (equivalentFont != nullptr) {
-        DeleteObject(equivalentFont);
-    }
-    if (equivalentDc != nullptr) {
-        DeleteDC(equivalentDc);
-    }
-
-    // The frozen geometry table must still match the live legacy path.
-    for (const FrozenCase& frozen : kFrozenGeometry) {
-        for (const Scenario& scenario : FrozenGeometryScenarios()) {
-            if (scenario.label == frozen.label) {
-                CompareRects("frozen " + std::string(frozen.label), BuildLegacyRects(scenario, dc), frozen.rects, 0.0);
-            }
-        }
-    }
-    for (const FrozenTitleCase& frozen : kFrozenTitles) {
-        for (const Scenario& scenario : FrozenTitleScenarios()) {
-            if (scenario.label == frozen.label) {
-                CompareRects("frozen " + std::string(frozen.label),
-                    BuildLegacyRects(scenario, dc),
-                    BuildQtTitleRectsWithWidths(scenario, frozen.measuredTitleWidth, frozen.measuredZoomWidth),
-                    0.0);
-            }
-        }
-    }
-}
-
-void EmitReference(HDC dc) {
-    std::printf("// FROZEN-GEOMETRY-BEGIN\n");
-    std::printf("const std::vector<FrozenCase> kFrozenGeometry {\n");
-    for (const Scenario& scenario : FrozenGeometryScenarios()) {
-        const Rects rects = BuildLegacyRects(scenario, dc);
-        std::printf("    { \"%s\", {\n", scenario.label.c_str());
-        for (const FrozenRect& rect : rects) {
-            std::printf("        { \"%s\", %.1f, %.1f, %.1f, %.1f },\n",
-                rect.name, rect.left, rect.top, rect.right, rect.bottom);
-        }
-        std::printf("    } },\n");
-    }
-    std::printf("};\n");
-    std::printf("// FROZEN-GEOMETRY-END\n");
-    std::printf("// FROZEN-TITLES-BEGIN\n");
-    std::printf("const std::vector<FrozenTitleCase> kFrozenTitles {\n");
-    for (const Scenario& scenario : FrozenTitleScenarios()) {
-        const std::wstring wideTitle(scenario.title.begin(), scenario.title.end());
-        const std::wstring wideZoom(scenario.zoomLabel.begin(), scenario.zoomLabel.end());
-        const double measuredTitle = static_cast<double>(cnote::appui::MeasureToolbarTextWidth(dc, wideTitle));
-        const double measuredZoom = static_cast<double>(cnote::appui::MeasureToolbarTextWidth(dc, wideZoom));
-        const Rects rects = BuildLegacyRects(scenario, dc);
-        std::printf("    { \"%s\", %.1f, %.1f, {\n", scenario.label.c_str(), measuredTitle, measuredZoom);
-        for (const FrozenRect& rect : rects) {
-            std::printf("        { \"%s\", %.1f, %.1f, %.1f, %.1f },\n",
-                rect.name, rect.left, rect.top, rect.right, rect.bottom);
-        }
-        std::printf("    } },\n");
-    }
-    std::printf("};\n");
-    std::printf("// FROZEN-TITLES-END\n");
-}
-
-#endif  // CNOTE_LAYOUT_LEGACY_PARITY
-
 void RunFrozenTable(const QFont& font) {
     Check(!kFrozenGeometry.empty(), "frozen geometry reference table is populated");
     Check(!kFrozenTitles.empty(), "frozen title reference table is populated");
@@ -1204,10 +739,9 @@ int main(int argc, char** argv) {
 #endif
     }
 #ifdef Q_OS_WIN
-    // The offscreen plugin's font database returns placeholder metrics on
-    // Windows (one em advance per glyph, regardless of the glyph), so the
-    // live text comparison requires the windows platform.  It stays headless:
-    // this harness never creates a window.
+    // The harness runs on the native platform on Windows, the platform its
+    // frozen reference values were validated on.  It stays headless: this
+    // harness never creates a window.
     qputenv("QT_QPA_PLATFORM", "windows");
 #else
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
@@ -1240,42 +774,10 @@ int main(int argc, char** argv) {
         return reference;
     }();
 
-#ifdef CNOTE_LAYOUT_LEGACY_PARITY
-    HDC screenDc = GetDC(nullptr);
-    HDC dc = screenDc != nullptr ? CreateCompatibleDC(screenDc) : nullptr;
-    if (screenDc != nullptr) {
-        ReleaseDC(nullptr, screenDc);
-    }
-    HFONT fontHandle = CreateReferenceToolbarFont();
-    HGDIOBJ previousFont = dc != nullptr && fontHandle != nullptr ? SelectObject(dc, fontHandle) : nullptr;
-    Check(dc != nullptr && fontHandle != nullptr, "layout parity needs a GDI font context");
-
-    if (argc > 1 && std::strcmp(argv[1], "--emit-reference") == 0) {
-        EmitReference(dc);
-        if (previousFont != nullptr) {
-            SelectObject(dc, previousFont);
-        }
-        DeleteObject(fontHandle);
-        DeleteDC(dc);
-        return 0;
-    }
-
-    RunLiveMatrix(dc, font);
     RunFrozenTable(font);
-#else
-    (void)font;
-    RunFrozenTable(font);
-#endif
 
     RunAutoHideTable();
 
     std::printf("%s: %d checks, %d failure(s)\n", g_failures == 0 ? "PASS" : "FAIL", g_checks, g_failures);
-#ifdef CNOTE_LAYOUT_LEGACY_PARITY
-    if (previousFont != nullptr) {
-        SelectObject(dc, previousFont);
-    }
-    DeleteObject(fontHandle);
-    DeleteDC(dc);
-#endif
     return g_failures == 0 ? 0 : 1;
 }

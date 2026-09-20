@@ -37,8 +37,6 @@ struct ClipboardContent {
     SelectionClipboardData selection {};
     QImage image {};
     QString text {};
-
-    [[nodiscard]] bool HasContent() const noexcept { return kind != ClipboardKind::None; }
 };
 
 // Writes the structured selection: the CTS codec bytes under

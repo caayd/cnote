@@ -720,9 +720,8 @@ QPointF QtMainWindow::QuickPopupCursorAnchor() const {
     // App::ToggleQuickSizePopup (ToolbarState.cpp:246-258): the popup anchors at
     // the cursor in client coordinates; when the cursor is outside the canvas
     // (exclusive right/bottom edges, like the reference PtInRect-style check)
-    // the anchor falls back to the canvas centre 120 px below its top.  The
-    // reference's 120 is a raw device-pixel offset (not ScaleForDpi), so it is
-    // divided by the device pixel ratio into logical pixels here.
+    // the anchor falls back to the canvas centre 120 px below its top.  Qt
+    // works in device-independent pixels, so the offset is used as-is.
     const QPointF cursor = mapFromGlobal(QCursor::pos());
     const QRectF canvas = toolbar_ != nullptr ? toolbar_->HostCanvasRect() : QRectF();
     const bool inside = cursor.x() >= canvas.left() && cursor.x() < canvas.right()
@@ -730,8 +729,7 @@ QPointF QtMainWindow::QuickPopupCursorAnchor() const {
     if (inside) {
         return cursor;
     }
-    const qreal dpr = devicePixelRatioF() > 0.0 ? devicePixelRatioF() : 1.0;
-    return QPointF((canvas.left() + canvas.right()) / 2.0, canvas.top() + 120.0 / dpr);
+    return QPointF((canvas.left() + canvas.right()) / 2.0, canvas.top() + 120.0);
 }
 
 void QtMainWindow::RecordRecentPath(const std::filesystem::path& path) {

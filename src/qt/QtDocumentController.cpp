@@ -182,7 +182,6 @@ void QtDocumentController::BroadcastChange(ProjectChange::Kind kind) {
     }
     ProjectChange change;
     change.kind = kind;
-    change.revision = session_->revision;
     for (QObject* owner : manager_.ViewsForSession(session_)) {
         if (auto* view = qobject_cast<QtDocumentController*>(owner); view != nullptr) {
             view->OnSessionChanged(change, view == this);
@@ -256,7 +255,6 @@ void QtDocumentController::NotifySessionChanged(bool originating) {
     }
     ProjectChange change;
     change.kind = ProjectChange::Kind::Committed;
-    change.revision = session_->revision;
     for (QObject* owner : manager_.ViewsForSession(session_)) {
         if (auto* view = qobject_cast<QtDocumentController*>(owner); view != nullptr) {
             view->OnSessionChanged(change, view == this && originating);
@@ -830,7 +828,6 @@ void QtDocumentController::CommitPageGesture() {
     action.pageIndices = { pageIndex };
     action.pages = { std::move(before) };
     action.replacementPages = { *page };
-    action.focusPageIndex = pageIndex;
     session_->undoActions.push_back(std::move(action));
     session_->redoActions.clear();
     session_->dirty = true;
@@ -1112,7 +1109,6 @@ std::size_t QtDocumentController::InsertPages(std::size_t index, std::size_t cou
     action.type = HistoryActionType::AddPages;
     action.pages = std::move(pages);
     action.index = insertIndex;
-    action.focusPageIndex = insertIndex;
     session_->undoActions.push_back(std::move(action));
     session_->redoActions.clear();
     session_->dirty = true;
@@ -1164,7 +1160,6 @@ bool QtDocumentController::RemovePage(std::size_t index) {
     action.type = HistoryActionType::RemovePages;
     action.pages = { removed };
     action.index = index;
-    action.focusPageIndex = document.CurrentPageIndex();
     session_->undoActions.push_back(std::move(action));
     session_->redoActions.clear();
     session_->dirty = true;
@@ -1199,7 +1194,6 @@ bool QtDocumentController::PastePage(std::size_t index) {
     action.type = HistoryActionType::AddPages;
     action.pages = { pasted };
     action.index = insertIndex;
-    action.focusPageIndex = insertIndex;
     session_->undoActions.push_back(std::move(action));
     session_->redoActions.clear();
     session_->dirty = true;
@@ -1269,7 +1263,6 @@ void QtDocumentController::ApplyNewPageDraft(const ui::NewPageDraft& draft, ui::
     action.pageIndices = indices;
     action.pages = std::move(before);
     action.replacementPages = std::move(after);
-    action.focusPageIndex = indices.front();
     session_->undoActions.push_back(std::move(action));
     session_->redoActions.clear();
     session_->dirty = true;
@@ -1423,7 +1416,6 @@ bool QtDocumentController::RemoveSelection() {
     action.pageIndices = indices;
     action.pages = std::move(before);
     action.replacementPages = std::move(after);
-    action.focusPageIndex = indices.front();
     session_->undoActions.push_back(std::move(action));
     session_->redoActions.clear();
     session_->dirty = true;
@@ -1495,7 +1487,6 @@ bool QtDocumentController::PastePayload(
     action.pageIndices = { pageIndex };
     action.pages = { before };
     action.replacementPages = { page };
-    action.focusPageIndex = pageIndex;
     session_->undoActions.push_back(std::move(action));
     session_->redoActions.clear();
     session_->dirty = true;

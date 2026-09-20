@@ -6,9 +6,9 @@
 
 #include "platform/qt/graphic_qt.h"
 
-// Qt drawing backend for the MicroTeX wrapper, compiled into the targets that
-// link `microtex_qt` (BUILD_QT). The GDI backend was removed at cutover; the
-// two platform backends must never be linked into one target (plan step 1.5).
+// Qt drawing backend for the MicroTeX wrapper: the only drawing backend (the
+// legacy GDI one was deleted at cutover). Compiled into the targets that link
+// `microtex_qt`.
 
 namespace cnote::latex {
 
@@ -25,10 +25,6 @@ void Draw(const FormulaHandle& formula, QPainter& painter, float x, float y, flo
     painter.scale(scale, scale);
     detail::DrawRender(formula, g2, argb);
     painter.restore();
-}
-
-void Draw(const PageLatex& latex, QPainter& painter, float x, float y, float scale) {
-    Draw(Parse(latex), painter, x, y, scale, latex.color);
 }
 
 }  // namespace cnote::latex

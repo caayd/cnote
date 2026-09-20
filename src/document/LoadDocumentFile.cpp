@@ -1,35 +1,27 @@
 #include "document/FileIO.h"
 
-#include <fstream>
+#include <QByteArray>
+#include <QFile>
+#include <QString>
+
 #include <memory>
 #include <vector>
 
 #include "PdfBackend.h"
 #include "ProjectFile.h"
+#include "Unicode.h"
 
 namespace cnote {
 
 namespace {
 
 std::optional<std::vector<std::uint8_t>> ReadAllBytes(const std::filesystem::path& filePath) {
-    std::ifstream input(filePath, std::ios::binary);
-    if (!input) {
+    QFile file(QString::fromUtf8(PathToUtf8(filePath).c_str()));
+    if (!file.open(QIODevice::ReadOnly)) {
         return std::nullopt;
     }
-    input.seekg(0, std::ios::end);
-    const std::streamoff size = input.tellg();
-    if (size < 0) {
-        return std::nullopt;
-    }
-    input.seekg(0, std::ios::beg);
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if (!bytes.empty()) {
-        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        if (!input) {
-            return std::nullopt;
-        }
-    }
-    return bytes;
+    const QByteArray bytes = file.readAll();
+    return std::vector<std::uint8_t>(bytes.begin(), bytes.end());
 }
 
 }  // namespace

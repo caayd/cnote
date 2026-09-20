@@ -359,5 +359,4 @@ if(NOT _cnote_pdfium_link_ok)
         "PDFium headers/import library do not link with the selected compiler:\n${_cnote_pdfium_link_output}")
 endif()
 
-set(CNOTE_PDFIUM_VERSION "${CNOTE_PDFIUM_REQUIRED_VERSION}")
 mark_as_advanced(PDFium_DIR PDFium_INCLUDE_DIR PDFium_LIBRARY PDFium_IMPLIB)

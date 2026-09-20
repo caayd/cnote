@@ -17,6 +17,7 @@
 #include <sstream>
 #include <system_error>
 
+#include "ProjectFile.h"
 #include "Unicode.h"
 
 namespace cnote::settings {
@@ -261,23 +262,6 @@ std::u16string Utf8ToUtf16(std::string_view value) {
 
 // -- recent files -------------------------------------------------------------
 
-bool HasExtension(const std::filesystem::path& path, std::u16string_view extension) {
-    const std::u16string actual = path.extension().u16string();
-    if (actual.size() != extension.size()) {
-        return false;
-    }
-    for (std::size_t index = 0; index < actual.size(); ++index) {
-        const char16_t a = actual[index];
-        const char16_t b = extension[index];
-        const char16_t lowerA = (a >= u'A' && a <= u'Z') ? static_cast<char16_t>(a + 32) : a;
-        const char16_t lowerB = (b >= u'A' && b <= u'Z') ? static_cast<char16_t>(b + 32) : b;
-        if (lowerA != lowerB) {
-            return false;
-        }
-    }
-    return true;
-}
-
 std::filesystem::path NormalizeRecentPath(const std::filesystem::path& filePath) {
     if (filePath.empty()) {
         return {};
@@ -310,7 +294,7 @@ public:
     void Record(const std::filesystem::path& filePath) {
         const std::filesystem::path normalizedPath = NormalizeRecentPath(filePath);
         if (normalizedPath.empty()
-            || (!HasExtension(normalizedPath, u".cnote") && !HasExtension(normalizedPath, u".pdf"))) {
+            || (!cnote::HasExtension(normalizedPath, u".cnote") && !cnote::HasExtension(normalizedPath, u".pdf"))) {
             return;
         }
 

@@ -1,12 +1,10 @@
 // Deterministic tests for the portable selection math (plan steps 5.2/5.3).
 //
 // The ported functions exist because src/selection/Geometry.cpp is bound to
-// App/POINT/RECT and cannot be linked into the Qt target.  On Windows this test
-// links the legacy translation unit as well and compares every case directly
-// against it; everywhere else it compares against the frozen table produced by
-// the same Windows run (values captured from the legacy functions, printed with
-// --print-frozen).  Either way the expectations come from the reference
-// implementation, not from a re-derivation.
+// App/POINT/RECT and cannot be linked into the Qt target.  Every case is
+// compared against the frozen table below, whose values were captured from that
+// reference implementation (printed with --print-frozen), so the expectations
+// come from the reference implementation rather than from a re-derivation.
 
 #include <cmath>
 #include <cstdio>
@@ -18,10 +16,6 @@
 #include "Document.h"
 #include "latex/LatexEngine.h"
 #include "ui/SelectionMath.h"
-
-#ifdef CNOTE_SELECTION_LEGACY_REFERENCE
-#include "selection/Geometry.h"
-#endif
 
 namespace {
 
@@ -46,12 +40,12 @@ void CheckNear(double actual, double expected, const std::string& what, double t
     }
 }
 
-// --- fixed inputs shared by the unit expectations and the legacy comparison ---
+// --- fixed inputs shared by the unit expectations and the probe ----------------
 
 cnote::Stroke MakeStroke() {
     cnote::Stroke stroke;
     stroke.style.width = 3.0f;
-    stroke.smoothing = 0.0f;  // no smoothing: the legacy render points are the raw points
+    stroke.smoothing = 0.0f;  // no smoothing: the reference render points are the raw points
     stroke.points = {
         { 10.0f, 10.0f },
         { 60.0f, 30.0f },
@@ -101,8 +95,8 @@ struct Case {
     double value = 0.0;   // 0/1 for predicates, page units otherwise
 };
 
-// Frozen expectations captured from the legacy implementation on Windows
-// (see --print-frozen); the Windows build additionally compares live.
+// Frozen expectations captured from the reference implementation (see
+// --print-frozen).
 const Case kFrozenCases[] = {
     { "stroke.bounds.minX", 10.0 },
     { "stroke.bounds.minY", 10.0 },
@@ -157,7 +151,7 @@ void CheckFrozen(const std::string& name, double actual, double tolerance = 0.00
     CheckNear(actual, expected->value, name, tolerance);
 }
 
-// The input set used for both the unit expectations and the legacy comparison.
+// The input set the frozen expectations are probed from.
 struct ProbeResults {
     double strokeBoundsMinX = 0.0;
     double strokeBoundsMinY = 0.0;
@@ -244,51 +238,6 @@ ProbeResults Probe() {
         cnote::Vec2 { 0.0f, 0.0f }, cnote::Vec2 { 10.0f, 0.0f }, cnote::Vec2 { 0.0f, 5.0f }, cnote::Vec2 { 10.0f, 5.0f });
     return results;
 }
-
-#ifdef CNOTE_SELECTION_LEGACY_REFERENCE
-struct LegacyApi {
-    static bool StrokeBounds(const cnote::Stroke& s, float* a, float* b, float* c, float* d) {
-        return cnote::StrokeBounds(s, a, b, c, d);
-    }
-    static bool StrokeHitsPoint(const cnote::Stroke& s, cnote::Vec2 p, float r, float f) {
-        return cnote::StrokeHitsPoint(s, p, r, f);
-    }
-    static bool StrokeIntersectsRectSelection(const cnote::Stroke& s, cnote::Vec2 a, cnote::Vec2 b, float f) {
-        return cnote::StrokeIntersectsRectSelection(s, a, b, f);
-    }
-    static bool StrokeIntersectsPolygonSelection(const cnote::Stroke& s, const std::vector<cnote::Vec2>& p, float f) {
-        return cnote::StrokeIntersectsPolygonSelection(s, p, f);
-    }
-    static cnote::Vec2 ClampStrokeDeltaToPage(const cnote::Stroke& s, const cnote::Page& p, cnote::Vec2 d) {
-        return cnote::ClampStrokeDeltaToPage(s, p, d);
-    }
-    static cnote::Vec2 ImageCenter(const cnote::PageImage& i) { return cnote::ImageCenter(i); }
-    static std::array<cnote::Vec2, 4> ImageCorners(const cnote::PageImage& i) { return cnote::ImageCorners(i); }
-    static bool ImageHitsPoint(const cnote::PageImage& i, cnote::Vec2 p) { return cnote::ImageHitsPoint(i, p); }
-    static bool ImageIntersectsRectSelection(const cnote::PageImage& i, cnote::Vec2 a, cnote::Vec2 b) {
-        return cnote::ImageIntersectsRectSelection(i, a, b);
-    }
-    static bool ImageIntersectsPolygonSelection(const cnote::PageImage& i, const std::vector<cnote::Vec2>& p) {
-        return cnote::ImageIntersectsPolygonSelection(i, p);
-    }
-    static cnote::Vec2 ClampImageDeltaToPage(const cnote::PageImage& i, const cnote::Page& p, cnote::Vec2 d) {
-        return cnote::ClampImageDeltaToPage(i, p, d);
-    }
-    static float SelectionHandleHitRadiusPixels(int dpi) { return cnote::SelectionHandleHitRadiusPixels(dpi); }
-    static float SelectionRotateOffsetPageUnits(float scale, int dpi) {
-        return cnote::SelectionRotateOffsetPageUnits(scale, dpi);
-    }
-    static cnote::Vec2 RotatePointAround(cnote::Vec2 p, cnote::Vec2 c, float d) {
-        return cnote::RotatePointAround(p, c, d);
-    }
-    static bool PointInPolygon(cnote::Vec2 p, const std::vector<cnote::Vec2>& poly) {
-        return cnote::PointInPolygon(p, poly);
-    }
-    static bool SegmentsIntersect(cnote::Vec2 a1, cnote::Vec2 a2, cnote::Vec2 b1, cnote::Vec2 b2) {
-        return cnote::SegmentsIntersect(a1, a2, b1, b2);
-    }
-};
-#endif
 
 struct PortedApi {
     static bool StrokeBounds(const cnote::Stroke& s, float* a, float* b, float* c, float* d) {
@@ -406,8 +355,8 @@ int main(int argc, char** argv) {
 
     VerifyProbe(ported, "");
 
-    // MapSelectionTransformPoint is a new helper with no legacy counterpart, so
-    // it is checked with direct expectations rather than the frozen table.
+    // MapSelectionTransformPoint is not covered by the frozen table, so it is
+    // checked with direct expectations.
     {
         const cnote::ui::SelectionBounds from { 100.0f, 200.0f, 300.0f, 400.0f, true };
         const cnote::Vec2 identity = cnote::ui::MapSelectionTransformPoint(cnote::Vec2 { 150.0f, 250.0f }, from, from, 0.0f);
@@ -434,46 +383,6 @@ int main(int argc, char** argv) {
         CheckNear(mapped.x, 30.0, "map.zeroFrom.x");
         CheckNear(mapped.y, 40.0, "map.zeroFrom.y");
     }
-
-#ifdef CNOTE_SELECTION_LEGACY_REFERENCE
-    // Live differential comparison against the legacy implementation, which is
-    // only linkable on Windows (UiUtil.h includes <windows.h>).
-    const ProbeResults legacy = Probe<LegacyApi>();
-    Check(Near(ported.strokeBoundsMinX, legacy.strokeBoundsMinX), "legacy stroke bounds minX");
-    Check(Near(ported.strokeBoundsMinY, legacy.strokeBoundsMinY), "legacy stroke bounds minY");
-    Check(Near(ported.strokeBoundsMaxX, legacy.strokeBoundsMaxX), "legacy stroke bounds maxX");
-    Check(Near(ported.strokeBoundsMaxY, legacy.strokeBoundsMaxY), "legacy stroke bounds maxY");
-    Check(ported.strokeHitOnPoint == legacy.strokeHitOnPoint, "legacy stroke hit on point");
-    Check(ported.strokeHitNearSegment == legacy.strokeHitNearSegment, "legacy stroke hit near segment");
-    Check(ported.strokeHitFar == legacy.strokeHitFar, "legacy stroke hit far");
-    Check(ported.strokeRectContainsSegment == legacy.strokeRectContainsSegment, "legacy stroke rect contains segment");
-    Check(ported.strokeRectMiss == legacy.strokeRectMiss, "legacy stroke rect miss");
-    Check(ported.strokePolygonInside == legacy.strokePolygonInside, "legacy stroke polygon inside");
-    Check(ported.strokePolygonMiss == legacy.strokePolygonMiss, "legacy stroke polygon miss");
-    Check(Near(ported.strokeClamp.x, legacy.strokeClamp.x), "legacy stroke clamp x");
-    Check(Near(ported.strokeClamp.y, legacy.strokeClamp.y), "legacy stroke clamp y");
-    Check(Near(ported.imageCenter.x, legacy.imageCenter.x), "legacy image center x");
-    Check(Near(ported.imageCenter.y, legacy.imageCenter.y), "legacy image center y");
-    Check(Near(ported.imageCorner0.x, legacy.imageCorner0.x), "legacy image corner0 x");
-    Check(Near(ported.imageCorner0.y, legacy.imageCorner0.y), "legacy image corner0 y");
-    Check(ported.imageHitCenter == legacy.imageHitCenter, "legacy image hit center");
-    Check(ported.imageHitFar == legacy.imageHitFar, "legacy image hit far");
-    Check(ported.imageRectMiss == legacy.imageRectMiss, "legacy image rect miss");
-    Check(ported.imageRectHit == legacy.imageRectHit, "legacy image rect hit");
-    Check(ported.imagePolygonHit == legacy.imagePolygonHit, "legacy image polygon hit");
-    Check(ported.imagePolygonMiss == legacy.imagePolygonMiss, "legacy image polygon miss");
-    Check(Near(ported.imageClamp.x, legacy.imageClamp.x), "legacy image clamp x");
-    Check(Near(ported.imageClamp.y, legacy.imageClamp.y), "legacy image clamp y");
-    Check(Near(ported.handleHitRadius, legacy.handleHitRadius), "legacy handle hit radius");
-    Check(Near(ported.rotateOffset, legacy.rotateOffset), "legacy rotate offset");
-    Check(Near(ported.rotated90.x, legacy.rotated90.x), "legacy rotate 90 x");
-    Check(Near(ported.rotated90.y, legacy.rotated90.y), "legacy rotate 90 y");
-    Check(ported.pointInPolygonInside == legacy.pointInPolygonInside, "legacy point in polygon inside");
-    Check(ported.pointInPolygonOutside == legacy.pointInPolygonOutside, "legacy point in polygon outside");
-    Check(ported.segmentsCross == legacy.segmentsCross, "legacy segments cross");
-    Check(ported.segmentsParallel == legacy.segmentsParallel, "legacy segments parallel");
-    Check(Near(legacy.imageCenter.x, 140.0), "legacy reference sanity (image center)");
-#endif
 
     // LaTeX bounds need the engine; kept separate because the frozen values are
     // engine metrics rather than geometry math.

@@ -7,10 +7,6 @@
 #include <string>
 #include <vector>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 #include "Document.h"
 
 namespace cnote {
@@ -50,16 +46,6 @@ public:
     [[nodiscard]] std::optional<std::vector<PdfTextCharBox>> ExtractTextCharBoxes(
         const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
         std::size_t pageIndex) const;
-#ifdef _WIN32
-    [[nodiscard]] bool RenderPageToHdc(
-        const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
-        std::size_t pageIndex,
-        HDC hdc,
-        int x,
-        int y,
-        int width,
-        int height) const;
-#endif
     [[nodiscard]] bool ExportPdf(
         const Document& document,
         const std::filesystem::path& filePath,

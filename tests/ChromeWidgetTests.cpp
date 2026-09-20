@@ -327,7 +327,7 @@ void TestPaletteWheelIntents() {
 
 // The no-argument entry resolves the reference anchor itself
 // (App::TogglePaletteWheel, ToolbarState.cpp:127-159): centred on the cursor
-// when it is inside the window, otherwise 72 device pixels below the toolbar's
+// when it is inside the window, otherwise 72 DIPs below the toolbar's
 // current-colour swatch.  QCursor::setPos is the only way to drive it, and a
 // platform may clamp it, so every expectation follows the cursor position read
 // back from the host instead of the requested one.
@@ -383,8 +383,7 @@ void TestPaletteWheelAnchor() {
     if (fallbackAnchor) {
         const QPointF hostOrigin(toolbar->mapTo(&host, QPoint(0, 0)));
         const QRectF colorRect = toolbar->ControlRect(cnote::ui::ToolbarControl::CurrentColor).translated(hostOrigin);
-        const qreal dpr = host.devicePixelRatioF() > 0.0 ? host.devicePixelRatioF() : 1.0;
-        const QPointF anchor(colorRect.center().x(), colorRect.bottom() + (72.0 / dpr));
+        const QPointF anchor(colorRect.center().x(), colorRect.bottom() + 72.0);
         toolbar->TogglePaletteWheel();
         Check(toolbar->PaletteWheelVisible(), "the wheel opens with the swatch fallback anchor");
         const qt::PaletteWheelLayout layout = qt::BuildPaletteWheelLayout(clientRect, anchor, entryCount, qt::ToolbarHeight(false));

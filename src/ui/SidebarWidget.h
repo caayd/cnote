@@ -4,7 +4,6 @@
 #include <optional>
 #include <vector>
 
-#include <QElapsedTimer>
 #include <QImage>
 #include <QRect>
 #include <QString>
@@ -20,7 +19,7 @@ namespace cnote::render {
 class PdfBackgroundProvider;
 }
 
-class QTimer;
+class QVariantAnimation;
 
 namespace cnote::ui {
 
@@ -55,7 +54,6 @@ public:
 
     // --- model ------------------------------------------------------------
     void SetDocument(const Document* document, render::PdfBackgroundProvider* pdfBackground = nullptr);
-    [[nodiscard]] const Document* DocumentPtr() const { return document_; }
     // Committed document change: drops every cached thumbnail (App.cpp:4300
     // InvalidateSidebarThumbnailCache).
     void NotifyDocumentChanged();
@@ -75,7 +73,6 @@ public:
     // unless auto-hide reserves nothing).  The widget positions itself, so the
     // shell must not put it in a QLayout.
     void SetHostClientRect(const QRect& clientRect, int reservedTop);
-    [[nodiscard]] QRect HostClientRect() const { return hostClientRect_; }
     void SetMaximized(bool maximized);
 
     // --- scrolling --------------------------------------------------------
@@ -128,9 +125,7 @@ private:
     void UpdateGeometry();
     void UpdateVisibility();
     void StartSlideAnimation(qreal target);
-    void OnSlideTick();
     void StartScrollAnimation(int target);
-    void OnScrollTick();
     void EnsureCurrentPageVisible();
     const QImage* ThumbnailAt(std::size_t index, int width, int height);
     void InvalidateThumbnails();
@@ -144,21 +139,15 @@ private:
 
     bool open_ = false;
     qreal slideProgress_ = 0.0;
-    int slideFrom_ = 0;
-    int slideTarget_ = 0;
-    QTimer* slideTimer_ = nullptr;
-    QElapsedTimer slideClock_ {};
+    QVariantAnimation* slideAnimation_ = nullptr;
 
     QRect hostClientRect_ {};
     int reservedTop_ = 0;
     bool maximized_ = false;
 
     int scrollY_ = 0;
-    int scrollFrom_ = 0;
-    int scrollTarget_ = 0;
     qreal wheelRemainder_ = 0.0;
-    QTimer* scrollTimer_ = nullptr;
-    QElapsedTimer scrollClock_ {};
+    QVariantAnimation* scrollAnimation_ = nullptr;
 
     bool pageJumpEditing_ = false;
     QString pageJumpText_ {};

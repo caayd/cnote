@@ -21,14 +21,11 @@ class PdfiumBackgroundProvider final : public PdfBackgroundProvider {
 public:
     PdfiumBackgroundProvider(const PdfiumBackend& backend, const Document& document, std::size_t capacity = 8);
 
-    void SetDocument(const Document& document);
-
     [[nodiscard]] QImage PageBackground(std::int32_t sourceIndex, std::int32_t pageIndex, float rasterScale) override;
 
     // Diagnostics for the render evidence.
     [[nodiscard]] std::size_t RenderCount() const noexcept { return renderCount_; }
     [[nodiscard]] std::size_t CachedPageCount() const noexcept { return cache_.size(); }
-    void Clear();
 
 private:
     struct Key {

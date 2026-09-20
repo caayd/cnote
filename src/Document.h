@@ -162,9 +162,7 @@ public:
         std::size_t currentPageIndex,
         PageDefaults pageDefaults);
 
-    [[nodiscard]] bool IsPdfDocument() const noexcept;
     [[nodiscard]] const std::filesystem::path& FilePath() const noexcept;
-    [[nodiscard]] const std::filesystem::path& SourcePath() const noexcept;
     [[nodiscard]] const std::shared_ptr<std::vector<std::uint8_t>>& PdfData() const noexcept;
     [[nodiscard]] bool HasPdfData() const noexcept;
     [[nodiscard]] std::size_t PdfSourceCount() const noexcept;
@@ -183,7 +181,6 @@ public:
     std::size_t RemovePage(std::size_t index);
     void SetFilePath(std::filesystem::path filePath);
     void SetNewPageDefaults(PageDefaults pageDefaults);
-    std::int32_t AppendPdfSource(std::filesystem::path sourcePath, std::shared_ptr<std::vector<std::uint8_t>> pdfData);
     void ResetToBlank();
     void ReplaceWithEditable(
         std::filesystem::path filePath,
@@ -199,7 +196,6 @@ public:
 
 private:
     std::filesystem::path filePath_;
-    bool pdfDocument_ = false;
     std::vector<PdfSource> pdfSources_ {};
     std::vector<Page> pages_ { Page {} };
     std::size_t currentPageIndex_ = 0;

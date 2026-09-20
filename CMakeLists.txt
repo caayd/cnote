@@ -32,9 +32,8 @@ target_include_directories(tinyxml2 PUBLIC third_party/tinyxml2)
 # Source list mirrors upstream CMakeLists.txt (their target also builds a
 # sample exe and requires pkg-config; we want neither).
 #
-# The engine sources are shared by the legacy Windows GDI target (`microtex`,
-# Windows only) and the Qt target (`microtex_qt`, all platforms).  The two
-# platform backends must never be compiled into one target (plan step 1.5).
+# The engine sources feed the Qt target (`microtex_qt`, all platforms); the
+# legacy Windows GDI target they were once shared with no longer exists.
 set(CNOTE_MICROTEX_ENGINE_SOURCES
     third_party/microtex/src/atom/atom_basic.cpp
     third_party/microtex/src/atom/atom_char.cpp
@@ -128,10 +127,9 @@ enable_testing()
 # NanoMichael/MicroTeX @ 0e3707f6 (MIT; third_party/microtex/LICENSE) with local
 # cnote changes recorded in the file headers.
 #
-# Resource notes (unchanged from the legacy target): tinyxml2 is retained, the
-# MicroTeX res/ tree - including its `.clatexmath-res_root` marker - is staged as
-# real files next to the executable, and the GPLv3 res/greek + res/cyrillic
-# directories stay stripped.
+# Resource notes: tinyxml2 is retained, the MicroTeX res/ tree - including its
+# `.clatexmath-res_root` marker - is staged as real files next to the
+# executable, and the GPLv3 res/greek + res/cyrillic directories stay stripped.
 find_package(Qt6 6.11.2 REQUIRED COMPONENTS Gui)
 
 add_library(microtex_qt STATIC
@@ -367,7 +365,6 @@ add_library(cnote_services STATIC
 )
 target_include_directories(cnote_services PUBLIC src)
 target_compile_features(cnote_services PUBLIC cxx_std_20)
-target_compile_definitions(cnote_services PUBLIC CNOTE_LATEX_QT_BACKEND)
 target_compile_options(cnote_services PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
@@ -419,11 +416,10 @@ endif()
 # Layout parity evidence (plan step 6.1): one input matrix (client sizes
 # including compact widths, palette sizes, maximized states, tool variants,
 # title/zoom text lengths, popup-edge clamping, auto-hide boundaries) drives
-# cnote::appui and cnote::appui::qt and asserts matching rectangles - exactly
-# for geometry and within the stated text-metric tolerance for title/zoom.
-# Windows additionally runs the live legacy comparison; every platform compares
-# against the frozen reference table captured from that legacy path (the
-# executable's own --emit-reference mode verifies the table on Windows).
+# cnote::appui::qt and asserts every produced rectangle against the frozen
+# reference table below.  The comparison is exact: both sides are integer
+# arithmetic at the 96-DPI reference scale, and the title/zoom cases take the
+# reference's own measured text advances as input instead of measuring here.
 add_executable(cnote_layout_parity_tests tests/LayoutParityTests.cpp)
 target_include_directories(cnote_layout_parity_tests PRIVATE src)
 target_compile_features(cnote_layout_parity_tests PRIVATE cxx_std_20)
@@ -438,9 +434,8 @@ target_compile_options(cnote_layout_parity_tests PRIVATE
 )
 target_link_libraries(cnote_layout_parity_tests PRIVATE cnote_ui Qt6::Gui)
 add_test(NAME layout_parity_qt COMMAND cnote_layout_parity_tests)
-# Windows needs the native platform: the offscreen plugin's font database
-# returns placeholder metrics there, while the harness compares real text
-# advances.  Other platforms only need geometry and run offscreen.
+# The harness selects its own platform (native on Windows, offscreen
+# elsewhere); these properties only supply the plugin path.
 if(WIN32)
     set_tests_properties(layout_parity_qt PROPERTIES TIMEOUT 120
         ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_plugins}")
@@ -465,211 +460,209 @@ endif()
 #            Contents/Frameworks/libpdfium.dylib.  Present but UNVERIFIED: there
 #            is no macOS machine in this environment (see the packaging report).
 #
+include(GNUInstallDirs)
+
+# The same artwork as the Windows .rc icon and the macOS bundle icon, made
+# available to Qt on every platform.
+qt_add_resources(cnote_services "cnote_app_icons"
+    PREFIX "/cnote"
+    BASE "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/cnote.ico"
+)
+
+# The Windows icon resource stays conditional; no other platform compiles it.
+if(WIN32)
+    target_sources(cnote PRIVATE src/cnote.rc)
+endif()
+
+# -- install layout -----------------------------------------------------------
+get_target_property(_cnote_output_name cnote OUTPUT_NAME)
+if(NOT _cnote_output_name)
+    set(_cnote_output_name "cnote")
+endif()
+set(_cnote_app_bundle "${_cnote_output_name}.app")
+if(APPLE)
+    set(_cnote_resource_dest "${_cnote_app_bundle}/Contents/Resources")
+else()
+    set(_cnote_resource_dest "${CMAKE_INSTALL_BINDIR}")
+endif()
+
+install(TARGETS cnote
+    BUNDLE DESTINATION .
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+)
+
+# MicroTeX's XML/TTF resources must remain real files (plan step 3.8): stage
+# them beside the executable, or in Contents/Resources inside a bundle.
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res/"
+    DESTINATION "${_cnote_resource_dest}/latex-res"
+)
+
+# PDFium: the exact runtime library the build linked, installed where the
+# installed application loads it without any developer PATH entry.
+if(APPLE)
+    install(FILES "$<TARGET_FILE:pdfium>"
+        DESTINATION "${_cnote_app_bundle}/Contents/Frameworks")
+elseif(WIN32)
+    install(FILES "$<TARGET_FILE:pdfium>" DESTINATION "${CMAKE_INSTALL_BINDIR}")
+else()
+    install(FILES "$<TARGET_FILE:pdfium>" DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+endif()
+
+# Relocatable runtime paths: the installed executable finds the deployed
+# libraries relative to itself, never through a build-machine path.
+if(APPLE)
+    set_target_properties(cnote PROPERTIES
+        INSTALL_RPATH "@executable_path/../Frameworks")
+elseif(UNIX)
+    set_target_properties(cnote PROPERTIES
+        INSTALL_RPATH "$ORIGIN/../lib")
+endif()
+
+# -- macOS bundle (configured, explicitly unverified) -------------------------
+if(APPLE)
+    set_target_properties(cnote PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_BUNDLE_NAME "cnote"
+        # Placeholder reverse-DNS identifier: macOS signing/notarization and
+        # the real distribution identifier are release prerequisites that
+        # cannot be verified or chosen without a macOS machine.
+        MACOSX_BUNDLE_GUI_IDENTIFIER "org.cnote.app"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    )
+    # Bundle icon generated from the same assets/cnote.ico artwork.  The
+    # generator is only needed on macOS; skipping it (no Python) leaves the
+    # bundle without CFBundleIconFile rather than failing the build.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        set(_cnote_icns "${CMAKE_CURRENT_BINARY_DIR}/cnote.icns")
+        add_custom_command(OUTPUT "${_cnote_icns}"
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-icns.py"
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/cnote.ico"
+                "${_cnote_icns}"
+            DEPENDS
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/cnote.ico"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-icns.py"
+            COMMENT "Generating cnote.icns from assets/cnote.ico"
+            VERBATIM
+        )
+        add_custom_target(cnote_bundle_icon ALL DEPENDS "${_cnote_icns}")
+        install(FILES "${_cnote_icns}"
+            DESTINATION "${_cnote_app_bundle}/Contents/Resources")
+        set_target_properties(cnote PROPERTIES
+            MACOSX_BUNDLE_ICON_FILE "cnote.icns")
+    endif()
+endif()
+
+# -- Qt runtime deployment (plan step 7.3) ------------------------------------
+# Windows: windeployqt (Qt DLLs, platform/image plugins, MinGW compiler
+# runtime).  Linux/macOS: the Qt deploy tool copies the Qt libraries (and
+# plugins on Linux) and writes a relative qt.conf.  Libraries that cannot be
+# resolved are left to the verification script, which fails loudly.
+#
+# On Linux the offscreen platform plugin ships too: it lets the packaged
+# application (and tools/verify-package.cmake) run the real binary headless
+# on a machine without a display.  Windows' default windeployqt set already
+# carries everything the verifier requires; macOS is handled by macdeployqt.
+set(_cnote_deploy_plugin_args "")
+if(UNIX AND NOT APPLE)
+    set(_cnote_deploy_plugin_args INCLUDE_PLUGINS offscreen)
+endif()
+qt_generate_deploy_app_script(
+    TARGET cnote
+    OUTPUT_SCRIPT _cnote_deploy_script
+    NO_UNSUPPORTED_PLATFORM_ERROR
+    ${_cnote_deploy_plugin_args}
+)
+install(SCRIPT "${_cnote_deploy_script}")
+
+# -- third-party notices (plan 7.4/7.6) ----------------------------------------
+# The shipped archives carry the notice file plus the license texts of every
+# component that is redistributed: MicroTeX (MIT and its font licenses),
+# tinyxml2 (zlib), PDFium (BSD-3-Clause and its bundled licenses) and the
+# MinGW-w64 public-domain disclaimer (see THIRD-PARTY-NOTICES.md; the MinGW
+# runtime DLLs shipped on Windows are covered by the GCC Runtime Library
+# Exception rather than a separate license file).
+set(_cnote_notice_dir "${CMAKE_INSTALL_DATADIR}/licenses/cnote")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/THIRD-PARTY-NOTICES.md"
+    DESTINATION "${_cnote_notice_dir}")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/LICENSE"
+    DESTINATION "${_cnote_notice_dir}/microtex")
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res/fonts/licences/"
+    DESTINATION "${_cnote_notice_dir}/microtex/fonts-licences")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinyxml2/LICENSE.txt"
+    DESTINATION "${_cnote_notice_dir}/tinyxml2")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium/LICENSE"
+    DESTINATION "${_cnote_notice_dir}/pdfium")
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium/licenses/"
+    DESTINATION "${_cnote_notice_dir}/pdfium/licenses")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/DISCLAIMER.PD"
+    DESTINATION "${_cnote_notice_dir}/mingw-w64")
+
+# The LGPL v3 text is taken from the Qt installation that is being deployed.
+# Qt's binary installers do not always carry it; when it is missing the
+# release must supply LICENSES/LGPL-3.0-only.txt from the Qt source, so this
+# is reported at configure time instead of being silently omitted.
+get_target_property(_cnote_core_location_local Qt6::Core IMPORTED_LOCATION)
+get_filename_component(_cnote_root_local "${_cnote_core_location_local}/../.." ABSOLUTE)
+set(_cnote_lgpl_license "")
+foreach(_cnote_license_candidate
+    "${_cnote_root_local}/LICENSE.LGPL3"
+    "${_cnote_root_local}/LICENSE.LGPLv3"
+    "${_cnote_root_local}/LICENSES/LGPL-3.0-only.txt"
+    "${_cnote_root_local}/LICENSES/LGPL-3.0-or-later.txt")
+    if(EXISTS "${_cnote_license_candidate}")
+        set(_cnote_lgpl_license "${_cnote_license_candidate}")
+        break()
+    endif()
+endforeach()
+if(_cnote_lgpl_license)
+    install(FILES "${_cnote_lgpl_license}"
+        DESTINATION "${_cnote_notice_dir}/qt" RENAME "LICENSE.LGPL3")
+else()
+    message(WARNING
+        "Qt LGPL v3 text not found under ${_cnote_root_local}: the packaged "
+        "notices cannot include it. Supply LICENSES/LGPL-3.0-only.txt from the Qt "
+        "source distribution before publishing an artifact (see "
+        "THIRD-PARTY-NOTICES.md, 'Open prerequisites').")
+endif()
+
+# -- CPack: Windows x64 ZIP, Linux x64 relocatable TGZ ------------------------
+set(CPACK_PACKAGE_NAME "cnote")
+set(CPACK_PACKAGE_VENDOR "cnote")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+    "cnote note-taking application (Qt ${Qt6_VERSION} build)")
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    if(APPLE AND CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
+        set(_cnote_package_arch "arm64")
+    else()
+        set(_cnote_package_arch "x64")
+    endif()
+else()
+    set(_cnote_package_arch "x86")
+endif()
+# Deterministic artifact name; the archive gets the same name as its
+# top-level directory (CPACK_INCLUDE_TOPLEVEL_DIRECTORY below).
+set(CPACK_PACKAGE_FILE_NAME
+    "cnote-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}-${_cnote_package_arch}")
+set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
+set(CPACK_PACKAGE_CHECKSUM "SHA256")
+if(WIN32)
+    set(CPACK_GENERATOR "ZIP")
+elseif(APPLE)
+    # Configured but unverified: drag-and-drop DMG for the (unsigned,
+    # un-notarized) bundle.  macOS artifacts are not produced here.
+    set(CPACK_GENERATOR "DragNDrop")
+    set(CPACK_DMG_VOLUME_NAME "cnote")
+else()
+    set(CPACK_GENERATOR "TGZ")
+endif()
 # `include(CPack)` must remain the last statement of this project: it captures
 # the install rules above.
-if(TARGET cnote)
-    include(GNUInstallDirs)
-
-    # The same artwork as the Windows .rc icon and the macOS bundle icon, made
-    # available to Qt on every platform.
-    qt_add_resources(cnote_services "cnote_app_icons"
-        PREFIX "/cnote"
-        BASE "${CMAKE_CURRENT_SOURCE_DIR}/assets"
-        FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/cnote.ico"
-    )
-
-    # The Windows icon resource stays conditional; no other platform compiles it.
-    if(WIN32)
-        target_sources(cnote PRIVATE src/cnote.rc)
-    endif()
-
-    # -- install layout -------------------------------------------------------
-    get_target_property(_cnote_output_name cnote OUTPUT_NAME)
-    if(NOT _cnote_output_name)
-        set(_cnote_output_name "cnote")
-    endif()
-    set(_cnote_app_bundle "${_cnote_output_name}.app")
-    if(APPLE)
-        set(_cnote_resource_dest "${_cnote_app_bundle}/Contents/Resources")
-    else()
-        set(_cnote_resource_dest "${CMAKE_INSTALL_BINDIR}")
-    endif()
-
-    install(TARGETS cnote
-        BUNDLE DESTINATION .
-        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
-    )
-
-    # MicroTeX's XML/TTF resources must remain real files (plan step 3.8): stage
-    # them beside the executable, or in Contents/Resources inside a bundle.
-    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res/"
-        DESTINATION "${_cnote_resource_dest}/latex-res"
-    )
-
-    # PDFium: the exact runtime library the build linked, installed where the
-    # installed application loads it without any developer PATH entry.
-    if(APPLE)
-        install(FILES "$<TARGET_FILE:pdfium>"
-            DESTINATION "${_cnote_app_bundle}/Contents/Frameworks")
-    elseif(WIN32)
-        install(FILES "$<TARGET_FILE:pdfium>" DESTINATION "${CMAKE_INSTALL_BINDIR}")
-    else()
-        install(FILES "$<TARGET_FILE:pdfium>" DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-    endif()
-
-    # Relocatable runtime paths: the installed executable finds the deployed
-    # libraries relative to itself, never through a build-machine path.
-    if(APPLE)
-        set_target_properties(cnote PROPERTIES
-            INSTALL_RPATH "@executable_path/../Frameworks")
-    elseif(UNIX)
-        set_target_properties(cnote PROPERTIES
-            INSTALL_RPATH "$ORIGIN/../lib")
-    endif()
-
-    # -- macOS bundle (configured, explicitly unverified) ---------------------
-    if(APPLE)
-        set_target_properties(cnote PROPERTIES
-            MACOSX_BUNDLE TRUE
-            MACOSX_BUNDLE_BUNDLE_NAME "cnote"
-            # Placeholder reverse-DNS identifier: macOS signing/notarization and
-            # the real distribution identifier are release prerequisites that
-            # cannot be verified or chosen without a macOS machine.
-            MACOSX_BUNDLE_GUI_IDENTIFIER "org.cnote.app"
-            MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
-            MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
-        )
-        # Bundle icon generated from the same assets/cnote.ico artwork.  The
-        # generator is only needed on macOS; skipping it (no Python) leaves the
-        # bundle without CFBundleIconFile rather than failing the build.
-        find_package(Python3 COMPONENTS Interpreter QUIET)
-        if(Python3_Interpreter_FOUND)
-            set(_cnote_icns "${CMAKE_CURRENT_BINARY_DIR}/cnote.icns")
-            add_custom_command(OUTPUT "${_cnote_icns}"
-                COMMAND "${Python3_EXECUTABLE}"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-icns.py"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/assets/cnote.ico"
-                    "${_cnote_icns}"
-                DEPENDS
-                    "${CMAKE_CURRENT_SOURCE_DIR}/assets/cnote.ico"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-icns.py"
-                COMMENT "Generating cnote.icns from assets/cnote.ico"
-                VERBATIM
-            )
-            add_custom_target(cnote_bundle_icon ALL DEPENDS "${_cnote_icns}")
-            install(FILES "${_cnote_icns}"
-                DESTINATION "${_cnote_app_bundle}/Contents/Resources")
-            set_target_properties(cnote PROPERTIES
-                MACOSX_BUNDLE_ICON_FILE "cnote.icns")
-        endif()
-    endif()
-
-    # -- Qt runtime deployment (plan step 7.3) --------------------------------
-    # Windows: windeployqt (Qt DLLs, platform/image plugins, MinGW compiler
-    # runtime).  Linux/macOS: the Qt deploy tool copies the Qt libraries (and
-    # plugins on Linux) and writes a relative qt.conf.  Libraries that cannot be
-    # resolved are left to the verification script, which fails loudly.
-    #
-    # On Linux the offscreen platform plugin ships too: it lets the packaged
-    # application (and tools/verify-package.cmake) run the real binary headless
-    # on a machine without a display.  Windows' default windeployqt set already
-    # carries everything the verifier requires; macOS is handled by macdeployqt.
-    set(_cnote_deploy_plugin_args "")
-    if(UNIX AND NOT APPLE)
-        set(_cnote_deploy_plugin_args INCLUDE_PLUGINS offscreen)
-    endif()
-    qt_generate_deploy_app_script(
-        TARGET cnote
-        OUTPUT_SCRIPT _cnote_deploy_script
-        NO_UNSUPPORTED_PLATFORM_ERROR
-        ${_cnote_deploy_plugin_args}
-    )
-    install(SCRIPT "${_cnote_deploy_script}")
-
-    # -- third-party notices (plan 7.4/7.6) ------------------------------------
-    # The shipped archives carry the notice file plus the license texts of every
-    # component that is redistributed: MicroTeX (MIT and its font licenses),
-    # tinyxml2 (zlib), PDFium (BSD-3-Clause and its bundled licenses) and the
-    # MinGW-w64 public-domain disclaimer (see THIRD-PARTY-NOTICES.md; the MinGW
-    # runtime DLLs shipped on Windows are covered by the GCC Runtime Library
-    # Exception rather than a separate license file).
-    set(_cnote_notice_dir "${CMAKE_INSTALL_DATADIR}/licenses/cnote")
-    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/THIRD-PARTY-NOTICES.md"
-        DESTINATION "${_cnote_notice_dir}")
-    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/LICENSE"
-        DESTINATION "${_cnote_notice_dir}/microtex")
-    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res/fonts/licences/"
-        DESTINATION "${_cnote_notice_dir}/microtex/fonts-licences")
-    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinyxml2/LICENSE.txt"
-        DESTINATION "${_cnote_notice_dir}/tinyxml2")
-    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium/LICENSE"
-        DESTINATION "${_cnote_notice_dir}/pdfium")
-    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium/licenses/"
-        DESTINATION "${_cnote_notice_dir}/pdfium/licenses")
-    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/DISCLAIMER.PD"
-        DESTINATION "${_cnote_notice_dir}/mingw-w64")
-
-    # The LGPL v3 text is taken from the Qt installation that is being deployed.
-    # Qt's binary installers do not always carry it; when it is missing the
-    # release must supply LICENSES/LGPL-3.0-only.txt from the Qt source, so this
-    # is reported at configure time instead of being silently omitted.
-    get_target_property(_cnote_core_location_local Qt6::Core IMPORTED_LOCATION)
-    get_filename_component(_cnote_root_local "${_cnote_core_location_local}/../.." ABSOLUTE)
-    set(_cnote_lgpl_license "")
-    foreach(_cnote_license_candidate
-        "${_cnote_root_local}/LICENSE.LGPL3"
-        "${_cnote_root_local}/LICENSE.LGPLv3"
-        "${_cnote_root_local}/LICENSES/LGPL-3.0-only.txt"
-        "${_cnote_root_local}/LICENSES/LGPL-3.0-or-later.txt")
-        if(EXISTS "${_cnote_license_candidate}")
-            set(_cnote_lgpl_license "${_cnote_license_candidate}")
-            break()
-        endif()
-    endforeach()
-    if(_cnote_lgpl_license)
-        install(FILES "${_cnote_lgpl_license}"
-            DESTINATION "${_cnote_notice_dir}/qt" RENAME "LICENSE.LGPL3")
-    else()
-        message(WARNING
-            "Qt LGPL v3 text not found under ${_cnote_root_local}: the packaged "
-            "notices cannot include it. Supply LICENSES/LGPL-3.0-only.txt from the Qt "
-            "source distribution before publishing an artifact (see "
-            "THIRD-PARTY-NOTICES.md, 'Open prerequisites').")
-    endif()
-
-    # -- CPack: Windows x64 ZIP, Linux x64 relocatable TGZ --------------------
-    set(CPACK_PACKAGE_NAME "cnote")
-    set(CPACK_PACKAGE_VENDOR "cnote")
-    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
-    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
-        "cnote note-taking application (Qt ${Qt6_VERSION} build)")
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-        if(APPLE AND CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
-            set(_cnote_package_arch "arm64")
-        else()
-            set(_cnote_package_arch "x64")
-        endif()
-    else()
-        set(_cnote_package_arch "x86")
-    endif()
-    # Deterministic artifact name; the archive gets the same name as its
-    # top-level directory (CPACK_INCLUDE_TOPLEVEL_DIRECTORY below).
-    set(CPACK_PACKAGE_FILE_NAME
-        "cnote-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}-${_cnote_package_arch}")
-    set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
-    set(CPACK_PACKAGE_CHECKSUM "SHA256")
-    if(WIN32)
-        set(CPACK_GENERATOR "ZIP")
-    elseif(APPLE)
-        # Configured but unverified: drag-and-drop DMG for the (unsigned,
-        # un-notarized) bundle.  macOS artifacts are not produced here.
-        set(CPACK_GENERATOR "DragNDrop")
-        set(CPACK_DMG_VOLUME_NAME "cnote")
-    else()
-        set(CPACK_GENERATOR "TGZ")
-    endif()
-    include(CPack)
-endif()
+include(CPack)
 
 
 # Self-contained offscreen evidence for the settings dialog: control inventory,
@@ -729,29 +722,6 @@ if(WIN32)
     add_test(NAME precision_touchpad_qt COMMAND cnote_precision_touchpad_tests)
     set_tests_properties(precision_touchpad_qt PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
-    foreach(_cnote_precision_test cnote_precision_filter_tests cnote_precision_touchpad_tests)
-        foreach(_cnote_runtime Qt6::Core Qt6::Gui Qt6::Widgets)
-            add_custom_command(TARGET ${_cnote_precision_test} POST_BUILD
-                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "$<TARGET_FILE:${_cnote_runtime}>"
-                    "$<TARGET_FILE_DIR:${_cnote_precision_test}>"
-            )
-        endforeach()
-    endforeach()
-endif()
-
-# The dialog tests need QtWidgets at runtime; stage the Qt runtime next to the
-# executables on Windows (the other Qt test targets rely on a manual copy).
-if(WIN32)
-    foreach(_cnote_dialog_test cnote_settings_dialog_tests cnote_new_page_dialog_tests)
-        foreach(_cnote_runtime Qt6::Core Qt6::Gui Qt6::Widgets)
-            add_custom_command(TARGET ${_cnote_dialog_test} POST_BUILD
-                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "$<TARGET_FILE:${_cnote_runtime}>"
-                    "$<TARGET_FILE_DIR:${_cnote_dialog_test}>"
-            )
-        endforeach()
-    endforeach()
 endif()
 
 
@@ -805,10 +775,9 @@ set_tests_properties(interaction_router_qt PROPERTIES TIMEOUT 120)
 
 # --- Portable selection math (plan steps 5.2/5.3) ----------------------------
 # src/selection/Geometry.cpp is bound to App/POINT/RECT and cannot be linked
-# into Qt targets, so the Qt canvas uses this portable port.  On Windows the
-# test also links the legacy translation unit and compares every case against
-# it live; other platforms compare against the frozen table captured from that
-# same legacy run.
+# into Qt targets, so the Qt canvas uses this portable port.  Every case is
+# compared against the frozen table captured from the reference implementation
+# (see --print-frozen).
 add_executable(cnote_selection_math_tests
     tests/SelectionMathTests.cpp
 )
@@ -816,7 +785,7 @@ target_include_directories(cnote_selection_math_tests PRIVATE src)
 target_compile_features(cnote_selection_math_tests PRIVATE cxx_std_20)
 target_compile_definitions(cnote_selection_math_tests PRIVATE
     CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
-target_link_libraries(cnote_selection_math_tests PRIVATE cnote_model cnote_services cnote_services)
+target_link_libraries(cnote_selection_math_tests PRIVATE cnote_model cnote_services)
 add_test(NAME selection_math_qt COMMAND cnote_selection_math_tests)
 set_tests_properties(selection_math_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
@@ -835,19 +804,10 @@ target_compile_features(cnote_portability_tests PRIVATE cxx_std_20)
 target_compile_options(cnote_portability_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_portability_tests PRIVATE cnote_services cnote_services Qt6::Core)
+target_link_libraries(cnote_portability_tests PRIVATE cnote_services Qt6::Core)
 add_test(NAME portability_paths_qt COMMAND cnote_portability_tests)
 set_tests_properties(portability_paths_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
-if(WIN32)
-    # PDFium is a runtime dependency of the export path; stage it next to the
-    # test executable so a clean build directory can run this test directly.
-    add_custom_command(TARGET cnote_portability_tests POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "$<TARGET_FILE:pdfium>"
-            "$<TARGET_FILE_DIR:cnote_portability_tests>/pdfium.dll"
-    )
-endif()
 
 # Font fallback (plan 3.7): none of the reference Windows families is installed
 # on Linux, so the style-hint substitution must keep every paragraph, every span
@@ -899,14 +859,6 @@ target_link_libraries(cnote_persistence_tests PRIVATE cnote_ui cnote_services)
 add_test(NAME persistence_semantics_qt COMMAND cnote_persistence_tests)
 set_tests_properties(persistence_semantics_qt PROPERTIES TIMEOUT 180
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
-if(WIN32)
-    # PDFium is a runtime dependency of the export path.
-    add_custom_command(TARGET cnote_persistence_tests POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "$<TARGET_FILE:pdfium>"
-            "$<TARGET_FILE_DIR:cnote_persistence_tests>/pdfium.dll"
-    )
-endif()
 
 # --- Window chrome (borderless custom caption) --------------------------------
 # The Windows shell removes the native caption through the window handle
@@ -1071,7 +1023,6 @@ endif()
 # setPos places the pointer, QTest fires the real Ctrl+W shortcut, and the
 # popup's host-space rect is compared against LayoutQt's expected geometry for
 # a matrix of cursor positions, window sizes and brush sizes.
-find_package(Qt6 6.11.2 REQUIRED COMPONENTS Test)
 add_executable(cnote_quick_popup_tests tests/QuickPopupPlacementTests.cpp)
 target_include_directories(cnote_quick_popup_tests PRIVATE src)
 target_compile_features(cnote_quick_popup_tests PRIVATE cxx_std_20)

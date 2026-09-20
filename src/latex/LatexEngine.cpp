@@ -2,18 +2,19 @@
 
 #include <algorithm>
 #include <bit>
-#include <cwchar>
 #include <cwctype>
 #include <deque>
 #include <string>
 #include <string_view>
+
+#include <QString>
 
 #include "latex.h"
 #include "render.h"
 
 // Backend-independent MicroTeX core: lifetime, LRU formula cache, source
 // validation and natural metrics.  Drawing lives in the platform translation
-// units (LatexEngineQt.cpp / LatexEngineGdi.cpp); see LatexEngine.h.
+// unit (LatexEngineQt.cpp); see LatexEngine.h.
 
 namespace cnote::latex {
 
@@ -35,14 +36,10 @@ std::deque<CacheEntry> g_cache;
 bool g_initialized = false;
 
 // MicroTeX's parser is code-unit oriented: each model UTF-16 unit maps to one
-// wchar, on every platform. Never reinterpret surrogate units as scalar values.
+// wchar. Never reinterpret surrogate units as scalar values. QString::fromUtf16
+// preserves every code unit; toStdWString only widens them.
 std::wstring WideFromUtf16(std::u16string_view value) {
-    std::wstring wide;
-    wide.reserve(value.size());
-    for (char16_t unit : value) {
-        wide.push_back(static_cast<wchar_t>(unit));
-    }
-    return wide;
+    return QString::fromUtf16(value.data(), static_cast<qsizetype>(value.size())).toStdWString();
 }
 
 void HashValue(std::uint64_t& hash, std::uint64_t value) {
@@ -221,10 +218,6 @@ FormulaMetrics Measure(const FormulaHandle& formula) {
 
 FormulaHandle Parse(const PageLatex& latex) {
     return Parse(latex.content, latex.fontSize, true);
-}
-
-FormulaMetrics Measure(const PageLatex& latex) {
-    return Measure(Parse(latex));
 }
 
 namespace detail {

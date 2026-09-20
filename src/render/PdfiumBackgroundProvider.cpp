@@ -14,15 +14,6 @@ PdfiumBackgroundProvider::PdfiumBackgroundProvider(const PdfiumBackend& backend,
       document_(&document),
       capacity_(std::max<std::size_t>(1U, capacity)) {}
 
-void PdfiumBackgroundProvider::SetDocument(const Document& document) {
-    document_ = &document;
-    Clear();
-}
-
-void PdfiumBackgroundProvider::Clear() {
-    cache_.clear();
-}
-
 QImage PdfiumBackgroundProvider::PageBackground(std::int32_t sourceIndex, std::int32_t pageIndex, float rasterScale) {
     if (document_ == nullptr || sourceIndex < 0 || pageIndex < 0 || rasterScale <= 0.0f) {
         return {};

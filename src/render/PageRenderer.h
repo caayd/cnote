@@ -74,10 +74,6 @@ void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRende
 // page.width * scale * devicePixelRatio.
 [[nodiscard]] QImage RenderPageSurface(const Page& page, const PageRenderParams& params);
 
-// Renders a page thumbnail into a QImage of the given width (height from the
-// page aspect ratio).
-[[nodiscard]] QImage RenderPageThumbnail(const Page& page, int width);
-
 // Cached page surface owned by the caller. EnsurePageSurface re-renders only
 // when the signature changes.
 struct PageSurfaceCache {

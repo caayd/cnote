@@ -9,14 +9,12 @@ namespace cnote {
 
 class PdfiumBackend;
 
-// Backend-specific page raster composition for PDF export. Defined once per
-// backend: GDI+ in src/PdfOverlayGdi.cpp (legacy Win32), Qt in
-// src/render/PdfExportQt.cpp. The export orchestration in PdfBackend.cpp is
-// shared; only these two routines differ.
+// Backend-specific page raster composition for PDF export. Defined once in
+// src/render/PdfExportQt.cpp; the export orchestration in PdfBackend.cpp is
+// shared and only the page raster composition lives here.
 
-// Shared raster allocation helpers (defined in PdfBackend.cpp).
+// Shared raster allocation helper (defined in PdfBackend.cpp).
 [[nodiscard]] RasterImage CreateBlankRaster(float pageWidth, float pageHeight, float renderScale);
-[[nodiscard]] RasterImage CreateTransparentRaster(float pageWidth, float pageHeight, float renderScale);
 
 // Renders the text/LaTeX overlay of a page into a transparent raster.
 [[nodiscard]] std::optional<RasterImage> ComposeTextOverlayRaster(const Page& page, float renderScale);

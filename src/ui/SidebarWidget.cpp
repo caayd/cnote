@@ -8,7 +8,7 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QTimer>
+#include <QVariantAnimation>
 #include <QWheelEvent>
 
 #include "Document.h"
@@ -45,15 +45,33 @@ SidebarWidget::SidebarWidget(QWidget* parent)
     setFocusPolicy(Qt::ClickFocus);
     setAttribute(Qt::WA_OpaquePaintEvent, true);
 
-    slideTimer_ = new QTimer(this);
-    slideTimer_->setTimerType(Qt::PreciseTimer);
-    slideTimer_->setInterval(8);
-    connect(slideTimer_, &QTimer::timeout, this, &SidebarWidget::OnSlideTick);
+    // QVariantAnimation owns frame pacing and easing; the legacy WM_TIMER-style
+    // 8 ms PreciseTimer loop is gone. Smoothstep keeps the ported feel.
+    QEasingCurve slideEasing(QEasingCurve::Custom);
+    slideEasing.setCustomType(&Smoothstep);
+    slideAnimation_ = new QVariantAnimation(this);
+    slideAnimation_->setDuration(kSlideAnimationMs);
+    slideAnimation_->setEasingCurve(slideEasing);
+    connect(slideAnimation_, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
+        slideProgress_ = value.toReal();
+        UpdateGeometry();
+        UpdateVisibility();
+        emit SlideProgressChanged(slideProgress_);
+    });
 
-    scrollTimer_ = new QTimer(this);
-    scrollTimer_->setTimerType(Qt::PreciseTimer);
-    scrollTimer_->setInterval(8);
-    connect(scrollTimer_, &QTimer::timeout, this, &SidebarWidget::OnScrollTick);
+    QEasingCurve scrollEasing(QEasingCurve::Custom);
+    scrollEasing.setCustomType(&Smoothstep);
+    scrollAnimation_ = new QVariantAnimation(this);
+    scrollAnimation_->setDuration(kScrollAnimationMs);
+    scrollAnimation_->setEasingCurve(scrollEasing);
+    connect(scrollAnimation_, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
+        const int y = value.toInt();
+        if (y != scrollY_) {
+            scrollY_ = y;
+            update();
+            emit ScrollChanged(scrollY_);
+        }
+    });
 
     hide();
 }
@@ -68,7 +86,7 @@ void SidebarWidget::SetDocument(const Document* document, render::PdfBackgroundP
     pdfBackground_ = pdfBackground;
     currentPage_ = document != nullptr ? document->CurrentPageIndex() : 0;
     scrollY_ = 0;
-    scrollTarget_ = 0;
+    scrollAnimation_->stop();
     wheelRemainder_ = 0.0;
     InvalidateThumbnails();
     UpdateVisibility();
@@ -197,7 +215,7 @@ void SidebarWidget::SetScrollY(int scrollY, bool animated) {
         StartScrollAnimation(clamped);
         return;
     }
-    scrollTimer_->stop();
+    scrollAnimation_->stop();
     if (scrollY_ == clamped) {
         return;
     }
@@ -211,32 +229,13 @@ void SidebarWidget::ScrollByPixels(int pixels, bool animated) {
 }
 
 void SidebarWidget::StartScrollAnimation(int target) {
-    scrollFrom_ = scrollY_;
-    scrollTarget_ = target;
-    if (scrollFrom_ == scrollTarget_) {
+    scrollAnimation_->stop();
+    if (target == scrollY_) {
         return;
     }
-    scrollClock_.start();
-    scrollTimer_->start();
-}
-
-void SidebarWidget::OnScrollTick() {
-    const qreal linear = std::clamp(static_cast<qreal>(scrollClock_.elapsed()) / kScrollAnimationMs, 0.0, 1.0);
-    const qreal eased = Smoothstep(linear);
-    const int value = static_cast<int>(std::lround(static_cast<qreal>(scrollFrom_) + (static_cast<qreal>(scrollTarget_ - scrollFrom_) * eased)));
-    if (value != scrollY_) {
-        scrollY_ = value;
-        update();
-        emit ScrollChanged(scrollY_);
-    }
-    if (linear >= 1.0) {
-        scrollTimer_->stop();
-        if (scrollY_ != scrollTarget_) {
-            scrollY_ = scrollTarget_;
-            update();
-            emit ScrollChanged(scrollY_);
-        }
-    }
+    scrollAnimation_->setStartValue(scrollY_);
+    scrollAnimation_->setEndValue(target);
+    scrollAnimation_->start();
 }
 
 void SidebarWidget::EnsureCurrentPageVisible() {
@@ -270,31 +269,14 @@ void SidebarWidget::SetOpen(bool open) {
 
 void SidebarWidget::StartSlideAnimation(qreal target) {
     const qreal clamped = std::clamp(target, 0.0, 1.0);
-    slideFrom_ = static_cast<int>(std::lround(slideProgress_ * 1000.0));
-    const int to = static_cast<int>(std::lround(clamped * 1000.0));
-    if (slideFrom_ == to) {
-        slideProgress_ = clamped;
+    slideAnimation_->stop();
+    if (clamped == slideProgress_) {
         UpdateGeometry();
         return;
     }
-    slideTarget_ = to;
-    slideClock_.start();
-    slideTimer_->start();
-}
-
-void SidebarWidget::OnSlideTick() {
-    const qreal linear = std::clamp(static_cast<qreal>(slideClock_.elapsed()) / kSlideAnimationMs, 0.0, 1.0);
-    const qreal eased = Smoothstep(linear);
-    const qreal from = static_cast<qreal>(slideFrom_) / 1000.0;
-    const qreal to = static_cast<qreal>(slideTarget_) / 1000.0;
-    slideProgress_ = from + ((to - from) * eased);
-    if (linear >= 1.0) {
-        slideProgress_ = to;
-        slideTimer_->stop();
-    }
-    UpdateGeometry();
-    UpdateVisibility();
-    emit SlideProgressChanged(slideProgress_);
+    slideAnimation_->setStartValue(slideProgress_);
+    slideAnimation_->setEndValue(clamped);
+    slideAnimation_->start();
 }
 
 bool SidebarWidget::SidebarVisible() const {
@@ -648,7 +630,7 @@ void SidebarWidget::wheelEvent(QWheelEvent* event) {
     wheelRemainder_ -= static_cast<float>(wholePixels);
     const int target = std::clamp(scrollY_ - wholePixels, 0, MaxScroll());
     if (target != scrollY_) {
-        scrollTimer_->stop();
+        scrollAnimation_->stop();
         scrollY_ = target;
         update();
         emit ScrollChanged(scrollY_);

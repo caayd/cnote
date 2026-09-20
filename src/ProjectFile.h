@@ -11,8 +11,6 @@
 
 namespace cnote {
 
-inline constexpr std::u16string_view kCnoteFileExtension = u".cnote";
-
 [[nodiscard]] bool HasExtension(const std::filesystem::path& path, std::u16string_view extension);
 
 class ProjectFile {

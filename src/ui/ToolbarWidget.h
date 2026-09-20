@@ -86,8 +86,6 @@ public:
     void SetActiveTool(settings::Tool tool);
     [[nodiscard]] settings::Tool ActiveTool() const { return activeTool_; }
     void SetUndoRedoEnabled(bool canUndo, bool canRedo);
-    [[nodiscard]] bool CanUndo() const { return canUndo_; }
-    [[nodiscard]] bool CanRedo() const { return canRedo_; }
     void SetTitle(const QString& title);
     [[nodiscard]] QString Title() const { return title_; }
     void SetZoomLabel(const QString& label);
@@ -102,18 +100,15 @@ public:
     // platforms that keep native decorations leave it off.  The cluster's
     // geometry is always reserved by the layout either way.
     void SetCaptionButtonsVisible(bool visible);
-    [[nodiscard]] bool CaptionButtonsVisible() const { return captionButtonsVisible_; }
     // Native frame width the reference subtracts from the caption cluster's
     // right edge while maximized (WindowFrameThicknessX, Layout.cpp:211) and the
     // reveal band's top inset (App.cpp:2465).  Logical pixels; the shell supplies
     // it from the window's DPI-scaled frame metrics.
     void SetFrameThicknessX(qreal thickness);
-    [[nodiscard]] qreal FrameThicknessX() const { return frameThicknessX_; }
 
     // Text-format state for the popup's active buttons (filled from the active
     // edit; the popup is only shown while SetTextFormatAvailable(true)).
     void SetTextFormatAvailable(bool available);
-    [[nodiscard]] bool TextFormatAvailable() const { return textFormatAvailable_; }
     void SetTextFormatState(const std::optional<PageTextStyle>& style, TextAlignment alignment);
 
     // --- geometry ---------------------------------------------------------
@@ -122,7 +117,6 @@ public:
     [[nodiscard]] QRectF ControlRect(ToolbarControl control) const;
     [[nodiscard]] ToolbarControl ControlAt(const QPointF& widgetPosition) const;
     [[nodiscard]] ToolbarControl HoveredControl() const { return hovered_; }
-    [[nodiscard]] bool IsControlRect(const QPointF& widgetPosition) const;  // IsToolbarControlRect
     // Same hit test in host (window client) coordinates: the widget is offset
     // while the auto-hide reveal animation runs, so the native hit test cannot
     // use raw client positions.  The shell's WM_NCHITTEST and the widget's own
@@ -140,7 +134,6 @@ public:
     void CancelZoomEdit();
     void CommitZoomEdit();
     [[nodiscard]] bool ZoomEditing() const { return zoomEditing_; }
-    [[nodiscard]] QString ZoomEditText() const { return zoomEditText_; }
 
     // --- overlays ---------------------------------------------------------
     // The host-space canvas rect (client area below the reserved toolbar band)
@@ -160,7 +153,6 @@ public:
     void HideTextFormatPopup();
     [[nodiscard]] bool TextFormatPopupVisible() const;
     [[nodiscard]] QRect TextFormatPopupBounds() const;
-    [[nodiscard]] bool TextFormatFontMenuOpen() const;
 
     void TogglePaletteMenu();
     void HidePaletteMenu();
@@ -176,7 +168,6 @@ public:
     void TogglePaletteWheel(const QPointF& hostCenter);
     void HidePaletteWheel();
     [[nodiscard]] bool PaletteWheelVisible() const;
-    [[nodiscard]] QRectF PaletteWheelBounds() const;
     [[nodiscard]] std::optional<std::size_t> PaletteWheelHoverIndex() const { return wheelHoverIndex_; }
     [[nodiscard]] std::vector<settings::Tool> PaletteWheelDisplayedTools() const;
 
@@ -186,7 +177,6 @@ public:
     // Applies/updates the palette color index; mirror of App::SetColorIndex's
     // view state (the shell owns the actual stroke recoloring).
     void SetColorIndex(std::size_t index);
-    [[nodiscard]] std::size_t ColorIndex() const { return settings_.colorIndex; }
 
     // --- auto-hide (plan step 6.1, App.cpp:2298-2600) ---------------------
     void SetAutoHideEnabled(bool enabled);

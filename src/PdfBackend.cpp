@@ -5,13 +5,15 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <numbers>
 #include <string>
 #include <vector>
 
+#include <QSaveFile>
+
 #include "PdfOverlay.h"
+#include "Unicode.h"
 #include "selection/StrokeSmoothing.h"
 
 #include "fpdf_attachment.h"
@@ -25,9 +27,7 @@ namespace cnote {
 
 namespace {
 
-constexpr float kMinimumStrokeRenderWidth = 1.25f;
 constexpr float kStrokeRenderWidthDivisor = 2.15f;
-constexpr float kTextLayoutScale = 8.0f;
 constexpr char16_t kEmbeddedCnoteAttachmentName[] = u"cnote-edit-data.cnote";
 
 // PDFium wide strings are UTF-16 code units; build a null-terminated
@@ -302,11 +302,12 @@ bool AppendPageImageObject(
 
 struct PdfFileWriter {
     FPDF_FILEWRITE writer {};
-    std::FILE* file = nullptr;
+    QSaveFile* file = nullptr;
 
     static int WriteBlock(FPDF_FILEWRITE* self, const void* data, unsigned long size) {
         auto* fileWriter = reinterpret_cast<PdfFileWriter*>(self);
-        return std::fwrite(data, 1, size, fileWriter->file) == size ? 1 : 0;
+        const qint64 expected = static_cast<qint64>(size);
+        return fileWriter->file->write(static_cast<const char*>(data), expected) == expected ? 1 : 0;
     }
 };
 
@@ -323,20 +324,6 @@ RasterImage CreateBlankRaster(float pageWidth, float pageHeight, float renderSca
     raster.stride = stride;
     raster.scale = renderScale;
     raster.pixels.assign(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight), 0xFF);
-    return raster;
-}
-
-RasterImage CreateTransparentRaster(float pageWidth, float pageHeight, float renderScale) {
-    const int bitmapWidth = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageWidth) * renderScale)));
-    const int bitmapHeight = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageHeight) * renderScale)));
-    const int stride = bitmapWidth * 4;
-
-    RasterImage raster {};
-    raster.width = bitmapWidth;
-    raster.height = bitmapHeight;
-    raster.stride = stride;
-    raster.scale = renderScale;
-    raster.pixels.assign(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight), 0);
     return raster;
 }
 
@@ -697,20 +684,21 @@ bool PdfiumBackend::ExportPdf(
     }
 
     if (ok) {
-#ifdef _WIN32
-        std::FILE* file = _wfopen(filePath.c_str(), L"wb");
-#else
-        std::FILE* file = std::fopen(filePath.c_str(), "wb");
-#endif
-        if (file == nullptr) {
+        const std::string utf8Path = PathToUtf8(filePath);
+        QSaveFile file(QString::fromUtf8(utf8Path.c_str()));
+        if (!file.open(QIODevice::WriteOnly)) {
             ok = false;
         } else {
             PdfFileWriter fileWriter {};
             fileWriter.writer.version = 1;
             fileWriter.writer.WriteBlock = &PdfFileWriter::WriteBlock;
-            fileWriter.file = file;
+            fileWriter.file = &file;
             ok = FPDF_SaveAsCopy(outputDocument, &fileWriter.writer, FPDF_NO_INCREMENTAL) != 0;
-            std::fclose(file);
+            // Only a successful copy may replace the destination; otherwise the
+            // temporary is discarded by the QSaveFile destructor.
+            if (ok) {
+                ok = file.commit();
+            }
         }
     }
 

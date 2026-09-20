@@ -1,9 +1,8 @@
 // Qt PDF-export overlay composition (migration plan step 3.4).
 //
-// The export orchestration in PdfBackend.cpp is shared with the legacy GDI+
-// exporter; only the page raster composition differs. This TU is the Qt
-// counterpart of src/PdfOverlayGdi.cpp and is built only into Qt targets, so
-// the legacy cnote_core never sees Qt Gui.
+// The export orchestration in PdfBackend.cpp is shared; only the page raster
+// composition lives here. This is the only export overlay implementation (the
+// legacy GDI+ exporter was deleted at cutover).
 
 #include "PdfOverlay.h"
 

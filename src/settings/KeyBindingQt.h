@@ -12,8 +12,7 @@ namespace cnote::settings {
 
 // Runtime shortcut actions, mirroring `App::ShortcutAction` and the legacy
 // `src/ShortcutConfig.cpp` definitions one-for-one.  The Qt services never
-// include the legacy Win32 `App.h`, so the enum is restated here; the Windows
-// parity harness asserts both enumerations stay identical.
+// include the legacy Win32 `App.h`, so the enum is restated here.
 enum class ShortcutAction {
     ToolDraw,
     ToolSelect,

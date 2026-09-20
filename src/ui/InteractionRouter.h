@@ -313,8 +313,6 @@ public:
     [[nodiscard]] InteractionKind ActiveInteraction() const { return active_; }
     [[nodiscard]] bool PanFromMiddleButton() const { return panFromMiddleButton_; }
     [[nodiscard]] const std::vector<ObjectRef>& PendingErase() const { return pendingErase_; }
-    [[nodiscard]] std::optional<std::size_t> PendingTextClickPage() const { return pendingTextClickPage_; }
-    [[nodiscard]] std::optional<std::size_t> PendingTextClickIndex() const { return pendingTextClickIndex_; }
 
     // Pure ports of the legacy stroke helpers, exposed for the tests and for
     // the canvas preview: App.cpp:1997 (SnapLineEndpoint), App.cpp:2013

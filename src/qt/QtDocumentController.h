@@ -68,8 +68,10 @@ public:
     [[nodiscard]] bool HasSavedPath() const;
     [[nodiscard]] const std::filesystem::path& FilePath() const;
 
-    // The canvas supplies the overlay content when an edit is finished from
-    // outside the canvas (AppManager::FinishInteraction).
+    // The canvas supplies the overlay content.  When a pending edit is
+    // superseded from inside this controller - undo/redo, starting a stroke, or
+    // creating/opening another object - the FinishInteraction() override below
+    // captures the live text/LaTeX through this source.
     void SetEditContentSource(ui::EditContentSource* source) { editContent_ = source; }
 
     // --- selection and object-gesture surface (ui::CanvasController) --------

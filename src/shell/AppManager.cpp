@@ -190,13 +190,6 @@ bool AppManager::IsAutoSaveTimerActive(const std::shared_ptr<ProjectSession>& se
     return existing != timers_.end() && existing->second && existing->second->isActive();
 }
 
-AppManager::Entry* AppManager::FindEntry(QObject* owner) {
-    const auto entry = std::find_if(entries_.begin(), entries_.end(), [&](const Entry& candidate) {
-        return candidate.owner == owner;
-    });
-    return entry != entries_.end() ? &*entry : nullptr;
-}
-
 bool AppManager::AnyInteractionActive(const std::shared_ptr<ProjectSession>& session) const {
     for (const Entry& entry : entries_) {
         if (entry.session == session && entry.view != nullptr && entry.view->IsInteractionActive()) {
