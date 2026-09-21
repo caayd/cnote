@@ -1,0 +1,261 @@
+# Build and test every supported desktop platform (migration plan step 7.5).
+#
+# Scope of the evidence:
+#   * The command sequences below are executed exactly as written on the
+#     developer machines for Windows x64 (MinGW 13.1 from the Qt kit) and
+#     Linux x64 (WSL Ubuntu 24.04, GCC 13.3) with the same ordering and the same
+#     environment variables, using the locally installed Qt 6.11.2 and PDFium
+#     148.0.7749.0 SDKs.  See the CI report for the captured logs.
+#   * Hosted-runner execution is UNVERIFIED: the dependency download steps and
+#     the aqtinstall/MinGW toolchain paths have never been run on a GitHub
+#     runner from this environment, and the macOS jobs cannot be executed at
+#     all here.  This workflow is a definition plus locally validated command
+#     sequences, not a claim that CI is green.
+#
+# What each job does:
+#   1. installs Qt 6.11.2 with aqtinstall (the action verifies Qt's own
+#      checksums) and downloads + SHA-256-verifies the pinned PDFium 148.0.7749.0
+#      archive;
+#   2. configures with cmake/Pdfium.cmake's CNOTE_PDFIUM_ROOT contract;
+#   3. builds the cnote product target (the legacy Win32 frontend and its
+#      cnote_core/microtex-GDI targets were removed at cutover);
+#   4. runs the tests that need no display, then every remaining test.  Each
+#      Qt test selects its own platform through its CTest ENVIRONMENT
+#      properties (offscreen everywhere except the three Windows tests that
+#      need the native platform), so no QT_QPA_PLATFORM is set at step level:
+#      forcing offscreen on Windows breaks font_fallback_qt's real font
+#      metrics.
+
+name: build-and-test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  QT_VERSION: 6.11.2
+  PDFIUM_TAG: chromium/7749
+  # Tests that need no display: xpress_codec is pure C++; session_manager_qt
+  # uses QCoreApplication only; interaction_router_qt and
+  # precision_input_router_qt create no Qt application object at all.
+  HEADLESS_TESTS: ^(xpress_codec|session_manager_qt|interaction_router_qt|precision_input_router_qt)$
+
+jobs:
+  windows-x64:
+    name: Windows x64 (MinGW)
+    runs-on: windows-2022
+    env:
+      PDFIUM_ASSET: pdfium-win-x64.tgz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_mingw
+          tools: tools_mingw1310
+          cache: true
+
+      - name: Fetch and verify PDFium
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/pdfium.tgz" \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${PDFIUM_ASSET}"
+          expected=$(awk -v asset="$PDFIUM_ASSET" '$1 == asset { print $2 }' .github/dependency-digests.txt)
+          actual=$(sha256sum "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
+          if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+            echo "PDFium digest mismatch for $PDFIUM_ASSET (expected '$expected', got '$actual')" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/pdfium"
+          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
+          test -f "$RUNNER_TEMP/pdfium/PDFiumConfig.cmake"
+          echo "CNOTE_PDFIUM_ROOT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
+
+      - name: Resolve MinGW compiler from the Qt kit
+        shell: bash
+        run: |
+          set -euo pipefail
+          # aqtinstall lays Qt out as <root>/<version>/<arch> and its tools as
+          # <root>/Tools/<tool>; the compiler is the one shipped with the kit.
+          compiler=$(find "$QT_ROOT_DIR/../../Tools" -maxdepth 3 -name g++.exe 2>/dev/null | head -n 1)
+          if [ -z "$compiler" ]; then
+            echo "MinGW g++.exe not found under the Qt tools directory" >&2
+            exit 1
+          fi
+          echo "CNOTE_CXX_COMPILER=$compiler" >> "$GITHUB_ENV"
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER="$CNOTE_CXX_COMPILER" \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DCNOTE_PDFIUM_ROOT="$CNOTE_PDFIUM_ROOT"
+
+      - name: Build
+        shell: bash
+        run: cmake --build build
+
+      - name: Model and codec tests (no display)
+        shell: bash
+        run: ctest --test-dir build -R "$HEADLESS_TESTS" --output-on-failure
+
+      - name: Qt tests (platform selected per test)
+        shell: bash
+        run: ctest --test-dir build -E "$HEADLESS_TESTS" --output-on-failure
+
+  linux-x64:
+    name: Linux x64 (GCC)
+    runs-on: ubuntu-24.04
+    env:
+      PDFIUM_ASSET: pdfium-linux-x64.tgz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: linux_gcc_64
+          cache: true
+
+      - name: Install platform libraries for the offscreen platform plugin
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libglib2.0-0 libfontconfig1 libfreetype6 libgl1 libegl1 libxkbcommon0
+
+      - name: Fetch and verify PDFium
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/pdfium.tgz" \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${PDFIUM_ASSET}"
+          expected=$(awk -v asset="$PDFIUM_ASSET" '$1 == asset { print $2 }' .github/dependency-digests.txt)
+          actual=$(sha256sum "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
+          if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+            echo "PDFium digest mismatch for $PDFIUM_ASSET (expected '$expected', got '$actual')" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/pdfium"
+          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
+          test -f "$RUNNER_TEMP/pdfium/PDFiumConfig.cmake"
+          echo "CNOTE_PDFIUM_ROOT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DCNOTE_PDFIUM_ROOT="$CNOTE_PDFIUM_ROOT"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Model and codec tests (no display)
+        run: ctest --test-dir build -R "$HEADLESS_TESTS" --output-on-failure
+
+      - name: Qt tests (platform selected per test)
+        run: ctest --test-dir build -E "$HEADLESS_TESTS" --output-on-failure
+
+  macos-arm64:
+    name: macOS arm64
+    runs-on: macos-14
+    env:
+      PDFIUM_ASSET: pdfium-mac-arm64.tgz
+      CNOTE_OSX_ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: clang_64
+          cache: true
+
+      - name: Fetch and verify PDFium
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/pdfium.tgz" \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${PDFIUM_ASSET}"
+          expected=$(awk -v asset="$PDFIUM_ASSET" '$1 == asset { print $2 }' .github/dependency-digests.txt)
+          actual=$(shasum -a 256 "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
+          if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+            echo "PDFium digest mismatch for $PDFIUM_ASSET (expected '$expected', got '$actual')" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/pdfium"
+          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
+          test -f "$RUNNER_TEMP/pdfium/PDFiumConfig.cmake"
+          echo "CNOTE_PDFIUM_ROOT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="$CNOTE_OSX_ARCH" \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DCNOTE_PDFIUM_ROOT="$CNOTE_PDFIUM_ROOT"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Model and codec tests (no display)
+        run: ctest --test-dir build -R "$HEADLESS_TESTS" --output-on-failure
+
+      - name: Qt tests (platform selected per test)
+        run: ctest --test-dir build -E "$HEADLESS_TESTS" --output-on-failure
+
+  macos-x64:
+    name: macOS x64
+    runs-on: macos-13
+    env:
+      PDFIUM_ASSET: pdfium-mac-x64.tgz
+      CNOTE_OSX_ARCH: x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: clang_64
+          cache: true
+
+      - name: Fetch and verify PDFium
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/pdfium.tgz" \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${PDFIUM_ASSET}"
+          expected=$(awk -v asset="$PDFIUM_ASSET" '$1 == asset { print $2 }' .github/dependency-digests.txt)
+          actual=$(shasum -a 256 "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
+          if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+            echo "PDFium digest mismatch for $PDFIUM_ASSET (expected '$expected', got '$actual')" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/pdfium"
+          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
+          test -f "$RUNNER_TEMP/pdfium/PDFiumConfig.cmake"
+          echo "CNOTE_PDFIUM_ROOT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="$CNOTE_OSX_ARCH" \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DCNOTE_PDFIUM_ROOT="$CNOTE_PDFIUM_ROOT"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Model and codec tests (no display)
+        run: ctest --test-dir build -R "$HEADLESS_TESTS" --output-on-failure
+
+      - name: Qt tests (platform selected per test)
+        run: ctest --test-dir build -E "$HEADLESS_TESTS" --output-on-failure

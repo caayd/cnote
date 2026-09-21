@@ -10,18 +10,22 @@
 // braces etc.) and incomplete required arguments such as an empty fraction
 // slot. Unknown commands do NOT fail — MicroTeX's partial mode renders them
 // as red text in place, which doubles as the live-preview error indication.
+//
+// Backends: the parse/measure core is backend-independent (LatexEngine.cpp).
+// Drawing is provided solely by LatexEngineQt.cpp (QPainter).
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
-#include <string>
-
-#include <windows.h>
+#include <string_view>
 
 #include "Document.h"
 
-namespace Gdiplus {
-class Graphics;
+namespace tex {
+class Graphics2D;
 }
+
+class QPainter;
 
 namespace cnote::latex {
 
@@ -37,9 +41,10 @@ struct FormulaMetrics {
 struct Formula;
 using FormulaHandle = std::shared_ptr<Formula>;
 
-// Must be called once after GdiplusStartup, before any Parse/Draw call.
-// resRoot is the directory containing MicroTeX's "fonts" tree (latex-res).
-bool Initialize(const std::wstring& resRoot);
+// Must be called once after the platform graphics stack is up (QApplication
+// exists and its font database is usable), before any Parse/Draw call. resRoot is the directory containing MicroTeX's resource
+// tree (latex-res) and its `.clatexmath-res_root` marker.
+bool Initialize(const std::filesystem::path& resRoot);
 void Shutdown();
 bool IsInitialized();
 
@@ -47,19 +52,26 @@ bool IsInitialized();
 // wraps the source as display math (\[ ... \]) unless it already is; display
 // equations take their natural width. Parsed formulae are cached (LRU) keyed
 // by source+fontSize+display; color is applied at draw time, not parse time.
-[[nodiscard]] FormulaHandle Parse(const std::wstring& source, float fontSize, bool display);
+[[nodiscard]] FormulaHandle Parse(std::u16string_view source, float fontSize, bool display);
 
 [[nodiscard]] FormulaMetrics Measure(const FormulaHandle& formula);
 
 // Convenience for model objects.
 [[nodiscard]] FormulaHandle Parse(const PageLatex& latex);
-[[nodiscard]] FormulaMetrics Measure(const PageLatex& latex);
 
-// Draws with the formula's top-left at (x, y) in the graphics' current
+namespace detail {
+
+// Backend glue: paints the parsed formula into a graphics context whose
+// coordinate system the backend adapter has already positioned and scaled.
+// Defined in LatexEngine.cpp; safe to call with a null handle.
+void DrawRender(const FormulaHandle& formula, tex::Graphics2D& graphics, std::uint32_t argb);
+
+}  // namespace detail
+
+// Draws with the formula's top-left at (x, y) in the painter's current
 // coordinate space, scaled by `scale` (page units -> target units). Vector
-// output at any scale. Safe to call with a null handle (no-op).
-void Draw(const FormulaHandle& formula, Gdiplus::Graphics& graphics, float x, float y, float scale, std::uint32_t argb);
-void Draw(const FormulaHandle& formula, HDC dc, float x, float y, float scale, std::uint32_t argb);
-void Draw(const PageLatex& latex, HDC dc, float x, float y, float scale);
+// output at any scale. The painter state and the caller's transform are
+// preserved. Safe to call with a null handle (no-op).
+void Draw(const FormulaHandle& formula, QPainter& painter, float x, float y, float scale, std::uint32_t argb);
 
 }  // namespace cnote::latex

@@ -2,6 +2,12 @@
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="cnote" type="win32"/>
   <description>cnote</description>
+  <!-- No dpiAware/dpiAwareness element here: Qt owns DPI awareness and applies
+       its default PerMonitorV2 context at startup.  Declaring DPI awareness in
+       the manifest would fix the process context before Qt runs; a mismatch
+       makes Qt's SetProcessDpiAwarenessContext() call fail (logged as
+       "qt.qpa.window: SetProcessDpiAwarenessContext() failed") and any future
+       non-V2 declaration would silently downgrade the context. -->
   <dependency>
     <dependentAssembly>
       <assemblyIdentity
@@ -13,10 +19,4 @@
         language="*"/>
     </dependentAssembly>
   </dependency>
-  <application xmlns="urn:schemas-microsoft-com:asm.v3">
-    <windowsSettings>
-      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
-      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
-    </windowsSettings>
-  </application>
 </assembly>

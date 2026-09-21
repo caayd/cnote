@@ -16,14 +16,14 @@ Document Document::CreateBlank(PageDefaults pageDefaults) {
     return document;
 }
 
-Document Document::CreateEditable(std::wstring filePath, std::vector<Page> pages, std::size_t currentPageIndex, PageDefaults pageDefaults) {
+Document Document::CreateEditable(std::filesystem::path filePath, std::vector<Page> pages, std::size_t currentPageIndex, PageDefaults pageDefaults) {
     Document document;
     document.ReplaceWithEditable(std::move(filePath), std::move(pages), currentPageIndex, pageDefaults);
     return document;
 }
 
 Document Document::CreatePdfDocument(
-    std::wstring sourcePath,
+    std::filesystem::path sourcePath,
     std::shared_ptr<std::vector<std::uint8_t>> pdfData,
     std::vector<Page> pages,
     std::size_t currentPageIndex,
@@ -38,12 +38,12 @@ Document Document::CreatePdfDocument(
         }
         pdfSources.push_back({ std::move(sourcePath), std::move(pdfData) });
     }
-    document.ReplaceWithProject(pdfSources.empty() ? std::wstring {} : pdfSources.front().sourcePath, std::move(pdfSources), std::move(pages), currentPageIndex, pageDefaults);
+    document.ReplaceWithProject(pdfSources.empty() ? std::filesystem::path {} : pdfSources.front().sourcePath, std::move(pdfSources), std::move(pages), currentPageIndex, pageDefaults);
     return document;
 }
 
 Document Document::CreateProjectDocument(
-    std::wstring filePath,
+    std::filesystem::path filePath,
     std::vector<PdfSource> pdfSources,
     std::vector<Page> pages,
     std::size_t currentPageIndex,
@@ -53,20 +53,8 @@ Document Document::CreateProjectDocument(
     return document;
 }
 
-bool Document::IsPdfDocument() const noexcept {
-    return pdfDocument_;
-}
-
-const std::wstring& Document::FilePath() const noexcept {
+const std::filesystem::path& Document::FilePath() const noexcept {
     return filePath_;
-}
-
-const std::wstring& Document::SourcePath() const noexcept {
-    static const std::wstring emptyPath;
-    if (pdfSources_.empty()) {
-        return emptyPath;
-    }
-    return pdfSources_.front().sourcePath;
 }
 
 const std::shared_ptr<std::vector<std::uint8_t>>& Document::PdfData() const noexcept {
@@ -156,7 +144,7 @@ std::size_t Document::RemovePage(std::size_t index) {
     return currentPageIndex_;
 }
 
-void Document::SetFilePath(std::wstring filePath) {
+void Document::SetFilePath(std::filesystem::path filePath) {
     filePath_ = std::move(filePath);
 }
 
@@ -166,16 +154,14 @@ void Document::SetNewPageDefaults(PageDefaults pageDefaults) {
 
 void Document::ResetToBlank() {
     filePath_.clear();
-    pdfDocument_ = false;
     pdfSources_.clear();
     pages_ = { Page {} };
     currentPageIndex_ = 0;
     newPageDefaults_ = {};
 }
 
-void Document::ReplaceWithEditable(std::wstring filePath, std::vector<Page> pages, std::size_t currentPageIndex, PageDefaults pageDefaults) {
+void Document::ReplaceWithEditable(std::filesystem::path filePath, std::vector<Page> pages, std::size_t currentPageIndex, PageDefaults pageDefaults) {
     filePath_ = std::move(filePath);
-    pdfDocument_ = false;
     pdfSources_.clear();
     if (pages.empty()) {
         pages_ = { Page {} };
@@ -186,31 +172,8 @@ void Document::ReplaceWithEditable(std::wstring filePath, std::vector<Page> page
     newPageDefaults_ = pageDefaults;
 }
 
-std::int32_t Document::AppendPdfSource(std::wstring sourcePath, std::shared_ptr<std::vector<std::uint8_t>> pdfData) {
-    if (!pdfData || pdfData->empty()) {
-        return -1;
-    }
-
-    for (std::size_t index = 0; index < pdfSources_.size(); ++index) {
-        const PdfSource& existing = pdfSources_[index];
-        if (existing.pdfData == pdfData) {
-            return static_cast<std::int32_t>(index);
-        }
-        if (existing.sourcePath == sourcePath
-            && existing.pdfData
-            && existing.pdfData->size() == pdfData->size()
-            && std::equal(existing.pdfData->begin(), existing.pdfData->end(), pdfData->begin())) {
-            return static_cast<std::int32_t>(index);
-        }
-    }
-
-    pdfSources_.push_back({ std::move(sourcePath), std::move(pdfData) });
-    pdfDocument_ = !pdfSources_.empty();
-    return static_cast<std::int32_t>(pdfSources_.size() - 1U);
-}
-
 void Document::ReplaceWithProject(
-    std::wstring filePath,
+    std::filesystem::path filePath,
     std::vector<PdfSource> pdfSources,
     std::vector<Page> pages,
     std::size_t currentPageIndex,
@@ -222,10 +185,8 @@ void Document::ReplaceWithProject(
             pdfSources_.push_back(std::move(pdfSource));
         }
     }
-    pdfDocument_ = !pdfSources_.empty();
     if (pages.empty()) {
         pages_ = { Page {} };
-        pdfDocument_ = false;
         pdfSources_.clear();
     } else {
         pages_ = std::move(pages);

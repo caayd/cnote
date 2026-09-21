@@ -1,4 +1,8 @@
 #include "resource.h"
 
-1 RT_MANIFEST "cnote.manifest"
+/* RT_MANIFEST, written numerically: GNU windres does not predefine the
+   RT_MANIFEST symbolic type, and a symbolic spelling would be emitted as a
+   *named* resource type that Windows never applies as an application manifest
+   (breaking the Common-Controls 6.0 dependency below). */
+1 24 "cnote.manifest"
 IDI_APP_ICON ICON "../assets/cnote.ico"

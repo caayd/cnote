@@ -1,0 +1,18 @@
+# Pinned dependency digests (SHA-256) for the CI workflows.
+#
+# PDFium assets come from the exact bblanchon/pdfium-binaries release
+# chromium/7749 (= PDFium 148.0.7749.0), which cmake/Pdfium.cmake requires.
+# Values were read from the GitHub release asset metadata
+# (https://api.github.com/repos/bblanchon/pdfium-binaries/releases/tags/chromium%2F7749)
+# on 2026-09-13; the workflows download the asset and verify it against this
+# file before extracting anything.
+#
+# Qt 6.11.2 is installed by jurplel/install-qt-action (aqtinstall), which
+# verifies each archive against Qt's own published update metadata; there is no
+# separately published digest to pin here.
+#
+# Format: <asset-name>  <sha256>
+pdfium-win-x64.tgz     a0f7ca96b3a1b2f509bb003f717147bc612e8a3f9b435cd8d1adb97c70cb2dbd
+pdfium-linux-x64.tgz   735abb28af7deab720dc54c8df3673a0a2a57bae9a0b16288842695fbd90a4b9
+pdfium-mac-arm64.tgz   38be4f699283f7b890d709a52e85af219eb9969bd095a00b301a3a094c4bac0e
+pdfium-mac-x64.tgz     956433456e5c43acb1dfad4889260568c3ff6b7f626a4321671b2af94d85b1dd

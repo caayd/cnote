@@ -1,0 +1,166 @@
+# Packaging jobs (migration plan steps 7.4/7.5): the Windows x64 ZIP and the
+# Linux x64 relocatable TGZ.
+#
+# Every packaging rule lives in CMakeLists.txt ("Qt packaging: installed
+# resources, deployment and CPack", owned by the packaging slice) and in
+# tools/verify-package.cmake.  These jobs only invoke them, in this order:
+#   configure -> build -> cmake --install --prefix <stage> ->
+#   cpack --config build/CPackConfig.cmake -B dist ->
+#   cmake -P tools/verify-package.cmake over the produced archive.
+# No install, deploy, CPack or verifier logic is duplicated here.
+#
+# Evidence scope: the same command sequence was executed locally on Windows x64
+# (MinGW 13.1, Qt 6.11.2, PDFium 148.0.7749.0) and in WSL Ubuntu 24.04; the
+# macOS DMG path and hosted-runner execution are UNVERIFIED (no macOS machine is
+# available here and no runner has been exercised).  This is a definition plus
+# locally validated commands, not a claim that CI is green.
+
+name: package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+env:
+  QT_VERSION: 6.11.2
+  PDFIUM_TAG: chromium/7749
+
+jobs:
+  windows-x64:
+    name: Windows x64 ZIP
+    runs-on: windows-2022
+    env:
+      PDFIUM_ASSET: pdfium-win-x64.tgz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_mingw
+          tools: tools_mingw1310
+          cache: true
+
+      - name: Fetch and verify PDFium
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/pdfium.tgz" \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${PDFIUM_ASSET}"
+          expected=$(awk -v asset="$PDFIUM_ASSET" '$1 == asset { print $2 }' .github/dependency-digests.txt)
+          actual=$(sha256sum "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
+          if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+            echo "PDFium digest mismatch for $PDFIUM_ASSET" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/pdfium"
+          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
+          echo "CNOTE_PDFIUM_ROOT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
+
+      - name: Resolve MinGW compiler from the Qt kit
+        shell: bash
+        run: |
+          set -euo pipefail
+          compiler=$(find "$QT_ROOT_DIR/../../Tools" -maxdepth 3 -name g++.exe 2>/dev/null | head -n 1)
+          test -n "$compiler"
+          echo "CNOTE_CXX_COMPILER=$compiler" >> "$GITHUB_ENV"
+
+      - name: Configure, build, install and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER="$CNOTE_CXX_COMPILER" \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DCNOTE_PDFIUM_ROOT="$CNOTE_PDFIUM_ROOT"
+          cmake --build build
+          cmake --install build --prefix stage
+          cpack --config build/CPackConfig.cmake -B dist
+
+      - name: Verify the packaged ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(ls dist/*.zip)
+          cmake -DARTIFACT="$archive" -DPLATFORM=windows \
+            -DFIXTURE=tools/fixtures/blank.cnote \
+            -DDEVELOPER_PREFIX="$QT_ROOT_DIR" \
+            -DWORK_DIR="$RUNNER_TEMP/verify" \
+            -P tools/verify-package.cmake
+
+      - name: Upload the Windows ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: cnote-windows-x64-zip
+          path: dist/*.zip
+          if-no-files-found: error
+
+  linux-x64:
+    name: Linux x64 TGZ
+    runs-on: ubuntu-24.04
+    env:
+      PDFIUM_ASSET: pdfium-linux-x64.tgz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: linux_gcc_64
+          cache: true
+
+      - name: Install platform libraries for the offscreen platform plugin
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libglib2.0-0 libfontconfig1 libfreetype6 libgl1 libegl1 libxkbcommon0 \
+            libxkbcommon-x11-0
+
+      - name: Fetch and verify PDFium
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/pdfium.tgz" \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${PDFIUM_ASSET}"
+          expected=$(awk -v asset="$PDFIUM_ASSET" '$1 == asset { print $2 }' .github/dependency-digests.txt)
+          actual=$(sha256sum "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
+          if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+            echo "PDFium digest mismatch for $PDFIUM_ASSET" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/pdfium"
+          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
+          echo "CNOTE_PDFIUM_ROOT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
+
+      - name: Configure, build, install and package
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DCNOTE_PDFIUM_ROOT="$CNOTE_PDFIUM_ROOT"
+          cmake --build build
+          cmake --install build --prefix stage
+          cpack --config build/CPackConfig.cmake -B dist
+
+      - name: Verify the packaged TGZ
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          archive=$(ls dist/*.tar.gz)
+          cmake -DARTIFACT="$archive" -DPLATFORM=linux \
+            -DFIXTURE=tools/fixtures/blank.cnote \
+            -DDEVELOPER_PREFIX="$QT_ROOT_DIR" \
+            -DWORK_DIR="$RUNNER_TEMP/verify" \
+            -DQT_QPA_PLATFORM=offscreen \
+            -P tools/verify-package.cmake
+
+      - name: Upload the Linux TGZ
+        uses: actions/upload-artifact@v4
+        with:
+          name: cnote-linux-x64-tgz
+          path: dist/*.tar.gz
+          if-no-files-found: error

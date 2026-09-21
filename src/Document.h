@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -76,7 +77,7 @@ struct PageText {
     bool bold = false;
     bool italic = false;
     bool underline = false;
-    std::wstring content {};
+    std::u16string content {};
     std::vector<PageTextStyleSpan> styleSpans {};
 };
 
@@ -90,7 +91,7 @@ struct PageLatex {
     float y = 0.0f;
     float fontSize = 24.0f;
     std::uint32_t color = 0xFF111827;
-    std::wstring content {};
+    std::u16string content {};
 };
 
 struct RasterImage {
@@ -130,7 +131,7 @@ struct Page {
 class Document {
 public:
     struct PdfSource {
-        std::wstring sourcePath {};
+        std::filesystem::path sourcePath {};
         std::shared_ptr<std::vector<std::uint8_t>> pdfData {};
     };
 
@@ -144,26 +145,24 @@ public:
     static Document CreateBlank();
     static Document CreateBlank(PageDefaults pageDefaults);
     static Document CreateEditable(
-        std::wstring filePath,
+        std::filesystem::path filePath,
         std::vector<Page> pages,
         std::size_t currentPageIndex,
         PageDefaults pageDefaults);
     static Document CreatePdfDocument(
-        std::wstring sourcePath,
+        std::filesystem::path sourcePath,
         std::shared_ptr<std::vector<std::uint8_t>> pdfData,
         std::vector<Page> pages,
         std::size_t currentPageIndex,
         PageDefaults pageDefaults);
     static Document CreateProjectDocument(
-        std::wstring filePath,
+        std::filesystem::path filePath,
         std::vector<PdfSource> pdfSources,
         std::vector<Page> pages,
         std::size_t currentPageIndex,
         PageDefaults pageDefaults);
 
-    [[nodiscard]] bool IsPdfDocument() const noexcept;
-    [[nodiscard]] const std::wstring& FilePath() const noexcept;
-    [[nodiscard]] const std::wstring& SourcePath() const noexcept;
+    [[nodiscard]] const std::filesystem::path& FilePath() const noexcept;
     [[nodiscard]] const std::shared_ptr<std::vector<std::uint8_t>>& PdfData() const noexcept;
     [[nodiscard]] bool HasPdfData() const noexcept;
     [[nodiscard]] std::size_t PdfSourceCount() const noexcept;
@@ -180,25 +179,23 @@ public:
     bool SetCurrentPageIndex(std::size_t index);
     std::size_t InsertPage(std::size_t index, Page page);
     std::size_t RemovePage(std::size_t index);
-    void SetFilePath(std::wstring filePath);
+    void SetFilePath(std::filesystem::path filePath);
     void SetNewPageDefaults(PageDefaults pageDefaults);
-    std::int32_t AppendPdfSource(std::wstring sourcePath, std::shared_ptr<std::vector<std::uint8_t>> pdfData);
     void ResetToBlank();
     void ReplaceWithEditable(
-        std::wstring filePath,
+        std::filesystem::path filePath,
         std::vector<Page> pages,
         std::size_t currentPageIndex,
         PageDefaults pageDefaults);
     void ReplaceWithProject(
-        std::wstring filePath,
+        std::filesystem::path filePath,
         std::vector<PdfSource> pdfSources,
         std::vector<Page> pages,
         std::size_t currentPageIndex,
         PageDefaults pageDefaults);
 
 private:
-    std::wstring filePath_;
-    bool pdfDocument_ = false;
+    std::filesystem::path filePath_;
     std::vector<PdfSource> pdfSources_ {};
     std::vector<Page> pages_ { Page {} };
     std::size_t currentPageIndex_ = 0;
