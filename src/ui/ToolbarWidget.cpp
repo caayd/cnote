@@ -1166,6 +1166,7 @@ ToolbarWidget::~ToolbarWidget() {
 }
 
 void ToolbarWidget::SetSettings(const settings::Settings& settings) {
+    const bool wasAutoHide = settings_.autoHideToolbar;
     settings_ = settings;
     // A wheel-tool toggle while the wheel is open re-slices it (the reference
     // repaints from wheel_.tools on the next frame, App.cpp:6755-6760).
@@ -1175,6 +1176,13 @@ void ToolbarWidget::SetSettings(const settings::Settings& settings) {
     if (!settings_.autoHideToolbar) {
         revealProgress_ = 1.0;
         revealed_ = true;
+    } else if (!wasAutoHide) {
+        // Auto-hide just turned on (including the first settings load): the
+        // band parks above the host.  SetAutoHideEnabled early-returns once
+        // the flag already matches, so without this the band would start
+        // revealed and slide away on the first mouse move.
+        revealProgress_ = 0.0;
+        revealed_ = false;
     }
     UpdateToolbarGeometry();
     update();
@@ -1514,8 +1522,13 @@ void ToolbarWidget::UpdateAutoHideForCursor(const QPointF& hostPosition, bool in
     if (!settings_.autoHideToolbar) {
         return;
     }
+    // The reference guard list (App.cpp:2444-2464) also covers its popups:
+    // the palette menu, zoom/brush editing and slider drags all keep the band
+    // up.  The Qt overlays are real widgets, so an open wheel/popup covering
+    // the band would otherwise deliver a Leave that hides it mid-gesture.
     const qt::ToolbarAutoHide decision = qt::ResolveToolbarAutoHide(
-        hostPosition.y(), maximized_, revealed_, interactionActive, frameThicknessX_);
+        hostPosition.y(), maximized_, revealed_,
+        interactionActive || AnyOverlayVisible() || zoomEditing_, frameThicknessX_);
     if (decision == qt::ToolbarAutoHide::Reveal) {
         SetRevealed(true);
     } else if (decision == qt::ToolbarAutoHide::Hide) {
