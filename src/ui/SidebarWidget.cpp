@@ -45,27 +45,33 @@ SidebarWidget::SidebarWidget(QWidget* parent)
     setFocusPolicy(Qt::ClickFocus);
     setAttribute(Qt::WA_OpaquePaintEvent, true);
 
-    // QVariantAnimation owns frame pacing and easing; the legacy WM_TIMER-style
-    // 8 ms PreciseTimer loop is gone. Smoothstep keeps the ported feel.
-    QEasingCurve slideEasing(QEasingCurve::Custom);
-    slideEasing.setCustomType(&Smoothstep);
+    // QVariantAnimation owns frame pacing; the legacy WM_TIMER-style 8 ms
+    // PreciseTimer loop is gone.  Qt warns on Custom easing curves inside
+    // QVariantAnimation, so the animations stay linear and Smoothstep is
+    // applied to the progress in the handlers (same curve as the port).
     slideAnimation_ = new QVariantAnimation(this);
     slideAnimation_->setDuration(kSlideAnimationMs);
-    slideAnimation_->setEasingCurve(slideEasing);
-    connect(slideAnimation_, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
-        slideProgress_ = value.toReal();
+    connect(slideAnimation_, &QVariantAnimation::valueChanged, this, [this](const QVariant&) {
+        const qreal t = slideAnimation_->duration() > 0
+            ? std::clamp(static_cast<qreal>(slideAnimation_->currentTime()) / slideAnimation_->duration(), 0.0, 1.0)
+            : 1.0;
+        const qreal from = slideAnimation_->startValue().toReal();
+        const qreal to = slideAnimation_->endValue().toReal();
+        slideProgress_ = from + ((to - from) * Smoothstep(t));
         UpdateGeometry();
         UpdateVisibility();
         emit SlideProgressChanged(slideProgress_);
     });
 
-    QEasingCurve scrollEasing(QEasingCurve::Custom);
-    scrollEasing.setCustomType(&Smoothstep);
     scrollAnimation_ = new QVariantAnimation(this);
     scrollAnimation_->setDuration(kScrollAnimationMs);
-    scrollAnimation_->setEasingCurve(scrollEasing);
-    connect(scrollAnimation_, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
-        const int y = value.toInt();
+    connect(scrollAnimation_, &QVariantAnimation::valueChanged, this, [this](const QVariant&) {
+        const qreal t = scrollAnimation_->duration() > 0
+            ? std::clamp(static_cast<qreal>(scrollAnimation_->currentTime()) / scrollAnimation_->duration(), 0.0, 1.0)
+            : 1.0;
+        const qreal from = scrollAnimation_->startValue().toReal();
+        const qreal to = scrollAnimation_->endValue().toReal();
+        const int y = static_cast<int>(std::lround(from + ((to - from) * Smoothstep(t))));
         if (y != scrollY_) {
             scrollY_ = y;
             update();
@@ -637,6 +643,23 @@ void SidebarWidget::wheelEvent(QWheelEvent* event) {
     }
     // Sidebar-local scrolling never pans the canvas (plan step 5.3).
     event->accept();
+}
+
+bool SidebarWidget::event(QEvent* event) {
+    // The page-jump editor is hand-drawn, not a real line edit, so it must
+    // claim ShortcutOverride itself: otherwise window shortcuts (zoom presets
+    // on 1-5, tool keys) swallow the digits it is editing.
+    if (pageJumpEditing_ && event->type() == QEvent::ShortcutOverride) {
+        auto* key = static_cast<QKeyEvent*>(event);
+        const QString text = key->text();
+        if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter
+            || key->key() == Qt::Key_Escape || key->key() == Qt::Key_Backspace
+            || (!text.isEmpty() && text.at(0).isDigit())) {
+            event->accept();
+            return true;
+        }
+    }
+    return QWidget::event(event);
 }
 
 void SidebarWidget::keyPressEvent(QKeyEvent* event) {

@@ -547,9 +547,6 @@ void QtMainWindow::ApplyToolToCanvas() {
         settings_.inputSpacing,
         settings_.inputSmoothing,
     });
-    for (QAction* action : toolShortcutActions_) {
-        action->setEnabled(!EditorOwnsKeyboard());
-    }
 }
 
 // Whether a text/LaTeX editor owns the keyboard right now.
@@ -1499,17 +1496,18 @@ void QtMainWindow::UpdateChrome() {
     // The reference frontend has no status bar: file/zoom live in the toolbar
     // band and the page indicator lives in the sidebar, so the canvas keeps the
     // full client height above its chrome.
+    const bool editorOwnsKeyboard = EditorOwnsKeyboard();
     if (saveAction_ != nullptr) {
-        saveAction_->setEnabled(controller_.Dirty());
+        saveAction_->setEnabled(controller_.Dirty() && !editorOwnsKeyboard);
     }
     if (undoAction_ != nullptr) {
-        undoAction_->setEnabled(controller_.CanUndo());
+        undoAction_->setEnabled(controller_.CanUndo() && !editorOwnsKeyboard);
     }
     if (redoAction_ != nullptr) {
-        redoAction_->setEnabled(controller_.CanRedo());
+        redoAction_->setEnabled(controller_.CanRedo() && !editorOwnsKeyboard);
     }
     if (copyAction_ != nullptr) {
-        const bool hasSelection = controller_.HasSelection();
+        const bool hasSelection = controller_.HasSelection() && !editorOwnsKeyboard;
         copyAction_->setEnabled(hasSelection);
         cutAction_->setEnabled(hasSelection);
     }
@@ -1555,15 +1553,22 @@ void QtMainWindow::UpdateChrome() {
     // canvas.  The gate follows the controller's edit state, which is already
     // cleared by the time its EditStateChanged reaches this function (see
     // EditorOwnsKeyboard).
-    const bool editorOwnsKeyboard = EditorOwnsKeyboard();
-    for (QAction* action : toolShortcutActions_) {
+    // Editor focus precedence: every window shortcut stands down while a
+    // text/LaTeX editor owns the keyboard - the editor's own bindings (Ctrl+B
+    // bold, Ctrl+C/X/V clipboard, caret keys) take the keys instead, and
+    // command shortcuts like zoom presets or tool keys must not fire mid-edit.
+    // Command-state actions (save/undo/redo/copy/cut above) combine the gate
+    // with their own applicability; the rest are simply disabled.
+    for (QAction* action : actions()) {
+        if (action == saveAction_ || action == undoAction_ || action == redoAction_
+            || action == copyAction_ || action == cutAction_) {
+            continue;  // gated above with their command state
+        }
+        if (action == quickSizeAction_) {
+            continue;  // Ctrl+W is context-sensitive: it opens the text-format
+                       // popup while editing, so it must stay enabled.
+        }
         action->setEnabled(!editorOwnsKeyboard);
-    }
-    if (previousPageAction_ != nullptr) {
-        previousPageAction_->setEnabled(!editorOwnsKeyboard);
-    }
-    if (nextPageAction_ != nullptr) {
-        nextPageAction_->setEnabled(!editorOwnsKeyboard);
     }
     if (toolbar_ != nullptr) {
         toolbar_->SetAutoHideEnabled(settings_.autoHideToolbar);

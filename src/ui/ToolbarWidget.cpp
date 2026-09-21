@@ -357,6 +357,23 @@ protected:
         }
     }
 
+    bool event(QEvent* event) override {
+        // The value editor is hand-drawn, not a real line edit, so it must
+        // claim ShortcutOverride itself: otherwise window shortcuts (zoom
+        // presets on 1-5, tool keys) swallow the digits it is editing.
+        if (editing_ && event->type() == QEvent::ShortcutOverride) {
+            auto* key = static_cast<QKeyEvent*>(event);
+            const QString text = key->text();
+            if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter
+                || key->key() == Qt::Key_Escape || key->key() == Qt::Key_Backspace
+                || (!text.isEmpty() && (text.at(0).isDigit() || text.at(0) == QLatin1Char('.')))) {
+                event->accept();
+                return true;
+            }
+        }
+        return QWidget::event(event);
+    }
+
     void keyPressEvent(QKeyEvent* event) override {
         if (!editing_) {
             QWidget::keyPressEvent(event);
@@ -609,6 +626,23 @@ protected:
             hoveredFontOption_ = next;
             update();
         }
+    }
+
+    bool event(QEvent* event) override {
+        // Same hand-drawn editor as the quick-size popup: claim the keys it
+        // consumes so window shortcuts (zoom presets on 1-5, tool keys) do not
+        // swallow digits while the font size is being typed.
+        if (sizeEditing_ && event->type() == QEvent::ShortcutOverride) {
+            auto* key = static_cast<QKeyEvent*>(event);
+            const QString text = key->text();
+            if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter
+                || key->key() == Qt::Key_Escape || key->key() == Qt::Key_Backspace
+                || (!text.isEmpty() && (text.at(0).isDigit() || text.at(0) == QLatin1Char('.')))) {
+                event->accept();
+                return true;
+            }
+        }
+        return QWidget::event(event);
     }
 
     void keyPressEvent(QKeyEvent* event) override {
