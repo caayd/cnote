@@ -41,6 +41,7 @@ struct CanvasInputSettings {
     float inputSpacing = 0.85f;     // page units at scale 1 (App::Settings default)
     float inputSmoothing = 0.3f;    // 0..1 pointer follow factor
     float strokeSmoothing = 0.55f;  // render-time smoothing strength
+    std::uint32_t objectColor = 0xFF111827;  // active palette slot; seeds new text/LaTeX objects
 };
 
 // One resize/rotate step of the whole selection on a page: the selection bounds

@@ -19,16 +19,19 @@ namespace cnote::text {
 
 // --- style conversion (authoritative for live editing and rendering) --------
 
-[[nodiscard]] QFont FontForStyle(const PageTextStyle& style);
-[[nodiscard]] QTextCharFormat CharFormatForStyle(const PageTextStyle& style);
-[[nodiscard]] PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextStyle& fallback);
+// displayScale multiplies font sizes for on-screen editing at a zoomed view;
+// the model always stores unscaled (page-unit) sizes, so capture divides the
+// same factor back out.  Rendering code passes the default 1.0.
+[[nodiscard]] QFont FontForStyle(const PageTextStyle& style, float displayScale = 1.0f);
+[[nodiscard]] QTextCharFormat CharFormatForStyle(const PageTextStyle& style, float displayScale = 1.0f);
+[[nodiscard]] PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextStyle& fallback, float displayScale = 1.0f);
 
 // Applies the model's default style and every span to the document.
-void ApplyPageTextFormatting(QTextDocument& document, const PageText& text);
+void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, float displayScale = 1.0f);
 
 // Captures the document's character formats back into spans in model UTF-16
-// offsets.
-[[nodiscard]] std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& document, const PageText& text);
+// offsets.  displayScale must match the scale the document was formatted with.
+[[nodiscard]] std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& document, const PageText& text, float displayScale = 1.0f);
 
 // --- offset mapping ---------------------------------------------------------
 

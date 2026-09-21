@@ -37,7 +37,7 @@ bool IsSpace(char16_t character) {
 
 }  // namespace
 
-QFont FontForStyle(const PageTextStyle& style) {
+QFont FontForStyle(const PageTextStyle& style, float displayScale) {
     QFont font;
     switch (style.fontFamily) {
     case TextFontFamily::Serif:
@@ -54,25 +54,25 @@ QFont FontForStyle(const PageTextStyle& style) {
         font.setStyleHint(QFont::SansSerif);
         break;
     }
-    font.setPointSizeF(std::max(1.0f, style.fontSize) * kPointsPerPixel);
+    font.setPointSizeF(std::max(1.0f, style.fontSize * std::max(0.01f, displayScale)) * kPointsPerPixel);
     font.setBold(style.bold);
     font.setItalic(style.italic);
     font.setUnderline(style.underline);
     return font;
 }
 
-QTextCharFormat CharFormatForStyle(const PageTextStyle& style) {
+QTextCharFormat CharFormatForStyle(const PageTextStyle& style, float displayScale) {
     QTextCharFormat format;
-    format.setFont(FontForStyle(style));
+    format.setFont(FontForStyle(style, displayScale));
     format.setForeground(QColor::fromRgba(style.color));
     return format;
 }
 
-PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextStyle& fallback) {
+PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextStyle& fallback, float displayScale) {
     PageTextStyle style = fallback;
     const QFont font = format.font();
     if (font.pointSizeF() > 0.0) {
-        style.fontSize = static_cast<float>(font.pointSizeF()) / kPointsPerPixel;
+        style.fontSize = static_cast<float>(font.pointSizeF()) / (kPointsPerPixel * std::max(0.01f, displayScale));
     }
     if (format.hasProperty(QTextFormat::ForegroundBrush)) {
         const QColor color = format.foreground().color();
@@ -94,13 +94,13 @@ PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextSt
     return style;
 }
 
-void ApplyPageTextFormatting(QTextDocument& document, const PageText& text) {
+void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, float displayScale) {
     const PageTextStyle defaultStyle = DefaultStyleFor(text);
-    document.setDefaultFont(FontForStyle(defaultStyle));
+    document.setDefaultFont(FontForStyle(defaultStyle, displayScale));
 
     QTextCursor cursor(&document);
     cursor.select(QTextCursor::Document);
-    cursor.setCharFormat(CharFormatForStyle(defaultStyle));
+    cursor.setCharFormat(CharFormatForStyle(defaultStyle, displayScale));
 
     const TextOffsetMap map = BuildTextOffsetMap(text.content);
     for (const PageTextStyleSpan& span : text.styleSpans) {
@@ -112,11 +112,11 @@ void ApplyPageTextFormatting(QTextDocument& document, const PageText& text) {
         QTextCursor spanCursor(&document);
         spanCursor.setPosition(static_cast<int>(start));
         spanCursor.setPosition(static_cast<int>(end), QTextCursor::KeepAnchor);
-        spanCursor.mergeCharFormat(CharFormatForStyle(span.style));
+        spanCursor.mergeCharFormat(CharFormatForStyle(span.style, displayScale));
     }
 }
 
-std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& document, const PageText& text) {
+std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& document, const PageText& text, float displayScale) {
     const PageTextStyle defaultStyle = DefaultStyleFor(text);
     const TextOffsetMap map = BuildTextOffsetMap(text.content);
     std::vector<PageTextStyleSpan> spans;
@@ -128,7 +128,7 @@ std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& do
             if (!fragment.isValid() || fragment.length() == 0) {
                 continue;
             }
-            const PageTextStyle style = StyleForCharFormat(fragment.charFormat(), defaultStyle);
+            const PageTextStyle style = StyleForCharFormat(fragment.charFormat(), defaultStyle, displayScale);
             const std::uint32_t documentStart = static_cast<std::uint32_t>(fragment.position());
             const std::uint32_t documentEnd = documentStart + static_cast<std::uint32_t>(fragment.length());
             const std::uint32_t modelStart = ModelOffsetForDocument(map, documentStart);

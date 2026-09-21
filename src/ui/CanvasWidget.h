@@ -64,7 +64,6 @@ public:
     static constexpr int kWheelScrollUnitPixels = 18;
     static constexpr int kZoomSessionDelayMs = 100;
     static constexpr int kTextEditorMinWidth = 360;
-    static constexpr int kTextEditorMinHeight = 120;
 
     explicit CanvasWidget(CanvasController& controller, QWidget* parent = nullptr);
     ~CanvasWidget() override;
@@ -385,6 +384,9 @@ private:
     std::optional<std::size_t> overlayPageIndex_ {};
     std::optional<std::size_t> overlayTextIndex_ {};
     std::optional<std::size_t> overlayLatexIndex_ {};
+    // View scale the text editor's fonts were last formatted at; the editor is
+    // the live preview, so its glyphs must match the canvas render size.
+    float textEditScale_ = 1.0f;
 
     std::unordered_map<std::size_t, PageSurfaces> surfaces_;
     render::PdfBackgroundProvider* pdfBackground_ = nullptr;

@@ -529,6 +529,10 @@ void QtMainWindow::ApplySettingsToShell() {
 void QtMainWindow::ApplyStrokeStyle() {
     const StrokeStyle style = StrokeStyleFor(settings_, activeTool_, 0.0f);
     controller_.SetActiveStrokeStyle(style);
+    // New text/LaTeX objects take the same active palette colour.
+    ui::CanvasInputSettings input = controller_.InputSettings();
+    input.objectColor = style.color;
+    controller_.SetInputSettings(input);
     // The cursors track the same settings: the dot fills with the active
     // palette colour (App::DrawCursorForCurrentSize, App.cpp:7471-7489) and the
     // eraser square sizes from eraseBrushSize (App::EraserCursorForCurrentSize,

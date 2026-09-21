@@ -490,6 +490,7 @@ std::size_t QtDocumentController::AddTextObject(std::size_t pageIndex, Vec2 topL
     text.x = topLeft.x;
     text.y = topLeft.y;
     text.fontSize = fontSize;
+    text.color = input_.objectColor;
     page->texts.push_back(text);
     const std::size_t index = page->texts.size() - 1U;
     if (BeginTextEdit(pageIndex, index)) {
@@ -510,6 +511,7 @@ std::size_t QtDocumentController::AddLatexObject(std::size_t pageIndex, Vec2 top
     latex.x = topLeft.x;
     latex.y = topLeft.y;
     latex.fontSize = fontSize;
+    latex.color = input_.objectColor;
     page->latexes.push_back(latex);
     const std::size_t index = page->latexes.size() - 1U;
     if (BeginLatexEdit(pageIndex, index)) {
