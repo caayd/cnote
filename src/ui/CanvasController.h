@@ -52,6 +52,9 @@ struct SelectionTransform {
     SelectionBounds from;
     SelectionBounds to;
     float rotateDegrees = 0.0f;
+    // Shift-resize: texts scale their font (and box) like the reference's
+    // UpdateTextTransform instead of reflowing into the resized box.
+    bool scaleTextFont = false;
 };
 
 // Per-view seam between CanvasWidget (viewport, transient interaction state,

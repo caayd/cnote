@@ -1560,6 +1560,8 @@ std::optional<TransformRequest> CanvasWidget::HitTestSelectionHandle(const QPoin
     TransformRequest request;
     request.pageIndex = view->pageIndex;
 
+    std::printf("[dbg] frame %.1f,%.1f %.1fx%.1f logical %.1f,%.1f radius %.1f\n",
+        frame.left(), frame.top(), frame.width(), frame.height(), logical.x(), logical.y(), hitRadius);
     // The rotate handle's radius overlaps the top edge handle's, so it is
     // checked first and wins a tie.
     if (hits(SelectionRotateHandlePosition(frame))) {
@@ -2142,6 +2144,7 @@ void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers
     transform.to = transformFrom_;
 
     const bool shiftPressed = modifiers.testFlag(Qt::ShiftModifier);
+    transform.scaleTextFont = shiftPressed;
     if (handle == TransformHandle::Rotate) {
         const Vec2 center {
             (transformFrom_.left + transformFrom_.right) * 0.5f,

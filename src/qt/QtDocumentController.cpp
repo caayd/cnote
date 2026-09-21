@@ -965,13 +965,53 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         }
         PageText& text = page->texts[index];
         const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page->width);
-        const Vec2 mapped = ui::MapSelectionTransformPoint(
-            { bounds.left, bounds.top }, transform.from, transform.to, transform.rotateDegrees);
-        text.x += mapped.x - bounds.left;
-        text.y += mapped.y - bounds.top;
-        text.fontSize *= scaleY;
-        for (PageTextStyleSpan& span : text.styleSpans) {
-            span.style.fontSize *= scaleY;
+        if (transform.rotateDegrees != 0.0f || transform.scaleTextFont) {
+            // Rotation and Shift-resize keep the reference behaviour: the
+            // origin follows the mapped top-left and the font scales with the
+            // frame (App::UpdateTextTransform shift path, App.cpp:5032-5038).
+            const Vec2 mapped = ui::MapSelectionTransformPoint(
+                { bounds.left, bounds.top }, transform.from, transform.to, transform.rotateDegrees);
+            text.x += mapped.x - bounds.left;
+            text.y += mapped.y - bounds.top;
+            if (transform.scaleTextFont) {
+                const float textScale = std::max(0.05f,
+                    (transform.to.right - transform.to.left) / std::max(1.0f, transform.from.right - transform.from.left));
+                text.fontSize = std::max(1.0f, text.fontSize * textScale);
+                for (PageTextStyleSpan& span : text.styleSpans) {
+                    span.style.fontSize = std::max(1.0f, span.style.fontSize * textScale);
+                }
+                if (text.width > 0.0f) {
+                    text.width = std::max(1.0f, text.width * textScale);
+                }
+                if (text.height > 0.0f) {
+                    text.height = std::max(1.0f, text.height * textScale);
+                }
+            }
+            gestureChanged_ = true;
+            continue;
+        }
+
+        // Box resize (App::UpdateTextTransform non-shift path, App.cpp:5045-5125):
+        // the text box follows the mapped bounds so the user chooses where
+        // wrapping happens. A pure vertical drag keeps the wrap width; a
+        // horizontal drag rewrites text.width (auto-width text becomes
+        // explicit) and resets the height to auto, exactly like the reference.
+        const Vec2 mappedTopLeft = ui::MapSelectionTransformPoint(
+            { bounds.left, bounds.top }, transform.from, transform.to, 0.0f);
+        const Vec2 mappedBottomRight = ui::MapSelectionTransformPoint(
+            { bounds.right, bounds.bottom }, transform.from, transform.to, 0.0f);
+        const bool widthChanged = transform.to.left != transform.from.left
+            || transform.to.right != transform.from.right;
+        const bool heightChanged = transform.to.top != transform.from.top
+            || transform.to.bottom != transform.from.bottom;
+        text.x += mappedTopLeft.x - bounds.left;
+        text.y += mappedTopLeft.y - bounds.top;
+        if (widthChanged) {
+            text.width = std::max(1.0f, mappedBottomRight.x - mappedTopLeft.x);
+            text.height = 0.0f;
+        }
+        if (heightChanged) {
+            text.height = std::max(1.0f, mappedBottomRight.y - mappedTopLeft.y);
         }
         gestureChanged_ = true;
     }
