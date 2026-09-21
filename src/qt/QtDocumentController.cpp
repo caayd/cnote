@@ -1086,6 +1086,56 @@ void QtDocumentController::CommitErase(std::size_t pageIndex, const std::vector<
     gestureChanged_ = true;
     CommitPageGesture();
 }
+bool QtDocumentController::RecolorSelection(std::uint32_t color) {
+    // Reference App::SetColorIndex (ToolbarState.cpp:512-543) recolors selected
+    // strokes; this port extends the same idea to text and LaTeX objects and
+    // routes it through the page-gesture machinery so the recolor is one
+    // undoable ReplacePages action instead of an unrecorded mutation.
+    bool recolored = false;
+    for (auto& [pageIndex, selection] : selection_) {
+        if (selection.Empty()) {
+            continue;
+        }
+        BeginPageGesture(pageIndex);
+        Page* page = GesturePage();
+        if (page == nullptr) {
+            continue;
+        }
+        for (const std::size_t index : selection.strokes) {
+            if (index < page->strokes.size() && page->strokes[index].style.color != color) {
+                page->strokes[index].style.color = color;
+                gestureChanged_ = true;
+            }
+        }
+        for (const std::size_t index : selection.texts) {
+            if (index >= page->texts.size()) {
+                continue;
+            }
+            PageText& text = page->texts[index];
+            if (text.color != color) {
+                text.color = color;
+                gestureChanged_ = true;
+            }
+            for (PageTextStyleSpan& span : text.styleSpans) {
+                if (span.style.color != color) {
+                    span.style.color = color;
+                    gestureChanged_ = true;
+                }
+            }
+        }
+        for (const std::size_t index : selection.latexes) {
+            if (index < page->latexes.size() && page->latexes[index].color != color) {
+                page->latexes[index].color = color;
+                gestureChanged_ = true;
+            }
+        }
+        recolored = recolored || gestureChanged_;
+        CommitPageGesture();
+    }
+    return recolored;
+}
+
+
 
 void QtDocumentController::SetPendingStrokeDotted(bool dotted) {
     if (pendingStroke_.has_value()) {

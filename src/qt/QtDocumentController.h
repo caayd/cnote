@@ -94,6 +94,7 @@ public:
     // the gesture snapshot first, so `transform` is absolute, not cumulative.
     void TransformSelection(std::size_t pageIndex, const ui::SelectionTransform& transform) override;
     void CommitErase(std::size_t pageIndex, const std::vector<ui::ObjectRef>& targets) override;
+    bool RecolorSelection(std::uint32_t color) override;
 
     // Stroke effects the interaction router drives (line/oval modes replace the
     // whole pending point list).

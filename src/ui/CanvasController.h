@@ -137,6 +137,9 @@ public:
     // is the additional rotation about the `from` center (0 for pure resizes).
     virtual void TransformSelection(std::size_t pageIndex, const SelectionTransform& transform) = 0;
     virtual void CommitErase(std::size_t pageIndex, const std::vector<ObjectRef>& targets) = 0;
+    // Recolors every selected stroke/text/LaTeX object to `color` as one undo
+    // step (the palette-click path); false when nothing was recolored.
+    virtual bool RecolorSelection(std::uint32_t color) = 0;
 
     [[nodiscard]] virtual bool CanUndo() const = 0;
     [[nodiscard]] virtual bool CanRedo() const = 0;

@@ -371,6 +371,11 @@ void QtMainWindow::CreateChrome() {
         settings_.colorIndex = index;
         ApplyStrokeStyle();
         settingsStore_.Save(settings_);
+        // Reference App::SetColorIndex (ToolbarState.cpp:520-535): a palette
+        // pick recolors the current selection as well as the active slot.
+        if (!settings_.palette.empty()) {
+            controller_.RecolorSelection(settings_.palette[index % settings_.palette.size()]);
+        }
         UpdateChrome();
     });
     connect(toolbar_, &ui::ToolbarWidget::WheelToolToggled, this, [this](settings::Tool tool) {
