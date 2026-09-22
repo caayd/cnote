@@ -337,6 +337,12 @@ void QtMainWindow::CreateChrome() {
     titleMenu_->addAction(openAction_);
     recentMenu_ = titleMenu_->addMenu(QStringLiteral("Open Recent"));
     recentMenuAction_ = recentMenu_->menuAction();
+    // Reference title menu order (App.cpp:5954-5957): New, New window, New view
+    // of this project, then the save/export entries.
+    newWindowAction_ = titleMenu_->addAction(QStringLiteral("New Window"));
+    connect(newWindowAction_, &QAction::triggered, this, &QtMainWindow::OpenNewWindow);
+    newViewAction_ = titleMenu_->addAction(QStringLiteral("New View of This Project"));
+    connect(newViewAction_, &QAction::triggered, this, &QtMainWindow::OpenNewView);
     titleMenu_->addSeparator();
     titleMenu_->addAction(saveAction_);
     titleMenu_->addAction(saveAsAction);
@@ -1034,6 +1040,49 @@ void QtMainWindow::NewDocument() {
     canvas_->SetPdfBackgroundProvider(controller_.PdfBackground());
     canvas_->ResetView();
     UpdateChrome();
+}
+
+void QtMainWindow::OpenNewWindow() {
+    // Reference App::CreateAdditionalWindow(false) (Startup.cpp:49-79): an
+    // independent window on a fresh untitled session.  Qt owns the lifetime:
+    // WA_DeleteOnClose frees the window and its controller unregisters the
+    // view, and quitOnLastWindowClosed ends the app when the last one goes.
+    canvas_->CancelStroke();
+    canvas_->CancelActiveEdit();
+    auto* window = new QtMainWindow(manager_);
+    window->setAttribute(Qt::WA_DeleteOnClose);
+    window->resize(size());
+    window->show();
+}
+
+void QtMainWindow::OpenNewView() {
+    // Reference App::CreateAdditionalWindow(true): a second view attached to
+    // the same ProjectSession, so edits propagate live through the manager's
+    // view registry.  The new view inherits the current page, zoom, pan and
+    // sidebar state (Startup.cpp:56-66).
+    canvas_->CancelStroke();
+    canvas_->CancelActiveEdit();
+    const std::shared_ptr<ProjectSession> session = controller_.Session();
+    auto* window = new QtMainWindow(manager_);
+    window->setAttribute(Qt::WA_DeleteOnClose);
+    window->resize(size());
+    window->controller_.AttachSession(session);
+    window->canvas_->SetPdfBackgroundProvider(window->controller_.PdfBackground());
+    window->controller_.SetCurrentPageIndex(controller_.CurrentPageIndex());
+    window->canvas_->SetZoom(canvas_->Zoom());
+    window->canvas_->PanBy(QPointF(
+        static_cast<qreal>(canvas_->ViewportPanX() - window->canvas_->ViewportPanX()),
+        static_cast<qreal>(canvas_->ViewportPanY() - window->canvas_->ViewportPanY())));
+    if (sidebar_ != nullptr && sidebar_->IsOpen() && window->sidebar_ != nullptr) {
+        window->sidebar_->SetOpen(true);
+    }
+    if (window->sidebar_ != nullptr) {
+        window->sidebar_->SetDocument(&window->controller_.DocumentRef(), window->controller_.PdfBackground());
+        window->sidebar_->NotifyDocumentChanged();
+        window->sidebar_->SetCurrentPage(window->controller_.CurrentPageIndex());
+    }
+    window->UpdateChrome();
+    window->show();
 }
 
 void QtMainWindow::Save() {

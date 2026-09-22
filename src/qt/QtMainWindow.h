@@ -91,6 +91,11 @@ public slots:
     void OpenNewPageSettings();
     void ShowTitleMenu();
     void NewDocument();
+    // Title-menu window commands (reference App::OpenNewWindow/OpenNewView,
+    // Startup.cpp:46-47): a fresh untitled project, or a second view sharing
+    // this session with live updates through the AppManager view registry.
+    void OpenNewWindow();
+    void OpenNewView();
     void Save();
     bool SaveAs();
     bool ExportPdf(bool embedProject);
@@ -223,6 +228,8 @@ private:
     QMenu* titleMenu_ = nullptr;
     QMenu* recentMenu_ = nullptr;
     QAction* recentMenuAction_ = nullptr;
+    QAction* newWindowAction_ = nullptr;
+    QAction* newViewAction_ = nullptr;
     std::function<CloseDecision()> closeDecision_;
     bool startSizeApplied_ = false;
 
