@@ -147,6 +147,10 @@ private:
     void ApplyStrokeStyle();
     void ResetView();
     void ApplyZoomPreset(std::size_t index);
+    // Zoom anchor in canvas coordinates (reference App::ApplyZoomPreset,
+    // Viewport.cpp:607-631): the open palette wheel's centre first, then the
+    // cursor when it is over the canvas, then the canvas centre.
+    [[nodiscard]] QPointF ZoomAnchorPoint() const;
     void FocusPage(std::size_t pageIndex);
     void PreviousPage();
     void NextPage();

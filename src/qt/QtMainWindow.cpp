@@ -400,7 +400,7 @@ void QtMainWindow::CreateChrome() {
         UpdateChrome();
     });
     connect(toolbar_, &ui::ToolbarWidget::ZoomPresetRequested, this, [this](float zoom) {
-        canvas_->SetZoom(zoom);
+        canvas_->SetZoom(zoom, ZoomAnchorPoint());
         UpdateChrome();
     });
     connect(toolbar_, &ui::ToolbarWidget::BrushSizeChanged, this, [this](settings::Tool tool, float size) {
@@ -664,8 +664,25 @@ void QtMainWindow::ApplyZoomPreset(std::size_t index) {
     if (preset <= 0.0f) {
         return;
     }
-    canvas_->SetZoom(std::clamp(preset, settings::kMinZoom, settings::kMaxZoom));
+    canvas_->SetZoom(std::clamp(preset, settings::kMinZoom, settings::kMaxZoom), ZoomAnchorPoint());
     UpdateChrome();
+}
+
+QPointF QtMainWindow::ZoomAnchorPoint() const {
+    // Reference App::ApplyZoomPreset (Viewport.cpp:607-631): the wheel's centre
+    // wins while the wheel is open (MessageLoop.cpp:427 passes wheel_.center),
+    // then the cursor when it is inside the client, then the client centre.
+    if (toolbar_ != nullptr && toolbar_->PaletteWheelVisible()) {
+        const QPointF anchor = canvas_->mapFrom(this, toolbar_->PaletteWheelCenter());
+        if (canvas_->rect().contains(anchor.toPoint())) {
+            return anchor;
+        }
+    }
+    const QPoint cursor = canvas_->mapFromGlobal(QCursor::pos());
+    if (canvas_->rect().contains(cursor)) {
+        return QPointF(cursor);
+    }
+    return QPointF(canvas_->rect().center());
 }
 
 void QtMainWindow::FocusPage(std::size_t pageIndex) {
@@ -1097,12 +1114,12 @@ void QtMainWindow::FitToWindow() {
 }
 
 void QtMainWindow::ZoomIn() {
-    canvas_->ZoomBySteps(1, canvas_->rect().center());
+    canvas_->ZoomBySteps(1, ZoomAnchorPoint());
     UpdateChrome();
 }
 
 void QtMainWindow::ZoomOut() {
-    canvas_->ZoomBySteps(-1, canvas_->rect().center());
+    canvas_->ZoomBySteps(-1, ZoomAnchorPoint());
     UpdateChrome();
 }
 

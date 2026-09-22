@@ -168,6 +168,9 @@ public:
     void TogglePaletteWheel(const QPointF& hostCenter);
     void HidePaletteWheel();
     [[nodiscard]] bool PaletteWheelVisible() const;
+    // Host-space centre the open wheel is anchored on (the zoom anchor the
+    // reference passes to ApplyZoomPreset, MessageLoop.cpp:427).
+    [[nodiscard]] QPointF PaletteWheelCenter() const { return wheelCenter_; }
     [[nodiscard]] std::optional<std::size_t> PaletteWheelHoverIndex() const { return wheelHoverIndex_; }
     [[nodiscard]] std::vector<settings::Tool> PaletteWheelDisplayedTools() const;
 

@@ -175,10 +175,30 @@ void CanvasWidget::ResetView() {
 void CanvasWidget::BeginZoomSession(const QPointF& anchor) {
     zoomSessionActive_ = true;
     zoomAnchorValid_ = false;
-    if (const std::optional<CanvasPageView> hit = HitTestPageView(anchor); hit.has_value()) {
+    // Reference App::ResolveZoomAnchorPage (Viewport.cpp:437-458): the anchor
+    // page is the *nearest* page, not only a direct hit, so a cursor in the
+    // margin or an open wheel's centre still anchors the zoom.
+    std::optional<CanvasPageView> best;
+    float bestDistance = 0.0f;
+    for (const CanvasPageView& view : CalculatePageViews()) {
+        if (!view.valid) {
+            continue;
+        }
+        const qreal dx = std::max({ view.rect.left() - anchor.x(), 0.0, anchor.x() - view.rect.right() });
+        const qreal dy = std::max({ view.rect.top() - anchor.y(), 0.0, anchor.y() - view.rect.bottom() });
+        const float distance = static_cast<float>((dx * dx) + (dy * dy));
+        if (!best.has_value() || distance < bestDistance) {
+            best = view;
+            bestDistance = distance;
+            if (distance <= 0.0f) {
+                break;
+            }
+        }
+    }
+    if (best.has_value()) {
         zoomAnchorValid_ = true;
-        zoomAnchorPageIndex_ = hit->pageIndex;
-        zoomAnchorPage_ = ScreenToPage(*hit, anchor, false);
+        zoomAnchorPageIndex_ = best->pageIndex;
+        zoomAnchorPage_ = ScreenToPage(*best, anchor, false);
         zoomAnchorCursor_ = anchor;
     }
     zoomSettleTimer_->start();
