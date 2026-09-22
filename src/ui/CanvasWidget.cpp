@@ -1609,42 +1609,41 @@ std::optional<TransformRequest> CanvasWidget::HitTestSelectionHandle(const QPoin
     return std::nullopt;
 }
 
-std::vector<ObjectRef> CanvasWidget::EraseTargetsAt(const QPointF& logical) const {
+std::vector<ObjectRef> CanvasWidget::EraseTargetsAt(std::size_t pageIndex, Vec2 start, Vec2 end) const {
     std::vector<ObjectRef> targets;
-    const std::optional<CanvasPageView> view = HitTestPageView(logical);
-    if (!view.has_value()) {
+    const CanvasPageView view = CalculatePageView(pageIndex);
+    if (!view.valid) {
         return targets;
     }
     const Document& document = controller_.DocumentRef();
-    const Page& page = document.PageAt(view->pageIndex);
-    const Vec2 pagePoint = ScreenToPage(*view, logical, false);
+    const Page& page = document.PageAt(pageIndex);
 
-    // Reference App::EraseAt: the eraser radius is max(3.5, eraseBrushSize * 4)
-    // logical pixels (App::EraserRadiusPixels, App.cpp:7426-7428) scaled into
-    // page units (App.cpp:5736).
-    const float radiusPage = std::max(kEraserMinRadiusPixels, eraseBrushSize_ * 4.0f) / std::max(0.1f, view->scale);
-    const Vec2 a { pagePoint.x - radiusPage, pagePoint.y - radiusPage };
-    const Vec2 b { pagePoint.x + radiusPage, pagePoint.y + radiusPage };
+    // Reference App::EraseAt (App.cpp:5713-5799): the eraser radius is
+    // max(3.5, eraseBrushSize * 4) logical pixels (App::EraserRadiusPixels,
+    // App.cpp:7426-7428) scaled into page units, swept along the segment from
+    // the previous sample to this one.
+    const float radiusPage = std::max(kEraserMinRadiusPixels, eraseBrushSize_ * 4.0f) / std::max(0.1f, view.scale);
 
     for (std::size_t index = 0; index < page.images.size(); ++index) {
-        if (ImageIntersectsRectSelection(page.images[index], a, b)) {
-            targets.push_back(ObjectRef { view->pageIndex, ObjectKind::Image, index });
+        if (ImageHitsSegment(page.images[index], start, end, radiusPage)) {
+            targets.push_back(ObjectRef { pageIndex, ObjectKind::Image, index });
         }
     }
     for (std::size_t index = 0; index < page.texts.size(); ++index) {
         const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
-        if (!(bounds.right < a.x || bounds.left > b.x || bounds.bottom < a.y || bounds.top > b.y)) {
-            targets.push_back(ObjectRef { view->pageIndex, ObjectKind::Text, index });
+        if (SegmentHitsRect(bounds.left, bounds.top, bounds.right, bounds.bottom, start, end, radiusPage)) {
+            targets.push_back(ObjectRef { pageIndex, ObjectKind::Text, index });
         }
     }
     for (std::size_t index = 0; index < page.latexes.size(); ++index) {
-        if (LatexIntersectsRectSelection(page.latexes[index], page.width, a, b)) {
-            targets.push_back(ObjectRef { view->pageIndex, ObjectKind::Latex, index });
+        const LatexBounds bounds = MeasurePageLatexBounds(page.latexes[index], page.width);
+        if (SegmentHitsRect(bounds.left, bounds.top, bounds.right, bounds.bottom, start, end, radiusPage)) {
+            targets.push_back(ObjectRef { pageIndex, ObjectKind::Latex, index });
         }
     }
     for (std::size_t index = 0; index < page.strokes.size(); ++index) {
-        if (StrokeHitsPoint(page.strokes[index], pagePoint, radiusPage, controller_.InputSettings().strokeSmoothing)) {
-            targets.push_back(ObjectRef { view->pageIndex, ObjectKind::Stroke, index });
+        if (StrokeHitsSegment(page.strokes[index], start, end, radiusPage, controller_.InputSettings().strokeSmoothing)) {
+            targets.push_back(ObjectRef { pageIndex, ObjectKind::Stroke, index });
         }
     }
     return targets;

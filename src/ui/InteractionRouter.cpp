@@ -604,24 +604,42 @@ void InteractionRouter::BeginErase(const QPointF& logical) {
         host_.ClearSelection();
     }
     pendingErase_.clear();
+    eraseLastPageIndex_.reset();
     SetActive(InteractionKind::Erase);
     UpdateCapture();
     ExtendErase(logical);
 }
 
 void InteractionRouter::ExtendErase(const QPointF& logical) {
-    // App.cpp:5558-5562 / EraseAt: accumulate the objects under the pointer; the
-    // pending set renders at kPendingEraseOpacity until one commit.
+    // App.cpp:5713-5799 EraseAt: the eraser sweeps the segment from the
+    // previous sample to this one, so a fast brush cannot skip objects between
+    // mouse-move events.  The pending set renders at kPendingEraseOpacity until
+    // one commit.
     if (active_ != InteractionKind::Erase) {
         return;
     }
+    const std::optional<PageHit> hit = host_.HitTestPage(logical);
+    if (!hit.has_value()) {
+        eraseLastPageIndex_.reset();
+        return;
+    }
+    if (!eraseLastPageIndex_.has_value() || *eraseLastPageIndex_ != hit->pageIndex) {
+        host_.SetViewPage(hit->pageIndex);
+    }
+    const Vec2 center = host_.ScreenToPage(logical, true);
+    const Vec2 start = eraseLastPageIndex_.has_value() && *eraseLastPageIndex_ == hit->pageIndex
+        ? eraseLastPagePoint_
+        : center;
+
     bool changed = false;
-    for (const ObjectRef& target : host_.EraseTargetsAt(logical)) {
+    for (const ObjectRef& target : host_.EraseTargetsAt(hit->pageIndex, start, center)) {
         if (std::find(pendingErase_.begin(), pendingErase_.end(), target) == pendingErase_.end()) {
             pendingErase_.push_back(target);
             changed = true;
         }
     }
+    eraseLastPageIndex_ = hit->pageIndex;
+    eraseLastPagePoint_ = center;
     if (changed) {
         host_.UpdatePendingErase(pendingErase_);
         host_.InvalidateCanvas();
@@ -639,6 +657,7 @@ void InteractionRouter::EndErase(bool commit) {
         host_.UpdatePendingErase({});
     }
     pendingErase_.clear();
+    eraseLastPageIndex_.reset();
     SetActive(InteractionKind::None);
     UpdateCapture();
     host_.InvalidateCanvas();

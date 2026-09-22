@@ -48,6 +48,11 @@ float SelectionHandleHitRadiusPixels(int dpi);
 float SelectionRotateOffsetPageUnits(float pageScale, int dpi);
 bool StrokeHitsPoint(const Stroke& stroke, Vec2 point, float radius, float fallbackSmoothing);
 bool StrokeIntersectsRectSelection(const Stroke& stroke, Vec2 a, Vec2 b, float fallbackSmoothing);
+float DistanceSegmentToSegmentSquared(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2);
+bool CircleHitsRect(float left, float top, float right, float bottom, Vec2 center, float radius);
+bool SegmentHitsRect(float left, float top, float right, float bottom, Vec2 a, Vec2 b, float radius);
+bool ImageHitsSegment(const PageImage& image, Vec2 a, Vec2 b, float radius);
+bool StrokeHitsSegment(const Stroke& stroke, Vec2 a, Vec2 b, float radius, float fallbackSmoothing);
 bool StrokeIntersectsPolygonSelection(const Stroke& stroke, const std::vector<Vec2>& polygon, float fallbackSmoothing);
 bool LatexHitsPoint(const PageLatex& latex, float pageWidth, Vec2 point);
 bool LatexIntersectsRectSelection(const PageLatex& latex, float pageWidth, Vec2 a, Vec2 b);
@@ -166,6 +171,69 @@ inline bool SegmentsIntersect(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2) {
     }
     if (std::abs(d4) <= 0.001f && OnSegment(b1, b2, a2)) {
         return true;
+    }
+    return false;
+}
+
+// Segment-vs-segment distance and the swept-circle hit tests the eraser uses
+// (App.cpp:2144-2209 DistanceSegmentToSegmentSquared, CircleHitsRect,
+// SegmentHitsRect, ImageHitsSegment).  Testing the whole segment between the
+// previous and current cursor samples is what keeps a fast brush stroke from
+// skipping objects between mouse-move events.
+inline float DistanceSegmentToSegmentSquared(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2) {
+    if (SegmentsIntersect(a1, a2, b1, b2)) {
+        return 0.0f;
+    }
+    return std::min({
+        DistancePointToSegmentSquared(a1, b1, b2),
+        DistancePointToSegmentSquared(a2, b1, b2),
+        DistancePointToSegmentSquared(b1, a1, a2),
+        DistancePointToSegmentSquared(b2, a1, a2),
+    });
+}
+
+inline bool CircleHitsRect(float left, float top, float right, float bottom, Vec2 center, float radius) {
+    const float closestX = std::clamp(center.x, left, right);
+    const float closestY = std::clamp(center.y, top, bottom);
+    const float dx = center.x - closestX;
+    const float dy = center.y - closestY;
+    return (dx * dx) + (dy * dy) <= radius * radius;
+}
+
+inline bool SegmentHitsRect(float left, float top, float right, float bottom, Vec2 a, Vec2 b, float radius) {
+    if (CircleHitsRect(left, top, right, bottom, a, radius)
+        || CircleHitsRect(left, top, right, bottom, b, radius)
+        || SegmentIntersectsRectF(a, b, left, top, right, bottom)) {
+        return true;
+    }
+    const float radiusSquared = radius * radius;
+    return DistancePointToSegmentSquared({ left, top }, a, b) <= radiusSquared
+        || DistancePointToSegmentSquared({ right, top }, a, b) <= radiusSquared
+        || DistancePointToSegmentSquared({ right, bottom }, a, b) <= radiusSquared
+        || DistancePointToSegmentSquared({ left, bottom }, a, b) <= radiusSquared;
+}
+
+inline bool ImageHitsSegment(const PageImage& image, Vec2 a, Vec2 b, float radius) {
+    return SegmentHitsRect(
+        image.x, image.y, image.x + image.width, image.y + image.height,
+        ToImageLocalPoint(image, a), ToImageLocalPoint(image, b), radius);
+}
+
+// Stroke half of App::EraseAt's segment sweep (App.cpp:5780-5796): the stroke's
+// first point against the erase segment, then segment-vs-segment for the rest.
+inline bool StrokeHitsSegment(const Stroke& stroke, Vec2 a, Vec2 b, float radius, float fallbackSmoothing) {
+    const float radiusSquared = radius * radius;
+    const std::vector<Vec2> points = StrokeRenderPoints(stroke, fallbackSmoothing);
+    if (points.empty()) {
+        return false;
+    }
+    if (DistancePointToSegmentSquared(points.front(), a, b) <= radiusSquared) {
+        return true;
+    }
+    for (std::size_t index = 1; index < points.size(); ++index) {
+        if (DistanceSegmentToSegmentSquared(a, b, points[index - 1], points[index]) <= radiusSquared) {
+            return true;
+        }
     }
     return false;
 }

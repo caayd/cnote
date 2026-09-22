@@ -100,7 +100,7 @@ public:
     std::optional<std::size_t> PageWithPdfTextAt(const QPointF&) const override { return pdfTextPage; }
     std::optional<ui::SelectionHit> HitTestSelectionObject(const QPointF&, std::size_t) const override { return selectionObject; }
     std::optional<ui::TransformRequest> HitTestSelectionHandle(const QPointF&) const override { return selectionHandle; }
-    std::vector<ui::ObjectRef> EraseTargetsAt(const QPointF&) const override { return eraseTargets; }
+    std::vector<ui::ObjectRef> EraseTargetsAt(std::size_t, Vec2, Vec2) const override { return eraseTargets; }
 
     void PanBy(const QPointF& delta) override { ops.push_back("PanBy(" + Format(delta.x()) + "," + Format(delta.y()) + ")"); }
     void ZoomByWheelSteps(int steps, const QPointF& anchor) override {

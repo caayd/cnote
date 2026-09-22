@@ -222,8 +222,11 @@ public:
     // App::BeginMoveSelection transform-handle probes, in the legacy order
     // stroke, image, text, latex (Selection.cpp:1468-1501).
     [[nodiscard]] virtual std::optional<TransformRequest> HitTestSelectionHandle(const QPointF& logical) const = 0;
-    // App::EraseAt (App.cpp:5558) object collection for one sample.
-    [[nodiscard]] virtual std::vector<ObjectRef> EraseTargetsAt(const QPointF& logical) const = 0;
+    // App::EraseAt (App.cpp:5713-5799) object collection for one sample: every
+    // object on `pageIndex` the swept circle along `start`->`end` (page units)
+    // touches.  `start` equals `end` for the first sample of a drag or after a
+    // page change.
+    [[nodiscard]] virtual std::vector<ObjectRef> EraseTargetsAt(std::size_t pageIndex, Vec2 start, Vec2 end) const = 0;
 
     // --- viewport ---------------------------------------------------------
     virtual void PanBy(const QPointF& logicalDelta) = 0;
@@ -364,6 +367,10 @@ private:
     bool strokeDotted_ = false;
 
     std::vector<ObjectRef> pendingErase_;
+    // App.cpp:5713-5799 EraseAt's lastErasePageIndex_/lastErasePagePoint_: the
+    // segment start for the next sample, reset when the cursor leaves the page.
+    std::optional<std::size_t> eraseLastPageIndex_;
+    Vec2 eraseLastPagePoint_ {};
 
     QPointF selectionAnchor_;
     QPointF selectionCurrent_;

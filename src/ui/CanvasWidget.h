@@ -137,7 +137,7 @@ public:
     [[nodiscard]] std::optional<std::size_t> PageWithPdfTextAt(const QPointF& logical) const override;
     [[nodiscard]] std::optional<SelectionHit> HitTestSelectionObject(const QPointF& logical, std::size_t pageIndex) const override;
     [[nodiscard]] std::optional<TransformRequest> HitTestSelectionHandle(const QPointF& logical) const override;
-    [[nodiscard]] std::vector<ObjectRef> EraseTargetsAt(const QPointF& logical) const override;
+    [[nodiscard]] std::vector<ObjectRef> EraseTargetsAt(std::size_t pageIndex, Vec2 start, Vec2 end) const override;
     void ZoomByWheelSteps(int steps, const QPointF& anchor) override;
     void ScrollBy(const QPointF& logicalDelta) override;
     void SetViewPage(std::size_t pageIndex) override;
