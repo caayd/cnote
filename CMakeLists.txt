@@ -335,6 +335,19 @@ if(WIN32)
                 "${_cnote_qt_bin_dir}/Qt6Svg.dll"
                 "$<TARGET_FILE_DIR:cnote>/Qt6Svg.dll")
     endif()
+    # The MinGW runtime DLLs ship in the compiler's bin directory, not the Qt
+    # kit's; without them beside the executable Windows resolves them from the
+    # ambient PATH and a mismatched copy fails with
+    # STATUS_ENTRYPOINT_NOT_FOUND at launch.
+    get_filename_component(_cnote_compiler_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    foreach(_cnote_runtime_dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll)
+        if(EXISTS "${_cnote_compiler_bin}/${_cnote_runtime_dll}")
+            add_custom_command(TARGET cnote POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${_cnote_compiler_bin}/${_cnote_runtime_dll}"
+                    "$<TARGET_FILE_DIR:cnote>")
+        endif()
+    endforeach()
 endif()
 
 
