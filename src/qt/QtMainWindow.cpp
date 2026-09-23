@@ -28,6 +28,7 @@
 #include "document/SelectionClipboardQt.h"
 #include "settings/KeyBindingQt.h"
 #include "shell/AppManager.h"
+#include "text/TextEditingQt.h"
 #include "ui/CanvasWidget.h"
 #include "ui/LayoutQt.h"
 #include "ui/NewPageDialogQt.h"
@@ -445,9 +446,7 @@ void QtMainWindow::CreateChrome() {
     });
     connect(toolbar_, &ui::ToolbarWidget::TextFontFamilyChanged, this, [this](TextFontFamily family) {
         ApplyTextFormat([family](QTextCharFormat& format) {
-            format.setFontFamilies({ QString::fromStdString(
-                family == TextFontFamily::Monospace ? "Consolas"
-                                                    : (family == TextFontFamily::Serif ? "Times New Roman" : "Segoe UI")) });
+            format.setFontFamilies({ text::TextFontFamilyName(family) });
         });
     });
     connect(toolbar_, &ui::ToolbarWidget::ToolbarGeometryChanged, this, [this]() { UpdateChromeGeometry(); });

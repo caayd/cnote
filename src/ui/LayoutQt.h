@@ -113,7 +113,7 @@ struct TextFormatPopupLayout {
     QRectF textSizeInputRect;
     QRectF fontDropdownRect;
     QRectF fontMenuRect;
-    std::array<QRectF, 3> fontOptionRects;
+    std::array<QRectF, 4> fontOptionRects;
 };
 
 struct PaletteMenuLayout {

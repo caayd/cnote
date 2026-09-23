@@ -287,7 +287,7 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
             ok = reader.ReadUtf16(charCount, text.content);
         }
         text.alignment = static_cast<TextAlignment>(std::min<std::uint32_t>(flags & 0xFFU, 2U));
-        text.fontFamily = static_cast<TextFontFamily>(std::min<std::uint32_t>((flags >> 8U) & 0xFFU, 2U));
+        text.fontFamily = static_cast<TextFontFamily>(std::min<std::uint32_t>((flags >> 8U) & 0xFFU, 3U));
         text.bold = (flags & (1U << 16U)) != 0;
         text.italic = (flags & (1U << 17U)) != 0;
         text.underline = (flags & (1U << 18U)) != 0;
@@ -304,7 +304,7 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
                     && reader.ReadUint32(spanFlags)
                     && span.start <= text.content.size()
                     && span.length <= text.content.size() - span.start;
-                span.style.fontFamily = static_cast<TextFontFamily>(std::min<std::uint32_t>(spanFlags & 0xFFU, 2U));
+                span.style.fontFamily = static_cast<TextFontFamily>(std::min<std::uint32_t>(spanFlags & 0xFFU, 3U));
                 span.style.bold = (spanFlags & (1U << 8U)) != 0U;
                 span.style.italic = (spanFlags & (1U << 9U)) != 0U;
                 span.style.underline = (spanFlags & (1U << 10U)) != 0U;

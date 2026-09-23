@@ -148,6 +148,8 @@ QString FontFamilyLabel(TextFontFamily family) {
         return QStringLiteral("Serif");
     case TextFontFamily::Monospace:
         return QStringLiteral("Monospace");
+    case TextFontFamily::ShantellSans:
+        return QStringLiteral("Shantell Sans");
     case TextFontFamily::Sans:
     default:
         return QStringLiteral("Sans");

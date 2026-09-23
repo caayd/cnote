@@ -50,6 +50,18 @@ document.
   artifact. The zlib license text is staged into the packages at
   `share/licenses/cnote/tinyxml2/LICENSE.txt`.
 
+### Shantell Sans (`third_party/shantell-sans`)
+
+- Source: `google/fonts` `ofl/shantellsans` variable fonts
+  (`ShantellSans[BNCE,INFM,SPAC,wght].ttf`,
+  `ShantellSans-Italic[BNCE,INFM,SPAC,wght].ttf`), © 2022 The Shantell Sans
+  Project Authors (https://github.com/arrowtype/shantell-sans).
+- License: SIL Open Font License 1.1 (`third_party/shantell-sans/OFL.txt`).
+- Shipped: embedded in the application through the `cnote_text_fonts` Qt
+  resource and registered with `QFontDatabase` at runtime; it is the default
+  text-tool family. The OFL text is staged into the packages at
+  `share/licenses/cnote/shantell-sans/OFL.txt`.
+
 ### mingw-w64 `interactioncontext.h` (`third_party/mingw-w64`)
 
 - Revision: unmodified public-domain header from `mingw-w64/mingw-w64` commit

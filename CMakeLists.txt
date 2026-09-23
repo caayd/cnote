@@ -383,6 +383,17 @@ target_compile_options(cnote_services PRIVATE
 )
 target_link_libraries(cnote_services PUBLIC cnote_model microtex_qt pdfium Qt6::Core Qt6::Gui)
 
+# Bundled text font: Shantell Sans (SIL OFL 1.1, third_party/shantell-sans),
+# the default family for new text objects.  Registered lazily by
+# text::TextFontFamilyName (see TextEditingQt.cpp).
+qt_add_resources(cnote_services "cnote_text_fonts"
+    PREFIX "/cnote/fonts"
+    BASE "third_party/shantell-sans"
+    FILES
+        third_party/shantell-sans/ShantellSans.ttf
+        third_party/shantell-sans/ShantellSans-Italic.ttf
+)
+
 # Self-contained contract test: legacy-record -> QKeySequence -> PortableText
 # round trips for every capturable action, malformed/unknown-record fallback to
 # the action default, real payload parsing, Windows/XDG path resolution and
@@ -613,6 +624,8 @@ install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium/licenses/"
     DESTINATION "${_cnote_notice_dir}/pdfium/licenses")
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mingw-w64/DISCLAIMER.PD"
     DESTINATION "${_cnote_notice_dir}/mingw-w64")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/shantell-sans/OFL.txt"
+    DESTINATION "${_cnote_notice_dir}/shantell-sans")
 
 # The LGPL v3 text is taken from the Qt installation that is being deployed.
 # Qt's binary installers do not always carry it; when it is missing the

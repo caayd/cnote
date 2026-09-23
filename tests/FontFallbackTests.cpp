@@ -49,6 +49,9 @@ constexpr FamilyCase kFamilies[] = {
     { cnote::TextFontFamily::Sans, "Segoe UI", false },
     { cnote::TextFontFamily::Serif, "Times New Roman", false },
     { cnote::TextFontFamily::Monospace, "Consolas", true },
+    // Bundled (registered from the Qt resource on first use), so it resolves
+    // to the real family on every platform.
+    { cnote::TextFontFamily::ShantellSans, "Shantell Sans", false },
 };
 
 cnote::PageTextStyle StyleFor(cnote::TextFontFamily family, float fontSize) {
@@ -110,9 +113,10 @@ void CheckFamilyResolution() {
         const QFontMetricsF metrics(font);
         const bool installed = QFontDatabase::families().contains(QString::fromUtf8(entry.requested));
 
-        std::printf("     %-10s requested=%-16s resolved=%-24s lineHeight=%.1f advance(\"Hamburgefonstiv\")=%.1f installed=%d\n",
+        std::printf("     %-14s requested=%-16s resolved=%-24s lineHeight=%.1f advance(\"Hamburgefonstiv\")=%.1f installed=%d\n",
             entry.family == cnote::TextFontFamily::Sans ? "Sans"
-                : entry.family == cnote::TextFontFamily::Serif ? "Serif" : "Monospace",
+                : entry.family == cnote::TextFontFamily::Serif ? "Serif"
+                : entry.family == cnote::TextFontFamily::Monospace ? "Monospace" : "Shantell Sans",
             entry.requested, info.family().toUtf8().constData(), metrics.height(),
             metrics.horizontalAdvance(QStringLiteral("Hamburgefonstiv")), installed ? 1 : 0);
 

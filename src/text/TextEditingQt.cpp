@@ -5,12 +5,18 @@
 
 #include <QColor>
 #include <QFont>
+#include <QFontDatabase>
+#include <QGuiApplication>
 #include <QTextBlock>
 #include <QTextCharFormat>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QtGui/qtextobject.h>
 
+// qt_add_resources initializer for the bundled text fonts (cnote_services is a
+// static library, so the resource must be pulled in explicitly - same pattern
+// as qInitResources_cnote_chrome_assets in ui/ChromeAssetsQt.cpp).
+extern int qInitResources_cnote_text_fonts();
 namespace cnote::text {
 
 namespace {
@@ -35,22 +41,51 @@ bool IsSpace(char16_t character) {
     return character == u' ' || character == u'\t' || character == u'\n' || character == u'\r';
 }
 
+// Registers the bundled Shantell Sans (SIL OFL 1.1, third_party/shantell-sans)
+// with the application font database so the family resolves identically on
+// machines without it installed.  addApplicationFont needs a QGuiApplication,
+// so registration retries until one exists rather than latching a failure.
+void EnsureTextFonts() {
+    static bool registered = false;
+    if (registered || QGuiApplication::instance() == nullptr) {
+        return;
+    }
+    qInitResources_cnote_text_fonts();
+    QFontDatabase::addApplicationFont(QStringLiteral(":/cnote/fonts/ShantellSans.ttf"));
+    QFontDatabase::addApplicationFont(QStringLiteral(":/cnote/fonts/ShantellSans-Italic.ttf"));
+    registered = true;
+}
+
 }  // namespace
+
+QString TextFontFamilyName(TextFontFamily family) {
+    switch (family) {
+    case TextFontFamily::Serif:
+        return QStringLiteral("Times New Roman");
+    case TextFontFamily::Monospace:
+        return QStringLiteral("Consolas");
+    case TextFontFamily::ShantellSans:
+        EnsureTextFonts();
+        return QStringLiteral("Shantell Sans");
+    case TextFontFamily::Sans:
+    default:
+        return QStringLiteral("Segoe UI");
+    }
+}
 
 QFont FontForStyle(const PageTextStyle& style, float displayScale) {
     QFont font;
+    font.setFamily(TextFontFamilyName(style.fontFamily));
     switch (style.fontFamily) {
     case TextFontFamily::Serif:
-        font.setFamily(QStringLiteral("Times New Roman"));
         font.setStyleHint(QFont::Serif);
         break;
     case TextFontFamily::Monospace:
-        font.setFamily(QStringLiteral("Consolas"));
         font.setStyleHint(QFont::Monospace);
         break;
     case TextFontFamily::Sans:
+    case TextFontFamily::ShantellSans:
     default:
-        font.setFamily(QStringLiteral("Segoe UI"));
         font.setStyleHint(QFont::SansSerif);
         break;
     }
@@ -85,6 +120,8 @@ PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextSt
         style.fontFamily = TextFontFamily::Serif;
     } else if (family == QStringLiteral("Consolas")) {
         style.fontFamily = TextFontFamily::Monospace;
+    } else if (family == QStringLiteral("Shantell Sans")) {
+        style.fontFamily = TextFontFamily::ShantellSans;
     } else if (family == QStringLiteral("Segoe UI")) {
         style.fontFamily = TextFontFamily::Sans;
     }

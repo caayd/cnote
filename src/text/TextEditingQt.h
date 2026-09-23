@@ -12,12 +12,19 @@
 #include "latex/LatexCompletion.h"
 
 class QFont;
+class QString;
 class QTextCharFormat;
 class QTextDocument;
 
 namespace cnote::text {
 
 // --- style conversion (authoritative for live editing and rendering) --------
+
+// The Qt family name for a model font family; the single mapping shared by
+// FontForStyle and the toolbar's format application.  The bundled families
+// (Shantell Sans) are registered with the application font database on first
+// use.
+[[nodiscard]] QString TextFontFamilyName(TextFontFamily family);
 
 // displayScale multiplies font sizes for on-screen editing at a zoomed view;
 // the model always stores unscaled (page-unit) sizes, so capture divides the

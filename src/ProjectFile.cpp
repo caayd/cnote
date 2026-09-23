@@ -408,6 +408,9 @@ bool ReadText(ByteReader& reader, std::uint32_t version, PageText& text) {
     case 2:
         text.fontFamily = TextFontFamily::Monospace;
         break;
+    case 3:
+        text.fontFamily = TextFontFamily::ShantellSans;
+        break;
     default:
         text.fontFamily = TextFontFamily::Sans;
         break;
@@ -437,7 +440,7 @@ bool ReadText(ByteReader& reader, std::uint32_t version, PageText& text) {
                 || span.length > text.content.size() - span.start) {
                 return false;
             }
-            span.style.fontFamily = static_cast<TextFontFamily>(std::min<std::uint8_t>(spanFontFamily, 2U));
+            span.style.fontFamily = static_cast<TextFontFamily>(std::min<std::uint8_t>(spanFontFamily, 3U));
             span.style.bold = (spanFlags & kTextStyleFlagBold) != 0U;
             span.style.italic = (spanFlags & kTextStyleFlagItalic) != 0U;
             span.style.underline = (spanFlags & kTextStyleFlagUnderline) != 0U;

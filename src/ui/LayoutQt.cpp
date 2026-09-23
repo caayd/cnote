@@ -346,7 +346,7 @@ TextFormatPopupLayout BuildTextFormatPopupLayout(const QRectF& canvasRect, const
         constexpr qreal optionHeight = 28.0;   // Layout.cpp:366
         constexpr qreal menuPadding = 6.0;     // Layout.cpp:367
         constexpr qreal menuGap = 6.0;         // Layout.cpp:368
-        const qreal menuHeight = (menuPadding * 2.0) + (optionHeight * 3.0);
+        const qreal menuHeight = (menuPadding * 2.0) + (optionHeight * static_cast<qreal>(layout.fontOptionRects.size()));
         const qreal maxMenuTop = std::max(minTop, canvasRect.bottom() - menuHeight - canvasPadding);
         const qreal belowTop = std::clamp(layout.panelRect.bottom() + menuGap, minTop, maxMenuTop);
         const qreal aboveTop = std::clamp(layout.panelRect.top() - menuHeight - menuGap, minTop, maxMenuTop);

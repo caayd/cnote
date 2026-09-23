@@ -18,6 +18,10 @@ enum class TextFontFamily : std::uint8_t {
     Sans = 0,
     Serif = 1,
     Monospace = 2,
+    // Bundled Shantell Sans (SIL OFL 1.1, third_party/shantell-sans); the
+    // default for new text.  Serialized as 3; readers predating it clamp to
+    // Monospace.
+    ShantellSans = 3,
 };
 
 struct Vec2 {
@@ -52,7 +56,7 @@ struct PageImage {
 struct PageTextStyle {
     float fontSize = 24.0f;
     std::uint32_t color = 0xFF111827;
-    TextFontFamily fontFamily = TextFontFamily::Sans;
+    TextFontFamily fontFamily = TextFontFamily::ShantellSans;
     bool bold = false;
     bool italic = false;
     bool underline = false;
@@ -73,7 +77,7 @@ struct PageText {
     float fontSize = 24.0f;
     std::uint32_t color = 0xFF111827;
     TextAlignment alignment = TextAlignment::Left;
-    TextFontFamily fontFamily = TextFontFamily::Sans;
+    TextFontFamily fontFamily = TextFontFamily::ShantellSans;
     bool bold = false;
     bool italic = false;
     bool underline = false;
