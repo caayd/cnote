@@ -218,8 +218,8 @@ void CanvasWidget::EndZoomSession() {
 void CanvasWidget::PanBy(const QPointF& delta) {
     // Reference App::PanBy (Viewport.cpp:116-119) cancels an in-flight smooth
     // scroll before applying the delta: a precision pan (native touchpad frame
-    // or a pixelDelta event) must land 1:1 and must not fight the 90 ms
-    // animation of an earlier wheel notch for the same viewport.
+    // or a pixelDelta event) must land 1:1 and must not fight the notch chase
+    // of an earlier wheel notch for the same viewport.
     StopSmoothScroll();
     panX_ += static_cast<float>(delta.x());
     panY_ += static_cast<float>(delta.y());
@@ -1654,7 +1654,7 @@ void CanvasWidget::ZoomByWheelSteps(int steps, const QPointF& anchor) {
 }
 
 void CanvasWidget::ScrollBy(const QPointF& logicalDelta) {
-    // Reference 90 ms smooth scroll (plan step 5.3).
+    // Wheel notches animate through the accumulating chase (StartSmoothScroll).
     StartSmoothScroll(logicalDelta);
 }
 
@@ -2356,10 +2356,17 @@ void CanvasWidget::EndPrecisionGesture() {
 // --- smooth scroll, selection helpers and transient painting ----------------
 
 void CanvasWidget::StartSmoothScroll(const QPointF& delta) {
-    scrollStart_ = QPointF(panX_, panY_);
-    scrollTarget_ = scrollStart_ + delta;
-    scrollClock_.start();
-    scrolling_ = true;
+    // Notches accumulate onto the running target instead of restarting a
+    // fixed-duration animation from the current pan: the old cubic re-anchored
+    // scrollStart_ on every notch, so each new notch discarded the unfinished
+    // tail of the in-flight animation (a fast flick lost distance and the
+    // velocity restarted from zero every notch, which read as stutter).
+    if (!scrolling_) {
+        scrollTarget_ = QPointF(panX_, panY_);
+        scrollClock_.start();
+        scrolling_ = true;
+    }
+    scrollTarget_ += delta;
     if (scrollTimer_ == nullptr) {
         scrollTimer_ = new QTimer(this);
         scrollTimer_->setTimerType(Qt::PreciseTimer);
@@ -2380,18 +2387,38 @@ void CanvasWidget::UpdateSmoothScroll() {
     if (!scrolling_) {
         return;
     }
-    constexpr double kSmoothScrollDurationMs = 90.0;
-    const double progress = std::min(1.0, static_cast<double>(scrollClock_.elapsed()) / kSmoothScrollDurationMs);
-    // Reference Viewport.cpp:53 interpolation: start + (target - start) * (1 - (1-t)^3).
-    const double remaining = 1.0 - progress;
-    const double eased = 1.0 - (remaining * remaining * remaining);
-    panX_ = static_cast<float>(scrollStart_.x() + ((scrollTarget_.x() - scrollStart_.x()) * eased));
-    panY_ = static_cast<float>(scrollStart_.y() + ((scrollTarget_.y() - scrollStart_.y()) * eased));
-    ClampViewportPan();
-    NotifyViewportChanged();
-    if (progress >= 1.0) {
+    // Exponential chase: pan approaches the accumulated target by a fixed
+    // fraction of the remaining distance per unit time.  Velocity is
+    // continuous across notches (no restart), scales with the backlog (a fast
+    // flick moves fast), and is independent of the tick rate.
+    constexpr double kScrollChaseMs = 30.0;
+    const double dt = static_cast<double>(scrollClock_.restart());
+    const double step = 1.0 - std::exp(-dt / kScrollChaseMs);
+    const double dx = scrollTarget_.x() - panX_;
+    const double dy = scrollTarget_.y() - panY_;
+    if (std::abs(dx) < 0.5 && std::abs(dy) < 0.5) {
+        panX_ = static_cast<float>(scrollTarget_.x());
+        panY_ = static_cast<float>(scrollTarget_.y());
+        ClampViewportPan();
+        NotifyViewportChanged();
         StopSmoothScroll();
+        return;
     }
+    const float oldX = panX_;
+    const float oldY = panY_;
+    panX_ += static_cast<float>(dx * step);
+    panY_ += static_cast<float>(dy * step);
+    ClampViewportPan();
+    if (panX_ == oldX && panY_ == oldY && dt >= 4.0) {
+        // The clamp pinned the pan on a real tick: the accumulated target is
+        // unreachable (e.g. a flick past the document edge), so the chase
+        // would never converge.  Drop the backlog and stop.  A sub-4 ms tick
+        // moves too little to measure and keeps chasing instead.
+        scrollTarget_ = QPointF(panX_, panY_);
+        StopSmoothScroll();
+        return;
+    }
+    NotifyViewportChanged();
 }
 
 std::optional<SelectionBounds> CanvasWidget::SelectionBoundsForPage(std::size_t pageIndex) const {

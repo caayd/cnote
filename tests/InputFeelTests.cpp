@@ -5,9 +5,11 @@
 //      scrolling".  Contract (migration plan 5.3 and the reference front end):
 //      ordinary wheel notches (QWheelEvent::angleDelta) keep the reference
 //      WheelScrollPixels conversion - three scroll lines of 18 logical pixels
-//      (54 px) per 120-unit notch - and the reference 90 ms cubic smooth scroll
-//      (MessageLoop.cpp:41-62, 530/539; Viewport.cpp:53, 183-236), while
-//      precision scrolling (QWheelEvent::pixelDelta) is applied 1:1 inside its
+//      (54 px) per 120-unit notch - and animate through an accumulating
+//      exponential chase (CanvasWidget::StartSmoothScroll): every notch adds
+//      its full distance to the running target, so rapid notches sum instead
+//      of capping at one notch per animation restart, while precision
+//      scrolling (QWheelEvent::pixelDelta) is applied 1:1 inside its
 //      own event, with no animation and no second smoothing, because the OS
 //      already delivers smooth, momentum-carrying deltas.  Horizontal motion
 //      keeps the native direction: the reference panned with the raw
@@ -265,7 +267,7 @@ void PrecisionScrollIsDirectAndOneToOne(ui::CanvasWidget& canvas) {
     CheckNear(left.immediate.x(), -7.0, 0.01, "negative horizontal pixelDelta pans the content left");
 
     // Direct panning must cancel a notch animation in flight instead of letting
-    // the 90 ms cubic overwrite it on its next tick (reference App::PanBy).
+    // the chase overwrite it on its next tick (reference App::PanBy).
     canvas.ResetView();
     Pump(60);
     const QPointF notchBefore = ViewportPan(canvas);
@@ -290,8 +292,8 @@ void PrecisionScrollIsDirectAndOneToOne(ui::CanvasWidget& canvas) {
     CheckNear((ViewportPan(canvas) - preciseBefore).y(), 0.0, 0.01, "no animation tail is left behind");
 }
 
-void WheelNotchesKeepTheReferenceAnimation(ui::CanvasWidget& canvas) {
-    std::printf("-- ordinary notches keep the reference 54 px / 90 ms animation\n");
+void WheelNotchesAccumulateAndAnimate(ui::CanvasWidget& canvas) {
+    std::printf("-- ordinary notches animate 54 px each and rapid notches accumulate\n");
     canvas.ResetView();
     Pump(60);
 
@@ -303,6 +305,25 @@ void WheelNotchesKeepTheReferenceAnimation(ui::CanvasWidget& canvas) {
     const WheelOutcome twoBack = InjectWheel(canvas, QPoint(), QPoint(0, -240), Qt::NoModifier, 200);
     CheckNear(twoBack.settled.y(), -108.0, 0.5, "two backward notches scroll 108 px the other way");
     Check(twoBack.animated, "backward notches animate too");
+
+    // Regression: notches arriving while an animation is still in flight must
+    // add their full distance to the running target.  The old restart-per-notch
+    // cubic re-anchored on the current pan and discarded the unfinished tail,
+    // so a fast flick travelled less than its notches.
+    canvas.ResetView();
+    Pump(60);
+    const QPointF flickBefore = ViewportPan(canvas);
+    for (int notchIndex = 0; notchIndex < 5; ++notchIndex) {
+        static_cast<void>(InjectWheel(canvas, QPoint(), QPoint(0, 120), Qt::NoModifier, 0));
+        QElapsedTimer gap;
+        gap.start();
+        while (gap.elapsed() < 20) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        }
+    }
+    Pump(400);
+    CheckNear((ViewportPan(canvas) - flickBefore).y(), 270.0, 1.0,
+        "five notches 20 ms apart accumulate the full 270 px (no tail discarded)");
 
     // Qt negates WM_MOUSEHWHEEL's delta; the reference panned with the raw Win32
     // delta, so the Qt-convention equivalent keeps the native direction.
@@ -571,7 +592,7 @@ int main(int argc, char** argv) {
     QCoreApplication::processEvents();
 
     PrecisionScrollIsDirectAndOneToOne(canvas);
-    WheelNotchesKeepTheReferenceAnimation(canvas);
+    WheelNotchesAccumulateAndAnimate(canvas);
     NoGestureIsAppliedTwice(canvas);
     ConfiguredCursorIsShown(canvas);
 

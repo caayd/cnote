@@ -264,8 +264,10 @@ private:
     void PaintPageContents(QPainter& painter, const Page& page, const CanvasPageView& view);
     void PruneSurfaces(const std::vector<std::size_t>& visiblePages);
 
-    // Reference smooth scroll: 90 ms, elapsed-time driven with a precise timer
-    // and the legacy cubic interpolation (Viewport.cpp:53).
+    // Wheel-notch smooth scroll: notches accumulate onto scrollTarget_ and a
+    // frame-rate-independent exponential chase moves the pan toward it, so a
+    // fast flick travels its full distance instead of capping at one notch
+    // per animation restart.
     void StartSmoothScroll(const QPointF& delta);
     void StopSmoothScroll();
     void UpdateSmoothScroll();
@@ -334,10 +336,9 @@ private:
     bool pointerCaptured_ = false;
     QPointF lastPointerPosition_ {};
 
-    // Reference smooth scroll (90 ms, cubic interpolation).
+    // Wheel-notch scroll chase (accumulating target, exponential approach).
     QTimer* scrollTimer_ = nullptr;
     QElapsedTimer scrollClock_;
-    QPointF scrollStart_ {};
     QPointF scrollTarget_ {};
     bool scrolling_ = false;
     qreal precisionStartZoom_ = 1.0;

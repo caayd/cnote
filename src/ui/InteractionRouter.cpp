@@ -372,8 +372,8 @@ bool InteractionRouter::HandleWheel(const WheelSample& sample) {
         return true;
     }
     if (sample.angleDeltaY != 0) {
-        // One notch is 54 logical pixels (3 lines x 18) and keeps the reference
-        // 90 ms smooth scroll; the canvas animates this path only.
+        // One notch is 54 logical pixels (3 lines x 18); the canvas animates
+        // this path only (accumulating chase, see CanvasWidget::ScrollBy).
         host_.ScrollBy(QPointF(0.0, scrollPixels(sample.angleDeltaY)));
         return true;
     }
