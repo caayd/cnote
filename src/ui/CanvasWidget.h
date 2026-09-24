@@ -254,14 +254,65 @@ private:
         // Newest first; bounded to kScalesPerPage entries.
         std::vector<SurfaceEntry> entries;
     };
+    // Move/transform gesture overlay: while a page gesture is in flight the
+    // selection is painted live on top of the committed raster, and a small
+    // patch re-rendered once per gesture covers the region the selection
+    // vacated (the cached surface still shows it at its original position).
+    // `excluded` feeds the patch render (selection plus any editing
+    // exclusions); `only` is the selection subset painted live.  Both are
+    // sorted index lists captured at gesture begin.
+    struct GestureItem {
+        // Raster of the object rendered at scale * DPR, plus where its
+        // top-left sits in page units.  `trackX/trackY` is the object's
+        // position at gesture begin (stroke first point, otherwise x/y), so
+        // the live offset is current - track.
+        QImage image;
+        float originX = 0.0f;
+        float originY = 0.0f;
+        float width = 0.0f;
+        float height = 0.0f;
+        float trackX = 0.0f;
+        float trackY = 0.0f;
+        ObjectKind kind = ObjectKind::Stroke;
+        std::size_t index = 0;
+    };
+    struct GestureSurface {
+        std::size_t pageIndex = 0;
+        render::ExcludedIndices excluded;
+        render::ExcludedIndices only;
+        // Vacated region in page units (selection bounds at gesture begin,
+        // inflated for stroke widths) and its raster at scale * DPR.
+        QRectF patchRegion;
+        float scale = 0.0f;
+        float devicePixelRatio = 0.0f;
+        QImage patch;
+        // Fallback when no committed raster exists to reuse (e.g. a DPR change
+        // mid-gesture): rendered once with the selection excluded so later
+        // moves cannot ghost.
+        render::PageSurfaceCache fallback {};
+        // Move gestures blit one cached raster per object (exact for pure
+        // translation); transforms paint the subset live because scaling and
+        // rotation change stroke widths and text layout.
+        bool transform = false;
+        std::vector<GestureItem> items;
+        float itemsScale = 0.0f;
+        float itemsDevicePixelRatio = 0.0f;
+    };
 
     [[nodiscard]] render::PageRenderParams RenderParamsFor(const CanvasPageView& view) const;
     // Mutable cache lookup for incremental stroke commits (same key as FindSurface).
     render::PageSurfaceCache* MutableSurface(std::size_t pageIndex, float scale, float devicePixelRatio);
     const render::PageSurfaceCache* FindSurface(std::size_t pageIndex, float scale, float devicePixelRatio) const;
+    // Prepares the gesture overlay for `pageIndex` (sorted selection index
+    // lists, vacated-region patch, per-object rasters for moves) and clears
+    // it on commit.
+    void BeginGestureOverlay(std::size_t pageIndex, bool transform);
     const render::PageSurfaceCache* NewestSurface(std::size_t pageIndex) const;
     const render::PageSurfaceCache& EnsureSurface(const CanvasPageView& view, const Page& page);
     void PaintPageContents(QPainter& painter, const Page& page, const CanvasPageView& view);
+    void EndGestureOverlay();
+    // Widget-space dirty rect covering the selection frame plus handles.
+    [[nodiscard]] QRect SelectionDirtyRect(std::size_t pageIndex) const;
     void PruneSurfaces(const std::vector<std::size_t>& visiblePages);
 
     // Wheel-notch smooth scroll: notches accumulate onto scrollTarget_ and a
@@ -390,6 +441,7 @@ private:
     float textEditScale_ = 1.0f;
 
     std::unordered_map<std::size_t, PageSurfaces> surfaces_;
+    GestureSurface gesture_ {};
     render::PdfBackgroundProvider* pdfBackground_ = nullptr;
     float cachedDevicePixelRatio_ = 0.0f;
     std::size_t lastPaintPageCount_ = 0;

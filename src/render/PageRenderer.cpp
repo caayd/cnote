@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include <QColor>
@@ -78,6 +79,67 @@ std::uint64_t HashValue(std::uint64_t hash, std::uint64_t value) {
 
 std::uint64_t HashFloat(std::uint64_t hash, float value) {
     return HashValue(hash, std::bit_cast<std::uint32_t>(value));
+}
+
+}  // namespace
+
+namespace {
+
+// Conservative page-unit bounds used by the cullRect fast path: objects whose
+// work.  Stroke bounds are inflated by the pen's half width.
+bool StrokeIntersectsCull(const Stroke& stroke, const QRectF& cull) {
+    if (stroke.points.empty()) {
+        return false;
+    }
+    const float margin = stroke.style.width * 0.5f + 1.0f;
+    float minX = stroke.points.front().x;
+    float minY = stroke.points.front().y;
+    float maxX = minX;
+    float maxY = minY;
+    for (const Vec2& point : stroke.points) {
+        minX = std::min(minX, point.x);
+        minY = std::min(minY, point.y);
+        maxX = std::max(maxX, point.x);
+        maxY = std::max(maxY, point.y);
+    }
+    return QRectF(minX - margin, minY - margin,
+        (maxX - minX) + margin * 2.0, (maxY - minY) + margin * 2.0).intersects(cull);
+}
+
+bool ImageIntersectsCull(const PageImage& image, const QRectF& cull) {
+    // Rotated bounds: transform the four corners about the centre.
+    const float radians = image.rotationDegrees * (3.14159265358979323846f / 180.0f);
+    const float sine = std::sin(radians);
+    const float cosine = std::cos(radians);
+    const float centerX = image.x + image.width * 0.5f;
+    const float centerY = image.y + image.height * 0.5f;
+    float minX = std::numeric_limits<float>::max();
+    float minY = std::numeric_limits<float>::max();
+    float maxX = std::numeric_limits<float>::lowest();
+    float maxY = std::numeric_limits<float>::lowest();
+    for (const Vec2 corner : { Vec2 { image.x, image.y }, Vec2 { image.x + image.width, image.y },
+             Vec2 { image.x + image.width, image.y + image.height }, Vec2 { image.x, image.y + image.height } }) {
+        const float dx = corner.x - centerX;
+        const float dy = corner.y - centerY;
+        const float rx = centerX + (dx * cosine) - (dy * sine);
+        const float ry = centerY + (dx * sine) + (dy * cosine);
+        minX = std::min(minX, rx);
+        minY = std::min(minY, ry);
+        maxX = std::max(maxX, rx);
+        maxY = std::max(maxY, ry);
+    }
+    return QRectF(minX, minY, maxX - minX, maxY - minY).intersects(cull);
+}
+
+bool TextIntersectsCull(const PageText& text, float pageWidth, const QRectF& cull) {
+    const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, pageWidth);
+    return QRectF(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top)
+        .intersects(cull);
+}
+
+bool LatexIntersectsCull(const PageLatex& latex, const QRectF& cull) {
+    const latex::FormulaMetrics metrics = latex::Measure(latex::Parse(latex));
+    return QRectF(latex.x, latex.y, metrics.width, metrics.height).intersects(cull);
 }
 
 }  // namespace
@@ -203,28 +265,32 @@ void PaintPage(QPainter& painter, const Page& page, const QPointF& pageOrigin, c
     };
 
     for (std::size_t index = 0; index < page.images.size(); ++index) {
-        if (excluded(params.excluded.images, index)) {
+        if (excluded(params.excluded.images, index)
+            || (params.cullRect.has_value() && !ImageIntersectsCull(page.images[index], *params.cullRect))) {
             continue;
         }
         PaintImage(painter, page.images[index], params, pendingOpacity(params.pendingErase.images, index));
     }
 
     for (std::size_t index = 0; index < page.texts.size(); ++index) {
-        if (excluded(params.excluded.texts, index)) {
+        if (excluded(params.excluded.texts, index)
+            || (params.cullRect.has_value() && !TextIntersectsCull(page.texts[index], page.width, *params.cullRect))) {
             continue;
         }
         PaintText(painter, page.texts[index], page.width, scale, pendingOpacity(params.pendingErase.texts, index));
     }
 
     for (std::size_t index = 0; index < page.latexes.size(); ++index) {
-        if (excluded(params.excluded.latexes, index)) {
+        if (excluded(params.excluded.latexes, index)
+            || (params.cullRect.has_value() && !LatexIntersectsCull(page.latexes[index], *params.cullRect))) {
             continue;
         }
         PaintLatex(painter, page.latexes[index], scale, pendingOpacity(params.pendingErase.latexes, index));
     }
 
     for (std::size_t index = 0; index < page.strokes.size(); ++index) {
-        if (excluded(params.excluded.strokes, index)) {
+        if (excluded(params.excluded.strokes, index)
+            || (params.cullRect.has_value() && !StrokeIntersectsCull(page.strokes[index], *params.cullRect))) {
             continue;
         }
         PaintStrokePreview(painter, page.strokes[index], params, pendingOpacity(params.pendingErase.strokes, index));
@@ -279,6 +345,27 @@ QImage RenderPageSurface(const Page& page, const PageRenderParams& params) {
     deviceParams.scale = deviceScale;
     deviceParams.devicePixelRatio = 1.0f;
     PaintPage(painter, page, QPointF(0.0, 0.0), deviceParams);
+    painter.end();
+    return image;
+}
+
+QImage RenderPageSurfaceRegion(const Page& page, const PageRenderParams& params, const QRectF& region) {
+    const float deviceScale = std::max(0.01f, params.scale * params.devicePixelRatio);
+    const QRectF clipped = region.intersected(QRectF(0.0, 0.0, page.width, page.height));
+    const int width = std::max(1, static_cast<int>(std::lround(clipped.width() * deviceScale)));
+    const int height = std::max(1, static_cast<int>(std::lround(clipped.height() * deviceScale)));
+
+    QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+
+    QPainter painter(&image);
+    PageRenderParams deviceParams = params;
+    deviceParams.scale = deviceScale;
+    deviceParams.devicePixelRatio = 1.0f;
+    deviceParams.cullRect = clipped;
+    // The image's origin is the region's top-left: shift the page so the
+    // region lands at (0,0) in device pixels.
+    PaintPage(painter, page, QPointF(-clipped.x() * deviceScale, -clipped.y() * deviceScale), deviceParams);
     painter.end();
     return image;
 }

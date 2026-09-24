@@ -489,6 +489,91 @@ int main(int argc, char** argv) {
     Check(controller.Undo(), "undo removes the pending-erase probe stroke");
     QCoreApplication::processEvents();
 
+    // (g) Move-gesture rendering: dragging a selection must not re-rasterize
+    // the page per pointer sample.  The gesture paints the committed raster,
+    // a once-per-gesture patch over the vacated region and the dragged objects
+    // on top, so the surface render count stays flat across the drag and the
+    // original position shows no ghost ink.
+    canvas.SetTool(ui::Tool::Draw);
+    canvas.SetZoom(1.0f);
+    Pump(160);
+    canvas.CenterOnPage(0);
+    Pump(20);
+    canvas.repaint();
+    {
+        // A diagonal stroke gives the frame a centre far from every edge
+        // handle, so pressing it starts a move, not a resize.
+        const QPointF center(canvas.rect().center());
+        ui::InteractionModifiers modifiers = canvas.Router().Modifiers();
+        modifiers.straightLine = true;
+        canvas.SetInteractionModifiers(modifiers);
+        SendMouse(canvas, QEvent::MouseButtonPress, center + QPointF(-50.0, -50.0), Qt::LeftButton, Qt::LeftButton);
+        SendMouse(canvas, QEvent::MouseMove, center + QPointF(50.0, 50.0), Qt::NoButton, Qt::LeftButton);
+        SendMouse(canvas, QEvent::MouseButtonRelease, center + QPointF(50.0, 50.0), Qt::LeftButton, Qt::NoButton);
+        QCoreApplication::processEvents();
+        modifiers.straightLine = false;
+        canvas.SetInteractionModifiers(modifiers);
+    }
+    Check(controller.DocumentRef().PageAt(0).strokes.size() == 1U, "move-gesture probe stroke committed");
+    canvas.repaint();
+
+    // Select the stroke and drag it with the Select tool through the real
+    // router path (press inside the selection frame starts a move).
+    {
+        cnote::ui::PageSelection selection;
+        selection.strokes.push_back(0);
+        controller.SelectObjects(0, selection);
+    }
+    canvas.SetTool(ui::Tool::Select);
+    canvas.repaint();
+    const QPointF center(canvas.rect().center());
+    const QImage beforeDrag = canvas.grab().toImage();
+    const InkBox beforeInk = RedInk(beforeDrag);
+    Check(beforeInk.valid(), "selected stroke has ink before the drag");
+
+    const std::uint64_t gestureRendersBefore = canvas.SurfaceRenderCount();
+    SendMouse(canvas, QEvent::MouseButtonPress, center, Qt::LeftButton, Qt::LeftButton);
+    Check(canvas.ActiveInteraction() == ui::InteractionKind::MoveSelection,
+          "pressing inside the selection starts a move");
+    for (int step = 1; step <= 10; ++step) {
+        SendMouse(canvas, QEvent::MouseMove, center + QPointF(step * 10.0, step * 6.0), Qt::NoButton, Qt::LeftButton);
+        canvas.repaint();
+    }
+    const std::uint64_t gestureRendersMid = canvas.SurfaceRenderCount();
+    Check(gestureRendersMid - gestureRendersBefore <= 2U,
+          "a move gesture renders at most the patch and the item rasters once");
+
+    const QImage midDrag = canvas.grab().toImage();
+    const InkBox midInk = RedInk(midDrag);
+    Check(midInk.valid(), "the dragged stroke still has ink mid-gesture");
+    if (midInk.valid() && beforeInk.valid()) {
+        const int movedX = midInk.x0 - beforeInk.x0;
+        const int movedY = midInk.y0 - beforeInk.y0;
+        std::printf("MOVE-DRAG ink moved by (%d,%d) device px\n", movedX, movedY);
+        Check(movedX > 50, "the dragged stroke follows the pointer horizontally");
+        Check(movedY > 30, "the dragged stroke follows the pointer vertically");
+    }
+    // No ghost: the stroke's original position shows page white, not red ink.
+    if (beforeInk.valid()) {
+        const QPoint originCenter((beforeInk.x0 + beforeInk.x1) / 2, (beforeInk.y0 + beforeInk.y1) / 2);
+        const QRgb originPixel = midDrag.pixel(originCenter);
+        Check(qGreen(originPixel) > 200 && qBlue(originPixel) > 200,
+              "the vacated region is repainted without the dragged stroke");
+    }
+
+    SendMouse(canvas, QEvent::MouseButtonRelease, center + QPointF(100.0, 60.0), Qt::LeftButton, Qt::NoButton);
+    QCoreApplication::processEvents();
+    canvas.repaint();
+    const QImage afterDrag = canvas.grab().toImage();
+    const InkBox afterInk = RedInk(afterDrag);
+    std::printf("MOVE-COMMIT mid=%s after=%s\n", FormatBox(midInk).c_str(), FormatBox(afterInk).c_str());
+    Check(BoxNear(afterInk, midInk, static_cast<int>(4 * devicePixelRatio) + 2),
+          "the committed frame matches the last drag frame");
+    Check(controller.Undo(), "undo restores the probe stroke position");
+    controller.ClearSelection();
+    Check(controller.Undo(), "undo removes the move-gesture probe stroke");
+    QCoreApplication::processEvents();
+
     Check(canvas.SurfaceRenderCount() > 0U, "the cached page surface was rendered at least once");
 
     cnote::latex::Shutdown();

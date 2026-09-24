@@ -497,6 +497,111 @@ const render::PageSurfaceCache& CanvasWidget::EnsureSurface(const CanvasPageView
     return perPage.entries.front().cache;
 }
 
+void CanvasWidget::BeginGestureOverlay(std::size_t pageIndex, bool transform) {
+    const PageSelection& selection = controller_.SelectionFor(pageIndex);
+    gesture_ = GestureSurface {};
+    gesture_.pageIndex = pageIndex;
+    gesture_.transform = transform;
+    gesture_.only.strokes = selection.strokes;
+    gesture_.only.images = selection.images;
+    gesture_.only.texts = selection.texts;
+    gesture_.only.latexes = selection.latexes;
+    const auto sorted = [](std::vector<std::size_t>& list) {
+        std::sort(list.begin(), list.end());
+        list.erase(std::unique(list.begin(), list.end()), list.end());
+    };
+    sorted(gesture_.only.strokes);
+    sorted(gesture_.only.images);
+    sorted(gesture_.only.texts);
+    sorted(gesture_.only.latexes);
+    // The patch excludes the dragged selection plus whatever the edit overlays
+    // already exclude (the editor paints that object itself).
+    gesture_.excluded = gesture_.only;
+    if (controller_.EditingPageIndex() == pageIndex) {
+        if (const std::optional<std::size_t> index = controller_.EditingTextIndex(); index.has_value()) {
+            gesture_.excluded.texts.push_back(*index);
+            sorted(gesture_.excluded.texts);
+        }
+        if (const std::optional<std::size_t> index = controller_.EditingLatexIndex(); index.has_value()) {
+            gesture_.excluded.latexes.push_back(*index);
+            sorted(gesture_.excluded.latexes);
+        }
+    }
+    // The vacated region is the selection bounds at gesture begin, inflated by
+    // the widest selected stroke's half width plus a small margin so stroke
+    // caps/joins cannot bleed past the patch.  It is clamped to the page so
+    // the blit origin matches the renderer's clipped region.
+    const std::optional<SelectionBounds> bounds = SelectionBoundsForPage(pageIndex);
+    if (bounds.has_value()) {
+        float margin = 2.0f;
+        const Document& document = controller_.DocumentRef();
+        if (pageIndex < document.PageCount()) {
+            const Page& page = document.PageAt(pageIndex);
+            for (const std::size_t index : gesture_.only.strokes) {
+                if (index < page.strokes.size()) {
+                    margin = std::max(margin, page.strokes[index].style.width * 0.5f + 2.0f);
+                }
+            }
+            gesture_.patchRegion = QRectF(
+                bounds->left - margin, bounds->top - margin,
+                (bounds->right - bounds->left) + margin * 2.0,
+                (bounds->bottom - bounds->top) + margin * 2.0)
+                .intersected(QRectF(0.0, 0.0, page.width, page.height));
+
+            // Move gestures blit one cached raster per object.  Only the kind
+            // and index are captured here: the raster's bounds and track point
+            // are measured when it is rendered (first gesture paint), so a
+            // move that already landed before the first paint is not applied
+            // twice.
+            if (!transform) {
+                const auto addItem = [this](ObjectKind kind, std::size_t index) {
+                    GestureItem item;
+                    item.kind = kind;
+                    item.index = index;
+                    gesture_.items.push_back(item);
+                };
+                for (const std::size_t index : gesture_.only.strokes) {
+                    addItem(ObjectKind::Stroke, index);
+                }
+                for (const std::size_t index : gesture_.only.images) {
+                    addItem(ObjectKind::Image, index);
+                }
+                for (const std::size_t index : gesture_.only.texts) {
+                    addItem(ObjectKind::Text, index);
+                }
+                for (const std::size_t index : gesture_.only.latexes) {
+                    addItem(ObjectKind::Latex, index);
+                }
+            }
+        }
+    }
+}
+
+void CanvasWidget::EndGestureOverlay() {
+    gesture_ = GestureSurface {};
+}
+
+QRect CanvasWidget::SelectionDirtyRect(std::size_t pageIndex) const {
+    const std::optional<SelectionBounds> bounds = SelectionBoundsForPage(pageIndex);
+    if (!bounds.has_value()) {
+        return rect();
+    }
+    const CanvasPageView view = CalculatePageView(pageIndex);
+    if (!view.valid) {
+        return rect();
+    }
+    // The frame, its handles and the rotate knob all live inside the bounds
+    // inflated by the handle hit radius plus the rotate stem offset.
+    const qreal margin = SelectionHandleHitRadiusPixels(96)
+        + static_cast<qreal>(kSelectionRotateOffsetDip) + 4.0;
+    const QRectF frame(
+        view.rect.left() + (static_cast<qreal>(bounds->left) * view.scale),
+        view.rect.top() + (static_cast<qreal>(bounds->top) * view.scale),
+        static_cast<qreal>(bounds->right - bounds->left) * view.scale,
+        static_cast<qreal>(bounds->bottom - bounds->top) * view.scale);
+    return frame.adjusted(-margin, -margin, margin, margin).toAlignedRect().intersected(rect());
+}
+
 void CanvasWidget::PruneSurfaces(const std::vector<std::size_t>& visiblePages) {
     for (auto entry = surfaces_.begin(); entry != surfaces_.end();) {
         if (std::find(visiblePages.begin(), visiblePages.end(), entry->first) == visiblePages.end()) {
@@ -586,9 +691,44 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
         // objects can draw at kPendingEraseObjectOpacity.
         const render::PendingEraseIndices pendingErase = PendingEraseFor(view.pageIndex);
         const bool pageHasPendingErase = !pendingErase.Empty();
+        // A move/transform gesture on this page blits the committed raster,
+        // covers the vacated region with a once-per-gesture patch and paints
+        // the dragged selection live on top — no per-sample re-render.
+        const bool gestureOnPage = controller_.GesturePageIndex() == view.pageIndex
+            && gesture_.pageIndex == view.pageIndex
+            && !gesture_.only.Empty();
         const render::PageSurfaceCache* surface = nullptr;
 
-        if (!pageHasPendingErase) {
+        if (gestureOnPage && !pageHasPendingErase) {
+            surface = FindSurface(view.pageIndex, view.scale, cachedDevicePixelRatio_);
+            if (surface == nullptr) {
+                surface = NewestSurface(view.pageIndex);
+            }
+            if (surface == nullptr) {
+                // No committed raster to reuse: render the page once with the
+                // selection excluded so later moves cannot ghost.
+                render::PageRenderParams params = RenderParamsFor(view);
+                params.excluded = gesture_.excluded;
+                render::EnsurePageSurface(gesture_.fallback, page, params);
+                if (!gesture_.fallback.image.isNull()) {
+                    gesture_.fallback.image.setDevicePixelRatio(cachedDevicePixelRatio_);
+                }
+                surface = &gesture_.fallback;
+            }
+            if (gesture_.patch.isNull()
+                || gesture_.scale != view.scale
+                || gesture_.devicePixelRatio != cachedDevicePixelRatio_) {
+                render::PageRenderParams params = RenderParamsFor(view);
+                params.excluded = gesture_.excluded;
+                gesture_.patch = render::RenderPageSurfaceRegion(page, params, gesture_.patchRegion);
+                gesture_.scale = view.scale;
+                gesture_.devicePixelRatio = cachedDevicePixelRatio_;
+                if (!gesture_.patch.isNull()) {
+                    gesture_.patch.setDevicePixelRatio(cachedDevicePixelRatio_);
+                }
+                ++surfaceRenders_;
+            }
+        } else if (!pageHasPendingErase) {
             if (zoomSessionActive_ && !liveStrokeOnPage) {
                 surface = FindSurface(view.pageIndex, view.scale, cachedDevicePixelRatio_);
                 if (surface == nullptr) {
@@ -631,6 +771,167 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                 painter.drawImage(view.rect.topLeft(), surface->image);
             } else {
                 painter.drawImage(view.rect, surface->image);
+            }
+        }
+
+        if (gestureOnPage && !pageHasPendingErase && !gesture_.patch.isNull()) {
+            // Cover the region the selection vacated: the committed raster
+            // still shows it at its original position.  The patch is rendered
+            // at scale * DPR in device pixels, so it blits 1:1 at its region's
+            // top-left.
+            painter.drawImage(
+                QPointF(view.rect.left() + gesture_.patchRegion.x() * view.scale,
+                    view.rect.top() + gesture_.patchRegion.y() * view.scale),
+                gesture_.patch);
+        }
+
+        if (gestureOnPage && !pageHasPendingErase) {
+            if (!gesture_.transform && !gesture_.items.empty()) {
+                // Move: blit each object's cached raster at its live offset.
+                // The rasters are rendered once per gesture at scale * DPR.
+                if (gesture_.itemsScale != view.scale
+                    || gesture_.itemsDevicePixelRatio != cachedDevicePixelRatio_) {
+                    const float deviceScale = view.scale * cachedDevicePixelRatio_;
+                    for (GestureItem& item : gesture_.items) {
+                        float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
+                        float margin = 2.0f;
+                        render::ExcludedIndices one;
+                        std::vector<std::size_t>* list = nullptr;
+                        bool valid = true;
+                        switch (item.kind) {
+                        case ObjectKind::Stroke:
+                            list = &one.strokes;
+                            if (item.index >= page.strokes.size()
+                                || !StrokeBounds(page.strokes[item.index], &minX, &minY, &maxX, &maxY)) {
+                                valid = false;
+                                break;
+                            }
+                            margin = page.strokes[item.index].style.width * 0.5f + 2.0f;
+                            item.trackX = page.strokes[item.index].points.front().x;
+                            item.trackY = page.strokes[item.index].points.front().y;
+                            break;
+                        case ObjectKind::Image:
+                            list = &one.images;
+                            if (item.index >= page.images.size()) {
+                                valid = false;
+                                break;
+                            }
+                            minX = page.width;
+                            minY = page.height;
+                            for (const Vec2& corner : ImageCorners(page.images[item.index])) {
+                                minX = std::min(minX, corner.x);
+                                minY = std::min(minY, corner.y);
+                                maxX = std::max(maxX, corner.x);
+                                maxY = std::max(maxY, corner.y);
+                            }
+                            item.trackX = page.images[item.index].x;
+                            item.trackY = page.images[item.index].y;
+                            break;
+                        case ObjectKind::Text:
+                            list = &one.texts;
+                            if (item.index >= page.texts.size()) {
+                                valid = false;
+                                break;
+                            }
+                            {
+                                const text::QtTextBounds textBounds =
+                                    text::MeasurePageTextBoundsQt(page.texts[item.index], page.width);
+                                minX = textBounds.left;
+                                minY = textBounds.top;
+                                maxX = textBounds.right;
+                                maxY = textBounds.bottom;
+                            }
+                            item.trackX = page.texts[item.index].x;
+                            item.trackY = page.texts[item.index].y;
+                            break;
+                        case ObjectKind::Latex:
+                            list = &one.latexes;
+                            if (item.index >= page.latexes.size()) {
+                                valid = false;
+                                break;
+                            }
+                            {
+                                const LatexBounds latexBounds =
+                                    MeasurePageLatexBounds(page.latexes[item.index], page.width);
+                                minX = latexBounds.left;
+                                minY = latexBounds.top;
+                                maxX = latexBounds.right;
+                                maxY = latexBounds.bottom;
+                            }
+                            item.trackX = page.latexes[item.index].x;
+                            item.trackY = page.latexes[item.index].y;
+                            break;
+                        }
+                        if (!valid) {
+                            item.image = QImage();
+                            continue;
+                        }
+                        item.originX = minX - margin;
+                        item.originY = minY - margin;
+                        item.width = (maxX - minX) + margin * 2.0f;
+                        item.height = (maxY - minY) + margin * 2.0f;
+                        list->push_back(item.index);
+                        render::PageRenderParams params = RenderParamsFor(view);
+                        params.scale = deviceScale;
+                        params.devicePixelRatio = 1.0f;
+                        item.image = QImage(
+                            std::max(1, static_cast<int>(std::lround(item.width * deviceScale))),
+                            std::max(1, static_cast<int>(std::lround(item.height * deviceScale))),
+                            QImage::Format_ARGB32_Premultiplied);
+                        item.image.fill(Qt::transparent);
+                        QPainter itemPainter(&item.image);
+                        render::PaintPageSubset(itemPainter, page,
+                            QPointF(-item.originX * deviceScale, -item.originY * deviceScale),
+                            params, one);
+                        itemPainter.end();
+                        item.image.setDevicePixelRatio(cachedDevicePixelRatio_);
+                    }
+                    gesture_.itemsScale = view.scale;
+                    gesture_.itemsDevicePixelRatio = cachedDevicePixelRatio_;
+                    ++surfaceRenders_;
+                }
+                for (const GestureItem& item : gesture_.items) {
+                    if (item.image.isNull()) {
+                        continue;
+                    }
+                    float currentX = item.trackX;
+                    float currentY = item.trackY;
+                    switch (item.kind) {
+                    case ObjectKind::Stroke:
+                        if (item.index < page.strokes.size() && !page.strokes[item.index].points.empty()) {
+                            currentX = page.strokes[item.index].points.front().x;
+                            currentY = page.strokes[item.index].points.front().y;
+                        }
+                        break;
+                    case ObjectKind::Image:
+                        if (item.index < page.images.size()) {
+                            currentX = page.images[item.index].x;
+                            currentY = page.images[item.index].y;
+                        }
+                        break;
+                    case ObjectKind::Text:
+                        if (item.index < page.texts.size()) {
+                            currentX = page.texts[item.index].x;
+                            currentY = page.texts[item.index].y;
+                        }
+                        break;
+                    case ObjectKind::Latex:
+                        if (item.index < page.latexes.size()) {
+                            currentX = page.latexes[item.index].x;
+                            currentY = page.latexes[item.index].y;
+                        }
+                        break;
+                    }
+                    painter.drawImage(
+                        QPointF(view.rect.left() + (item.originX + currentX - item.trackX) * view.scale,
+                            view.rect.top() + (item.originY + currentY - item.trackY) * view.scale),
+                        item.image);
+                }
+            } else {
+                // Transform: the dragged selection paints live on top of the
+                // patched raster (scaling/rotation change stroke widths and
+                // text layout, so cached rasters do not apply).
+                render::PaintPageSubset(painter, page, view.rect.topLeft(), RenderParamsFor(view), gesture_.only);
             }
         }
 
@@ -1586,8 +1887,6 @@ std::optional<TransformRequest> CanvasWidget::HitTestSelectionHandle(const QPoin
     TransformRequest request;
     request.pageIndex = view->pageIndex;
 
-    std::printf("[dbg] frame %.1f,%.1f %.1fx%.1f logical %.1f,%.1f radius %.1f\n",
-        frame.left(), frame.top(), frame.width(), frame.height(), logical.x(), logical.y(), hitRadius);
     // The rotate handle's radius overlaps the top edge handle's, so it is
     // checked first and wins a tie.
     if (hits(SelectionRotateHandlePosition(frame))) {
@@ -2109,6 +2408,7 @@ void CanvasWidget::AddObjectToSelection(ObjectRef object) {
 
 void CanvasWidget::BeginMoveSelection(std::size_t pageIndex) {
     controller_.BeginPageGesture(pageIndex);
+    BeginGestureOverlay(pageIndex, false);
 }
 
 void CanvasWidget::UpdateMoveSelection(const QPointF& logicalDelta) {
@@ -2120,19 +2420,20 @@ void CanvasWidget::UpdateMoveSelection(const QPointF& logicalDelta) {
     if (!view.valid || view.scale <= 0.0f) {
         return;
     }
+    // The repaint region is the union of the frame before and after the move.
+    const QRect dirtyBefore = SelectionDirtyRect(*pageIndex);
     controller_.MoveSelectionBy(
         *pageIndex,
         Vec2 { static_cast<float>(logicalDelta.x()) / view.scale, static_cast<float>(logicalDelta.y()) / view.scale });
-    if (const auto page = surfaces_.find(*pageIndex); page != surfaces_.end()) {
-        surfaces_.erase(page);
-    }
-    update();
+    update(dirtyBefore.united(SelectionDirtyRect(*pageIndex)));
 }
 
 void CanvasWidget::CommitMoveSelection() {
     controller_.CommitPageGesture();
+    EndGestureOverlay();
     update();
 }
+
 
 void CanvasWidget::BeginTransform(const TransformRequest& request) {
     const std::optional<SelectionBounds> from = SelectionBoundsForPage(request.pageIndex);
@@ -2146,6 +2447,7 @@ void CanvasWidget::BeginTransform(const TransformRequest& request) {
     // controller snapshots the page and CommitTransform records one
     // ReplacePages action.
     controller_.BeginPageGesture(request.pageIndex);
+    BeginGestureOverlay(request.pageIndex, true);
 }
 
 void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers modifiers) {
@@ -2278,15 +2580,16 @@ void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers
         }
     }
 
+    // The repaint region is the union of the frame before and after the
+    // transform.
+    const QRect dirtyBefore = SelectionDirtyRect(*pageIndex);
     controller_.TransformSelection(*pageIndex, transform);
-    if (const auto page = surfaces_.find(*pageIndex); page != surfaces_.end()) {
-        surfaces_.erase(page);
-    }
-    update();
+    update(dirtyBefore.united(SelectionDirtyRect(*pageIndex)));
 }
 
 void CanvasWidget::CommitTransform() {
     controller_.CommitPageGesture();
+    EndGestureOverlay();
     transformHandle_.reset();
     transformFrom_ = SelectionBounds {};
     transformPressLogical_ = QPointF();

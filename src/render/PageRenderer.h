@@ -7,6 +7,7 @@
 
 #include <QImage>
 #include <QPointF>
+#include <QRectF>
 
 #include "Document.h"
 
@@ -68,6 +69,10 @@ struct PageRenderParams {
     // kPendingEraseObjectOpacity (App.cpp:9519-9568).  Part of the surface
     // signature, like the excluded indices.
     PendingEraseIndices pendingErase;
+    // Optional page-unit bounds: objects fully outside are skipped.  Used by
+    // RenderPageSurfaceRegion to avoid building paths for objects that cannot
+    // touch the rendered region.
+    std::optional<QRectF> cullRect;
 };
 
 // Draws the committed objects of one page in layer order: page/PDF background,
@@ -90,6 +95,12 @@ void PaintImage(QPainter& painter, const PageImage& image, const PageRenderParam
 // erase). Same pen/path/dash/opacity rules as committed strokes; `params.scale`
 // maps page units to painter units exactly like PaintPage.
 void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRenderParams& params, float opacity);
+
+// Renders only `region` (page units) of a page into a premultiplied ARGB32
+// QImage sized region * scale * devicePixelRatio, for compositing over a
+// cached full-page surface.  Objects outside `region` are culled.
+[[nodiscard]] QImage RenderPageSurfaceRegion(
+    const Page& page, const PageRenderParams& params, const QRectF& region);
 
 // Renders a page into a top-down premultiplied ARGB32 QImage sized
 // page.width * scale * devicePixelRatio.
