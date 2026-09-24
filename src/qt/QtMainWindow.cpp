@@ -518,6 +518,9 @@ void QtMainWindow::ApplySettingsToShell() {
         settings_.inputSpacing,
         settings_.inputSmoothing,
         settings_.strokeSmoothing,
+        0xFF111827,
+        settings_.dashLength,
+        settings_.dashGap,
     });
     ApplyStrokeStyle();
     ApplyToolToCanvas();

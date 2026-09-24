@@ -209,8 +209,8 @@ bool QtDocumentController::ExportPdf(const std::filesystem::path& path, bool emb
             temporary,
             kPdfExportRenderScale,
             input_.strokeSmoothing,
-            3.0f,
-            2.0f,
+            input_.dashLength,
+            input_.dashGap,
             std::span<const std::uint8_t>(serialized))) {
         std::filesystem::remove(temporary, removeError);
         if (error != nullptr) {

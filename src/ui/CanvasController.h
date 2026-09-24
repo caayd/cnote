@@ -42,6 +42,8 @@ struct CanvasInputSettings {
     float inputSmoothing = 0.3f;    // 0..1 pointer follow factor
     float strokeSmoothing = 0.55f;  // render-time smoothing strength
     std::uint32_t objectColor = 0xFF111827;  // active palette slot; seeds new text/LaTeX objects
+    float dashLength = 3.0f;  // dotted-stroke dash pattern (settings dash_length/dash_gap)
+    float dashGap = 2.0f;
 };
 
 // One resize/rotate step of the whole selection on a page: the selection bounds

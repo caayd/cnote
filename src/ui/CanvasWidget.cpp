@@ -407,6 +407,8 @@ render::PageRenderParams CanvasWidget::RenderParamsFor(const CanvasPageView& vie
     params.scale = view.scale;
     params.devicePixelRatio = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
     params.strokeSmoothing = controller_.InputSettings().strokeSmoothing;
+    params.dashLength = controller_.InputSettings().dashLength;
+    params.dashGap = controller_.InputSettings().dashGap;
     // Lazy PDF page backgrounds for pages that have a PDF source and no stored
     // raster; PageRenderer asks the provider at the current raster scale.
     params.pdfBackground = pdfBackground_;
