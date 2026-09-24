@@ -230,6 +230,18 @@ private:
     std::optional<std::size_t> gesturePage_ {};
     Page gestureBefore_ {};
     bool gestureChanged_ = false;
+    // Per-gesture bounds cache for MoveSelectionBy: each selected object's
+    // bounds are measured once and then translated by the applied (clamped)
+    // delta, so a move event costs O(1) per object instead of re-measuring
+    // stroke points / text layout / LaTeX metrics on every pointer sample.
+    struct MoveBounds {
+        bool built = false;
+        std::vector<ui::SelectionBounds> strokes;
+        std::vector<ui::SelectionBounds> images;
+        std::vector<ui::SelectionBounds> texts;
+        std::vector<ui::SelectionBounds> latexes;
+    };
+    MoveBounds moveBounds_ {};
     std::uint64_t savedChangeCount_ = 0;
 
     // Text edit state: the object snapshot the overlay was filled from.

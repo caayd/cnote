@@ -802,6 +802,7 @@ void QtDocumentController::BeginPageGesture(std::size_t pageIndex) {
     gesturePage_ = pageIndex;
     gestureBefore_ = *page;
     gestureChanged_ = false;
+    moveBounds_.built = false;
 }
 
 Page* QtDocumentController::GesturePage() {
@@ -859,62 +860,137 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
     }
     const ui::PageSelection& selection = SelectionFor(pageIndex);
 
-    for (const std::size_t index : selection.strokes) {
-        if (index >= page->strokes.size()) {
+    // First move of the gesture measures every selected object's bounds once;
+    // later samples reuse them and translate by the applied delta.  Without
+    // this each pointer event re-scans every selected stroke's points and
+    // re-runs text/LaTeX measurement just to clamp the delta.
+    if (!moveBounds_.built) {
+        moveBounds_.strokes.clear();
+        moveBounds_.images.clear();
+        moveBounds_.texts.clear();
+        moveBounds_.latexes.clear();
+        for (const std::size_t index : selection.strokes) {
+            ui::SelectionBounds bounds {};
+            if (index < page->strokes.size()) {
+                bounds.valid = ui::StrokeBounds(
+                    page->strokes[index], &bounds.left, &bounds.top, &bounds.right, &bounds.bottom);
+            }
+            moveBounds_.strokes.push_back(bounds);
+        }
+        for (const std::size_t index : selection.images) {
+            ui::SelectionBounds bounds {};
+            if (index < page->images.size()) {
+                for (const Vec2& corner : ui::ImageCorners(page->images[index])) {
+                    if (!bounds.valid) {
+                        bounds = ui::SelectionBounds { corner.x, corner.y, corner.x, corner.y, true };
+                        continue;
+                    }
+                    bounds.left = std::min(bounds.left, corner.x);
+                    bounds.top = std::min(bounds.top, corner.y);
+                    bounds.right = std::max(bounds.right, corner.x);
+                    bounds.bottom = std::max(bounds.bottom, corner.y);
+                }
+            }
+            moveBounds_.images.push_back(bounds);
+        }
+        for (const std::size_t index : selection.texts) {
+            ui::SelectionBounds bounds {};
+            if (index < page->texts.size()) {
+                const text::QtTextBounds textBounds =
+                    text::MeasurePageTextBoundsQt(page->texts[index], page->width);
+                bounds = ui::SelectionBounds {
+                    textBounds.left, textBounds.top, textBounds.right, textBounds.bottom, true };
+            }
+            moveBounds_.texts.push_back(bounds);
+        }
+        for (const std::size_t index : selection.latexes) {
+            ui::SelectionBounds bounds {};
+            if (index < page->latexes.size()) {
+                const ui::LatexBounds latexBounds =
+                    ui::MeasurePageLatexBounds(page->latexes[index], page->width);
+                bounds = ui::SelectionBounds {
+                    latexBounds.left, latexBounds.top, latexBounds.right, latexBounds.bottom, true };
+            }
+            moveBounds_.latexes.push_back(bounds);
+        }
+        moveBounds_.built = true;
+    }
+
+    // Clamps `delta` against the cached bounds and keeps them current by
+    // translating with whatever was actually applied.
+    const auto clampedDelta = [this, page](std::size_t slot, const std::vector<ui::SelectionBounds>& bounds, Vec2 delta) {
+        const ui::SelectionBounds& b = bounds[slot];
+        if (!b.valid) {
+            return Vec2 {};
+        }
+        return Vec2 {
+            std::clamp(delta.x, -b.left, page->width - b.right),
+            std::clamp(delta.y, -b.top, page->height - b.bottom),
+        };
+    };
+    const auto advance = [](ui::SelectionBounds& b, Vec2 applied) {
+        b.left += applied.x;
+        b.right += applied.x;
+        b.top += applied.y;
+        b.bottom += applied.y;
+    };
+
+    for (std::size_t slot = 0; slot < selection.strokes.size(); ++slot) {
+        const std::size_t index = selection.strokes[slot];
+        if (index >= page->strokes.size() || slot >= moveBounds_.strokes.size()) {
             continue;
         }
-        const Vec2 clamped = ui::ClampStrokeDeltaToPage(page->strokes[index], *page, delta);
+        const Vec2 clamped = clampedDelta(slot, moveBounds_.strokes, delta);
         if (clamped.x == 0.0f && clamped.y == 0.0f) {
             continue;
         }
         ui::TranslateStrokePoints(page->strokes[index], clamped);
+        advance(moveBounds_.strokes[slot], clamped);
         gestureChanged_ = true;
     }
-    for (const std::size_t index : selection.images) {
-        if (index >= page->images.size()) {
+    for (std::size_t slot = 0; slot < selection.images.size(); ++slot) {
+        const std::size_t index = selection.images[slot];
+        if (index >= page->images.size() || slot >= moveBounds_.images.size()) {
             continue;
         }
-        PageImage& image = page->images[index];
-        const Vec2 clamped = ui::ClampImageDeltaToPage(image, *page, delta);
+        const Vec2 clamped = clampedDelta(slot, moveBounds_.images, delta);
         if (clamped.x == 0.0f && clamped.y == 0.0f) {
             continue;
         }
-        image.x += clamped.x;
-        image.y += clamped.y;
+        page->images[index].x += clamped.x;
+        page->images[index].y += clamped.y;
+        advance(moveBounds_.images[slot], clamped);
         gestureChanged_ = true;
     }
-    for (const std::size_t index : selection.texts) {
-        if (index >= page->texts.size()) {
+    for (std::size_t slot = 0; slot < selection.texts.size(); ++slot) {
+        const std::size_t index = selection.texts[slot];
+        if (index >= page->texts.size() || slot >= moveBounds_.texts.size()) {
             continue;
         }
-        PageText& text = page->texts[index];
-        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page->width);
-        const Vec2 clamped {
-            std::clamp(delta.x, -bounds.left, page->width - bounds.right),
-            std::clamp(delta.y, -bounds.top, page->height - bounds.bottom),
-        };
+        const Vec2 clamped = clampedDelta(slot, moveBounds_.texts, delta);
         if (clamped.x == 0.0f && clamped.y == 0.0f) {
             continue;
         }
-        text.x += clamped.x;
-        text.y += clamped.y;
+        page->texts[index].x += clamped.x;
+        page->texts[index].y += clamped.y;
+        advance(moveBounds_.texts[slot], clamped);
         gestureChanged_ = true;
     }
-    for (const std::size_t index : selection.latexes) {
-        if (index >= page->latexes.size()) {
+    for (std::size_t slot = 0; slot < selection.latexes.size(); ++slot) {
+        const std::size_t index = selection.latexes[slot];
+        if (index >= page->latexes.size() || slot >= moveBounds_.latexes.size()) {
             continue;
         }
-        PageLatex& object = page->latexes[index];
-        const Vec2 clamped = ui::ClampLatexDeltaToPage(object, *page, delta);
+        const Vec2 clamped = clampedDelta(slot, moveBounds_.latexes, delta);
         if (clamped.x == 0.0f && clamped.y == 0.0f) {
             continue;
         }
-        object.x += clamped.x;
-        object.y += clamped.y;
+        page->latexes[index].x += clamped.x;
+        page->latexes[index].y += clamped.y;
+        advance(moveBounds_.latexes[slot], clamped);
         gestureChanged_ = true;
     }
 }
-
 void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::SelectionTransform& transform) {
     Page* page = GesturePage();
     if (page == nullptr || !transform.from.valid) {
@@ -923,7 +999,30 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
 
     // Absolute, not cumulative: every update restores the gesture snapshot and
     // re-applies the transform, so repeated UpdateTransform calls cannot drift.
-    *page = gestureBefore_;
+    // Only the selected objects are restored — copying the whole page per
+    // pointer event deep-copied every unselected stroke, image raster and text
+    // run, which dominated the gesture on dense pages.
+    const ui::PageSelection& selection = SelectionFor(pageIndex);
+    for (const std::size_t index : selection.strokes) {
+        if (index < page->strokes.size() && index < gestureBefore_.strokes.size()) {
+            page->strokes[index] = gestureBefore_.strokes[index];
+        }
+    }
+    for (const std::size_t index : selection.images) {
+        if (index < page->images.size() && index < gestureBefore_.images.size()) {
+            page->images[index] = gestureBefore_.images[index];
+        }
+    }
+    for (const std::size_t index : selection.texts) {
+        if (index < page->texts.size() && index < gestureBefore_.texts.size()) {
+            page->texts[index] = gestureBefore_.texts[index];
+        }
+    }
+    for (const std::size_t index : selection.latexes) {
+        if (index < page->latexes.size() && index < gestureBefore_.latexes.size()) {
+            page->latexes[index] = gestureBefore_.latexes[index];
+        }
+    }
 
     const float fromWidth = transform.from.right - transform.from.left;
     const float fromHeight = transform.from.bottom - transform.from.top;
@@ -932,7 +1031,6 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
     const float scaleX = fromWidth > 0.0001f ? (transform.to.right - transform.to.left) / fromWidth : 1.0f;
     const float scaleY = fromHeight > 0.0001f ? (transform.to.bottom - transform.to.top) / fromHeight : 1.0f;
 
-    const ui::PageSelection& selection = SelectionFor(pageIndex);
     for (const std::size_t index : selection.strokes) {
         if (index >= page->strokes.size()) {
             continue;
