@@ -197,32 +197,72 @@ void PaintPage(QPainter& painter, const Page& page, const QPointF& pageOrigin, c
             ? kPendingEraseObjectOpacity
             : 1.0f;
     };
+    // Exclusion lists are sorted, so membership is a binary search.
+    const auto excluded = [](const std::vector<std::size_t>& list, std::size_t index) {
+        return std::binary_search(list.begin(), list.end(), index);
+    };
 
     for (std::size_t index = 0; index < page.images.size(); ++index) {
+        if (excluded(params.excluded.images, index)) {
+            continue;
+        }
         PaintImage(painter, page.images[index], params, pendingOpacity(params.pendingErase.images, index));
     }
 
     for (std::size_t index = 0; index < page.texts.size(); ++index) {
-        if (params.excludedTextIndex.has_value() && *params.excludedTextIndex == index) {
+        if (excluded(params.excluded.texts, index)) {
             continue;
         }
         PaintText(painter, page.texts[index], page.width, scale, pendingOpacity(params.pendingErase.texts, index));
     }
 
     for (std::size_t index = 0; index < page.latexes.size(); ++index) {
-        if (params.excludedLatexIndex.has_value() && *params.excludedLatexIndex == index) {
+        if (excluded(params.excluded.latexes, index)) {
             continue;
         }
         PaintLatex(painter, page.latexes[index], scale, pendingOpacity(params.pendingErase.latexes, index));
     }
 
     for (std::size_t index = 0; index < page.strokes.size(); ++index) {
-        if (params.excludedStrokeIndex.has_value() && *params.excludedStrokeIndex == index) {
+        if (excluded(params.excluded.strokes, index)) {
             continue;
         }
         PaintStrokePreview(painter, page.strokes[index], params, pendingOpacity(params.pendingErase.strokes, index));
     }
 
+    painter.restore();
+}
+
+void PaintPageSubset(QPainter& painter, const Page& page, const QPointF& pageOrigin,
+    const PageRenderParams& params, const ExcludedIndices& only) {
+    const float scale = std::max(0.01f, params.scale);
+    painter.save();
+    painter.translate(pageOrigin);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+    // Same layer order as PaintPage so a dragged selection composites like it
+    // does when committed.
+    for (const std::size_t index : only.images) {
+        if (index < page.images.size()) {
+            PaintImage(painter, page.images[index], params, 1.0f);
+        }
+    }
+    for (const std::size_t index : only.texts) {
+        if (index < page.texts.size()) {
+            PaintText(painter, page.texts[index], page.width, scale, 1.0f);
+        }
+    }
+    for (const std::size_t index : only.latexes) {
+        if (index < page.latexes.size()) {
+            PaintLatex(painter, page.latexes[index], scale, 1.0f);
+        }
+    }
+    for (const std::size_t index : only.strokes) {
+        if (index < page.strokes.size()) {
+            PaintStrokePreview(painter, page.strokes[index], params, 1.0f);
+        }
+    }
     painter.restore();
 }
 
@@ -242,7 +282,6 @@ QImage RenderPageSurface(const Page& page, const PageRenderParams& params) {
     painter.end();
     return image;
 }
-
 std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& params) {
     std::uint64_t hash = 14695981039346656037ULL;
     hash = HashFloat(hash, page.width);
@@ -252,9 +291,22 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     hash = HashFloat(hash, params.strokeSmoothing);
     hash = HashFloat(hash, params.dashLength);
     hash = HashFloat(hash, params.dashGap);
-    hash = HashValue(hash, params.excludedTextIndex.value_or(static_cast<std::size_t>(-1)));
-    hash = HashValue(hash, params.excludedLatexIndex.value_or(static_cast<std::size_t>(-1)));
-    hash = HashValue(hash, params.excludedStrokeIndex.value_or(static_cast<std::size_t>(-1)));
+    // Exclusion lists are part of the signature; excluded objects' content is
+    // not, so mutating an excluded object (a dragged selection, the object
+    // under edit) does not invalidate the surface.
+    const auto hashIndices = [&hash](const std::vector<std::size_t>& list) {
+        hash = HashValue(hash, list.size());
+        for (const std::size_t index : list) {
+            hash = HashValue(hash, index);
+        }
+    };
+    hashIndices(params.excluded.images);
+    hashIndices(params.excluded.texts);
+    hashIndices(params.excluded.latexes);
+    hashIndices(params.excluded.strokes);
+    const auto excluded = [](const std::vector<std::size_t>& list, std::size_t index) {
+        return std::binary_search(list.begin(), list.end(), index);
+    };
     const auto hashPending = [&hash](const std::vector<std::size_t>& pending) {
         hash = HashValue(hash, pending.size());
         for (const std::size_t index : pending) {
@@ -273,7 +325,11 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(page.raster.pixels.data()));
 
     hash = HashValue(hash, page.images.size());
-    for (const PageImage& image : page.images) {
+    for (std::size_t index = 0; index < page.images.size(); ++index) {
+        if (excluded(params.excluded.images, index)) {
+            continue;
+        }
+        const PageImage& image = page.images[index];
         hash = HashFloat(hash, image.x);
         hash = HashFloat(hash, image.y);
         hash = HashFloat(hash, image.width);
@@ -287,7 +343,11 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     }
 
     hash = HashValue(hash, page.texts.size());
-    for (const PageText& text : page.texts) {
+    for (std::size_t index = 0; index < page.texts.size(); ++index) {
+        if (excluded(params.excluded.texts, index)) {
+            continue;
+        }
+        const PageText& text = page.texts[index];
         hash = HashValue(hash, text::TextLayoutSignature(text, page.width));
         hash = HashFloat(hash, text.x);
         hash = HashFloat(hash, text.y);
@@ -296,7 +356,11 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     }
 
     hash = HashValue(hash, page.latexes.size());
-    for (const PageLatex& latex : page.latexes) {
+    for (std::size_t index = 0; index < page.latexes.size(); ++index) {
+        if (excluded(params.excluded.latexes, index)) {
+            continue;
+        }
+        const PageLatex& latex = page.latexes[index];
         hash = HashFloat(hash, latex.x);
         hash = HashFloat(hash, latex.y);
         hash = HashFloat(hash, latex.fontSize);
@@ -307,7 +371,11 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     }
 
     hash = HashValue(hash, page.strokes.size());
-    for (const Stroke& stroke : page.strokes) {
+    for (std::size_t index = 0; index < page.strokes.size(); ++index) {
+        if (excluded(params.excluded.strokes, index)) {
+            continue;
+        }
+        const Stroke& stroke = page.strokes[index];
         hash = HashValue(hash, stroke.style.color);
         hash = HashFloat(hash, stroke.style.width);
         hash = HashValue(hash, stroke.style.dotted);

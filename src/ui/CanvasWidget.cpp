@@ -414,8 +414,12 @@ render::PageRenderParams CanvasWidget::RenderParamsFor(const CanvasPageView& vie
     params.pdfBackground = pdfBackground_;
     // Objects being edited stay out of the committed raster cache.
     if (controller_.EditingPageIndex() == view.pageIndex) {
-        params.excludedTextIndex = controller_.EditingTextIndex();
-        params.excludedLatexIndex = controller_.EditingLatexIndex();
+        if (const std::optional<std::size_t> index = controller_.EditingTextIndex(); index.has_value()) {
+            params.excluded.texts.push_back(*index);
+        }
+        if (const std::optional<std::size_t> index = controller_.EditingLatexIndex(); index.has_value()) {
+            params.excluded.latexes.push_back(*index);
+        }
     }
     return params;
 }

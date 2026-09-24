@@ -34,6 +34,22 @@ struct PendingEraseIndices {
     }
 };
 
+// Committed objects excluded from a render, as sorted per-kind index lists
+// (e.g. the object being edited, or the dragged selection while a move/
+// transform gesture paints it live on top).  Excluded objects are also
+// excluded from cache signatures, so mutating them does not invalidate the
+// surface.
+struct ExcludedIndices {
+    std::vector<std::size_t> images;
+    std::vector<std::size_t> texts;
+    std::vector<std::size_t> latexes;
+    std::vector<std::size_t> strokes;
+
+    [[nodiscard]] bool Empty() const {
+        return images.empty() && texts.empty() && latexes.empty() && strokes.empty();
+    }
+};
+
 // Committed-object render parameters. `scale` maps page units to painter units;
 // `devicePixelRatio` is applied only when allocating a raster surface.
 struct PageRenderParams {
@@ -47,9 +63,7 @@ struct PageRenderParams {
     PdfBackgroundProvider* pdfBackground = nullptr;
     // Committed objects excluded from this render (e.g. the object being
     // edited). Excluded objects are also excluded from cache signatures.
-    std::optional<std::size_t> excludedTextIndex;
-    std::optional<std::size_t> excludedLatexIndex;
-    std::optional<std::size_t> excludedStrokeIndex;
+    ExcludedIndices excluded;
     // Objects marked by an in-progress erase drag paint at
     // kPendingEraseObjectOpacity (App.cpp:9519-9568).  Part of the surface
     // signature, like the excluded indices.
@@ -60,6 +74,13 @@ struct PageRenderParams {
 // images, committed text, LaTeX, strokes. `pageOrigin` is the page's top-left
 // in the painter's coordinate space; the painter's state is preserved.
 void PaintPage(QPainter& painter, const Page& page, const QPointF& pageOrigin, const PageRenderParams& params);
+
+// Draws only the listed objects of one page, in layer order, with no
+// background.  Used to paint a dragged selection live on top of a cached
+// surface that was rendered with those objects excluded.  `pageOrigin` and
+// `params.scale` behave exactly like PaintPage.
+void PaintPageSubset(QPainter& painter, const Page& page, const QPointF& pageOrigin,
+    const PageRenderParams& params, const ExcludedIndices& only);
 
 // Draws one image in page units (rotation and opacity applied). `params.scale`
 // maps page units to painter units exactly like PaintPage.
