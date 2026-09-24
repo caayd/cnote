@@ -1166,19 +1166,20 @@ void QtMainWindow::ZoomIn() {
     UpdateChrome();
 }
 
-void QtMainWindow::ZoomOut() {
-    canvas_->ZoomBySteps(-1, ZoomAnchorPoint());
-    UpdateChrome();
-}
-
 void QtMainWindow::AddTextObject() {
     const std::optional<ui::CanvasPageView> hit = canvas_->HitTestPageView(canvas_->rect().center());
     const std::size_t pageIndex = hit.has_value() ? hit->pageIndex : controller_.CurrentPageIndex();
     const Vec2 point = hit.has_value()
         ? canvas_->ScreenToPage(*hit, canvas_->rect().center(), false)
         : Vec2 { 60.0f, 80.0f };
-    controller_.AddTextObject(pageIndex, point, 24.0f);
+    // Same creation zoom scaling as the text tool (CanvasWidget::CreateTextAt).
+    controller_.AddTextObject(pageIndex, point, 24.0f / std::max(0.1f, canvas_->Zoom()));
     canvas_->SyncEditOverlay();
+    UpdateChrome();
+}
+
+void QtMainWindow::ZoomOut() {
+    canvas_->ZoomBySteps(-1, ZoomAnchorPoint());
     UpdateChrome();
 }
 
