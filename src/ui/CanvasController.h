@@ -7,6 +7,7 @@
 #include <QString>
 
 #include "Document.h"
+#include "PdfBackend.h"
 #include "ui/InteractionRouter.h"
 #include "ui/SelectionMath.h"
 
@@ -19,9 +20,14 @@ struct PageSelection {
     std::vector<std::size_t> images;
     std::vector<std::size_t> texts;
     std::vector<std::size_t> latexes;
+    // PDF text selected on this page (the reference's selectedPdfTextBoxes_):
+    // every selected character's box and code point, in document order. A page
+    // never carries both object and pdf-text selections.
+    std::vector<PdfTextCharBox> pdfText;
 
     [[nodiscard]] bool Empty() const {
-        return strokes.empty() && images.empty() && texts.empty() && latexes.empty();
+        return strokes.empty() && images.empty() && texts.empty() && latexes.empty()
+            && pdfText.empty();
     }
 };
 
@@ -120,8 +126,14 @@ public:
     virtual void ClearSelection() = 0;
     virtual void AddObjectToSelection(const ObjectRef& object) = 0;
     virtual void SelectObjects(std::size_t pageIndex, PageSelection selection) = 0;
+    // Page-space character boxes of the page's imported PDF text (the
+    // reference called PdfiumBackend::ExtractTextCharBoxes per query; the
+    // controller caches per source). Empty/nullptr when the page has no PDF
+    // text.
+    [[nodiscard]] virtual const std::vector<PdfTextCharBox>* PdfTextCharBoxesFor(std::size_t pageIndex) const = 0;
     // Removes every selected object as one undo step and clears the selection
-    // (the Delete key path); false when nothing was selected.
+    // (the Delete key path); false when nothing was selected. A pdf-text-only
+    // selection is cleared, not removed.
     virtual bool RemoveSelection() = 0;
     virtual void SetCurrentPageIndex(std::size_t index) = 0;
 

@@ -386,6 +386,9 @@ private:
     std::unique_ptr<InteractionRouter> router_;
     bool pointerCaptured_ = false;
     QPointF lastPointerPosition_ {};
+    // Mirrors router_->SetTool for the hover cursor (the router does not
+    // expose its tool back to the host).
+    Tool tool_ = Tool::Draw;
 
     // Wheel-notch scroll chase (accumulating target, exponential approach).
     QTimer* scrollTimer_ = nullptr;
@@ -416,6 +419,14 @@ private:
     QPointF selectionCurrent_ {};
     bool selectionOverlayLasso_ = false;
     std::vector<QPointF> lassoPoints_;
+    // PDF text drag (Selection.cpp:1360-1452): while a lasso selection anchored
+    // on PDF text is in flight the marquee is suppressed and the covered
+    // characters highlight instead. Index of the page the anchor hit; reset
+    // when the overlay ends.
+    std::optional<std::size_t> pdfTextDragPage_ {};
+    // I-beam while the pointer rests on PDF text under the Move/Select tools
+    // (MessageLoop.cpp:667/679 CursorHitsPdfText branches).
+    bool pdfTextHoverActive_ = false;
     std::vector<ObjectRef> pendingErase_;
 
     // Transform gesture state: the handle being dragged, the selection bounds

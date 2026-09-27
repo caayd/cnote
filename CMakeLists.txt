@@ -190,6 +190,17 @@ add_test(NAME pdf_background_qt COMMAND cnote_pdf_background_tests)
 set_tests_properties(pdf_background_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
+# PDF text selection end-to-end: real canvas + controller over a generated
+# PDF, drag-highlight, commit and copy.
+add_executable(cnote_pdf_text_tests
+    tests/PdfTextSelectionTests.cpp
+)
+target_link_libraries(cnote_pdf_text_tests PRIVATE cnote_ui)
+add_test(NAME pdf_text_qt COMMAND cnote_pdf_text_tests)
+set_tests_properties(pdf_text_qt PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins};QT_SCALE_FACTOR=1.0")
+
+
 # Self-contained Qt session-lifetime / autosave manager test.
 add_executable(cnote_session_manager_tests
     tests/SessionManagerTests.cpp
@@ -940,6 +951,7 @@ if(WIN32)
         cnote_text_editing_tests
         cnote_pdf_background_tests
         cnote_session_manager_tests
+        cnote_pdf_text_tests
         cnote_settings_tests
         cnote_selection_clipboard_tests
         cnote_layout_parity_tests

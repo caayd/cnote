@@ -1596,6 +1596,19 @@ void CanvasWidget::mousePressEvent(QMouseEvent* event) {
 void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
     lastPointerPosition_ = event->position();
     HandlePointerMove(SampleFromEvent(*event));
+    // MessageLoop.cpp:665-680: Move/Select show an I-beam over PDF text. Only
+    // while no interaction is live; a drag keeps its own cursor.
+    const bool wantPdfTextCursor = !pointerCaptured_
+        && (tool_ == Tool::Move || tool_ == Tool::Select)
+        && PageWithPdfTextAt(event->position()).has_value();
+    if (wantPdfTextCursor != pdfTextHoverActive_) {
+        pdfTextHoverActive_ = wantPdfTextCursor;
+        if (pdfTextHoverActive_) {
+            setCursor(Qt::IBeamCursor);
+        } else {
+            ApplyCursor();
+        }
+    }
     event->accept();
 }
 
@@ -1614,8 +1627,11 @@ void CanvasWidget::keyPressEvent(QKeyEvent* event) {
     }
     if (event->key() == Qt::Key_Delete) {
         // Deleting the selection is a document mutation, so it goes through the
-        // controller like the cut path (QtMainWindow::CutSelection).
+        // controller like the cut path (QtMainWindow::CutSelection).  A
+        // pdf-text-only clear emits SelectionChanged, not SessionChanged, so
+        // the repaint cannot rely on the session broadcast.
         if (controller_.RemoveSelection()) {
+            update();
             event->accept();
             return;
         }
@@ -1812,11 +1828,55 @@ std::optional<std::pair<std::size_t, std::size_t>> CanvasWidget::HitTestLatex(co
 }
 
 std::optional<std::size_t> CanvasWidget::PageWithPdfTextAt(const QPointF& logical) const {
-    // PDF text selection is not ported in this slice (plan step 5.2); returning
-    // nullopt keeps ordinary tool routing without a fake hit.
-    static_cast<void>(logical);
+    // App::CursorHitsPdfText (Selection.cpp:680-710): the page under the cursor
+    // counts only when one of its PDF character boxes contains the point.
+    const std::optional<CanvasPageView> view = HitTestPageView(logical);
+    if (!view.has_value() || !view->valid) {
+        return std::nullopt;
+    }
+    const std::vector<PdfTextCharBox>* boxes = controller_.PdfTextCharBoxesFor(view->pageIndex);
+    if (boxes == nullptr) {
+        return std::nullopt;
+    }
+    const Vec2 pagePoint = ScreenToPage(*view, logical, false);
+    for (const PdfTextCharBox& box : *boxes) {
+        if (pagePoint.x >= box.left
+            && pagePoint.x <= box.right
+            && pagePoint.y >= box.top
+            && pagePoint.y <= box.bottom) {
+            return view->pageIndex;
+        }
+    }
     return std::nullopt;
 }
+
+namespace {
+
+// Selection.cpp:1399-1424 nearestBoxIndex: the box containing the point, or the
+// one whose centre is closest. Assumes `boxes` is non-empty.
+std::size_t NearestPdfTextIndex(const std::vector<PdfTextCharBox>& boxes, Vec2 point) {
+    std::size_t nearest = 0;
+    float nearestDistance = std::numeric_limits<float>::max();
+    for (std::size_t index = 0; index < boxes.size(); ++index) {
+        const PdfTextCharBox& box = boxes[index];
+        if (point.x >= box.left && point.x <= box.right
+            && point.y >= box.top && point.y <= box.bottom) {
+            return index;
+        }
+        const float cx = (box.left + box.right) * 0.5f;
+        const float cy = (box.top + box.bottom) * 0.5f;
+        const float dx = cx - point.x;
+        const float dy = cy - point.y;
+        const float distance = (dx * dx) + (dy * dy);
+        if (distance < nearestDistance) {
+            nearestDistance = distance;
+            nearest = index;
+        }
+    }
+    return nearest;
+}
+
+}  // namespace
 
 std::optional<SelectionHit> CanvasWidget::HitTestSelectionObject(const QPointF& logical, std::size_t pageIndex) const {
     const std::optional<CanvasPageView> view = HitTestPageView(logical);
@@ -1973,7 +2033,9 @@ void CanvasWidget::SetCursor(CursorKind cursor) {
 }
 
 void CanvasWidget::SetTool(Tool tool) {
+    tool_ = tool;
     router_->SetTool(tool);
+    pdfTextHoverActive_ = false;
     SetCursor(InteractionRouter::CursorForTool(tool));
 }
 
@@ -2283,6 +2345,16 @@ void CanvasWidget::UpdateSelectionOverlay(
     selectionCurrent_ = current;
     selectionOverlayLasso_ = lasso;
     lassoPoints_ = lassoPoints;
+    // A lasso anchored on PDF text drags a text selection instead of a marquee
+    // (Selection.cpp:7237-7241 suppresses the overlay and App paints the
+    // covered characters). The probe runs once: the anchor never moves.
+    if (!pdfTextDragPage_.has_value()) {
+        if (lasso) {
+            pdfTextDragPage_ = PageWithPdfTextAt(anchor);
+        } else {
+            pdfTextDragPage_.reset();
+        }
+    }
     update();
 }
 
@@ -2290,17 +2362,44 @@ void CanvasWidget::CommitSelection(
     const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click) {
     selectionOverlayActive_ = false;
 
+    const std::optional<std::size_t> pdfDragPage = pdfTextDragPage_;
+    pdfTextDragPage_.reset();
+
     const std::optional<CanvasPageView> view = HitTestPageView(anchor);
     if (!view.has_value()) {
         controller_.ClearSelection();
         update();
-            return;
+        return;
     }
 
     const Document& document = controller_.DocumentRef();
     const Page& page = document.PageAt(view->pageIndex);
     const Vec2 anchorPage = ScreenToPage(*view, anchor, false);
     const Vec2 currentPage = ScreenToPage(*view, current, false);
+
+    // Selection.cpp:1373-1431: a lasso (or click) anchored on PDF text selects
+    // the character range spanned by the drag instead of hitting objects; the
+    // range runs from the nearest box to the anchor to the nearest box at the
+    // current point.
+    if (pdfDragPage.has_value() && *pdfDragPage == view->pageIndex) {
+        if (const std::vector<PdfTextCharBox>* boxes = controller_.PdfTextCharBoxesFor(*pdfDragPage);
+            boxes != nullptr && !boxes->empty()) {
+            PageSelection selection;
+            const std::size_t firstIndex = std::min(
+                NearestPdfTextIndex(*boxes, anchorPage), NearestPdfTextIndex(*boxes, currentPage));
+            const std::size_t lastIndex = std::max(
+                NearestPdfTextIndex(*boxes, anchorPage), NearestPdfTextIndex(*boxes, currentPage));
+            selection.pdfText.assign(boxes->begin() + static_cast<std::ptrdiff_t>(firstIndex),
+                boxes->begin() + static_cast<std::ptrdiff_t>(lastIndex + 1U));
+            // The reference clears every other selection vector when pdf text
+            // commits, so the new pdf selection replaces any prior object
+            // selection outright.
+            controller_.ClearSelection();
+            controller_.SelectObjects(view->pageIndex, std::move(selection));
+            update();
+            return;
+        }
+    }
 
     PageSelection selection;
     if (click) {
@@ -2855,8 +2954,69 @@ void CanvasWidget::PaintSelectionOverlay(QPainter& painter) {
         painter.drawEllipse(frame.center(), 3.0, 3.0);
     }
 
-    // Live marquee / lasso.
-    if (selectionOverlayActive_) {
+    // PDF text highlight (App::PaintPdfTextSelection App.cpp:7818-7915):
+    // committed boxes paint translucent over the text; a pdf text drag paints
+    // the live range instead of the marquee.
+    const QColor pdfHighlight(64, 150, 255, 96);
+    for (const CanvasPageView& view : CalculatePageViews()) {
+        if (!view.valid || view.scale <= 0.0f) {
+            continue;
+        }
+        const PageSelection& selection = controller_.SelectionFor(view.pageIndex);
+        const bool hasCommitted = !selection.pdfText.empty();
+        const bool showLive = selectionOverlayActive_ && pdfTextDragPage_.has_value()
+            && *pdfTextDragPage_ == view.pageIndex;
+        if (!hasCommitted && !showLive) {
+            continue;
+        }
+        const Document& document = controller_.DocumentRef();
+        const Page& page = document.PageAt(view.pageIndex);
+        // Padding shrinks with zoom like the reference's 0.75 / scale.
+        const float padding = 0.75f / view.scale;
+        const auto paintBox = [&](const PdfTextCharBox& box) {
+            const float left = std::max(0.0f, box.left - padding);
+            const float top = std::max(0.0f, box.top - padding);
+            const float right = std::min(page.width, box.right + padding);
+            const float bottom = std::min(page.height, box.bottom + padding);
+            if (right <= left || bottom <= top) {
+                return;
+            }
+            painter.fillRect(QRectF(
+                view.rect.left() + (static_cast<qreal>(left) * view.scale),
+                view.rect.top() + (static_cast<qreal>(top) * view.scale),
+                static_cast<qreal>(right - left) * view.scale,
+                static_cast<qreal>(bottom - top) * view.scale),
+                pdfHighlight);
+        };
+
+        if (hasCommitted) {
+            for (const PdfTextCharBox& box : selection.pdfText) {
+                paintBox(box);
+            }
+        }
+        if (!showLive) {
+            continue;
+        }
+        const std::vector<PdfTextCharBox>* boxes = controller_.PdfTextCharBoxesFor(view.pageIndex);
+        const std::optional<CanvasPageView> currentView = HitTestPageView(selectionCurrent_);
+        if (boxes == nullptr || boxes->empty()
+            || !currentView.has_value() || currentView->pageIndex != view.pageIndex) {
+            continue;
+        }
+        const Vec2 anchorPage = ScreenToPage(view, selectionAnchor_, false);
+        const Vec2 currentPage = ScreenToPage(*currentView, selectionCurrent_, false);
+        const std::size_t firstIndex = std::min(
+            NearestPdfTextIndex(*boxes, anchorPage), NearestPdfTextIndex(*boxes, currentPage));
+        const std::size_t lastIndex = std::max(
+            NearestPdfTextIndex(*boxes, anchorPage), NearestPdfTextIndex(*boxes, currentPage));
+        for (std::size_t index = firstIndex; index <= lastIndex; ++index) {
+            paintBox((*boxes)[index]);
+        }
+    }
+
+    // Live marquee / lasso. A pdf text drag suppresses it entirely (the char
+    // boxes above are the feedback).
+    if (selectionOverlayActive_ && !pdfTextDragPage_.has_value()) {
         painter.setPen(QPen(QColor(59, 130, 246), 1.0, selectionOverlayLasso_ ? Qt::SolidLine : Qt::DashLine));
         painter.setBrush(QColor(59, 130, 246, 40));
         if (selectionOverlayLasso_ && lassoPoints_.size() >= 2U) {

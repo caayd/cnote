@@ -28,6 +28,24 @@ constexpr float kMinScreenSpacing = 1.75f;
 constexpr float kMaxScreenSpacing = 3.0f;
 constexpr int kMaxInterpolatedPoints = 64;
 
+// Upper bound on extracted PDF char-box pages kept per view; extraction is
+// per-pointer-event work in the reference, cached here instead.
+constexpr std::size_t kPdfTextCacheCapacity = 64;
+
+// App::AppendPdfUnicode (Clipboard.cpp:27-37): code points beyond the BMP are
+// stored as a UTF-16 surrogate pair.
+void AppendPdfUnicode(std::u16string& text, std::uint32_t unicode) {
+    if (unicode <= 0xFFFFU) {
+        text.push_back(static_cast<char16_t>(unicode));
+        return;
+    }
+    if (unicode <= 0x10FFFFU) {
+        const std::uint32_t codePoint = unicode - 0x10000U;
+        text.push_back(static_cast<char16_t>(0xD800U + (codePoint >> 10U)));
+        text.push_back(static_cast<char16_t>(0xDC00U + (codePoint & 0x3FFU)));
+    }
+}
+
 // Lazily rendered PDF page rasters kept alive by the background provider.
 constexpr std::size_t kPdfBackgroundCapacity = 8;
 
@@ -805,6 +823,71 @@ void QtDocumentController::BeginPageGesture(std::size_t pageIndex) {
     moveBounds_.built = false;
 }
 
+const std::vector<PdfTextCharBox>* QtDocumentController::PdfTextCharBoxesFor(std::size_t pageIndex) const {
+    const Page* page = PageAt(pageIndex);
+    if (page == nullptr || pdfBackend_ == nullptr) {
+        return nullptr;
+    }
+    const Document::PdfSource* pdfSource = DocumentRef().PdfSourceAtIndex(page->sourcePdfSourceIndex);
+    if (pdfSource == nullptr || page->sourcePdfPageIndex < 0
+        || !pdfSource->pdfData || pdfSource->pdfData->empty()) {
+        return nullptr;
+    }
+    const PdfTextCacheKey key {
+        pdfSource->pdfData,
+        static_cast<std::size_t>(page->sourcePdfPageIndex),
+    };
+    if (const auto cached = pdfTextCache_.find(key); cached != pdfTextCache_.end()) {
+        return &cached->second;
+    }
+    const std::optional<std::vector<PdfTextCharBox>> boxes = pdfBackend_->ExtractTextCharBoxes(
+        pdfSource->pdfData, static_cast<std::size_t>(page->sourcePdfPageIndex));
+    if (!boxes.has_value()) {
+        return nullptr;
+    }
+    // Extraction reads the whole PDF text page (pdfium LoadMemDocument + text
+    // page walk), so hit-testing without this cache cost ~10 ms per probe.
+    if (pdfTextCache_.size() >= kPdfTextCacheCapacity) {
+        pdfTextCache_.clear();
+    }
+    const auto inserted = pdfTextCache_.emplace(key, std::move(*boxes));
+    return &inserted.first->second;
+}
+
+bool QtDocumentController::HasSelectedPdfText() const {
+    for (const auto& [pageIndex, selection] : selection_) {
+        if (!selection.pdfText.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+QString QtDocumentController::SelectedPdfText() const {
+    // App::CopyPdfTextSelectionToClipboard (Clipboard.cpp:73-113): characters
+    // are emitted in document order; a line break is inserted when the next
+    // box sits well below the previous one or wraps back to the left.
+    std::u16string text;
+    const PdfTextCharBox* previousBox = nullptr;
+    for (const auto& [pageIndex, selection] : selection_) {
+        for (const PdfTextCharBox& box : selection.pdfText) {
+            if (previousBox != nullptr) {
+                const float previousHeight = previousBox->bottom - previousBox->top;
+                const float currentHeight = box.bottom - box.top;
+                const float lineBreakThreshold = std::max(previousHeight, currentHeight) * 0.5f;
+                if (box.top > previousBox->bottom + lineBreakThreshold
+                    || box.left + (box.right - box.left) * 0.5f < previousBox->left) {
+                    text.push_back(L'\n');
+                }
+            }
+            AppendPdfUnicode(text, box.unicode);
+            previousBox = &box;
+        }
+    }
+    return QString::fromStdU16String(text);
+}
+
+
 Page* QtDocumentController::GesturePage() {
     return gesturePage_.has_value() ? PageAt(*gesturePage_) : nullptr;
 }
@@ -1567,6 +1650,29 @@ bool QtDocumentController::BuildSelectionPayload(cnote::SelectionClipboardData& 
 bool QtDocumentController::RemoveSelection() {
     if (session_ == nullptr || selection_.empty()) {
         return false;
+    }
+    // PDF text is not document content: the reference's DeleteSelection just
+    // clears it (Clipboard.cpp:225-235 cut still copies it first). Strip it
+    // here; the object path below then handles any remaining real selection,
+    // and a pdf-text-only selection ends as a clear, not a history step.
+    for (auto& [pageIndex, selection] : selection_) {
+        selection.pdfText.clear();
+    }
+    {
+        bool hasObjects = false;
+        for (const auto& [pageIndex, selection] : selection_) {
+            if (pageIndex < session_->document.PageCount()
+                && (!selection.strokes.empty() || !selection.images.empty()
+                    || !selection.texts.empty() || !selection.latexes.empty())) {
+                hasObjects = true;
+                break;
+            }
+        }
+        if (!hasObjects) {
+            selection_.clear();
+            emit SelectionChanged();
+            return true;
+        }
     }
     Document& document = session_->document;
     std::vector<std::size_t> indices;

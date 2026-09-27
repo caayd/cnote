@@ -900,6 +900,12 @@ void QtMainWindow::OpenNewPageSettings() {
 }
 
 void QtMainWindow::CopySelection() {
+    // Clipboard.cpp:120-121 CopySelectionToClipboard: selected PDF text copies
+    // as plain text before any object payload is considered.
+    if (controller_.HasSelectedPdfText()) {
+        static_cast<void>(cnote::clipboard::WritePlainText(controller_.SelectedPdfText()));
+        return;
+    }
     cnote::SelectionClipboardData data;
     if (controller_.BuildSelectionPayload(data)) {
         static_cast<void>(cnote::clipboard::WriteSelection(data));
@@ -907,6 +913,17 @@ void QtMainWindow::CopySelection() {
 }
 
 void QtMainWindow::CutSelection() {
+    // CutSelectionToClipboard (Clipboard.cpp:225-235): the pdf branch still
+    // copies; the "cut" only clears the selection since the source text is
+    // baked into the page.
+    if (controller_.HasSelectedPdfText()) {
+        if (cnote::clipboard::WritePlainText(controller_.SelectedPdfText())) {
+            controller_.ClearSelection();
+            canvas_->NotifyDocumentChanged();
+            UpdateChrome();
+        }
+        return;
+    }
     cnote::SelectionClipboardData data;
     if (controller_.BuildSelectionPayload(data) && cnote::clipboard::WriteSelection(data)) {
         controller_.RemoveSelection();

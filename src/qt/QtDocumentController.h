@@ -135,9 +135,16 @@ public:
     // Collects the selected objects of every page the view has a selection on,
     // with the bounds the paste centers on. False when nothing is selected.
     [[nodiscard]] bool BuildSelectionPayload(cnote::SelectionClipboardData& data) const;
+    // PDF text selection (the reference's selectedPdfTextBoxes_): true when the
+    // view has selected PDF text, and the selected text assembled in document
+    // order with the reference's line-break heuristic. The shell publishes it
+    // as plain text.
+    [[nodiscard]] bool HasSelectedPdfText() const;
+    [[nodiscard]] QString SelectedPdfText() const;
     // Removes the selected objects as one undo step; false when nothing was
-    // selected.
+    // selected. A pdf-text-only selection is cleared, not removed.
     bool RemoveSelection() override;
+    [[nodiscard]] const std::vector<PdfTextCharBox>* PdfTextCharBoxesFor(std::size_t pageIndex) const override;
     // Inserts `data` into `pageIndex` with the payload's bounds centered on
     // `target` (clamped to stay inside the page), selects the pasted objects and
     // records one undo step.
@@ -242,6 +249,22 @@ private:
         std::vector<ui::SelectionBounds> latexes;
     };
     MoveBounds moveBounds_ {};
+
+    // Extracted PDF character boxes per source page, keyed by (source bytes,
+    // source page index). Extraction loads the whole PDF text page through
+    // PDFium, so it is cached: the key pins the byte buffer (shared_ptr is the
+    // key and the pin, so a replaced source can never collide).
+    struct PdfTextCacheKey {
+        std::shared_ptr<const std::vector<std::uint8_t>> pdfData;
+        std::size_t sourcePage = 0;
+        [[nodiscard]] bool operator<(const PdfTextCacheKey& other) const {
+            if (pdfData != other.pdfData) {
+                return std::owner_less<std::shared_ptr<const std::vector<std::uint8_t>>> {}(pdfData, other.pdfData);
+            }
+            return sourcePage < other.sourcePage;
+        }
+    };
+    mutable std::map<PdfTextCacheKey, std::vector<PdfTextCharBox>> pdfTextCache_;
     std::uint64_t savedChangeCount_ = 0;
 
     // Text edit state: the object snapshot the overlay was filled from.
