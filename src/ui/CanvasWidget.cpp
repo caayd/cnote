@@ -1210,6 +1210,15 @@ void CanvasWidget::ShowTextOverlay(const PageText& text) {
     textEditor_->setLineWrapMode(text.width > 0.0f
         ? QTextEdit::FixedPixelWidth
         : QTextEdit::NoWrap);
+    // FixedPixelWidth wraps at lineWrapColumnOrWidth, which defaults to 0 and
+    // stays 0 without this call - that wrapped every character onto its own
+    // line the moment a resized (fixed-width) text object reopened. The wrap
+    // width is the object's page width at the view scale, same as the
+    // committed layout; PositionOverlays keeps it in sync on zoom.
+    if (text.width > 0.0f) {
+        textEditor_->setLineWrapColumnOrWidth(
+            std::max(1, static_cast<int>(std::lround(text.width * textEditScale_))));
+    }
     {
         QSignalBlocker blocker(textEditor_);
         textEditor_->setPlainText(FromUtf16(map.normalized));
@@ -1308,9 +1317,15 @@ void CanvasWidget::PositionOverlays() {
         // Committed text is clipped to the page rect; mask the editor the same
         // way so the live preview cannot draw past the page edge.
         const QRect clip = geometry.intersected(view.rect.toAlignedRect()).translated(-geometry.topLeft());
+        if (object.width > 0.0f) {
+            const int wrapWidth = std::max(1,
+                static_cast<int>(std::lround(object.width * view.scale)));
+            if (textEditor_->lineWrapColumnOrWidth() != wrapWidth) {
+                textEditor_->setLineWrapColumnOrWidth(wrapWidth);
+            }
+        }
         textEditor_->setMask(QRegion(clip));
     }
-
     if (latexEditor_ != nullptr && latexEditor_->isVisible() && controller_.EditingLatexObject() != nullptr) {
         const PageLatex& object = *controller_.EditingLatexObject();
         const latex::FormulaMetrics metrics = latex::Measure(latex::Parse(object));

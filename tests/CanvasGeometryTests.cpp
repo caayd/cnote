@@ -42,10 +42,13 @@
 #include "latex/LatexEngine.h"
 #include "qt/QtDocumentController.h"
 #include "shell/AppManager.h"
+#include "text/TextLayoutQt.h"
+#include <QTextBlock>
 #include "ui/CanvasWidget.h"
 
 namespace {
 
+namespace text = cnote::text;
 namespace ui = cnote::ui;
 using cnote::Vec2;
 
@@ -575,6 +578,72 @@ int main(int argc, char** argv) {
     QCoreApplication::processEvents();
 
     Check(canvas.SurfaceRenderCount() > 0U, "the cached page surface was rendered at least once");
+
+
+    // (h) Text box resize -> reopen: the editor wraps at the object's pixel
+    // width (FixedPixelWidth + lineWrapColumnOrWidth). Regression: the column
+    // width was never set, so a fixed-width object wrapped one char per line.
+    canvas.SetTool(ui::Tool::Text);
+    SendMouse(canvas, QEvent::MouseButtonPress, center, Qt::LeftButton, Qt::LeftButton);
+    SendMouse(canvas, QEvent::MouseButtonRelease, center, Qt::LeftButton, Qt::NoButton);
+    QCoreApplication::processEvents();
+    if (canvas.TextEditor() != nullptr && canvas.TextEditor()->isVisible()) {
+        canvas.TextEditor()->setPlainText(QStringLiteral("wrap me after a resize"));
+        canvas.CommitActiveEdit();
+        QCoreApplication::processEvents();
+    }
+    Check(controller.DocumentRef().PageAt(0).texts.size() == 1U, "wrap probe text committed");
+    if (!controller.DocumentRef().PageAt(0).texts.empty()) {
+        // Drive the same code path the resize handle uses: an absolute
+        // SelectionTransform that narrows the box horizontally.
+        const cnote::PageText& original = controller.DocumentRef().PageAt(0).texts[0];
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(original, controller.DocumentRef().PageAt(0).width);
+        ui::SelectionTransform transform;
+        transform.from.valid = true;
+        transform.from.left = bounds.left;
+        transform.from.top = bounds.top;
+        transform.from.right = bounds.right;
+        transform.from.bottom = bounds.bottom;
+        transform.to = transform.from;
+        transform.to.right = transform.from.left + (transform.from.right - transform.from.left) * 0.25f;
+        {
+            ui::PageSelection sel;
+            sel.texts.push_back(0);
+            controller.SelectObjects(0, sel);
+        }
+        controller.BeginPageGesture(0);
+        controller.TransformSelection(0, transform);
+        controller.CommitPageGesture();
+        canvas.repaint();
+        const cnote::PageText& resized = controller.DocumentRef().PageAt(0).texts[0];
+        Check(resized.width > 0.0f, "resize gave the text a fixed width");
+
+        // Reopen the editor on the object.
+        const QPointF textPt = canvas.PageToScreen(0, { resized.x + resized.width * 0.5f, resized.y + 8.0f });
+        SendMouse(canvas, QEvent::MouseButtonPress, textPt, Qt::LeftButton, Qt::LeftButton);
+        SendMouse(canvas, QEvent::MouseButtonRelease, textPt, Qt::LeftButton, Qt::NoButton);
+        QCoreApplication::processEvents();
+        Check(canvas.EditOverlayActive(), "text editor reopens on the resized object");
+        if (canvas.EditOverlayActive() && canvas.TextEditor() != nullptr) {
+            QTextEdit* editor = canvas.TextEditor();
+            Check(editor->lineWrapMode() == QTextEdit::FixedPixelWidth,
+                  "fixed-width text uses pixel-width wrapping");
+            Check(editor->lineWrapColumnOrWidth() > 0,
+                  "wrap width is set, not the 0 that wraps one char per line");
+            const QTextBlock block = editor->document()->begin();
+            const int lines = block.layout() ? block.layout()->lineCount() : 0;
+            std::printf("WRAP lines=%d colOrWidth=%d\n", lines, editor->lineWrapColumnOrWidth());
+            Check(lines < static_cast<int>(resized.content.size()),
+                  "the editor does not wrap one char per line");
+            canvas.CancelActiveEdit();
+            QCoreApplication::processEvents();
+        }
+        controller.ClearSelection();
+        controller.Undo();
+        controller.Undo();
+        QCoreApplication::processEvents();
+        Check(controller.DocumentRef().PageAt(0).texts.empty(), "wrap probe cleaned up");
+    }
 
     cnote::latex::Shutdown();
     std::printf(g_failures == 0 ? "ALL CANVAS GEOMETRY CHECKS PASSED\n" : "%d CANVAS GEOMETRY CHECK(S) FAILED\n", g_failures);
