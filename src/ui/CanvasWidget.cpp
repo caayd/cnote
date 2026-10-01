@@ -561,9 +561,18 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const CanvasPageView& v
         if (!layer.image.isNull() && layer.pageRect.contains(needed)) {
             return;
         }
-        const QRectF grown = layer.image.isNull()
-            ? needed
-            : layer.pageRect.united(needed);
+        // Grow with slack on every side.  A wandering stroke otherwise
+        // re-allocates and re-copies the whole raster nearly every sample
+        // (each segment tips the union's edge a few pixels further), which
+        // is O(points) copies over the gesture.  Padding the grown rect by
+        // a fixed device-pixel band makes re-growth amortized over ~band
+        // px of travel instead.
+        constexpr int kGrowthSlackPixels = 96;
+        const float slack = static_cast<float>(kGrowthSlackPixels) / deviceScale;
+        const QRectF grown = (layer.image.isNull()
+                ? needed
+                : layer.pageRect.united(needed))
+            .adjusted(-slack, -slack, slack, slack);
         const int left = static_cast<int>(std::floor(grown.left() * deviceScale));
         const int top = static_cast<int>(std::floor(grown.top() * deviceScale));
         const int right = static_cast<int>(std::ceil(grown.right() * deviceScale));
