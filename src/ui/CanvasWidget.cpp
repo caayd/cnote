@@ -578,7 +578,8 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const CanvasPageView& v
             QPainter copy(&image);
             const int offsetX = static_cast<int>(std::lround(layer.pageRect.x() * deviceScale)) - left;
             const int offsetY = static_cast<int>(std::lround(layer.pageRect.y() * deviceScale)) - top;
-            copy.drawImage(offsetX, offsetY, layer.image);
+            copy.drawImage(QRect(offsetX, offsetY, layer.image.width(), layer.image.height()),
+                layer.image);
             copy.end();
         }
         layer.pageRect = QRectF(
@@ -586,7 +587,10 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const CanvasPageView& v
             static_cast<qreal>(top) / deviceScale,
             static_cast<qreal>(right - left) / deviceScale,
             static_cast<qreal>(bottom - top) / deviceScale);
-        image.setDevicePixelRatio(layer.devicePixelRatio);
+        // The layer stays untagged (devicePixelRatio 1): QPainter on a dpr-
+        // tagged QImage scales every coordinate by the dpr, which would push
+        // composited segments x dpr off their device-pixel targets.  The
+        // canvas blit passes an explicit logical-size rect instead.
         layer.image = std::move(image);
     };
 
@@ -1209,9 +1213,17 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                     // Stabilized ink is composited in the layer raster; only
                     // the provisional tail (two segments at most) is drawn
                     // live, so a paint no longer costs O(stroke points).
-                    painter.drawImage(QPointF(
+                    // The image is untagged device pixels, so the blit passes
+                    // an explicit logical-size rect (device px / dpr) at
+                    // pageRect's device-snapped origin — the point overload
+                    // would stretch the raster dpr-fold.
+                    const float dpr = strokeLayer_.devicePixelRatio > 0.0f
+                        ? strokeLayer_.devicePixelRatio : 1.0f;
+                    painter.drawImage(QRectF(
                             static_cast<qreal>(strokeLayer_.pageRect.x() * view.scale),
-                            static_cast<qreal>(strokeLayer_.pageRect.y() * view.scale)),
+                            static_cast<qreal>(strokeLayer_.pageRect.y() * view.scale),
+                            static_cast<qreal>(strokeLayer_.image.width() / dpr),
+                            static_cast<qreal>(strokeLayer_.image.height() / dpr)),
                         strokeLayer_.image);
                     PaintStrokeTail(painter, *pending, view);
                 } else {
@@ -1249,6 +1261,9 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     }
 
     lastPaintPageCount_ = paintedPages;
+    // The accumulated transient region was just consumed by this paint; the
+    // next gesture samples start a fresh region.
+    transientDirty_ = QRect();
     PruneSurfaces(visiblePages);
     PaintSelectionOverlay(painter);
     PositionOverlays();
@@ -2585,29 +2600,38 @@ void CanvasWidget::SetStrokeDotted(bool dotted) {
 void CanvasWidget::AppendStrokePoint(Vec2 pagePoint, bool dotted) {
     const std::size_t pageIndex = controller_.PendingStrokePage();
     const CanvasPageView view = CalculatePageView(pageIndex);
-    // Dirty region = the appended segment's bounds: the stroke only grows and
-    // the smoothed tail never retreats further than the last raw point.  The
-    // margin covers the pen half-width and the smoothing lookahead.
-    Vec2 segmentFrom = pagePoint;
+    // Dirty region = the appended segment's bounds, extended back over the
+    // smoothing lookahead: the provisional tail (PaintStrokeTail) repaints
+    // from the composited chain's end — up to two raw points behind the
+    // newest one — and the smoothed composite lags the raw tail similarly.
+    // Without the lookahead, last frame's tail pixels outside this segment's
+    // bounds stay stale on screen (fragmented ghost ink).
+    QRectF segment(
+        static_cast<qreal>(pagePoint.x), static_cast<qreal>(pagePoint.y), 0.0, 0.0);
     if (const Stroke* before = controller_.PendingStroke();
         before != nullptr && !before->points.empty()) {
-        segmentFrom = before->points.back();
+        for (std::size_t back = before->points.size() - 1U, steps = 0;
+             steps < 3U; --back, ++steps) {
+            const Vec2& p = before->points[back];
+            segment = segment.united(QRectF(p.x, p.y, 0.0, 0.0));
+            if (back == 0U) {
+                break;
+            }
+        }
     }
     controller_.ExtendStroke(pagePoint, view.scale);
     controller_.SetPendingStrokeDotted(dotted);
-    Vec2 segmentTo = pagePoint;
     float penWidth = 3.0f;
     if (const Stroke* pending = controller_.PendingStroke();
         pending != nullptr && !pending->points.empty()) {
-        segmentTo = pending->points.back();
+        segment = segment.united(QRectF(
+            static_cast<qreal>(pending->points.back().x),
+            static_cast<qreal>(pending->points.back().y), 0.0, 0.0));
         penWidth = pending->style.width;
     }
     const float margin = penWidth * 0.5f + kStrokeDirtyMarginPixels;
-    MarkTransientDirty(PageRegionDirtyRect(pageIndex, QRectF(
-        QPointF(std::min(segmentFrom.x, segmentTo.x) - margin,
-            std::min(segmentFrom.y, segmentTo.y) - margin),
-        QPointF(std::max(segmentFrom.x, segmentTo.x) + margin,
-            std::max(segmentFrom.y, segmentTo.y) + margin))));
+    MarkTransientDirty(PageRegionDirtyRect(pageIndex,
+        segment.adjusted(-margin, -margin, margin, margin)));
 }
 
 void CanvasWidget::ReplaceStrokePoints(const std::vector<Vec2>& points, bool dotted) {
