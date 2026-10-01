@@ -406,6 +406,7 @@ render::PageRenderParams CanvasWidget::RenderParamsFor(const CanvasPageView& vie
     render::PageRenderParams params;
     params.scale = view.scale;
     params.devicePixelRatio = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
+    params.contentRevision = controller_.Revision();
     params.strokeSmoothing = controller_.InputSettings().strokeSmoothing;
     params.dashLength = controller_.InputSettings().dashLength;
     params.dashGap = controller_.InputSettings().dashGap;

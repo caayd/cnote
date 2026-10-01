@@ -370,6 +370,14 @@ QImage RenderPageSurfaceRegion(const Page& page, const PageRenderParams& params,
     return image;
 }
 std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& params) {
+    // Signature contract: the cached surface is re-rendered when this value
+    // changes.  Committed mutations all bump params.contentRevision, so the
+    // content part is a structural fingerprint - container sizes and storage
+    // identities plus per-object headers - instead of a deep hash of every
+    // stroke point.  In-place edits that bypass the revision (mid-gesture
+    // moves/transforms) only ever touch objects the caller lists in
+    // params.excluded, which stay out of the fingerprint exactly like they
+    // stayed out of the old deep hash.
     std::uint64_t hash = 14695981039346656037ULL;
     hash = HashFloat(hash, page.width);
     hash = HashFloat(hash, page.height);
@@ -378,6 +386,7 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     hash = HashFloat(hash, params.strokeSmoothing);
     hash = HashFloat(hash, params.dashLength);
     hash = HashFloat(hash, params.dashGap);
+    hash = HashValue(hash, params.contentRevision);
     // Exclusion lists are part of the signature; excluded objects' content is
     // not, so mutating an excluded object (a dragged selection, the object
     // under edit) does not invalidate the surface.
@@ -405,6 +414,9 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     hashPending(params.pendingErase.latexes);
     hashPending(params.pendingErase.strokes);
 
+    // Storage identities pin the page instance and its containers, so a fresh
+    // document at the same revision (load, attach, undo of everything) cannot
+    // collide with a previous page's cached signature.
     hash = HashValue(hash, page.raster.width);
     hash = HashValue(hash, page.raster.height);
     hash = HashValue(hash, page.raster.stride);
@@ -412,6 +424,7 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(page.raster.pixels.data()));
 
     hash = HashValue(hash, page.images.size());
+    hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(page.images.data()));
     for (std::size_t index = 0; index < page.images.size(); ++index) {
         if (excluded(params.excluded.images, index)) {
             continue;
@@ -430,6 +443,7 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     }
 
     hash = HashValue(hash, page.texts.size());
+    hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(page.texts.data()));
     for (std::size_t index = 0; index < page.texts.size(); ++index) {
         if (excluded(params.excluded.texts, index)) {
             continue;
@@ -443,6 +457,7 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     }
 
     hash = HashValue(hash, page.latexes.size());
+    hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(page.latexes.data()));
     for (std::size_t index = 0; index < page.latexes.size(); ++index) {
         if (excluded(params.excluded.latexes, index)) {
             continue;
@@ -458,6 +473,7 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     }
 
     hash = HashValue(hash, page.strokes.size());
+    hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(page.strokes.data()));
     for (std::size_t index = 0; index < page.strokes.size(); ++index) {
         if (excluded(params.excluded.strokes, index)) {
             continue;
@@ -468,9 +484,12 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
         hash = HashValue(hash, stroke.style.dotted);
         hash = HashFloat(hash, stroke.smoothing);
         hash = HashValue(hash, stroke.points.size());
-        for (const Vec2& point : stroke.points) {
-            hash = HashFloat(hash, point.x);
-            hash = HashFloat(hash, point.y);
+        hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(stroke.points.data()));
+        if (!stroke.points.empty()) {
+            hash = HashFloat(hash, stroke.points.front().x);
+            hash = HashFloat(hash, stroke.points.front().y);
+            hash = HashFloat(hash, stroke.points.back().x);
+            hash = HashFloat(hash, stroke.points.back().y);
         }
     }
 
