@@ -645,6 +645,37 @@ int main(int argc, char** argv) {
         Check(controller.DocumentRef().PageAt(0).texts.empty(), "wrap probe cleaned up");
     }
 
+    // (i) Precision touchpad routing over overlay chrome.  The sidebar is a
+    // child of the main window layered on top of the canvas, so a cursor over
+    // it is still "inside the canvas rect"; the Win32 pointer-frame hook used
+    // to consume touchpad scrolls anyway and suppress the wheel event the
+    // sidebar's own wheelEvent needs.  The route check must walk the window's
+    // widget tree like wheel dispatch does.
+    QWidget host;
+    host.resize(1200, 900);
+    ui::CanvasWidget hosted(controller);
+    hosted.setParent(&host);
+    hosted.setGeometry(0, 0, 1200, 900);
+    QWidget overlay(&host);
+    overlay.setGeometry(20, 20, 200, 400);
+    host.show();
+    hosted.show();
+    overlay.show();
+    QCoreApplication::processEvents();
+    const QPoint overOverlay = hosted.mapToGlobal(QPoint(80, 60));
+    Check(hosted.rect().contains(hosted.mapFromGlobal(overOverlay)),
+          "the overlay sits inside the canvas rect (same overlap as the sidebar)");
+    Check(hosted.RoutePrecisionInput(overOverlay) == ui::PrecisionInputRoute::PassThrough,
+          "a gesture over the overlay is not claimed by the canvas");
+    const QPoint overCanvas = hosted.mapToGlobal(hosted.rect().bottomRight() - QPoint(20, 20));
+    Check(hosted.RoutePrecisionInput(overCanvas) == ui::PrecisionInputRoute::Canvas,
+          "a gesture over uncovered canvas still routes to the canvas");
+    overlay.hide();
+    host.hide();
+    QCoreApplication::processEvents();
+
+
+
     cnote::latex::Shutdown();
     std::printf(g_failures == 0 ? "ALL CANVAS GEOMETRY CHECKS PASSED\n" : "%d CANVAS GEOMETRY CHECK(S) FAILED\n", g_failures);
     return g_failures == 0 ? 0 : 1;

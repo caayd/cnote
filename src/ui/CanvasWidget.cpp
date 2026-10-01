@@ -2760,7 +2760,22 @@ void CanvasWidget::CreateLatexAt(std::size_t pageIndex, Vec2 pagePoint) {
 
 PrecisionInputRoute CanvasWidget::RoutePrecisionInput(const QPoint& globalPosition) const {
     const QPointF logical = mapFromGlobal(globalPosition);
-    return VisibleCanvasRect().contains(logical) ? PrecisionInputRoute::Canvas : PrecisionInputRoute::PassThrough;
+    if (!VisibleCanvasRect().contains(logical)) {
+        return PrecisionInputRoute::PassThrough;
+    }
+    // The Win32 pointer-frame hook consumes touchpad input at the window
+    // level, so its gestures cover the sidebar, toolbar and editors overlaid
+    // on the canvas just as much as the canvas itself.  Walk the window's
+    // widget tree the way a wheel event would dispatch: when the deepest
+    // widget under the cursor is some other chrome, the gesture belongs to
+    // it and the platform must keep synthesising the wheel it scrolls with.
+    QWidget* under = window();
+    QPoint point = under->mapFromGlobal(globalPosition);
+    while (QWidget* child = under->childAt(point)) {
+        point = child->mapFrom(under, point);
+        under = child;
+    }
+    return under == this ? PrecisionInputRoute::Canvas : PrecisionInputRoute::PassThrough;
 }
 
 void CanvasWidget::BeginPrecisionGesture() {
