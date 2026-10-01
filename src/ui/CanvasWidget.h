@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -223,6 +224,10 @@ public:
     [[nodiscard]] std::uint64_t SurfaceScaleMissCount() const { return surfaceScaleMisses_; }
     [[nodiscard]] std::size_t CachedSurfaceCount() const;
     [[nodiscard]] std::size_t LastPaintPageCount() const { return lastPaintPageCount_; }
+    // Logical-pixel area of the last repaint region queued by the
+    // transient-state path (diagnostics for the dirty-rect work: full-widget
+    // repaints report the window area).
+    [[nodiscard]] std::uint64_t LastTransientRepaintArea() const { return lastTransientRepaintArea_; }
 
 signals:
     void ViewportChanged();
@@ -380,6 +385,22 @@ private:
     // Per-kind pending-erase index sets for one page; the renderer fades them
     // (App.cpp:5572-5628 pendingErase*Indices_).
     [[nodiscard]] render::PendingEraseIndices PendingEraseFor(std::size_t pageIndex) const;
+    // Page-space bounds of one pending-erase candidate (stroke bounds include
+    // the pen half-width), or nullopt when the ref is out of range.
+    [[nodiscard]] std::optional<QRectF> PendingEraseObjectBounds(const Page& page, const ObjectRef& object) const;
+    // Page-space union of a page's marked-object bounds: the region that must
+    // be re-rendered for the faded overlay.
+    [[nodiscard]] QRectF PendingErasePageRegion(std::size_t pageIndex) const;
+
+    // Widget-space dirty rect covering a page-unit region of `pageIndex`.
+    [[nodiscard]] QRect PageRegionDirtyRect(std::size_t pageIndex, const QRectF& pageRect) const;
+    // Widget-space dirty rect covering every pending-erase object's bounds.
+    [[nodiscard]] QRect PendingEraseDirtyRect() const;
+    // Widget-space dirty rect covering the live marquee/lasso overlay.
+    [[nodiscard]] QRect OverlayDirtyRect() const;
+    // Records a transient repaint region and queues it; InvalidateCanvas then
+    // repaints the accumulated region instead of the whole widget.
+    void MarkTransientDirty(const QRect& logical);
 
     void BeginZoomSession(const QPointF& anchor);
     void EndZoomSession();
@@ -488,12 +509,24 @@ private:
 
     std::unordered_map<std::size_t, PageSurfaces> surfaces_;
     GestureSurface gesture_ {};
+    // Widget-space region the transient state has dirtied since the last
+    // paint (live stroke growth, marquee drag, pending-erase marks);
+    // InvalidateCanvas repaints it instead of the whole widget.
+    QRect transientDirty_ {};
     LiveStrokeLayer strokeLayer_ {};
     render::PdfBackgroundProvider* pdfBackground_ = nullptr;
     float cachedDevicePixelRatio_ = 0.0f;
     std::size_t lastPaintPageCount_ = 0;
     std::uint64_t surfaceRenders_ = 0;
     std::uint64_t surfaceScaleMisses_ = 0;
+    std::uint64_t lastTransientRepaintArea_ = 0;
+    // Pending-erase fade patch: re-rendered region of the page under the
+    // erase cursor, keyed by the page's signature (which includes the pending
+    // index lists) so drag samples blit instead of re-painting the page live.
+    std::size_t erasePatchPage_ = std::numeric_limits<std::size_t>::max();
+    std::uint64_t erasePatchSignature_ = 0;
+    QRectF erasePatchRegion_;
+    QImage erasePatch_;
 
     static constexpr std::size_t kScalesPerPage = 3;
 };

@@ -941,6 +941,15 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                 }
                 ++surfaceRenders_;
             }
+        } else if (pageHasPendingErase) {
+            // The committed raster is still valid during an erase drag (marks
+            // only fade; nothing is deleted yet).  Blit it and overlay the
+            // re-rendered patch that carries the faded objects, instead of
+            // re-painting the whole page vector-live every sample.
+            surface = FindSurface(view.pageIndex, view.scale, cachedDevicePixelRatio_);
+            if (surface == nullptr) {
+                surface = NewestSurface(view.pageIndex);
+            }
         } else if (!pageHasPendingErase) {
             if (zoomSessionActive_ && !liveStrokeOnPage) {
                 surface = FindSurface(view.pageIndex, view.scale, cachedDevicePixelRatio_);
@@ -959,7 +968,51 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 
         painter.save();
         painter.setClipRect(view.rect);
-        if (pageHasPendingErase) {
+        if (pageHasPendingErase && surface != nullptr) {
+            // Same 1:1 blit logic as the cached path below.
+            const qreal rasterDpr = surface->image.devicePixelRatio() > 0.0
+                ? surface->image.devicePixelRatio()
+                : 1.0;
+            const bool rasterMatchesView = !surface->image.isNull()
+                && std::abs(rasterDpr - cachedDevicePixelRatio_) < 0.001
+                && std::abs((surface->image.width() / rasterDpr) - view.rect.width()) < 1.0
+                && std::abs((surface->image.height() / rasterDpr) - view.rect.height()) < 1.0;
+            if (rasterMatchesView) {
+                painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+                painter.drawImage(view.rect.topLeft(), surface->image);
+            } else {
+                painter.drawImage(view.rect, surface->image);
+            }
+            // Overlay the faded objects: one re-rendered patch keyed on the
+            // page signature (which covers the pending index lists), reused
+            // for every sample where the pending set is unchanged.
+            render::PageRenderParams params = RenderParamsFor(view);
+            params.pendingErase = pendingErase;
+            const std::uint64_t signature = render::PageSurfaceSignature(page, params);
+            if (erasePatch_.isNull() || erasePatchSignature_ != signature
+                || erasePatchPage_ != view.pageIndex) {
+                // RenderPageSurfaceRegion clamps to the page internally but
+                // does not report the clamped rect, so clip here first or the
+                // patch would land offset from its true position.
+                erasePatchRegion_ = PendingErasePageRegion(view.pageIndex)
+                    .intersected(QRectF(0.0, 0.0, page.width, page.height));
+                erasePatch_ = render::RenderPageSurfaceRegion(page, params, erasePatchRegion_);
+                if (!erasePatch_.isNull()) {
+                    erasePatch_.setDevicePixelRatio(cachedDevicePixelRatio_);
+                }
+                erasePatchSignature_ = signature;
+                erasePatchPage_ = view.pageIndex;
+                ++surfaceRenders_;
+            }
+            if (!erasePatch_.isNull() && !erasePatchRegion_.isEmpty()) {
+                // The patch is rendered at scale * DPR in device pixels, so it
+                // blits 1:1 at its region's top-left (same as gesture_.patch).
+                painter.drawImage(
+                    QPointF(view.rect.left() + erasePatchRegion_.x() * view.scale,
+                        view.rect.top() + erasePatchRegion_.y() * view.scale),
+                    erasePatch_);
+            }
+        } else if (pageHasPendingErase) {
             render::PageRenderParams params = RenderParamsFor(view);
             params.pendingErase = pendingErase;
             render::PaintPage(painter, page, view.rect.topLeft(), params);
@@ -2462,7 +2515,10 @@ void CanvasWidget::InvalidateCanvas() {
     // signature-checked by the renderer, so a content change re-renders on its
     // own; the interaction router calls this for every pointer sample, and
     // clearing the rasters here re-rendered a dense page (~1 s) per sample.
-    update();
+    // The transient state only ever dirties the regions it reported through
+    // MarkTransientDirty; repaint that accumulated region instead of the
+    // whole widget.
+    update(transientDirty_.isEmpty() ? rect() : transientDirty_);
 }
 
 void CanvasWidget::SetPointerCapture(bool captured) {
@@ -2485,6 +2541,14 @@ void CanvasWidget::BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotte
     ResetStrokeLayer();
     controller_.BeginStroke(pageIndex, pagePoint, view.scale);
     controller_.SetPendingStrokeDotted(dotted);
+    // The press only inks the initial dot: repaint its bounds inflated by the
+    // pen half-width and the smoothing lookahead margin.
+    const Stroke* begun = controller_.PendingStroke();
+    const float width = begun != nullptr ? begun->style.width : 3.0f;
+    const float margin = width * 0.5f + kStrokeDirtyMarginPixels;
+    MarkTransientDirty(PageRegionDirtyRect(pageIndex, QRectF(
+        static_cast<qreal>(pagePoint.x - margin), static_cast<qreal>(pagePoint.y - margin),
+        static_cast<qreal>(margin * 2.0f), static_cast<qreal>(margin * 2.0f))));
 }
 
 void CanvasWidget::SetStrokeDotted(bool dotted) {
@@ -2492,15 +2556,45 @@ void CanvasWidget::SetStrokeDotted(bool dotted) {
     // The dash pattern is path-global, so toggling dotted invalidates the
     // composited prefix.
     ResetStrokeLayer();
+    const Stroke* pending = controller_.PendingStroke();
+    float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
+    if (pending != nullptr && StrokeBounds(*pending, &minX, &minY, &maxX, &maxY)) {
+        const float margin = pending->style.width * 0.5f + kStrokeDirtyMarginPixels;
+        MarkTransientDirty(PageRegionDirtyRect(controller_.PendingStrokePage(), QRectF(
+            static_cast<qreal>(minX - margin), static_cast<qreal>(minY - margin),
+            static_cast<qreal>((maxX - minX) + margin * 2.0f),
+            static_cast<qreal>((maxY - minY) + margin * 2.0f))));
+        return;
+    }
     update();
 }
 
 void CanvasWidget::AppendStrokePoint(Vec2 pagePoint, bool dotted) {
     const std::size_t pageIndex = controller_.PendingStrokePage();
     const CanvasPageView view = CalculatePageView(pageIndex);
+    // Dirty region = the appended segment's bounds: the stroke only grows and
+    // the smoothed tail never retreats further than the last raw point.  The
+    // margin covers the pen half-width and the smoothing lookahead.
+    Vec2 segmentFrom = pagePoint;
+    if (const Stroke* before = controller_.PendingStroke();
+        before != nullptr && !before->points.empty()) {
+        segmentFrom = before->points.back();
+    }
     controller_.ExtendStroke(pagePoint, view.scale);
     controller_.SetPendingStrokeDotted(dotted);
-    update();
+    Vec2 segmentTo = pagePoint;
+    float penWidth = 3.0f;
+    if (const Stroke* pending = controller_.PendingStroke();
+        pending != nullptr && !pending->points.empty()) {
+        segmentTo = pending->points.back();
+        penWidth = pending->style.width;
+    }
+    const float margin = penWidth * 0.5f + kStrokeDirtyMarginPixels;
+    MarkTransientDirty(PageRegionDirtyRect(pageIndex, QRectF(
+        QPointF(std::min(segmentFrom.x, segmentTo.x) - margin,
+            std::min(segmentFrom.y, segmentTo.y) - margin),
+        QPointF(std::max(segmentFrom.x, segmentTo.x) + margin,
+            std::max(segmentFrom.y, segmentTo.y) + margin))));
 }
 
 void CanvasWidget::ReplaceStrokePoints(const std::vector<Vec2>& points, bool dotted) {
@@ -2579,12 +2673,20 @@ void CanvasWidget::DiscardStroke() {
 }
 
 void CanvasWidget::ClearSelection() {
+    // The frame disappears; repaint exactly where it was (handles included).
+    const Document& document = controller_.DocumentRef();
+    for (std::size_t pageIndex = 0; pageIndex < document.PageCount(); ++pageIndex) {
+        if (!controller_.SelectionFor(pageIndex).Empty()) {
+            MarkTransientDirty(SelectionDirtyRect(pageIndex));
+        }
+    }
     controller_.ClearSelection();
-    update();
 }
 
 void CanvasWidget::UpdateSelectionOverlay(
     const QPointF& anchor, const QPointF& current, bool lasso, const std::vector<QPointF>& lassoPoints) {
+    // Repaint where the marquee was plus where it is now.
+    const QRect before = OverlayDirtyRect();
     selectionOverlayActive_ = true;
     selectionAnchor_ = anchor;
     selectionCurrent_ = current;
@@ -2600,11 +2702,15 @@ void CanvasWidget::UpdateSelectionOverlay(
             pdfTextDragPage_.reset();
         }
     }
-    update();
+    const QRect after = OverlayDirtyRect();
+    MarkTransientDirty(before.isEmpty() ? after : (after.isEmpty() ? before : before.united(after)));
 }
 
 void CanvasWidget::CommitSelection(
     const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click) {
+    // Repaint where the marquee/overlay was; the new selection frame's region
+    // is painted through update() below.
+    MarkTransientDirty(OverlayDirtyRect());
     selectionOverlayActive_ = false;
 
     const std::optional<std::size_t> pdfDragPage = pdfTextDragPage_;
@@ -2769,7 +2875,7 @@ void CanvasWidget::UpdateMoveSelection(const QPointF& logicalDelta) {
     controller_.MoveSelectionBy(
         *pageIndex,
         Vec2 { static_cast<float>(logicalDelta.x()) / view.scale, static_cast<float>(logicalDelta.y()) / view.scale });
-    update(dirtyBefore.united(SelectionDirtyRect(*pageIndex)));
+    MarkTransientDirty(dirtyBefore.united(SelectionDirtyRect(*pageIndex)));
 }
 
 void CanvasWidget::CommitMoveSelection() {
@@ -2928,7 +3034,7 @@ void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers
     // transform.
     const QRect dirtyBefore = SelectionDirtyRect(*pageIndex);
     controller_.TransformSelection(*pageIndex, transform);
-    update(dirtyBefore.united(SelectionDirtyRect(*pageIndex)));
+    MarkTransientDirty(dirtyBefore.united(SelectionDirtyRect(*pageIndex)));
 }
 
 void CanvasWidget::CommitTransform() {
@@ -2941,11 +3047,18 @@ void CanvasWidget::CommitTransform() {
 }
 
 void CanvasWidget::UpdatePendingErase(const std::vector<ObjectRef>& pending) {
+    // Fade-in and fade-out each repaint only the objects' own bounds.
+    const QRect dirty = PendingEraseDirtyRect();
     pendingErase_ = pending;
-    update();
+    const QRect after = PendingEraseDirtyRect();
+    // QRect::united treats an empty rect as a point at the origin, so merge
+    // explicitly to avoid dirtying the top-left corner spuriously.
+    const QRect combined = dirty.isEmpty() ? after : (after.isEmpty() ? dirty : dirty.united(after));
+    MarkTransientDirty(combined);
 }
 
 void CanvasWidget::CommitErase(const std::vector<ObjectRef>& pending) {
+    const QRect dirty = PendingEraseDirtyRect();
     std::map<std::size_t, std::vector<ObjectRef>> perPage;
     for (const ObjectRef& object : pending) {
         perPage[object.pageIndex].push_back(object);
@@ -2957,7 +3070,7 @@ void CanvasWidget::CommitErase(const std::vector<ObjectRef>& pending) {
         }
     }
     pendingErase_.clear();
-    update();
+    update(dirty.isEmpty() ? rect() : dirty);
 }
 
 void CanvasWidget::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) {
@@ -3091,6 +3204,141 @@ void CanvasWidget::UpdateSmoothScroll() {
         return;
     }
     NotifyViewportChanged();
+}
+
+QRect CanvasWidget::PageRegionDirtyRect(std::size_t pageIndex, const QRectF& pageRect) const {
+    const CanvasPageView view = CalculatePageView(pageIndex);
+    if (!view.valid) {
+        return rect();
+    }
+    return QRectF(
+        view.rect.left() + static_cast<qreal>(pageRect.x() * view.scale),
+        view.rect.top() + static_cast<qreal>(pageRect.y() * view.scale),
+        static_cast<qreal>(pageRect.width() * view.scale),
+        static_cast<qreal>(pageRect.height() * view.scale))
+        .toAlignedRect().intersected(rect());
+}
+
+void CanvasWidget::MarkTransientDirty(const QRect& logical) {
+    if (logical.isEmpty()) {
+        return;
+    }
+    transientDirty_ = transientDirty_.isEmpty() ? logical : transientDirty_.united(logical);
+    lastTransientRepaintArea_ = static_cast<std::uint64_t>(logical.width())
+        * static_cast<std::uint64_t>(logical.height());
+    update(logical);
+}
+
+QRect CanvasWidget::PendingEraseDirtyRect() const {
+    // Union of every marked object's bounds; marking/unmarking only ever
+    // changes pixels inside them.
+    QRect dirty;
+    const Document& document = controller_.DocumentRef();
+    for (const ObjectRef& object : pendingErase_) {
+        if (object.pageIndex >= document.PageCount()) {
+            continue;
+        }
+        if (const std::optional<QRectF> bounds = PendingEraseObjectBounds(
+                document.PageAt(object.pageIndex), object);
+            bounds.has_value()) {
+            const QRect rect = PageRegionDirtyRect(object.pageIndex, *bounds);
+            dirty = dirty.isEmpty() ? rect : dirty.united(rect);
+        }
+    }
+    return dirty;
+}
+
+std::optional<QRectF> CanvasWidget::PendingEraseObjectBounds(
+    const Page& page, const ObjectRef& object) const {
+    switch (object.kind) {
+    case ObjectKind::Stroke: {
+        if (object.objectIndex >= page.strokes.size()) {
+            return std::nullopt;
+        }
+        float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
+        if (!StrokeBounds(page.strokes[object.objectIndex], &minX, &minY, &maxX, &maxY)) {
+            return std::nullopt;
+        }
+        const float margin = page.strokes[object.objectIndex].style.width * 0.5f + 2.0f;
+        return QRectF(
+            static_cast<qreal>(minX - margin), static_cast<qreal>(minY - margin),
+            static_cast<qreal>((maxX - minX) + margin * 2.0f),
+            static_cast<qreal>((maxY - minY) + margin * 2.0f));
+    }
+    case ObjectKind::Image: {
+        if (object.objectIndex >= page.images.size()) {
+            return std::nullopt;
+        }
+        const PageImage& image = page.images[object.objectIndex];
+        float minX = page.width, minY = page.height, maxX = 0.0f, maxY = 0.0f;
+        for (const Vec2& corner : ImageCorners(image)) {
+            minX = std::min(minX, corner.x);
+            minY = std::min(minY, corner.y);
+            maxX = std::max(maxX, corner.x);
+            maxY = std::max(maxY, corner.y);
+        }
+        return QRectF(minX, minY, maxX - minX, maxY - minY);
+    }
+    case ObjectKind::Text: {
+        if (object.objectIndex >= page.texts.size()) {
+            return std::nullopt;
+        }
+        const text::QtTextBounds bounds =
+            text::MeasurePageTextBoundsQt(page.texts[object.objectIndex], page.width);
+        return QRectF(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+    }
+    case ObjectKind::Latex: {
+        if (object.objectIndex >= page.latexes.size()) {
+            return std::nullopt;
+        }
+        const LatexBounds bounds =
+            MeasurePageLatexBounds(page.latexes[object.objectIndex], page.width);
+        return QRectF(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+    }
+    }
+    return std::nullopt;
+}
+
+QRectF CanvasWidget::PendingErasePageRegion(std::size_t pageIndex) const {
+    // Page-space union of the marked objects' bounds: the re-rendered patch
+    // covering their faded state.
+    QRectF region;
+    const Document& document = controller_.DocumentRef();
+    if (pageIndex >= document.PageCount()) {
+        return region;
+    }
+    const Page& page = document.PageAt(pageIndex);
+    for (const ObjectRef& object : pendingErase_) {
+        if (object.pageIndex != pageIndex) {
+            continue;
+        }
+        if (const std::optional<QRectF> bounds = PendingEraseObjectBounds(page, object);
+            bounds.has_value()) {
+            region = region.isEmpty() ? *bounds : region.united(*bounds);
+        }
+    }
+    return region;
+}
+
+QRect CanvasWidget::OverlayDirtyRect() const {
+    if (!selectionOverlayActive_) {
+        return {};
+    }
+    // A PDF text drag paints character highlights over the whole page under
+    // the anchor instead of a marquee.
+    if (pdfTextDragPage_.has_value()) {
+        const CanvasPageView view = CalculatePageView(*pdfTextDragPage_);
+        return view.valid ? view.rect.toAlignedRect().intersected(rect()) : rect();
+    }
+    if (selectionOverlayLasso_ && !lassoPoints_.empty()) {
+        QRectF bounds(lassoPoints_.front(), QSizeF(0.0, 0.0));
+        for (const QPointF& point : lassoPoints_) {
+            bounds = bounds.united(QRectF(point, QSizeF(0.0, 0.0)));
+        }
+        return bounds.adjusted(-2.0, -2.0, 2.0, 2.0).toAlignedRect().intersected(rect());
+    }
+    return QRectF(selectionAnchor_, selectionCurrent_).normalized()
+        .adjusted(-2.0, -2.0, 2.0, 2.0).toAlignedRect().intersected(rect());
 }
 
 std::optional<SelectionBounds> CanvasWidget::SelectionBoundsForPage(std::size_t pageIndex) const {
