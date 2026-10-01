@@ -585,6 +585,67 @@ void TestSidebarWheelIsolation() {
     Check(sidebar.ScrollY() == 0, "sidebar scroll clamps at zero");
 }
 
+void TestSidebarEnsureVisibleFromScrolled() {
+    QWidget host;
+    host.resize(1400, 900);
+    cnote::ui::SidebarWidget sidebar(&host);
+    const cnote::Document document = BuildDocument(12);
+    sidebar.SetDocument(&document, nullptr);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    sidebar.SetOpen(true);
+    host.show();
+    QApplication::processEvents();
+    Check(WaitFor([&]() { return sidebar.SlideProgress() >= 0.999; }, 3000), "sidebar open before ensure-visible test");
+    Check(sidebar.MaxScroll() > 0, "a 12-page document scrolls");
+
+    const auto itemFullyVisible = [&](std::size_t index) {
+        const QRect content = sidebar.HeaderLayout().contentRect.toAlignedRect();
+        const std::optional<QRect> item = sidebar.PageItemRect(index);
+        return item.has_value() && item->top() >= content.top() && item->bottom() <= content.bottom();
+    };
+
+    // Scroll to the bottom, then select a page that is already fully visible.
+    // The old math compared widget-space item rect against scroll-space band
+    // edges and jumped back toward the top; nothing should move here.
+    sidebar.SetScrollY(sidebar.MaxScroll());
+    QApplication::processEvents();
+    Check(itemFullyVisible(10) || itemFullyVisible(11), "bottom pages are visible at max scroll");
+    const int parked = sidebar.ScrollY();
+    sidebar.SetCurrentPage(10);
+    // Give a wrong ensure-visible request time to animate; the correct code
+    // never starts one because the page is already inside the band.
+    WaitFor([&]() { return false; }, 250);
+    Check(sidebar.ScrollY() == parked, "selecting an already-visible page does not move the list");
+    Check(itemFullyVisible(10), "the selected page stays fully visible");
+
+    // A page below the fold lands at the bottom edge of the content band, not
+    // scrollY_ pixels short of it.
+    sidebar.SetScrollY(sidebar.MaxScroll() / 2);
+    QApplication::processEvents();
+    const int halfScroll = sidebar.ScrollY();
+    sidebar.SetCurrentPage(11);
+    Check(WaitFor([&]() {
+        const QRect content = sidebar.HeaderLayout().contentRect.toAlignedRect();
+        const std::optional<QRect> item = sidebar.PageItemRect(11);
+        return item.has_value() && item->bottom() <= content.bottom();
+    }, 1000), "selecting a page below the fold scrolls it into view");
+    Check(sidebar.ScrollY() > halfScroll, "the list scrolled down for the new page");
+    {
+        const QRect content = sidebar.HeaderLayout().contentRect.toAlignedRect();
+        const std::optional<QRect> item = sidebar.PageItemRect(11);
+        Check(item.has_value() && item->bottom() <= content.bottom() + 1,
+              "the revealed page sits inside the band, not past it");
+    }
+
+    // Symmetric case: a page above the fold lands at the top edge.
+    sidebar.SetCurrentPage(0);
+    Check(WaitFor([&]() {
+        const QRect content = sidebar.HeaderLayout().contentRect.toAlignedRect();
+        const std::optional<QRect> item = sidebar.PageItemRect(0);
+        return item.has_value() && item->top() >= content.top() - 1;
+    }, 1000), "selecting a page above the fold scrolls it to the top edge");
+}
+
 void TestToolbarAutoHide() {
     QWidget host;
     host.resize(1400, 900);
@@ -689,6 +750,7 @@ int main(int argc, char** argv) {
     TestPopupPlacementAndClamping();
     TestSidebarListAndNavigation();
     TestSidebarWheelIsolation();
+    TestSidebarEnsureVisibleFromScrolled();
     TestToolbarAutoHide();
     TestOverlayDismissalConsumesPaletteMenu();
 

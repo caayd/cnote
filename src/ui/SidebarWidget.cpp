@@ -254,12 +254,17 @@ void SidebarWidget::EnsureCurrentPageVisible() {
     if (!item.has_value()) {
         return;
     }
-    const int visibleTop = static_cast<int>(layout.contentRect.top() + metrics.contentPadding + scrollY_);
-    const int visibleBottom = static_cast<int>(layout.contentRect.bottom() - metrics.contentPadding + scrollY_);
+    // PageItemRect is widget-space (ItemTop already subtracts scrollY_), so
+    // compare against the widget-space content band and fold the current
+    // scroll back into the target.  Comparing against scroll-space edges used
+    // to add scrollY_ twice, so any ensure-visible beyond the first page
+    // jumped the list to an unrelated place.
+    const int visibleTop = static_cast<int>(layout.contentRect.top() + metrics.contentPadding);
+    const int visibleBottom = static_cast<int>(layout.contentRect.bottom() - metrics.contentPadding);
     if (item->top() < visibleTop) {
-        SetScrollY(static_cast<int>(item->top() - layout.contentRect.top() - metrics.contentPadding), true);
+        SetScrollY(scrollY_ + (item->top() - visibleTop), true);
     } else if (item->bottom() > visibleBottom) {
-        SetScrollY(static_cast<int>(item->bottom() - (layout.contentRect.bottom() - metrics.contentPadding)), true);
+        SetScrollY(scrollY_ + (item->bottom() - visibleBottom), true);
     }
 }
 
