@@ -2615,15 +2615,23 @@ void CanvasWidget::AppendStrokePoint(Vec2 pagePoint, bool dotted) {
     // newest one — and the smoothed composite lags the raw tail similarly.
     // Without the lookahead, last frame's tail pixels outside this segment's
     // bounds stay stale on screen (fragmented ghost ink).
-    QRectF segment(
-        static_cast<qreal>(pagePoint.x), static_cast<qreal>(pagePoint.y), 0.0, 0.0);
+    // QRectF(point, 0x0) is empty and united() drops empty operands, so the
+    // span must accumulate explicit min/max rather than union point rects.
+    float minX = pagePoint.x, minY = pagePoint.y;
+    float maxX = pagePoint.x, maxY = pagePoint.y;
+    const auto extend = [&minX, &minY, &maxX, &maxY](const Vec2& p) {
+        minX = std::min(minX, p.x);
+        minY = std::min(minY, p.y);
+        maxX = std::max(maxX, p.x);
+        maxY = std::max(maxY, p.y);
+    };
     if (const Stroke* before = controller_.PendingStroke();
         before != nullptr && !before->points.empty()) {
-        for (std::size_t back = before->points.size() - 1U, steps = 0;
-             steps < 3U; --back, ++steps) {
-            const Vec2& p = before->points[back];
-            segment = segment.united(QRectF(p.x, p.y, 0.0, 0.0));
-            if (back == 0U) {
+        const std::size_t start = before->points.size() - 1U;
+        const std::size_t stop = start >= 3U ? start - 2U : 0U;
+        for (std::size_t back = start; ; --back) {
+            extend(before->points[back]);
+            if (back == stop) {
                 break;
             }
         }
@@ -2633,14 +2641,13 @@ void CanvasWidget::AppendStrokePoint(Vec2 pagePoint, bool dotted) {
     float penWidth = 3.0f;
     if (const Stroke* pending = controller_.PendingStroke();
         pending != nullptr && !pending->points.empty()) {
-        segment = segment.united(QRectF(
-            static_cast<qreal>(pending->points.back().x),
-            static_cast<qreal>(pending->points.back().y), 0.0, 0.0));
+        extend(pending->points.back());
         penWidth = pending->style.width;
     }
     const float margin = penWidth * 0.5f + kStrokeDirtyMarginPixels;
     MarkTransientDirty(PageRegionDirtyRect(pageIndex,
-        segment.adjusted(-margin, -margin, margin, margin)));
+        QRectF(minX, minY, maxX - minX, maxY - minY)
+            .adjusted(-margin, -margin, margin, margin)));
 }
 
 void CanvasWidget::ReplaceStrokePoints(const std::vector<Vec2>& points, bool dotted) {
@@ -3377,11 +3384,22 @@ QRect CanvasWidget::OverlayDirtyRect() const {
         return view.valid ? view.rect.toAlignedRect().intersected(rect()) : rect();
     }
     if (selectionOverlayLasso_ && !lassoPoints_.empty()) {
-        QRectF bounds(lassoPoints_.front(), QSizeF(0.0, 0.0));
+        // QRectF(point, QSizeF(0,0)) is empty, and united() returns the
+        // non-empty operand when either side is empty — so unioning
+        // point-sized rects collapses the bounds to the LAST point instead
+        // of spanning them all.  Track explicit min/max instead.
+        float minX = lassoPoints_.front().x();
+        float minY = lassoPoints_.front().y();
+        float maxX = lassoPoints_.front().x();
+        float maxY = lassoPoints_.front().y();
         for (const QPointF& point : lassoPoints_) {
-            bounds = bounds.united(QRectF(point, QSizeF(0.0, 0.0)));
+            minX = std::min<float>(minX, point.x());
+            minY = std::min<float>(minY, point.y());
+            maxX = std::max<float>(maxX, point.x());
+            maxY = std::max<float>(maxY, point.y());
         }
-        return bounds.adjusted(-2.0, -2.0, 2.0, 2.0).toAlignedRect().intersected(rect());
+        return QRectF(minX, minY, maxX - minX, maxY - minY)
+            .adjusted(-2.0, -2.0, 2.0, 2.0).toAlignedRect().intersected(rect());
     }
     return QRectF(selectionAnchor_, selectionCurrent_).normalized()
         .adjusted(-2.0, -2.0, 2.0, 2.0).toAlignedRect().intersected(rect());
