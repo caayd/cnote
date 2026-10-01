@@ -498,6 +498,218 @@ const render::PageSurfaceCache& CanvasWidget::EnsureSurface(const CanvasPageView
     return perPage.entries.front().cache;
 }
 
+void CanvasWidget::ResetStrokeLayer() {
+    strokeLayer_ = LiveStrokeLayer {};
+}
+
+bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const CanvasPageView& view) {
+    const float devicePixelRatio = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
+    const float smoothing = StrokeRenderSmoothing(stroke, controller_.InputSettings().strokeSmoothing);
+    const std::size_t count = stroke.points.size();
+    LiveStrokeLayer& layer = strokeLayer_;
+
+    // The layer continues only for a pure append: same page, view scale,
+    // style and a point list whose already-consumed prefix is unchanged.
+    // A replaced list (line/oval modes rewrite all points) rebuilds it.
+    const bool appendContinues = layer.valid
+        && layer.pageIndex == view.pageIndex
+        && std::abs(layer.scale - view.scale) < 0.0001f
+        && std::abs(layer.devicePixelRatio - devicePixelRatio) < 0.0001f
+        && layer.style.color == stroke.style.color
+        && layer.style.dotted == stroke.style.dotted
+        && std::abs(layer.style.width - stroke.style.width) < 0.0001f
+        && std::abs(layer.smoothing - smoothing) < 0.0001f
+        && count >= layer.consumedRaw
+        && Vec2Equal(stroke.points.front(), layer.firstPoint)
+        && Vec2Equal(stroke.points[layer.consumedRaw - 1U], layer.consumedLast);
+    if (!appendContinues) {
+        // Dotted strokes keep the whole-stroke preview: the dash pattern phase
+        // is path-global, so compositing per segment would restart the pattern
+        // at every seam.
+        layer = LiveStrokeLayer {};
+        if (count == 0U || stroke.style.dotted) {
+            return false;
+        }
+        layer.valid = true;
+        layer.pageIndex = view.pageIndex;
+        layer.scale = view.scale;
+        layer.devicePixelRatio = devicePixelRatio;
+        layer.style = stroke.style;
+        layer.smoothing = smoothing;
+        layer.smoother.Reset(smoothing);
+        layer.smoothed.push_back(stroke.points.front());
+        layer.firstPoint = stroke.points.front();
+        layer.rawLast = stroke.points.front();
+        layer.lastEnd = stroke.points.front();
+        layer.consumedRaw = 1;
+        layer.consumedLast = stroke.points.front();
+        Vec2 ignored;
+        static_cast<void>(layer.smoother.Feed(stroke.points.front(), &ignored));
+    } else if (stroke.style.dotted) {
+        return false;
+    }
+
+    const float deviceScale = layer.scale * layer.devicePixelRatio;
+    const float penWidth = render::StrokeRenderPenWidth(stroke, layer.scale) * layer.devicePixelRatio;
+    const float margin = layer.style.width * 0.5f + 2.0f;    // page units
+    const QColor color = QColor::fromRgba(layer.style.color);
+
+    // Ensures the image covers `rect` (page units, snapped to device pixels).
+    // Snapping keeps the paint-time blit at integer device coordinates, so it
+    // is a 1:1 copy like the page surface rather than a resample.
+    const auto ensureCover = [&layer, deviceScale](const QRectF& needed) {
+        if (!layer.image.isNull() && layer.pageRect.contains(needed)) {
+            return;
+        }
+        const QRectF grown = layer.image.isNull()
+            ? needed
+            : layer.pageRect.united(needed);
+        const int left = static_cast<int>(std::floor(grown.left() * deviceScale));
+        const int top = static_cast<int>(std::floor(grown.top() * deviceScale));
+        const int right = static_cast<int>(std::ceil(grown.right() * deviceScale));
+        const int bottom = static_cast<int>(std::ceil(grown.bottom() * deviceScale));
+        QImage image(std::max(1, right - left), std::max(1, bottom - top),
+            QImage::Format_ARGB32_Premultiplied);
+        if (image.isNull()) {
+            return;
+        }
+        image.fill(Qt::transparent);
+        if (!layer.image.isNull()) {
+            QPainter copy(&image);
+            const int offsetX = static_cast<int>(std::lround(layer.pageRect.x() * deviceScale)) - left;
+            const int offsetY = static_cast<int>(std::lround(layer.pageRect.y() * deviceScale)) - top;
+            copy.drawImage(offsetX, offsetY, layer.image);
+            copy.end();
+        }
+        layer.pageRect = QRectF(
+            static_cast<qreal>(left) / deviceScale,
+            static_cast<qreal>(top) / deviceScale,
+            static_cast<qreal>(right - left) / deviceScale,
+            static_cast<qreal>(bottom - top) / deviceScale);
+        image.setDevicePixelRatio(layer.devicePixelRatio);
+        layer.image = std::move(image);
+    };
+
+    const auto toDevice = [&layer, deviceScale](Vec2 point) {
+        return QPointF(
+            static_cast<qreal>((point.x - layer.pageRect.x()) * deviceScale),
+            static_cast<qreal>((point.y - layer.pageRect.y()) * deviceScale));
+    };
+
+    // Newly stable smoothed points composite as the quad chain
+    // quadTo(s_{k-1}, mid(s_{k-1}, s_k)) that PaintStrokePreview's whole-path
+    // build emits.  Batching them into one path keeps the joins interior
+    // (round joins, no caps) instead of drawing a cap seam per point.
+    std::vector<Vec2> pendingControls;
+    std::vector<Vec2> pendingEnds;
+    Vec2 batchStart {};              // lastEnd when the first pending segment was queued
+    const auto flush = [&]() {
+        if (pendingControls.empty() || layer.image.isNull()) {
+            pendingControls.clear();
+            pendingEnds.clear();
+            return;
+        }
+        QPainterPath path;
+        path.moveTo(toDevice(batchStart));
+        for (std::size_t i = 0; i < pendingControls.size(); ++i) {
+            path.quadTo(toDevice(pendingControls[i]), toDevice(pendingEnds[i]));
+        }
+        QPainter ink(&layer.image);
+        ink.setRenderHint(QPainter::Antialiasing, true);
+        ink.setPen(QPen(color, static_cast<qreal>(penWidth), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        ink.setBrush(Qt::NoBrush);
+        ink.drawPath(path);
+        ink.end();
+        pendingControls.clear();
+        pendingEnds.clear();
+    };
+
+    while (layer.consumedRaw < count) {
+        const Vec2 raw = stroke.points[layer.consumedRaw];
+        Vec2 candidate;
+        if (layer.smoother.Feed(raw, &candidate)
+            && DistanceSquared(candidate, layer.smoothed.back()) >= 0.05f) {
+            const Vec2 control = layer.smoothed.back();
+            const Vec2 end {
+                (control.x + candidate.x) * 0.5f,
+                (control.y + candidate.y) * 0.5f,
+            };
+            const QRectF needed = QRectF(
+                QPointF(std::min({ layer.lastEnd.x, control.x, candidate.x }) - margin,
+                    std::min({ layer.lastEnd.y, control.y, candidate.y }) - margin),
+                QPointF(std::max({ layer.lastEnd.x, control.x, candidate.x }) + margin,
+                    std::max({ layer.lastEnd.y, control.y, candidate.y }) + margin));
+            ensureCover(needed);
+            if (layer.image.isNull()) {
+                // Allocation failure: keep painting live instead of dropping ink.
+                layer = LiveStrokeLayer {};
+                return false;
+            }
+            if (pendingControls.empty()) {
+                batchStart = layer.lastEnd;
+            }
+            pendingControls.push_back(control);
+            pendingEnds.push_back(end);
+            layer.smoothed.push_back(candidate);
+            layer.lastEnd = end;
+        }
+        layer.rawLast = raw;
+        layer.consumedLast = raw;
+        ++layer.consumedRaw;
+    }
+    flush();
+    return true;
+}
+
+void CanvasWidget::PaintStrokeTail(QPainter& painter, const Stroke& stroke, const CanvasPageView& view) {
+    const LiveStrokeLayer& layer = strokeLayer_;
+    const float scale = view.scale;
+    const float penWidth = render::StrokeRenderPenWidth(stroke, scale);
+    const QColor color = QColor::fromRgba(stroke.style.color);
+
+    // The provisional tail mirrors PaintStrokePreview's path over
+    // smoothed[m-1..] plus the raw tail point (emitted or not by the same
+    // 0.01 squared-distance clamp BuildSmoothedPoints uses).
+    Vec2 tail {};
+    const bool hasTail = !stroke.points.empty()
+        && layer.smoother.TailPoint(stroke.points.back(), layer.smoothed.back(), &tail);
+    const std::size_t k = layer.smoothed.size() + (hasTail ? 1U : 0U);
+    const Vec2 end = hasTail ? tail : layer.smoothed.back();
+
+    painter.setBrush(Qt::NoBrush);
+    if (k <= 1U) {
+        // Single-point dot: same filled-ellipse rule as PaintStrokePreview.
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        const qreal radius = static_cast<qreal>(penWidth * 0.5f);
+        painter.drawEllipse(
+            QPointF(static_cast<qreal>(layer.smoothed.front().x * scale),
+                static_cast<qreal>(layer.smoothed.front().y * scale)),
+            radius, radius);
+        return;
+    }
+
+    painter.setPen(QPen(color, static_cast<qreal>(penWidth), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    const QPointF from(static_cast<qreal>(layer.lastEnd.x * scale),
+        static_cast<qreal>(layer.lastEnd.y * scale));
+    const QPointF to(static_cast<qreal>(end.x * scale), static_cast<qreal>(end.y * scale));
+    if (k == 2U) {
+        painter.drawLine(from, to);
+        return;
+    }
+    QPainterPath path;
+    path.moveTo(from);
+    if (hasTail) {
+        const Vec2 control = layer.smoothed.back();
+        path.quadTo(
+            QPointF(static_cast<qreal>(control.x * scale), static_cast<qreal>(control.y * scale)),
+            QPointF(static_cast<qreal>((control.x + tail.x) * 0.5f * scale),
+                static_cast<qreal>((control.y + tail.y) * 0.5f * scale)));
+    }
+    path.lineTo(to);
+    painter.drawPath(path);
+}
+
 void CanvasWidget::BeginGestureOverlay(std::size_t pageIndex, bool transform) {
     const PageSelection& selection = controller_.SelectionFor(pageIndex);
     gesture_ = GestureSurface {};
@@ -940,7 +1152,18 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
             if (const Stroke* pending = controller_.PendingStroke(); pending != nullptr) {
                 painter.save();
                 painter.translate(view.rect.topLeft());
-                render::PaintStrokePreview(painter, *pending, RenderParamsFor(view), 1.0f);
+                if (SyncStrokeLayer(*pending, view)) {
+                    // Stabilized ink is composited in the layer raster; only
+                    // the provisional tail (two segments at most) is drawn
+                    // live, so a paint no longer costs O(stroke points).
+                    painter.drawImage(QPointF(
+                            static_cast<qreal>(strokeLayer_.pageRect.x() * view.scale),
+                            static_cast<qreal>(strokeLayer_.pageRect.y() * view.scale)),
+                        strokeLayer_.image);
+                    PaintStrokeTail(painter, *pending, view);
+                } else {
+                    render::PaintStrokePreview(painter, *pending, RenderParamsFor(view), 1.0f);
+                }
                 painter.restore();
             }
         }
@@ -2259,12 +2482,16 @@ void CanvasWidget::SetPointerCapture(bool captured) {
 
 void CanvasWidget::BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted) {
     const CanvasPageView view = CalculatePageView(pageIndex);
+    ResetStrokeLayer();
     controller_.BeginStroke(pageIndex, pagePoint, view.scale);
     controller_.SetPendingStrokeDotted(dotted);
 }
 
 void CanvasWidget::SetStrokeDotted(bool dotted) {
     controller_.SetPendingStrokeDotted(dotted);
+    // The dash pattern is path-global, so toggling dotted invalidates the
+    // composited prefix.
+    ResetStrokeLayer();
     update();
 }
 
@@ -2278,6 +2505,7 @@ void CanvasWidget::AppendStrokePoint(Vec2 pagePoint, bool dotted) {
 
 void CanvasWidget::ReplaceStrokePoints(const std::vector<Vec2>& points, bool dotted) {
     const std::size_t pageIndex = controller_.PendingStrokePage();
+    ResetStrokeLayer();
     controller_.ReplacePendingStrokePoints(points, dotted);
     const CanvasPageView view = CalculatePageView(pageIndex);
     if (view.valid) {
@@ -2296,7 +2524,7 @@ void CanvasWidget::CommitStroke() {
         committed = *pending;
     }
     controller_.EndStroke();
-
+    ResetStrokeLayer();
     const CanvasPageView view = CalculatePageView(pageIndex);
     const float devicePixelRatio = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
     render::PageSurfaceCache* cache = MutableSurface(pageIndex, view.scale, devicePixelRatio);
@@ -2345,6 +2573,7 @@ void CanvasWidget::CommitStroke() {
 void CanvasWidget::DiscardStroke() {
     const std::size_t pageIndex = controller_.PendingStrokePage();
     controller_.CancelStroke();
+    ResetStrokeLayer();
     const CanvasPageView view = CalculatePageView(pageIndex);
     update(view.valid ? view.rect.toAlignedRect() : rect());
 }

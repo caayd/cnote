@@ -22,6 +22,7 @@
 #include "ui/CanvasController.h"
 #include "ui/InteractionRouter.h"
 #include "ui/PrecisionInputSink.h"
+#include "selection/StrokeSmoothing.h"
 #include "ui/SelectionMath.h"
 
 class QListView;
@@ -299,6 +300,40 @@ private:
         float itemsDevicePixelRatio = 0.0f;
     };
 
+    // Live-stroke ink layer: the pending stroke's stabilized prefix is
+    // composited once into a raster covering the stroke's bounds (snapped to
+    // the device-pixel grid), so a paint blits it and draws only the small
+    // provisional tail instead of re-smoothing and re-rasterizing every point
+    // per frame.  `smoothed` holds emitted smoothed points for the consumed
+    // raw prefix; `consumedRaw`/`consumedLast`/`firstPoint` detect a replaced
+    // point list (line/oval modes) and force a rebuild.
+    struct LiveStrokeLayer {
+        bool valid = false;
+        std::size_t pageIndex = 0;
+        float scale = 0.0f;
+        float devicePixelRatio = 0.0f;
+        StrokeStyle style {};
+        float smoothing = 0.0f;
+        QRectF pageRect {};            // stroke bounds the image covers (page units)
+        QImage image;                  // ARGB32_Premultiplied at scale * DPR
+        std::vector<Vec2> smoothed;
+        Vec2 lastEnd {};               // end of the last composited segment
+        std::size_t consumedRaw = 0;   // raw points folded into `smoothed`
+        Vec2 consumedLast {};
+        Vec2 firstPoint {};
+        Vec2 rawLast {};
+        IncrementalStrokeSmoother smoother;
+    };
+
+    // Keeps the live-stroke layer in sync with the pending stroke and reports
+    // whether it applies (false: caller falls back to PaintStrokePreview -
+    // dotted strokes, replaced point lists mid-rebuild, allocation failure).
+    bool SyncStrokeLayer(const Stroke& stroke, const CanvasPageView& view);
+    void ResetStrokeLayer();
+    // Draws the provisional tail (the smoothed segments that still change as
+    // points arrive) on top of the layer at widget scale.
+    void PaintStrokeTail(QPainter& painter, const Stroke& stroke, const CanvasPageView& view);
+
     [[nodiscard]] render::PageRenderParams RenderParamsFor(const CanvasPageView& view) const;
     // Mutable cache lookup for incremental stroke commits (same key as FindSurface).
     render::PageSurfaceCache* MutableSurface(std::size_t pageIndex, float scale, float devicePixelRatio);
@@ -453,6 +488,7 @@ private:
 
     std::unordered_map<std::size_t, PageSurfaces> surfaces_;
     GestureSurface gesture_ {};
+    LiveStrokeLayer strokeLayer_ {};
     render::PdfBackgroundProvider* pdfBackground_ = nullptr;
     float cachedDevicePixelRatio_ = 0.0f;
     std::size_t lastPaintPageCount_ = 0;

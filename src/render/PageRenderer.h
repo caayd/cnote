@@ -94,6 +94,12 @@ void PaintPage(QPainter& painter, const Page& page, const QPointF& pageOrigin, c
 void PaintPageSubset(QPainter& painter, const Page& page, const QPointF& pageOrigin,
     const PageRenderParams& params, const ExcludedIndices& only);
 
+// Pen width in scaled units for a stroke rendered at `scale` (the minimum
+// keeps thin strokes visible when zoomed out).  Shared by the committed
+// render, the transient preview and the canvas' incremental live-stroke
+// layer so all three agree on thickness.
+[[nodiscard]] float StrokeRenderPenWidth(const Stroke& stroke, float scale);
+
 // Draws one image in page units (rotation and opacity applied). `params.scale`
 // maps page units to painter units exactly like PaintPage.
 void PaintImage(QPainter& painter, const PageImage& image, const PageRenderParams& params, float opacity);

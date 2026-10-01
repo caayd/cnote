@@ -177,6 +177,10 @@ void PaintImage(QPainter& painter, const PageImage& image, const PageRenderParam
     painter.restore();
 }
 
+float StrokeRenderPenWidth(const Stroke& stroke, float scale) {
+    return std::max(kMinimumStrokeRenderWidth, stroke.style.width * scale / kStrokeRenderWidthDivisor);
+}
+
 void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRenderParams& params, float opacity) {
     if (stroke.points.empty()) {
         return;
@@ -185,7 +189,7 @@ void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRende
     const float smoothing = StrokeRenderSmoothing(stroke, params.strokeSmoothing);
     const std::vector<Vec2> points = BuildSmoothedPoints(stroke.points, smoothing);
     const float scale = params.scale;
-    const float penWidth = std::max(kMinimumStrokeRenderWidth, stroke.style.width * scale / kStrokeRenderWidthDivisor);
+    const float penWidth = StrokeRenderPenWidth(stroke, scale);
     const QColor color = StrokeColor(stroke, opacity);
 
     QPen pen(color, penWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
