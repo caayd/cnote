@@ -2299,7 +2299,20 @@ std::vector<ObjectRef> CanvasWidget::EraseTargetsAt(std::size_t pageIndex, Vec2 
         }
     }
     for (std::size_t index = 0; index < page.strokes.size(); ++index) {
-        if (StrokeHitsSegment(page.strokes[index], start, end, radiusPage, controller_.InputSettings().strokeSmoothing)) {
+        const Stroke& stroke = page.strokes[index];
+        // Cheap reject before the smoothing pass: the smoothed curve stays
+        // within the raw points' bounds inflated by the pen half-width plus
+        // a slack for the smoothing deviation (a quadratic midpoint chain
+        // never leaves the convex hull of its raw neighbours).
+        float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
+        if (StrokeBounds(stroke, &minX, &minY, &maxX, &maxY)) {
+            const float margin = stroke.style.width * 0.5f + 8.0f;
+            if (!SegmentHitsRect(minX - margin, minY - margin, maxX + margin, maxY + margin,
+                    start, end, radiusPage)) {
+                continue;
+            }
+        }
+        if (StrokeHitsSegment(stroke, start, end, radiusPage, controller_.InputSettings().strokeSmoothing)) {
             targets.push_back(ObjectRef { pageIndex, ObjectKind::Stroke, index });
         }
     }
