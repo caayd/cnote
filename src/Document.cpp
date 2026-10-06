@@ -107,6 +107,24 @@ Page& Document::PageAt(std::size_t index) noexcept {
 const Page& Document::PageAt(std::size_t index) const noexcept {
     return pages_.at(index);
 }
+std::uint64_t Document::NextPageEpoch() noexcept {
+    // Process-wide counter (page epochs live only as long as the in-memory
+    // document and its renderer caches): monotonic and collision-free across
+    // page copies, undo snapshots and document reloads.
+    static std::uint64_t next = 1;
+    return next++;
+}
+
+std::uint64_t Document::PageEpoch(std::size_t index) const noexcept {
+    return index < pageEpochs_.size() ? pageEpochs_[index] : 0U;
+}
+
+void Document::TouchPage(std::size_t index) noexcept {
+    if (index < pageEpochs_.size()) {
+        pageEpochs_[index] = NextPageEpoch();
+    }
+}
+
 
 const Document::PageDefaults& Document::NewPageDefaults() const noexcept {
     return newPageDefaults_;
@@ -124,6 +142,9 @@ bool Document::SetCurrentPageIndex(std::size_t index) {
 std::size_t Document::InsertPage(std::size_t index, Page page) {
     const std::size_t insertIndex = std::min(index, pages_.size());
     pages_.insert(pages_.begin() + static_cast<std::ptrdiff_t>(insertIndex), std::move(page));
+    // Fresh epoch for the slot: the inserted page must not inherit a stale
+    // cache entry from whichever page previously sat at this index.
+    pageEpochs_.insert(pageEpochs_.begin() + static_cast<std::ptrdiff_t>(insertIndex), NextPageEpoch());
     if (insertIndex <= currentPageIndex_ && pages_.size() > 1U) {
         ++currentPageIndex_;
     }
@@ -136,6 +157,7 @@ std::size_t Document::RemovePage(std::size_t index) {
     }
 
     pages_.erase(pages_.begin() + static_cast<std::ptrdiff_t>(index));
+    pageEpochs_.erase(pageEpochs_.begin() + static_cast<std::ptrdiff_t>(index));
     if (currentPageIndex_ > index) {
         --currentPageIndex_;
     } else if (currentPageIndex_ >= pages_.size()) {
@@ -156,6 +178,7 @@ void Document::ResetToBlank() {
     filePath_.clear();
     pdfSources_.clear();
     pages_ = { Page {} };
+    pageEpochs_ = { NextPageEpoch() };
     currentPageIndex_ = 0;
     newPageDefaults_ = {};
 }
@@ -167,6 +190,10 @@ void Document::ReplaceWithEditable(std::filesystem::path filePath, std::vector<P
         pages_ = { Page {} };
     } else {
         pages_ = std::move(pages);
+    }
+    pageEpochs_.resize(pages_.size());
+    for (std::uint64_t& epoch : pageEpochs_) {
+        epoch = NextPageEpoch();
     }
     currentPageIndex_ = pages_.empty() ? 0 : std::min(currentPageIndex, pages_.size() - 1U);
     newPageDefaults_ = pageDefaults;
@@ -190,6 +217,10 @@ void Document::ReplaceWithProject(
         pdfSources_.clear();
     } else {
         pages_ = std::move(pages);
+    }
+    pageEpochs_.resize(pages_.size());
+    for (std::uint64_t& epoch : pageEpochs_) {
+        epoch = NextPageEpoch();
     }
     currentPageIndex_ = pages_.empty() ? 0 : std::min(currentPageIndex, pages_.size() - 1U);
     newPageDefaults_ = pageDefaults;

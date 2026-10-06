@@ -180,6 +180,13 @@ public:
     [[nodiscard]] const Page& PageAt(std::size_t index) const noexcept;
     [[nodiscard]] const PageDefaults& NewPageDefaults() const noexcept;
 
+    // Per-page content epoch, consumed by renderer-side caches (page surface
+    // rasters, sidebar thumbnails).  Every committed mutation of a page's
+    // contents must bump it via TouchPage; insert/remove/replace maintain the
+    // per-page slots.  Epochs come from a process-wide counter, so a fresh
+    // document can never collide with a dead page's cached signature.
+    [[nodiscard]] std::uint64_t PageEpoch(std::size_t index) const noexcept;
+    void TouchPage(std::size_t index) noexcept;
     bool SetCurrentPageIndex(std::size_t index);
     std::size_t InsertPage(std::size_t index, Page page);
     std::size_t RemovePage(std::size_t index);
@@ -202,6 +209,10 @@ private:
     std::filesystem::path filePath_;
     std::vector<PdfSource> pdfSources_ {};
     std::vector<Page> pages_ { Page {} };
+    // Parallel to pages_: each slot starts at a fresh process-wide epoch and
+    // is bumped by TouchPage; epochs never serialize.
+    std::vector<std::uint64_t> pageEpochs_ { NextPageEpoch() };
+    static std::uint64_t NextPageEpoch() noexcept;
     std::size_t currentPageIndex_ = 0;
     PageDefaults newPageDefaults_ {};
 };

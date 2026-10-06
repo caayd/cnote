@@ -504,7 +504,8 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
 
     // Page-boundary segmentation: finish the current page's stroke and start a
     // new segment on the page under the pointer (App.cpp:4490-4496).
-    if (const std::optional<PageHit> hit = host_.HitTestPage(logical); hit.has_value() && hit->pageIndex != strokePage_->pageIndex) {
+    const std::optional<PageHit> hit = host_.HitTestPage(logical);
+    if (hit.has_value() && hit->pageIndex != strokePage_->pageIndex) {
         EndStroke();
         host_.SetViewPage(hit->pageIndex);
         strokePage_ = hit;
@@ -518,7 +519,13 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
         return true;
     }
 
-    const Vec2 rawPoint = host_.ScreenToPage(logical, true);
+    // Pointer between pages (or past the canvas edge during capture): no page
+    // view contains it, so hit-test ScreenToPage would return {0,0} and spike
+    // the stroke to the page origin.  Map through the stroke's own page view
+    // instead; the point simply clamps to that page's edge.
+    const Vec2 rawPoint = hit.has_value()
+        ? host_.ScreenToPage(logical, true)
+        : host_.ScreenToPageOnPage(strokePage_->pageIndex, logical, true);
     const float inputSpacing = InputSpacingPageUnits(tuning_.inputSpacing, pageScale);
     const bool straightLineMode = modifiers_.straightLine;
 

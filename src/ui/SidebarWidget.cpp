@@ -100,7 +100,8 @@ void SidebarWidget::SetDocument(const Document* document, render::PdfBackgroundP
 }
 
 void SidebarWidget::NotifyDocumentChanged() {
-    InvalidateThumbnails();
+    // Repaint only: ThumbnailAt re-renders an entry whose page epoch changed,
+    // so a commit on one page does not re-rasterize every visible thumbnail.
     update();
 }
 
@@ -451,7 +452,8 @@ const QImage* SidebarWidget::ThumbnailAt(std::size_t index, int width, int heigh
         thumbnails_.resize(document_->PageCount());
     }
     Thumbnail& entry = thumbnails_[index];
-    if (entry.valid && entry.width == width && entry.height == height) {
+    const std::uint64_t epoch = document_->PageEpoch(index);
+    if (entry.valid && entry.pageEpoch == epoch && entry.width == width && entry.height == height) {
         return &entry.image;
     }
 
@@ -497,6 +499,7 @@ const QImage* SidebarWidget::ThumbnailAt(std::size_t index, int width, int heigh
     }
     painter.end();
 
+    entry.pageEpoch = epoch;
     entry.image = std::move(image);
     entry.width = width;
     entry.height = height;
@@ -505,7 +508,8 @@ const QImage* SidebarWidget::ThumbnailAt(std::size_t index, int width, int heigh
 }
 
 bool SidebarWidget::HasThumbnail(std::size_t index) const {
-    return index < thumbnails_.size() && thumbnails_[index].valid;
+    return index < thumbnails_.size() && thumbnails_[index].valid
+        && document_ != nullptr && thumbnails_[index].pageEpoch == document_->PageEpoch(index);
 }
 
 std::size_t SidebarWidget::RenderedThumbnailCount() const {

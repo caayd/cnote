@@ -325,10 +325,6 @@ const Document& QtDocumentController::DocumentRef() const {
     return session_ != nullptr ? session_->document : kEmpty;
 }
 
-std::uint64_t QtDocumentController::Revision() const {
-    return session_ != nullptr ? session_->revision : 0U;
-}
-
 Page* QtDocumentController::PageAt(std::size_t pageIndex) {
     if (session_ == nullptr || pageIndex >= session_->document.PageCount()) {
         return nullptr;
@@ -415,6 +411,7 @@ void QtDocumentController::EndStroke() {
     // Same commit shape as the reference (App::EndStroke): append, push an
     // AddStroke action with its insert index, clear the redo stack, bump the
     // revision once and broadcast once.
+    session_->document.TouchPage(pageIndex);
     HistoryAction action {};
     action.type = HistoryActionType::AddStroke;
     action.stroke = finished;
@@ -509,6 +506,10 @@ std::size_t QtDocumentController::AddTextObject(std::size_t pageIndex, Vec2 topL
     text.y = topLeft.y;
     text.fontSize = fontSize;
     text.color = input_.objectColor;
+    // The placeholder enters the page now (excluded from cached surfaces while
+    // it is under edit); bump the epoch so a failed BeginTextEdit still leaves
+    // consistent caches.
+    session_->document.TouchPage(pageIndex);
     page->texts.push_back(text);
     const std::size_t index = page->texts.size() - 1U;
     if (BeginTextEdit(pageIndex, index)) {
@@ -530,6 +531,7 @@ std::size_t QtDocumentController::AddLatexObject(std::size_t pageIndex, Vec2 top
     latex.y = topLeft.y;
     latex.fontSize = fontSize;
     latex.color = input_.objectColor;
+    session_->document.TouchPage(pageIndex);
     page->latexes.push_back(latex);
     const std::size_t index = page->latexes.size() - 1U;
     if (BeginLatexEdit(pageIndex, index)) {
@@ -630,6 +632,7 @@ void QtDocumentController::CommitTextEdit(PageText edited) {
     HistoryAction action {};
     bool changed = false;
     if (edited.content.empty()) {
+        session_->document.TouchPage(pageIndex);
         page->texts.erase(page->texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
         if (!creates) {
             action.type = HistoryActionType::RemoveText;
@@ -640,6 +643,7 @@ void QtDocumentController::CommitTextEdit(PageText edited) {
         }
     } else {
         edited = text::NormalizeCommittedText(edited);
+        session_->document.TouchPage(pageIndex);
         page->texts[textIndex] = edited;
         if (creates) {
             action.type = HistoryActionType::AddText;
@@ -675,6 +679,7 @@ void QtDocumentController::CancelTextEdit() {
     // an object created by the cancelled edit); nothing was recorded in history.
     if (editingTextCreates_ && editingTextPage_.has_value() && editingTextIndex_.has_value()) {
         if (Page* page = PageAt(*editingTextPage_); page != nullptr && *editingTextIndex_ < page->texts.size()) {
+            session_->document.TouchPage(*editingTextPage_);
             page->texts.erase(page->texts.begin() + static_cast<std::ptrdiff_t>(*editingTextIndex_));
         }
     }
@@ -710,6 +715,7 @@ void QtDocumentController::CommitLatexEdit(const QString& source) {
     HistoryAction action {};
     bool changed = false;
     if (edited.content.empty()) {
+        session_->document.TouchPage(pageIndex);
         page->latexes.erase(page->latexes.begin() + static_cast<std::ptrdiff_t>(latexIndex));
         if (!creates) {
             action.type = HistoryActionType::RemoveLatex;
@@ -719,6 +725,7 @@ void QtDocumentController::CommitLatexEdit(const QString& source) {
             changed = true;
         }
     } else {
+        session_->document.TouchPage(pageIndex);
         page->latexes[latexIndex] = edited;
         if (creates) {
             action.type = HistoryActionType::AddLatex;
@@ -752,6 +759,7 @@ void QtDocumentController::CancelLatexEdit() {
     }
     if (editingLatexCreates_ && editingLatexPage_.has_value() && editingLatexIndex_.has_value()) {
         if (Page* page = PageAt(*editingLatexPage_); page != nullptr && *editingLatexIndex_ < page->latexes.size()) {
+            session_->document.TouchPage(*editingLatexPage_);
             page->latexes.erase(page->latexes.begin() + static_cast<std::ptrdiff_t>(*editingLatexIndex_));
         }
     }
@@ -908,6 +916,10 @@ void QtDocumentController::CommitPageGesture() {
         return;
     }
 
+    // The page was mutated in place during the gesture (each sample touched
+    // excluded objects only, so no epoch was needed mid-flight); the commit
+    // makes the change visible to renderer caches.
+    session_->document.TouchPage(pageIndex);
     // One transaction per gesture, the reference's PushReplacePagesHistoryAction.
     HistoryAction action {};
     action.type = HistoryActionType::ReplacePages;
@@ -1512,14 +1524,17 @@ void QtDocumentController::ApplyNewPageDraft(const ui::NewPageDraft& draft, ui::
     for (const std::size_t pageIndex : indices) {
         Page& page = document.PageAt(pageIndex);
         before.push_back(page);
-        changed = ui::ApplyConfiguredSettingsToPage(
-                      page,
-                      std::max(ui::kMinPageSize, draft.width),
-                      std::max(ui::kMinPageSize, draft.height),
-                      draft.backgroundColor,
-                      ui::ResolvedPaletteProfile(draft.paletteProfile, palette),
-                      draft.applyPaletteProfileToExistingStrokes)
-            || changed;
+        const bool pageChanged = ui::ApplyConfiguredSettingsToPage(
+            page,
+            std::max(ui::kMinPageSize, draft.width),
+            std::max(ui::kMinPageSize, draft.height),
+            draft.backgroundColor,
+            ui::ResolvedPaletteProfile(draft.paletteProfile, palette),
+            draft.applyPaletteProfileToExistingStrokes);
+        if (pageChanged) {
+            document.TouchPage(pageIndex);
+        }
+        changed = pageChanged || changed;
     }
     if (!changed) {
         return;
@@ -1686,6 +1701,7 @@ bool QtDocumentController::RemoveSelection() {
         }
         indices.push_back(pageIndex);
         before.push_back(document.PageAt(pageIndex));
+        document.TouchPage(pageIndex);
         Page& page = document.PageAt(pageIndex);
 
         const auto removeAt = [](auto& objects, std::vector<std::size_t> indices) {
@@ -1777,6 +1793,8 @@ bool QtDocumentController::PastePayload(
         pasted.images.push_back(page.images.size());
         page.images.push_back(std::move(image));
     }
+
+    document.TouchPage(pageIndex);
 
     HistoryAction action {};
     action.type = HistoryActionType::ReplacePages;

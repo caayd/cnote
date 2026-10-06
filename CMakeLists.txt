@@ -994,6 +994,28 @@ if(WIN32)
     cnote_stage_test_runtime(cnote_canvas_geometry_tests)
 endif()
 
+# --- Page-surface epoch regression (stroke lag on multi-page documents) ------
+# Keys page rasters on the per-page content epoch instead of the session
+# revision: a stroke commit used to invalidate every visible page's surface
+# signature, and the dense-neighbour re-render on the next paint compressed
+# queued pointer samples into the sharp jumps reported at stroke start/end.
+# Asserts via SurfaceRenderCount that a commit on one page re-renders no
+# other page, including after a mid-document insert shifts indices, and that
+# a pointer sample in the inter-page gap no longer spikes to {0,0}.
+add_executable(cnote_page_surface_epoch_tests tests/PageSurfaceEpochTests.cpp)
+target_include_directories(cnote_page_surface_epoch_tests PRIVATE src)
+target_compile_features(cnote_page_surface_epoch_tests PRIVATE cxx_std_20)
+target_compile_options(cnote_page_surface_epoch_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_page_surface_epoch_tests PRIVATE cnote_ui Qt6::Widgets)
+add_test(NAME page_surface_epoch_qt COMMAND cnote_page_surface_epoch_tests)
+set_tests_properties(page_surface_epoch_qt PROPERTIES TIMEOUT 120
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
+if(WIN32)
+    cnote_stage_test_runtime(cnote_page_surface_epoch_tests)
+endif()
+
 # --- Keyboard-shortcut routing ------------------------------------------------
 # One QAction per command; the settings store is the single source of every
 # runtime binding.  This test drives real key events through the real window

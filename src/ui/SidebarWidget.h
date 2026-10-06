@@ -54,8 +54,10 @@ public:
 
     // --- model ------------------------------------------------------------
     void SetDocument(const Document* document, render::PdfBackgroundProvider* pdfBackground = nullptr);
-    // Committed document change: drops every cached thumbnail (App.cpp:4300
-    // InvalidateSidebarThumbnailCache).
+    // Committed document change: repaint; thumbnails validate lazily against
+    // Document::PageEpoch so only pages whose contents changed re-render
+    // (the reference dropped the whole cache, which re-rasterized every
+    // visible thumbnail on the GUI thread after each stroke commit).
     void NotifyDocumentChanged();
     void SetCurrentPage(std::size_t index);
     [[nodiscard]] std::size_t CurrentPage() const { return currentPage_; }
@@ -156,6 +158,10 @@ private:
     struct Thumbnail {
         QImage image {};
         int width = 0;
+        // Document::PageEpoch the image was rendered for; a mismatch lazily
+        // re-renders this entry only, so a commit on one page no longer
+        // re-rasterizes every visible thumbnail on the next paint.
+        std::uint64_t pageEpoch = 0;
         int height = 0;
         bool valid = false;
     };

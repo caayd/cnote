@@ -59,12 +59,13 @@ struct PageRenderParams {
     float strokeSmoothing = 0.55f;
     float dashLength = 3.0f;
     float dashGap = 2.0f;
-    // Committed-content revision of the document the page belongs to
-    // (CanvasController::Revision).  Every committed mutation bumps it, and
-    // in-place edits that do not (move/transform gestures mid-flight) only
-    // ever touch objects the caller excludes below, so the surface signature
-    // keys on this revision plus a structural fingerprint instead of hashing
-    // every stroke point - O(objects) per paint instead of O(points).
+    // Per-page content epoch (Document::PageEpoch): every committed mutation
+    // of THIS page bumps it, so commits elsewhere never invalidate this
+    // surface.  In-place edits that do not (move/transform gestures
+    // mid-flight) only ever touch objects the caller excludes below, so the
+    // surface signature keys on this epoch plus a structural fingerprint
+    // instead of hashing every stroke point - O(objects) per paint instead
+    // of O(points).
     std::uint64_t contentRevision = 0;
     // Optional lazy PDF page background. When set, pages with a PDF source and
     // no stored raster draw their background from the provider at `scale`.

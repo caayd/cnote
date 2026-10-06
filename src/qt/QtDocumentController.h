@@ -152,7 +152,6 @@ public:
 
     // --- ui::CanvasController --------------------------------------------
     [[nodiscard]] const Document& DocumentRef() const override;
-    [[nodiscard]] std::uint64_t Revision() const override;
     [[nodiscard]] ui::CanvasInputSettings InputSettings() const override { return input_; }
 
     void BeginStroke(std::size_t pageIndex, Vec2 point, float pageScale) override;
@@ -200,7 +199,8 @@ public:
     void CancelLatexEdit();
 
 signals:
-    // A commit changed the shared document (the canvas drops its caches).
+    // A commit changed the shared document (repaint; per-page caches
+    // invalidate through Document::PageEpoch).
     void SessionChanged();
     // The active edit started or ended (overlays show/hide, chrome updates).
     void EditStateChanged();

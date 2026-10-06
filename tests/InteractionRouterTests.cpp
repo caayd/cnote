@@ -92,6 +92,12 @@ public:
 
     std::optional<ui::PageHit> HitTestPage(const QPointF& logical) const override { return hitPage(logical); }
     Vec2 ScreenToPage(const QPointF& logical, bool clampToPage) const override { return screenToPage(logical, clampToPage); }
+    // The router uses this only when HitTestPage missed (pointer between
+    // pages); the mock maps through screenToPage so tests observe the same
+    // coordinates either path produces.
+    Vec2 ScreenToPageOnPage(std::size_t, const QPointF& logical, bool clampToPage) const override {
+        return screenToPage(logical, clampToPage);
+    }
     bool IsPointInCanvas(const QPointF&) const override { return pointInCanvas; }
     bool HasSelection() const override { return hasSelection; }
     bool CursorInteractsWithSelection(const QPointF&) const override { return cursorInteractsWithSelection; }

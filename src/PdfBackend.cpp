@@ -428,6 +428,9 @@ void PdfiumBackend::HydrateProject(Document& document) const {
     }
 
     for (std::size_t pageIndex = 0; pageIndex < document.PageCount(); ++pageIndex) {
+        // Hydration mutates page contents on a document that may already be
+        // attached to a session; keep the page-epoch caches honest.
+        document.TouchPage(pageIndex);
         Page& page = document.PageAt(pageIndex);
         const bool hasValidPdfSource = page.sourcePdfSourceIndex >= 0
             && static_cast<std::size_t>(page.sourcePdfSourceIndex) < openedSources.size()

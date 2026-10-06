@@ -406,7 +406,12 @@ render::PageRenderParams CanvasWidget::RenderParamsFor(const CanvasPageView& vie
     render::PageRenderParams params;
     params.scale = view.scale;
     params.devicePixelRatio = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
-    params.contentRevision = controller_.Revision();
+    // Per-page content epoch: a commit on one page invalidates only its own
+    // cached surface.  The old session-global revision re-rendered every
+    // visible page on the first paint after each stroke commit (a dense
+    // neighbour ~1 s on the GUI thread), which compressed queued pointer
+    // samples into sharp jumps at the next stroke's start.
+    params.contentRevision = controller_.DocumentRef().PageEpoch(view.pageIndex);
     params.strokeSmoothing = controller_.InputSettings().strokeSmoothing;
     params.dashLength = controller_.InputSettings().dashLength;
     params.dashGap = controller_.InputSettings().dashGap;
@@ -431,22 +436,10 @@ const render::PageSurfaceCache* CanvasWidget::FindSurface(
     if (page == surfaces_.end()) {
         return nullptr;
     }
+    const std::uint64_t epoch = controller_.DocumentRef().PageEpoch(pageIndex);
     for (const SurfaceEntry& entry : page->second.entries) {
-        if (entry.scale == scale && entry.devicePixelRatio == devicePixelRatio && entry.cache.valid) {
-            return &entry.cache;
-        }
-    }
-    return nullptr;
-}
-
-render::PageSurfaceCache* CanvasWidget::MutableSurface(
-    std::size_t pageIndex, float scale, float devicePixelRatio) {
-    const auto page = surfaces_.find(pageIndex);
-    if (page == surfaces_.end()) {
-        return nullptr;
-    }
-    for (SurfaceEntry& entry : page->second.entries) {
-        if (entry.scale == scale && entry.devicePixelRatio == devicePixelRatio && entry.cache.valid) {
+        if (entry.pageEpoch == epoch
+            && entry.scale == scale && entry.devicePixelRatio == devicePixelRatio && entry.cache.valid) {
             return &entry.cache;
         }
     }
@@ -458,8 +451,9 @@ const render::PageSurfaceCache* CanvasWidget::NewestSurface(std::size_t pageInde
     if (page == surfaces_.end()) {
         return nullptr;
     }
+    const std::uint64_t epoch = controller_.DocumentRef().PageEpoch(pageIndex);
     for (const SurfaceEntry& entry : page->second.entries) {
-        if (entry.cache.valid && !entry.cache.image.isNull()) {
+        if (entry.pageEpoch == epoch && entry.cache.valid && !entry.cache.image.isNull()) {
             return &entry.cache;
         }
     }
@@ -469,8 +463,17 @@ const render::PageSurfaceCache* CanvasWidget::NewestSurface(std::size_t pageInde
 const render::PageSurfaceCache& CanvasWidget::EnsureSurface(const CanvasPageView& view, const Page& page) {
     PageSurfaces& perPage = surfaces_[view.pageIndex];
     const float devicePixelRatio = RenderParamsFor(view).devicePixelRatio;
+    const std::uint64_t epoch = controller_.DocumentRef().PageEpoch(view.pageIndex);
 
     for (SurfaceEntry& entry : perPage.entries) {
+        // Entries keyed to a different page epoch came from before the page's
+        // last committed mutation (or, after an insert/remove shifted
+        // indices, from the page that previously sat at this index): they are
+        // dead weight and never match, so drop them here.
+        if (entry.pageEpoch != epoch) {
+            entry.cache = render::PageSurfaceCache {};
+            entry.pageEpoch = epoch;
+        }
         if (entry.scale == view.scale && entry.devicePixelRatio == devicePixelRatio) {
             const std::uint64_t before = entry.cache.signature;
             render::EnsurePageSurface(entry.cache, page, RenderParamsFor(view));
@@ -487,7 +490,7 @@ const render::PageSurfaceCache& CanvasWidget::EnsureSurface(const CanvasPageView
     }
 
     ++surfaceScaleMisses_;
-    perPage.entries.insert(perPage.entries.begin(), SurfaceEntry { view.scale, devicePixelRatio, {} });
+    perPage.entries.insert(perPage.entries.begin(), SurfaceEntry { epoch, view.scale, devicePixelRatio, {} });
     if (perPage.entries.size() > kScalesPerPage) {
         perPage.entries.resize(kScalesPerPage);
     }
@@ -2046,6 +2049,14 @@ Vec2 CanvasWidget::ScreenToPage(const QPointF& logical, bool clampToPage) const 
     return ScreenToPage(*view, logical, clampToPage);
 }
 
+Vec2 CanvasWidget::ScreenToPageOnPage(std::size_t pageIndex, const QPointF& logical, bool clampToPage) const {
+    const CanvasPageView view = CalculatePageView(pageIndex);
+    if (!view.valid) {
+        return {};
+    }
+    return ScreenToPage(view, logical, clampToPage);
+}
+
 bool CanvasWidget::IsPointInCanvas(const QPointF& logical) const {
     return VisibleCanvasRect().contains(logical);
 }
@@ -2670,11 +2681,27 @@ void CanvasWidget::CommitStroke() {
     if (hasPending) {
         committed = *pending;
     }
+    // The surface lookup must use the pre-commit epoch: EndStroke mutates the
+    // page and bumps it.  The captured epoch both validates that the entry's
+    // raster is the page's own (indices shift on insert/remove) and keys the
+    // composite fast path.
+    const std::uint64_t epochBeforeCommit = document.PageEpoch(pageIndex);
     controller_.EndStroke();
     ResetStrokeLayer();
     const CanvasPageView view = CalculatePageView(pageIndex);
     const float devicePixelRatio = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
-    render::PageSurfaceCache* cache = MutableSurface(pageIndex, view.scale, devicePixelRatio);
+    SurfaceEntry* entry = nullptr;
+    if (const auto pageSurfaces = surfaces_.find(pageIndex); pageSurfaces != surfaces_.end()) {
+        for (SurfaceEntry& candidate : pageSurfaces->second.entries) {
+            if (candidate.pageEpoch == epochBeforeCommit
+                && candidate.scale == view.scale && candidate.devicePixelRatio == devicePixelRatio
+                && candidate.cache.valid) {
+                entry = &candidate;
+                break;
+            }
+        }
+    }
+    render::PageSurfaceCache* cache = entry != nullptr ? &entry->cache : nullptr;
     // Same raster-resolution arithmetic as render::RenderPageSurface
     // (deviceScale = params.scale * params.devicePixelRatio, then page width *
     // deviceScale); a different float association rounds to 1124 vs 1123 on
@@ -2705,6 +2732,11 @@ void CanvasWidget::CommitStroke() {
         render::PaintStrokePreview(painter, committed, params, 1.0f);
         painter.end();
         cache->signature = render::PageSurfaceSignature(*pendingPage, RenderParamsFor(view));
+        // EndStroke bumped the page epoch; re-stamp so the composited raster
+        // stays the entry for this page instead of being dropped on the next
+        // paint (a full re-render of a dense page would stall the stroke the
+        // user is already drawing).
+        entry->pageEpoch = document.PageEpoch(pageIndex);
         update(view.rect.toAlignedRect());
         NotifyViewportChanged();
         return;

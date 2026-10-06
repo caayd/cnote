@@ -39,6 +39,8 @@ std::size_t PageRemovalCount(const Document& document, std::size_t index, std::s
 
 bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool undo) {
     switch (action.type) {
+    // Object-mutating cases bump the page's content epoch so renderer caches
+    // (page surfaces, sidebar thumbnails) invalidate on undo/redo.
     case HistoryActionType::AddStroke:
     case HistoryActionType::RemoveStroke: {
         if (action.pageIndex >= document.PageCount()) {
@@ -47,6 +49,7 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
         auto& strokes = document.PageAt(action.pageIndex).strokes;
         // Undo AddStroke / redo RemoveStroke remove the committed stroke; the
         // opposite direction reinserts it at its recorded index.
+        document.TouchPage(action.pageIndex);
         const bool remove = undo == (action.type == HistoryActionType::AddStroke);
         if (remove) {
             if (action.index >= strokes.size()) {
@@ -68,6 +71,7 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
             return false;
         }
         Page& page = document.PageAt(action.pageIndex);
+        document.TouchPage(action.pageIndex);
         if (action.type == HistoryActionType::UpdateText) {
             // Undo restores the previous text, redo reapplies the replacement;
             // the object is located by the id that was current in that state.
@@ -101,6 +105,7 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
             return false;
         }
         Page& page = document.PageAt(action.pageIndex);
+        document.TouchPage(action.pageIndex);
         if (action.type == HistoryActionType::UpdateLatex) {
             const std::uint64_t fromId = undo ? action.replacementLatex.id : action.latex.id;
             const auto latexIndex = FindLatexIndexById(page, fromId);
@@ -158,6 +163,9 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
             if (pageIndex >= document.PageCount()) {
                 return false;
             }
+        }
+        for (const std::size_t pageIndex : action.pageIndices) {
+            document.TouchPage(pageIndex);
         }
         for (std::size_t index = 0; index < action.pageIndices.size(); ++index) {
             document.PageAt(action.pageIndices[index]) = targetPages[index];

@@ -131,6 +131,7 @@ public:
     // ui::InteractionHost ---------------------------------------------------
     [[nodiscard]] std::optional<PageHit> HitTestPage(const QPointF& logical) const override;
     [[nodiscard]] Vec2 ScreenToPage(const QPointF& logical, bool clampToPage) const override;
+    [[nodiscard]] Vec2 ScreenToPageOnPage(std::size_t pageIndex, const QPointF& logical, bool clampToPage) const override;
     [[nodiscard]] bool IsPointInCanvas(const QPointF& logical) const override;
     [[nodiscard]] bool HasSelection() const override;
     [[nodiscard]] bool CursorInteractsWithSelection(const QPointF& logical) const override;
@@ -252,6 +253,10 @@ protected:
 
 private:
     struct SurfaceEntry {
+        // Document::PageEpoch the raster was rendered/stamped for.  Page
+        // indices shift on insert/remove, so entries also validate against
+        // the current epoch before a lookup may reuse the raster.
+        std::uint64_t pageEpoch = 0;
         float scale = 0.0f;
         float devicePixelRatio = 1.0f;
         render::PageSurfaceCache cache {};
@@ -340,8 +345,6 @@ private:
     void PaintStrokeTail(QPainter& painter, const Stroke& stroke, const CanvasPageView& view);
 
     [[nodiscard]] render::PageRenderParams RenderParamsFor(const CanvasPageView& view) const;
-    // Mutable cache lookup for incremental stroke commits (same key as FindSurface).
-    render::PageSurfaceCache* MutableSurface(std::size_t pageIndex, float scale, float devicePixelRatio);
     const render::PageSurfaceCache* FindSurface(std::size_t pageIndex, float scale, float devicePixelRatio) const;
     // Prepares the gesture overlay for `pageIndex` (sorted selection index
     // lists, vacated-region patch, per-object rasters for moves) and clears

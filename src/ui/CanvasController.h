@@ -78,11 +78,6 @@ public:
     // Shared model. Valid until the controller is destroyed; the widget treats
     // the returned reference as read-only.
     [[nodiscard]] virtual const Document& DocumentRef() const = 0;
-
-    // Bumped once per committed document change; viewport-only operations do
-    // not bump it. Used to drop stale page caches.
-    [[nodiscard]] virtual std::uint64_t Revision() const = 0;
-
     [[nodiscard]] virtual CanvasInputSettings InputSettings() const = 0;
 
     // Freehand stroke lifecycle. CanvasWidget owns the per-view page scale and

@@ -204,6 +204,11 @@ public:
     // --- geometry ---------------------------------------------------------
     [[nodiscard]] virtual std::optional<PageHit> HitTestPage(const QPointF& logical) const = 0;
     [[nodiscard]] virtual Vec2 ScreenToPage(const QPointF& logical, bool clampToPage) const = 0;
+    // Maps a widget point through a specific page's view; used mid-stroke
+    // when the pointer sits between pages and HitTestPage/ScreenToPage have
+    // no page to convert through (there it would return {0,0} and spike the
+    // stroke to the page origin).
+    [[nodiscard]] virtual Vec2 ScreenToPageOnPage(std::size_t pageIndex, const QPointF& logical, bool clampToPage) const = 0;
     // App::CanvasRect containment (Selection.cpp:1227).
     [[nodiscard]] virtual bool IsPointInCanvas(const QPointF& logical) const = 0;
 
