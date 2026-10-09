@@ -506,6 +506,14 @@ std::size_t QtDocumentController::AddTextObject(std::size_t pageIndex, Vec2 topL
     text.y = topLeft.y;
     text.fontSize = fontSize;
     text.color = input_.objectColor;
+    // Pending style from the text-format popup (CanvasInputSettings): every
+    // attribute the popup exposes seeds the placeholder so the editor opens
+    // already formatted.
+    text.fontFamily = input_.textFontFamily;
+    text.alignment = input_.textAlignment;
+    text.bold = input_.textBold;
+    text.italic = input_.textItalic;
+    text.underline = input_.textUnderline;
     // The placeholder enters the page now (excluded from cached surfaces while
     // it is under edit); bump the epoch so a failed BeginTextEdit still leaves
     // consistent caches.

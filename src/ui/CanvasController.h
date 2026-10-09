@@ -48,6 +48,16 @@ struct CanvasInputSettings {
     float inputSmoothing = 0.3f;    // 0..1 pointer follow factor
     float strokeSmoothing = 0.55f;  // render-time smoothing strength
     std::uint32_t objectColor = 0xFF111827;  // active palette slot; seeds new text/LaTeX objects
+    // Pending style for text objects created before one exists (the Ctrl+W
+    // format popup edits these; AddTextObject seeds them).  textFontSize is the
+    // screen point size at zoom 1 - the creation sites divide it by the canvas
+    // zoom, matching the legacy constant-screen-size rule.
+    TextFontFamily textFontFamily = TextFontFamily::ShantellSans;
+    TextAlignment textAlignment = TextAlignment::Left;
+    float textFontSize = 18.0f;
+    bool textBold = false;
+    bool textItalic = false;
+    bool textUnderline = false;
     float dashLength = 3.0f;  // dotted-stroke dash pattern (settings dash_length/dash_gap)
     float dashGap = 2.0f;
 };

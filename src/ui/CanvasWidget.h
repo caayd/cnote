@@ -199,6 +199,10 @@ public:
     [[nodiscard]] bool EditOverlayActive() const;
 
     [[nodiscard]] QTextEdit* TextEditor() const { return textEditor_; }
+    // Page-to-screen scale the live text editor was seeded with (the page
+    // view's zoom at overlay open); the shell converts between the model's
+    // page-unit font sizes and the editor's point sizes with it.
+    [[nodiscard]] float TextEditScale() const { return textEditScale_; }
     [[nodiscard]] QPlainTextEdit* LatexEditor() const { return latexEditor_; }
     // Applies a style to the text overlay's current selection.
     void ApplyTextFormatToSelection(const PageTextStyle& style);

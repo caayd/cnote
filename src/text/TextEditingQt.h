@@ -18,8 +18,13 @@ class QTextDocument;
 
 namespace cnote::text {
 
-// --- style conversion (authoritative for live editing and rendering) --------
+// The stored font size is pixel-like at the 96-DPI reference scale; Qt wants
+// points.  Page zoom and DPR are applied by the callers, never baked into the
+// model.  Exported so callers that reason in the popup's point units (the
+// text-format popup's pending size) can convert both ways.
+inline constexpr float kPointsPerPageUnit = 72.0f / 96.0f;
 
+// --- style conversion (authoritative for live editing and rendering) --------
 // The Qt family name for a model font family; the single mapping shared by
 // FontForStyle and the toolbar's format application.  The bundled families
 // (Shantell Sans) are registered with the application font database on first

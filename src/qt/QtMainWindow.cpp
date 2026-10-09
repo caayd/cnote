@@ -145,15 +145,13 @@ PageTextStyle TextStyleFromEditor(const QTextEdit* editor, TextAlignment& alignm
     } else {
         alignment = TextAlignment::Left;
     }
+    // fontFamily + the weight flags come from the shared capture mapping (its
+    // page-unit fontSize is overwritten below: the popup shows the editor's
+    // screen point size, same as the legacy size box).
+    style = text::StyleForCharFormat(format, style, 1.0f);
     if (format.hasProperty(QTextFormat::FontPointSize)) {
         style.fontSize = static_cast<float>(format.fontPointSize());
     }
-    if (format.hasProperty(QTextFormat::ForegroundBrush)) {
-        style.color = static_cast<std::uint32_t>(format.foreground().color().rgba());
-    }
-    style.bold = format.fontWeight() >= QFont::Bold;
-    style.italic = format.fontItalic();
-    style.underline = format.fontUnderline();
     return style;
 }
 
@@ -420,40 +418,79 @@ void QtMainWindow::CreateChrome() {
         settingsStore_.Save(settings_);
         UpdateChrome();
     });
-    connect(toolbar_, &ui::ToolbarWidget::TextBoldToggleRequested, this, [this]() {
-        ApplyTextFormat([this](QTextCharFormat& format) {
-            format.setFontWeight(format.fontWeight() >= QFont::Bold ? QFont::Normal : QFont::Bold);
-        });
+    // Text-format popup (Ctrl+W): while a text edit is open the commands apply
+    // to the editor's char format and the result is mirrored into the pending
+    // style; without an editor they edit settings_ directly.  Either way the
+    // pending style persists like the other tools' settings.
+    const auto persistPendingTextStyle = [this]() {
+        SyncPendingTextStyle();
+        ApplyPendingTextStyle();
+        settingsStore_.Save(settings_);
+        UpdateChrome();
+    };
+    connect(toolbar_, &ui::ToolbarWidget::TextBoldToggleRequested, this, [this, persistPendingTextStyle]() {
+        if (controller_.EditingText()) {
+            ApplyTextFormat([](QTextCharFormat& format) {
+                format.setFontWeight(format.fontWeight() >= QFont::Bold ? QFont::Normal : QFont::Bold);
+            });
+        } else {
+            settings_.textBold = !settings_.textBold;
+        }
+        persistPendingTextStyle();
     });
-    connect(toolbar_, &ui::ToolbarWidget::TextItalicToggleRequested, this, [this]() {
-        ApplyTextFormat([](QTextCharFormat& format) { format.setFontItalic(!format.fontItalic()); });
+    connect(toolbar_, &ui::ToolbarWidget::TextItalicToggleRequested, this, [this, persistPendingTextStyle]() {
+        if (controller_.EditingText()) {
+            ApplyTextFormat([](QTextCharFormat& format) { format.setFontItalic(!format.fontItalic()); });
+        } else {
+            settings_.textItalic = !settings_.textItalic;
+        }
+        persistPendingTextStyle();
     });
-    connect(toolbar_, &ui::ToolbarWidget::TextUnderlineToggleRequested, this, [this]() {
-        ApplyTextFormat([](QTextCharFormat& format) { format.setFontUnderline(!format.fontUnderline()); });
+    connect(toolbar_, &ui::ToolbarWidget::TextUnderlineToggleRequested, this, [this, persistPendingTextStyle]() {
+        if (controller_.EditingText()) {
+            ApplyTextFormat([](QTextCharFormat& format) { format.setFontUnderline(!format.fontUnderline()); });
+        } else {
+            settings_.textUnderline = !settings_.textUnderline;
+        }
+        persistPendingTextStyle();
     });
-    connect(toolbar_, &ui::ToolbarWidget::TextAlignCycleRequested, this, [this]() {
+    connect(toolbar_, &ui::ToolbarWidget::TextAlignCycleRequested, this, [this, persistPendingTextStyle]() {
         QTextEdit* editor = canvas_->TextEditor();
-        if (editor == nullptr) {
+        if (editor != nullptr && controller_.EditingText()) {
+            const Qt::Alignment current = editor->alignment();
+            const Qt::Alignment next = (current & Qt::AlignHCenter)
+                ? Qt::AlignRight
+                : ((current & Qt::AlignRight) ? Qt::AlignLeft : Qt::AlignHCenter);
+            editor->setAlignment(next);
+        } else {
+            settings_.textAlignment = settings_.textAlignment == TextAlignment::Left
+                ? TextAlignment::Center
+                : (settings_.textAlignment == TextAlignment::Center ? TextAlignment::Right : TextAlignment::Left);
+        }
+        persistPendingTextStyle();
+    });
+    connect(toolbar_, &ui::ToolbarWidget::TextSizeChanged, this, [this, persistPendingTextStyle](float size) {
+        if (size <= 0.0f) {
             return;
         }
-        const Qt::Alignment current = editor->alignment();
-        const Qt::Alignment next = (current & Qt::AlignHCenter)
-            ? Qt::AlignRight
-            : ((current & Qt::AlignRight) ? Qt::AlignLeft : Qt::AlignHCenter);
-        editor->setAlignment(next);
-        UpdateChrome();
-    });
-    connect(toolbar_, &ui::ToolbarWidget::TextSizeChanged, this, [this](float size) {
-        ApplyTextFormat([size](QTextCharFormat& format) {
-            if (size > 0.0f) {
+        // The popup's size is a screen point value; store it unchanged so the
+        // box round-trips the typed/read number exactly.
+        settings_.textFontSize = size;
+        if (controller_.EditingText()) {
+            ApplyTextFormat([size](QTextCharFormat& format) {
                 format.setFontPointSize(size);
-            }
-        });
+            });
+        }
+        persistPendingTextStyle();
     });
-    connect(toolbar_, &ui::ToolbarWidget::TextFontFamilyChanged, this, [this](TextFontFamily family) {
-        ApplyTextFormat([family](QTextCharFormat& format) {
-            format.setFontFamilies({ text::TextFontFamilyName(family) });
-        });
+    connect(toolbar_, &ui::ToolbarWidget::TextFontFamilyChanged, this, [this, persistPendingTextStyle](TextFontFamily family) {
+        settings_.textFontFamily = family;
+        if (controller_.EditingText()) {
+            ApplyTextFormat([family](QTextCharFormat& format) {
+                format.setFontFamilies({ text::TextFontFamilyName(family) });
+            });
+        }
+        persistPendingTextStyle();
     });
     connect(toolbar_, &ui::ToolbarWidget::ToolbarGeometryChanged, this, [this]() { UpdateChromeGeometry(); });
     connect(toolbar_, &ui::ToolbarWidget::RevealProgressChanged, this, [this](qreal) { UpdateChromeGeometry(); });
@@ -513,15 +550,45 @@ void QtMainWindow::ApplyTextFormat(const std::function<void(QTextCharFormat&)>& 
     UpdateChrome();
 }
 
+void QtMainWindow::SyncPendingTextStyle() {
+    QTextEdit* editor = canvas_ != nullptr ? canvas_->TextEditor() : nullptr;
+    if (editor == nullptr || !controller_.EditingText()) {
+        return;
+    }
+    // The editor's current char format is the last-applied style; the pending
+    // popup state mirrors it so the next created text inherits it (the per-tool
+    // persistence pattern: last use wins).  Color is deliberately not part of
+    // the pending style - new objects take the active palette slot.
+    TextAlignment alignment = TextAlignment::Left;
+    const PageTextStyle style = TextStyleFromEditor(editor, alignment);
+    settings_.textFontSize = style.fontSize;
+    settings_.textFontFamily = style.fontFamily;
+    settings_.textBold = style.bold;
+    settings_.textItalic = style.italic;
+    settings_.textUnderline = style.underline;
+    settings_.textAlignment = alignment;
+}
+
+void QtMainWindow::ApplyPendingTextStyle() {
+    ui::CanvasInputSettings input = controller_.InputSettings();
+    input.textFontFamily = settings_.textFontFamily;
+    input.textAlignment = settings_.textAlignment;
+    input.textFontSize = settings_.textFontSize;
+    input.textBold = settings_.textBold;
+    input.textItalic = settings_.textItalic;
+    input.textUnderline = settings_.textUnderline;
+    controller_.SetInputSettings(input);
+}
+
 void QtMainWindow::ApplySettingsToShell() {
-    controller_.SetInputSettings(ui::CanvasInputSettings {
-        settings_.inputSpacing,
-        settings_.inputSmoothing,
-        settings_.strokeSmoothing,
-        0xFF111827,
-        settings_.dashLength,
-        settings_.dashGap,
-    });
+    ui::CanvasInputSettings input {};
+    input.inputSpacing = settings_.inputSpacing;
+    input.inputSmoothing = settings_.inputSmoothing;
+    input.strokeSmoothing = settings_.strokeSmoothing;
+    input.dashLength = settings_.dashLength;
+    input.dashGap = settings_.dashGap;
+    controller_.SetInputSettings(input);
+    ApplyPendingTextStyle();
     ApplyStrokeStyle();
     ApplyToolToCanvas();
     if (toolbar_ != nullptr) {
@@ -735,6 +802,18 @@ void QtMainWindow::ToggleQuickPopup() {
             ? QRectF(canvas_->mapTo(this, editor->pos()), QSizeF(editor->size()))
             : QRectF();
         toolbar_->ShowTextFormatPopup(editRect);
+        return;
+    }
+    // The Text tool owns Ctrl+W before any edit exists: the same text-format
+    // popup edits the pending style that AddTextObject seeds.  Anchored at the
+    // cursor like the brush popup (there is no edit rect yet).
+    if (activeTool_ == settings::Tool::Text) {
+        if (toolbar_->TextFormatPopupVisible()) {
+            toolbar_->HideTextFormatPopup();
+            return;
+        }
+        const QPointF anchor = QuickPopupCursorAnchor();
+        toolbar_->ShowTextFormatPopup(QRectF(anchor, anchor));
         return;
     }
     if (activeTool_ != settings::Tool::Draw && activeTool_ != settings::Tool::Erase) {
@@ -1192,8 +1271,11 @@ void QtMainWindow::AddTextObject() {
     const Vec2 point = hit.has_value()
         ? canvas_->ScreenToPage(*hit, canvas_->rect().center(), false)
         : Vec2 { 60.0f, 80.0f };
-    // Same creation zoom scaling as the text tool (CanvasWidget::CreateTextAt).
-    controller_.AddTextObject(pageIndex, point, 24.0f / std::max(0.1f, canvas_->Zoom()));
+    // Same creation zoom scaling as the text tool (CanvasWidget::CreateTextAt):
+    // the pending popup size is a point value at zoom 1.
+    const float pageFontSize = std::max(1.0f, settings_.textFontSize)
+        / (text::kPointsPerPageUnit * std::max(0.1f, canvas_->Zoom()));
+    controller_.AddTextObject(pageIndex, point, pageFontSize);
     canvas_->SyncEditOverlay();
     UpdateChrome();
 }
@@ -1565,6 +1647,10 @@ bool QtMainWindow::eventFilter(QObject* watched, QEvent* event) {
                 ApplyTextFormat([](QTextCharFormat& format) {
                     format.setFontWeight(format.fontWeight() >= QFont::Bold ? QFont::Normal : QFont::Bold);
                 });
+                // Same last-use-wins rule as the popup toggles.
+                SyncPendingTextStyle();
+                ApplyPendingTextStyle();
+                settingsStore_.Save(settings_);
                 event->accept();
                 return true;
             }
@@ -1609,13 +1695,25 @@ void QtMainWindow::UpdateChrome() {
         toolbar_->SetMaximized(IsWindowMaximized());
         toolbar_->SetPageScale(canvas_ != nullptr ? canvas_->Zoom() : 1.0);
         toolbar_->SetColorIndex(settings_.colorIndex);
-        toolbar_->SetTextFormatAvailable(controller_.EditingText());
+        // The popup belongs to the text tool as a whole now: while a text edit
+        // is open it shows that editor's format, otherwise the pending style
+        // the next created text will inherit.
+        toolbar_->SetTextFormatAvailable(controller_.EditingText() || activeTool_ == settings::Tool::Text);
         if (controller_.EditingText()) {
             TextAlignment alignment = TextAlignment::Left;
             const PageTextStyle style = TextStyleFromEditor(canvas_ != nullptr ? canvas_->TextEditor() : nullptr, alignment);
             toolbar_->SetTextFormatState(style, alignment);
         } else {
-            toolbar_->SetTextFormatState(std::nullopt, TextAlignment::Left);
+            toolbar_->SetTextFormatState(
+                PageTextStyle {
+                    settings_.textFontSize,
+                    0xFF111827U,
+                    settings_.textFontFamily,
+                    settings_.textBold,
+                    settings_.textItalic,
+                    settings_.textUnderline,
+                },
+                settings_.textAlignment);
         }
     }
     // The overlay editors are created lazily by the canvas; their Ctrl+B

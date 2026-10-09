@@ -84,7 +84,7 @@ band there never draws the in-client window buttons.
 - `Ctrl+O` open
 - `Ctrl+S` save `.cnote`
 - `Ctrl+B` toggle PDF sidebar
-- `Ctrl+W` quick popup: brush size for pen tools, text formatting while editing text
+- `Ctrl+W` quick popup: brush size for pen tools, text formatting for the Text tool and while editing text
 - `Enter` inserts a new line while editing text
 - `Ctrl+Enter` commits the active text edit
 - `Escape` cancels the active text edit

@@ -3167,9 +3167,14 @@ void CanvasWidget::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) {
 void CanvasWidget::CreateTextAt(std::size_t pageIndex, Vec2 pagePoint) {
     // Reference creation zoom scaling (TextEditing.cpp, commit 2a76aea): the
     // page-space font size divides by the zoom so new text lands at a constant
-    // on-screen size whatever the viewport is.  24 page units at 100% keeps
-    // the current default; the floor matches the legacy max(0.1, zoom).
-    controller_.AddTextObject(pageIndex, pagePoint, 24.0f / std::max(0.1f, zoom_));
+    // on-screen size whatever the viewport is.  The pending size is the
+    // text-format popup's point value at zoom 1 (input_.textFontSize), so the
+    // page-unit size is points / (kPointsPerPageUnit * zoom); the floor matches
+    // the legacy max(0.1, zoom).
+    const ui::CanvasInputSettings input = controller_.InputSettings();
+    const float pageFontSize = std::max(1.0f, input.textFontSize)
+        / (text::kPointsPerPageUnit * std::max(0.1f, zoom_));
+    controller_.AddTextObject(pageIndex, pagePoint, pageFontSize);
     SyncEditOverlay();
 }
 

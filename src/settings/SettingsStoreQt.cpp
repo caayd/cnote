@@ -240,6 +240,61 @@ std::optional<Tool> ParseToolConfigName(std::string_view name) {
     return std::nullopt;
 }
 
+const char* TextFontFamilyConfigName(TextFontFamily family) {
+    switch (family) {
+    case TextFontFamily::Serif:
+        return "serif";
+    case TextFontFamily::Monospace:
+        return "monospace";
+    case TextFontFamily::ShantellSans:
+        return "shantell_sans";
+    case TextFontFamily::Sans:
+    default:
+        return "sans";
+    }
+}
+
+std::optional<TextFontFamily> ParseTextFontFamilyConfigName(std::string_view name) {
+    if (name == "serif") {
+        return TextFontFamily::Serif;
+    }
+    if (name == "monospace") {
+        return TextFontFamily::Monospace;
+    }
+    if (name == "shantell_sans") {
+        return TextFontFamily::ShantellSans;
+    }
+    if (name == "sans") {
+        return TextFontFamily::Sans;
+    }
+    return std::nullopt;
+}
+
+const char* TextAlignmentConfigName(TextAlignment alignment) {
+    switch (alignment) {
+    case TextAlignment::Center:
+        return "center";
+    case TextAlignment::Right:
+        return "right";
+    case TextAlignment::Left:
+    default:
+        return "left";
+    }
+}
+
+std::optional<TextAlignment> ParseTextAlignmentConfigName(std::string_view name) {
+    if (name == "center") {
+        return TextAlignment::Center;
+    }
+    if (name == "right") {
+        return TextAlignment::Right;
+    }
+    if (name == "left") {
+        return TextAlignment::Left;
+    }
+    return std::nullopt;
+}
+
 bool EqualPaletteNames(std::u16string_view left, std::u16string_view right) {
     if (left.size() != right.size()) {
         return false;
@@ -643,6 +698,48 @@ Settings SettingsStoreQt::ParseText(std::string_view text) {
             continue;
         }
 
+        if (key == "text_font_family") {
+            if (const auto parsed = ParseTextFontFamilyConfigName(value); parsed.has_value()) {
+                settings.textFontFamily = *parsed;
+            }
+            continue;
+        }
+
+        if (key == "text_bold") {
+            if (const auto parsed = ParseUnsignedInt(value); parsed.has_value()) {
+                settings.textBold = *parsed != 0U;
+            }
+            continue;
+        }
+
+        if (key == "text_italic") {
+            if (const auto parsed = ParseUnsignedInt(value); parsed.has_value()) {
+                settings.textItalic = *parsed != 0U;
+            }
+            continue;
+        }
+
+        if (key == "text_underline") {
+            if (const auto parsed = ParseUnsignedInt(value); parsed.has_value()) {
+                settings.textUnderline = *parsed != 0U;
+            }
+            continue;
+        }
+
+        if (key == "text_alignment") {
+            if (const auto parsed = ParseTextAlignmentConfigName(value); parsed.has_value()) {
+                settings.textAlignment = *parsed;
+            }
+            continue;
+        }
+
+        if (key == "text_font_size") {
+            if (const auto parsed = ParseFloat(value); parsed.has_value()) {
+                settings.textFontSize = std::clamp(*parsed, 4.0f, 512.0f);
+            }
+            continue;
+        }
+
         if (key == "draw_cursor_size") {
             if (const auto parsed = ParseFloat(value); parsed.has_value()) {
                 settings.drawCursorSize = std::clamp(*parsed, 4.0f, 24.0f);
@@ -857,6 +954,12 @@ std::string SettingsStoreQt::Serialize(const Settings& settings) {
     output << "erase_brush_size=" << settings.eraseBrushSize << '\n';
     output << "quick_size_slider_max=" << settings.quickSizeSliderMax << '\n';
     output << "brush_size_presets=" << FormatBrushSizePresets(settings.brushSizePresets) << '\n';
+    output << "text_font_family=" << TextFontFamilyConfigName(settings.textFontFamily) << '\n';
+    output << "text_bold=" << (settings.textBold ? 1 : 0) << '\n';
+    output << "text_italic=" << (settings.textItalic ? 1 : 0) << '\n';
+    output << "text_underline=" << (settings.textUnderline ? 1 : 0) << '\n';
+    output << "text_alignment=" << TextAlignmentConfigName(settings.textAlignment) << '\n';
+    output << "text_font_size=" << settings.textFontSize << '\n';
     output << "draw_cursor_kind=" << DrawCursorKindConfigName(settings.drawCursorKind) << '\n';
     output << "draw_cursor_size=" << settings.drawCursorSize << '\n';
     output << "input_smoothing=" << settings.inputSmoothing << '\n';

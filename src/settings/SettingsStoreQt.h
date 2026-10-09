@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Document.h"
 #include "settings/KeyBindingQt.h"
 
 #include <QKeySequence>
@@ -84,6 +85,17 @@ struct Settings {
     float eraseBrushSize = 3.0f;
     float quickSizeSliderMax = 20.0f;
     std::vector<float> brushSizePresets {};
+    // The text tool's pending style: the Ctrl+W text-format popup edits these
+    // before a text object exists and AddTextObject seeds them, mirroring how
+    // the brush sizes persist per tool.  textFontSize is the on-screen point
+    // size at zoom 1; creation divides it by zoom (legacy zoom-relative rule)
+    // so new text lands at a constant screen size.
+    TextFontFamily textFontFamily = TextFontFamily::ShantellSans;
+    bool textBold = false;
+    bool textItalic = false;
+    bool textUnderline = false;
+    TextAlignment textAlignment = TextAlignment::Left;
+    float textFontSize = 18.0f;
     DrawCursorKind drawCursorKind = DrawCursorKind::Dot;
     float drawCursorSize = 8.0f;
     float inputSpacing = 0.85f;

@@ -358,22 +358,33 @@ void QuickActionsFireEverywhere() {
         }
     }
 
-    // Ctrl+W (brush quick popup) belongs to the pen tools; a non-pen tool is
-    // inert, exactly like the reference IsToolbarBrushTool gate.
+    // Ctrl+W is context-sensitive: the brush quick popup for the pen tools,
+    // the text-format popup for the Text tool (pre-placement pending style),
+    // inert for the rest - the reference IsToolbarBrushTool gate extended by
+    // the text tool's pending-format branch.
     for (const cnote::settings::Tool tool : tools) {
-        const bool brushTool = tool == cnote::settings::Tool::Draw || tool == cnote::settings::Tool::Erase;
         for (const bool toolbarFocus : { false, true }) {
             Harness harness;
             SelectTool(harness, tool);
+            // Note: there is no Latex tool button (ControlForTool maps Latex to
+            // TextTool), so expectations follow the tool actually selected.
+            const cnote::settings::Tool active = harness.ActiveTool();
+            const bool brushTool = active == cnote::settings::Tool::Draw || active == cnote::settings::Tool::Erase;
+            const bool textTool = active == cnote::settings::Tool::Text;
             toolbarFocus ? harness.FocusToolbar() : harness.FocusCanvas();
             const bool before = harness.toolbar->QuickSizePopupVisible();
             harness.Press(Qt::Key_W, Qt::ControlModifier);
             const bool changed = harness.toolbar->QuickSizePopupVisible() != before;
-            std::printf("Ctrl+W tool=%s focus=%s -> quick=%d (brush=%d)\n",
+            const bool textPopup = harness.toolbar->TextFormatPopupVisible();
+            std::printf("Ctrl+W tool=%s focus=%s -> quick=%d textFormat=%d (brush=%d)\n",
                 ToolName(tool), toolbarFocus ? "toolbar" : "canvas",
-                harness.toolbar->QuickSizePopupVisible() ? 1 : 0, brushTool ? 1 : 0);
+                harness.toolbar->QuickSizePopupVisible() ? 1 : 0,
+                textPopup ? 1 : 0, brushTool ? 1 : 0);
             Check(changed == brushTool, std::string("Ctrl+W ") + (brushTool ? "fires" : "is inert")
                     + std::string(" with ") + ToolName(tool)
+                    + (toolbarFocus ? " from toolbar focus" : " from canvas focus"));
+            Check(textPopup == textTool, std::string("Ctrl+W ") + (textTool ? "opens" : "skips")
+                    + " the text-format popup with " + ToolName(tool)
                     + (toolbarFocus ? " from toolbar focus" : " from canvas focus"));
         }
     }
@@ -684,6 +695,59 @@ void RedirectSettingsStore() {
 #endif
 }
 
+void PendingTextFormatSeedsNewObjects() {
+    // Ctrl+W on the Text tool (before any edit exists) edits the pending
+    // style: the popup's toggles persist into settings_ and AddTextObject
+    // seeds them on the created object.
+    Harness harness;
+    SelectTool(harness, cnote::settings::Tool::Text);
+    harness.FocusCanvas();
+    harness.Press(Qt::Key_W, Qt::ControlModifier);
+    QApplication::processEvents();
+    Check(harness.toolbar->TextFormatPopupVisible(),
+        "Ctrl+W opens the text-format popup before placement");
+
+    emit harness.toolbar->TextBoldToggleRequested();
+    emit harness.toolbar->TextAlignCycleRequested();
+    emit harness.toolbar->TextFontFamilyChanged(cnote::TextFontFamily::Serif);
+    QApplication::processEvents();
+
+    harness.window->AddTextObject();
+    QApplication::processEvents();
+
+    const cnote::PageText* object = harness.window->Controller().EditingTextObject();
+    Check(object != nullptr, "AddTextObject leaves the editor open on the new object");
+    if (object != nullptr) {
+        std::printf("created text: bold=%d align=%d family=%d\n",
+            object->bold ? 1 : 0, static_cast<int>(object->alignment),
+            static_cast<int>(object->fontFamily));
+        Check(object->bold, "the pending bold flag seeds the created text");
+        Check(object->alignment == cnote::TextAlignment::Center,
+            "the pending alignment seeds the created text");
+        Check(object->fontFamily == cnote::TextFontFamily::Serif,
+            "the pending font family seeds the created text");
+    }
+    harness.canvas->CommitActiveEdit();
+    QApplication::processEvents();
+
+    // A fresh window reloads the persisted pending style (same channel the
+    // brush tools persist through).
+    {
+        Harness second;
+        const cnote::settings::Settings& reloaded = second.toolbar->Settings();
+        Check(reloaded.textBold
+                && reloaded.textAlignment == cnote::TextAlignment::Center
+                && reloaded.textFontFamily == cnote::TextFontFamily::Serif,
+            "the pending text style persists across sessions");
+        // Restore the defaults so later checks run against the baseline.
+        emit second.toolbar->TextBoldToggleRequested();
+        emit second.toolbar->TextAlignCycleRequested();
+        emit second.toolbar->TextAlignCycleRequested();
+        emit second.toolbar->TextFontFamilyChanged(cnote::TextFontFamily::ShantellSans);
+        QApplication::processEvents();
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -697,6 +761,7 @@ int main(int argc, char** argv) {
     PageNavigationIsGatedWhileEditing();
     QuickActionsFireEverywhere();
     QuickPopupIsTextFormattingWhileEditing();
+    PendingTextFormatSeedsNewObjects();
     EditorKeepsCtrlBWhileEditingText();
     SelectionEnablesCopyAndCutImmediately();
     ZoomInKeysAreNotDead();

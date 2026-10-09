@@ -148,6 +148,12 @@ private:
     // Applies a mutation to the active text editor's char format (the toolbar's
     // format commands; no-op unless a text edit is open).
     void ApplyTextFormat(const std::function<void(QTextCharFormat&)>& apply);
+    // Pending text style (the Ctrl+W popup's pre-placement state): copies the
+    // open editor's format into settings_ after a format command so the next
+    // text object inherits the last-used style, and pushes settings_ into the
+    // controller's input state so AddTextObject can seed it.
+    void SyncPendingTextStyle();
+    void ApplyPendingTextStyle();
     void ApplyToolToCanvas();
     void ApplyStrokeStyle();
     void ResetView();

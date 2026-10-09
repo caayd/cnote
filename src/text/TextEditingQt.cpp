@@ -21,10 +21,9 @@ namespace cnote::text {
 
 namespace {
 
-// The stored font size is pixel-like at the 96-DPI reference scale; Qt wants
-// points. Page zoom and DPR are applied by the caller, never baked in here.
-constexpr float kReferenceDpi = 96.0f;
-constexpr float kPointsPerPixel = 72.0f / kReferenceDpi;
+// Points-per-page-unit lives in the header (kPointsPerPageUnit); callers like
+// CanvasWidget convert the pending popup size with the same factor.
+constexpr float kPointsPerPixel = kPointsPerPageUnit;
 
 PageTextStyle DefaultStyleFor(const PageText& text) {
     return {
