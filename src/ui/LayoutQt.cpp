@@ -302,15 +302,14 @@ QRectF QuickSizePopupBounds(const QuickSizePopupLayout& layout) {
     return layout.panelRect.united(layout.previewRect).adjusted(-3.0, -3.0, 3.0, 3.0);  // Layout.cpp:288
 }
 
-TextFormatPopupLayout BuildTextFormatPopupLayout(const QRectF& canvasRect, const QRectF& editRect, bool fontMenuOpen) {
+TextFormatPopupLayout BuildTextFormatPopupLayout(const QRectF& canvasRect, const QRectF& editRect, bool fontMenuOpen, bool sizeMenuOpen) {
     TextFormatPopupLayout layout;
     constexpr qreal panelPadding = 8.0;        // Layout.cpp:327
     constexpr qreal buttonSize = 28.0;         // Layout.cpp:328
-    constexpr qreal textSizeInputWidth = 58.0; // Layout.cpp:329
+    constexpr qreal dropdownWidth = 118.0;     // Layout.cpp:331 (shared by both dropdowns)
     constexpr qreal itemGap = 6.0;             // Layout.cpp:330
-    constexpr qreal dropdownWidth = 118.0;     // Layout.cpp:331
     constexpr qreal panelHeight = 44.0;        // Layout.cpp:332
-    const qreal panelWidth = (panelPadding * 2.0) + (buttonSize * 4.0) + textSizeInputWidth + (itemGap * 5.0) + dropdownWidth;
+    const qreal panelWidth = (panelPadding * 2.0) + (buttonSize * 4.0) + dropdownWidth + (itemGap * 5.0) + dropdownWidth;
     constexpr qreal panelGap = 10.0;           // Layout.cpp:334
     constexpr qreal canvasPadding = 8.0;       // Layout.cpp:335
     qreal left = editRect.left();
@@ -338,31 +337,40 @@ TextFormatPopupLayout BuildTextFormatPopupLayout(const QRectF& canvasRect, const
     advanceButton(layout.boldRect);
     advanceButton(layout.italicRect);
     advanceButton(layout.underlineRect);
-    layout.textSizeInputRect = MakeRect(itemLeft, itemTop, itemLeft + textSizeInputWidth, itemTop + buttonSize);
-    itemLeft = layout.textSizeInputRect.right() + itemGap;
+    layout.sizeDropdownRect = MakeRect(itemLeft, itemTop, itemLeft + dropdownWidth, itemTop + buttonSize);
+    itemLeft = layout.sizeDropdownRect.right() + itemGap;
     layout.fontDropdownRect = MakeRect(itemLeft, itemTop, itemLeft + dropdownWidth, itemTop + buttonSize);
 
-    if (fontMenuOpen) {
+    // Shared dropdown-menu geometry (Layout.cpp:366-368): option rows below the
+    // panel when that does not cover the edit rect, above it otherwise.
+    const auto buildMenu = [&](const QRectF& anchorRect, std::size_t optionCount, QRectF* menuRect, QRectF* optionRects) {
         constexpr qreal optionHeight = 28.0;   // Layout.cpp:366
         constexpr qreal menuPadding = 6.0;     // Layout.cpp:367
         constexpr qreal menuGap = 6.0;         // Layout.cpp:368
-        const qreal menuHeight = (menuPadding * 2.0) + (optionHeight * static_cast<qreal>(layout.fontOptionRects.size()));
+        const qreal menuHeight = (menuPadding * 2.0) + (optionHeight * static_cast<qreal>(optionCount));
         const qreal maxMenuTop = std::max(minTop, canvasRect.bottom() - menuHeight - canvasPadding);
         const qreal belowTop = std::clamp(layout.panelRect.bottom() + menuGap, minTop, maxMenuTop);
         const qreal aboveTop = std::clamp(layout.panelRect.top() - menuHeight - menuGap, minTop, maxMenuTop);
-        const QRectF belowRect = MakeRect(layout.fontDropdownRect.left(), belowTop, layout.fontDropdownRect.right(), belowTop + menuHeight);
+        const QRectF belowRect = MakeRect(anchorRect.left(), belowTop, anchorRect.right(), belowTop + menuHeight);
         const bool canUseBelow = !RectsOverlap(belowRect, editRect)
             && belowRect.bottom() <= canvasRect.bottom() - canvasPadding;
         const qreal menuTop = canUseBelow ? belowTop : aboveTop;
-        layout.fontMenuRect = MakeRect(layout.fontDropdownRect.left(), menuTop, layout.fontDropdownRect.right(), menuTop + menuHeight);
-        for (std::size_t index = 0; index < layout.fontOptionRects.size(); ++index) {
-            const qreal optionTop = layout.fontMenuRect.top() + menuPadding + (static_cast<qreal>(index) * optionHeight);
-            layout.fontOptionRects[index] = MakeRect(
-                layout.fontMenuRect.left() + menuPadding,
+        *menuRect = MakeRect(anchorRect.left(), menuTop, anchorRect.right(), menuTop + menuHeight);
+        for (std::size_t index = 0; index < optionCount; ++index) {
+            const qreal optionTop = menuRect->top() + menuPadding + (static_cast<qreal>(index) * optionHeight);
+            optionRects[index] = MakeRect(
+                menuRect->left() + menuPadding,
                 optionTop,
-                layout.fontMenuRect.right() - menuPadding,
+                menuRect->right() - menuPadding,
                 optionTop + optionHeight);
         }
+    };
+
+    if (fontMenuOpen) {
+        buildMenu(layout.fontDropdownRect, layout.fontOptionRects.size(), &layout.fontMenuRect, layout.fontOptionRects.data());
+    }
+    if (sizeMenuOpen) {
+        buildMenu(layout.sizeDropdownRect, layout.sizeOptionRects.size(), &layout.sizeMenuRect, layout.sizeOptionRects.data());
     }
 
     return layout;
@@ -372,6 +380,9 @@ QRectF TextFormatPopupBounds(const TextFormatPopupLayout& layout) {
     QRectF bounds = layout.panelRect;
     if (HasRect(layout.fontMenuRect)) {
         bounds = bounds.united(layout.fontMenuRect);
+    }
+    if (HasRect(layout.sizeMenuRect)) {
+        bounds = bounds.united(layout.sizeMenuRect);
     }
     return bounds.adjusted(-3.0, -3.0, 3.0, 3.0);  // Layout.cpp:418
 }

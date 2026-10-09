@@ -483,12 +483,10 @@ public:
         update();
     }
 
-    void SetState(const std::optional<PageTextStyle>& style, TextAlignment alignment) {
+    void SetState(const std::optional<PageTextStyle>& style, TextAlignment alignment, std::size_t sizePreset) {
         style_ = style.value_or(PageTextStyle {});
         alignment_ = alignment;
-        if (!sizeEditing_) {
-            sizeText_ = FormatFontSizeValue(style_.fontSize);
-        }
+        sizePreset_ = sizePreset;
         update();
     }
 
@@ -496,8 +494,13 @@ public:
         fontMenuOpen_ = open;
         update();
     }
+    void SetSizeMenuOpen(bool open) {
+        sizeMenuOpen_ = open;
+        update();
+    }
 
     [[nodiscard]] bool FontMenuOpen() const { return fontMenuOpen_; }
+    [[nodiscard]] bool SizeMenuOpen() const { return sizeMenuOpen_; }
     [[nodiscard]] std::optional<TextFontFamily> HoveredFontOption() const { return hoveredFontOption_; }
 
 protected:
@@ -520,19 +523,13 @@ protected:
         drawButton(layout_.italicRect, QStringLiteral("text/italics.svg"), QStringLiteral("I"), style_.italic);
         drawButton(layout_.underlineRect, QStringLiteral("text/underline.svg"), QStringLiteral("U"), style_.underline);
 
-        const QRectF sizeRect = layout_.textSizeInputRect.translated(origin);
-        ChromeFillRoundedRect(painter, sizeRect, ChromeColor(kChromeFormatButtonFill));
-        ChromeStrokeRoundedRect(painter, sizeRect, ChromeColor(sizeEditing_ ? kChromeAccent : kChromeFormatButtonBorder), 1.0);
+        const QRectF sizeDropdown = layout_.sizeDropdownRect.translated(origin);
+        ChromeFillRoundedRect(painter, sizeDropdown, ChromeColor(kChromeFormatButtonFill));
+        ChromeStrokeRoundedRect(painter, sizeDropdown, ChromeColor(sizeMenuOpen_ ? kChromeAccent : kChromeFormatButtonBorder), 1.0);
         painter.setFont(ChromeFont(13));
         painter.setPen(ChromeColor(kChromeTextPrimary));
-        const QRectF sizeTextRect = sizeRect.adjusted(8.0, 0.0, -8.0, 0.0);
-        const QString sizeLabel = sizeEditing_ ? sizeText_ : FormatFontSizeValue(style_.fontSize);
-        painter.drawText(sizeTextRect, Qt::AlignLeft | Qt::AlignVCenter, sizeLabel);
-        if (sizeEditing_) {
-            const qreal advance = QFontMetricsF(ChromeFont(13)).horizontalAdvance(sizeLabel);
-            const qreal caretX = std::min(sizeTextRect.right() - 1.0, sizeTextRect.left() + advance + 1.0);
-            painter.drawLine(QPointF(caretX, sizeRect.top() + 6.0), QPointF(caretX, sizeRect.bottom() - 6.0));
-        }
+        painter.drawText(sizeDropdown.adjusted(10.0, 0.0, -10.0, 0.0), Qt::AlignLeft | Qt::AlignVCenter,
+            TextSizePresetLabel(std::min(sizePreset_, sizeOptions_.size() - 1U)));
 
         const QRectF dropdown = layout_.fontDropdownRect.translated(origin);
         ChromeFillRoundedRect(painter, dropdown, ChromeColor(kChromeFormatButtonFill));
@@ -553,6 +550,19 @@ protected:
                 painter.drawText(option.adjusted(8.0, 0.0, -8.0, 0.0), Qt::AlignLeft | Qt::AlignVCenter, FontFamilyLabel(family));
             }
         }
+
+        if (sizeMenuOpen_ && layout_.sizeMenuRect.isValid()) {
+            painter.setBrush(Qt::NoBrush);
+            ChromePanel(painter, layout_.sizeMenuRect.translated(origin));
+            for (std::size_t index = 0; index < layout_.sizeOptionRects.size(); ++index) {
+                const QRectF option = layout_.sizeOptionRects[index].translated(origin);
+                const bool active = sizePreset_ == index;
+                const bool hovered = hoveredSizeOption_.has_value() && *hoveredSizeOption_ == index;
+                ChromeFillRoundedRect(painter, option, ChromeColor(active ? kChromeFormatAccentFill : (hovered ? kChromeButtonFillHover : kChromePanelFill)), 3.0);
+                painter.setPen(ChromeColor(active ? kChromeTextPrimary : kChromeFormatTextMuted));
+                painter.drawText(option.adjusted(8.0, 0.0, -8.0, 0.0), Qt::AlignLeft | Qt::AlignVCenter, TextSizePresetLabel(index));
+            }
+        }
     }
 
     void mousePressEvent(QMouseEvent* event) override {
@@ -568,14 +578,24 @@ protected:
                     fontMenuOpen_ = false;
                     owner_->SetTextFormatFontMenuOpen(false);
                     owner_->OnTextFormatChanged();
-                    emitRequested(static_cast<TextFontFamily>(index));
+                    emit owner_->TextFontFamilyChanged(static_cast<TextFontFamily>(index));
+                    return;
+                }
+            }
+        }
+        if (sizeMenuOpen_) {
+            for (std::size_t index = 0; index < layout_.sizeOptionRects.size(); ++index) {
+                if (ContainsPoint(layout_.sizeOptionRects[index].translated(origin), local)) {
+                    sizeMenuOpen_ = false;
+                    owner_->SetTextFormatSizeMenuOpen(false);
+                    owner_->OnTextFormatChanged();
+                    emit owner_->TextSizePresetChanged(index);
                     return;
                 }
             }
         }
         if (ContainsPoint(layout_.alignCycleRect.translated(origin), local)) {
-            fontMenuOpen_ = false;
-            owner_->SetTextFormatFontMenuOpen(false);
+            CloseMenus();
             emit owner_->TextAlignCycleRequested();
             return;
         }
@@ -591,15 +611,18 @@ protected:
             owner_->ToggleTextFormatUnderline();
             return;
         }
-        if (ContainsPoint(layout_.textSizeInputRect.translated(origin), local)) {
-            sizeEditing_ = true;
-            sizeText_ = FormatFontSizeValue(style_.fontSize);
-            setFocus(Qt::MouseFocusReason);
+        if (ContainsPoint(layout_.sizeDropdownRect.translated(origin), local)) {
+            fontMenuOpen_ = false;
+            sizeMenuOpen_ = !sizeMenuOpen_;
+            owner_->SetTextFormatFontMenuOpen(false);
+            owner_->SetTextFormatSizeMenuOpen(sizeMenuOpen_);
             update();
             return;
         }
         if (ContainsPoint(layout_.fontDropdownRect.translated(origin), local)) {
+            sizeMenuOpen_ = false;
             fontMenuOpen_ = !fontMenuOpen_;
+            owner_->SetTextFormatSizeMenuOpen(false);
             owner_->SetTextFormatFontMenuOpen(fontMenuOpen_);
             update();
             return;
@@ -608,93 +631,55 @@ protected:
     }
 
     void mouseMoveEvent(QMouseEvent* event) override {
-        if (!fontMenuOpen_) {
-            if (hoveredFontOption_.has_value()) {
+        if (!fontMenuOpen_ && !sizeMenuOpen_) {
+            if (hoveredFontOption_.has_value() || hoveredSizeOption_.has_value()) {
                 hoveredFontOption_.reset();
+                hoveredSizeOption_.reset();
                 update();
             }
             return;
         }
         const QPointF local = event->position();
         const QPointF origin = -QPointF(bounds_.topLeft());
-        std::optional<TextFontFamily> next;
-        for (std::size_t index = 0; index < layout_.fontOptionRects.size(); ++index) {
-            if (ContainsPoint(layout_.fontOptionRects[index].translated(origin), local)) {
-                next = static_cast<TextFontFamily>(index);
-                break;
+        std::optional<TextFontFamily> nextFont;
+        std::optional<std::size_t> nextSize;
+        if (fontMenuOpen_) {
+            for (std::size_t index = 0; index < layout_.fontOptionRects.size(); ++index) {
+                if (ContainsPoint(layout_.fontOptionRects[index].translated(origin), local)) {
+                    nextFont = static_cast<TextFontFamily>(index);
+                    break;
+                }
             }
         }
-        if (next != hoveredFontOption_) {
-            hoveredFontOption_ = next;
-            update();
-        }
-    }
-
-    bool event(QEvent* event) override {
-        // Same hand-drawn editor as the quick-size popup: claim the keys it
-        // consumes so window shortcuts (zoom presets on 1-5, tool keys) do not
-        // swallow digits while the font size is being typed.
-        if (sizeEditing_ && event->type() == QEvent::ShortcutOverride) {
-            auto* key = static_cast<QKeyEvent*>(event);
-            const QString text = key->text();
-            if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter
-                || key->key() == Qt::Key_Escape || key->key() == Qt::Key_Backspace
-                || (!text.isEmpty() && (text.at(0).isDigit() || text.at(0) == QLatin1Char('.')))) {
-                event->accept();
-                return true;
+        if (sizeMenuOpen_) {
+            for (std::size_t index = 0; index < layout_.sizeOptionRects.size(); ++index) {
+                if (ContainsPoint(layout_.sizeOptionRects[index].translated(origin), local)) {
+                    nextSize = index;
+                    break;
+                }
             }
         }
-        return QWidget::event(event);
-    }
-
-    void keyPressEvent(QKeyEvent* event) override {
-        if (!sizeEditing_) {
-            QWidget::keyPressEvent(event);
-            return;
-        }
-        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
-            CommitSizeEdit();
-            return;
-        }
-        if (event->key() == Qt::Key_Escape) {
-            sizeEditing_ = false;
+        if (nextFont != hoveredFontOption_ || nextSize != hoveredSizeOption_) {
+            hoveredFontOption_ = nextFont;
+            hoveredSizeOption_ = nextSize;
             update();
-            return;
         }
-        if (event->key() == Qt::Key_Backspace) {
-            sizeText_.chop(1);
-            update();
-            return;
-        }
-        const QString text = event->text();
-        if (!text.isEmpty() && (text.at(0).isDigit() || text.at(0) == QLatin1Char('.'))) {
-            sizeText_ += text;
-            update();
-            return;
-        }
-        QWidget::keyPressEvent(event);
-    }
-
-    void focusOutEvent(QFocusEvent* event) override {
-        if (sizeEditing_) {
-            CommitSizeEdit();
-        }
-        QWidget::focusOutEvent(event);
     }
 
 private:
-    void CommitSizeEdit() {
-        bool ok = false;
-        const float parsed = sizeText_.toFloat(&ok);
-        if (ok && parsed > 0.0f) {
-            emit owner_->TextSizeChanged(parsed);
-        }
-        sizeEditing_ = false;
-        update();
+    void CloseMenus() {
+        fontMenuOpen_ = false;
+        sizeMenuOpen_ = false;
+        owner_->SetTextFormatFontMenuOpen(false);
+        owner_->SetTextFormatSizeMenuOpen(false);
     }
 
-    void emitRequested(TextFontFamily family) {
-        emit owner_->TextFontFamilyChanged(family);
+    // Preset names mirror the settings dialog's Small/Medium/Large row order.
+    QString TextSizePresetLabel(std::size_t index) const {
+        const QString name = index < sizeOptions_.size() ? sizeOptions_[index] : QStringLiteral("?");
+        const std::size_t clamped = std::min(index, owner_->settings_.textSizePresets.size() - 1U);
+        const float value = owner_->settings_.textSizePresets[clamped];
+        return QStringLiteral("%1 (%2)").arg(name, FormatFontSizeValue(value));
     }
 
     ToolbarWidget* owner_ = nullptr;
@@ -702,10 +687,13 @@ private:
     QRect bounds_ {};
     PageTextStyle style_ {};
     TextAlignment alignment_ = TextAlignment::Left;
+    std::size_t sizePreset_ = 0;
+    std::array<QString, 3> sizeOptions_ {
+        QStringLiteral("Small"), QStringLiteral("Medium"), QStringLiteral("Large") };
     bool fontMenuOpen_ = false;
-    bool sizeEditing_ = false;
-    QString sizeText_ {};
+    bool sizeMenuOpen_ = false;
     std::optional<TextFontFamily> hoveredFontOption_ {};
+    std::optional<std::size_t> hoveredSizeOption_ {};
 };
 
 // ---------------------------------------------------------------------------
@@ -1305,11 +1293,12 @@ void ToolbarWidget::SetTextFormatAvailable(bool available) {
     }
 }
 
-void ToolbarWidget::SetTextFormatState(const std::optional<PageTextStyle>& style, TextAlignment alignment) {
+void ToolbarWidget::SetTextFormatState(const std::optional<PageTextStyle>& style, TextAlignment alignment, std::size_t sizePreset) {
     formatStyle_ = style;
     formatAlignment_ = alignment;
+    formatSizePreset_ = sizePreset;
     if (textFormatPopup_ != nullptr) {
-        textFormatPopup_->SetState(style, alignment);
+        textFormatPopup_->SetState(style, alignment, sizePreset);
     }
     update();
 }
@@ -1913,7 +1902,8 @@ void ToolbarWidget::PositionOverlays() {
     if (textFormatPopup_ != nullptr && textFormatPopup_->isVisible()) {
         const QRectF canvas = HostCanvasRect();
         const QRectF editRect = textFormatEditRect_;
-        const qt::TextFormatPopupLayout layout = qt::BuildTextFormatPopupLayout(canvas, editRect, textFormatPopup_->FontMenuOpen());
+        const qt::TextFormatPopupLayout layout = qt::BuildTextFormatPopupLayout(
+            canvas, editRect, textFormatPopup_->FontMenuOpen(), textFormatPopup_->SizeMenuOpen());
         textFormatPopup_->Configure(layout, qt::TextFormatPopupBounds(layout).toAlignedRect());
     }
     if (paletteWheel_ != nullptr && paletteWheel_->isVisible()) {
@@ -1969,8 +1959,9 @@ void ToolbarWidget::ShowTextFormatPopup(const QRectF& editRectInHost) {
     EnsureOverlays();
     textFormatEditRect_ = editRectInHost;
     const QRectF canvas = HostCanvasRect();
-    const qt::TextFormatPopupLayout layout = qt::BuildTextFormatPopupLayout(canvas, editRectInHost, textFormatPopup_->FontMenuOpen());
-    textFormatPopup_->SetState(formatStyle_, formatAlignment_);
+    const qt::TextFormatPopupLayout layout = qt::BuildTextFormatPopupLayout(
+        canvas, editRectInHost, textFormatPopup_->FontMenuOpen(), textFormatPopup_->SizeMenuOpen());
+    textFormatPopup_->SetState(formatStyle_, formatAlignment_, formatSizePreset_);
     textFormatPopup_->Configure(layout, qt::TextFormatPopupBounds(layout).toAlignedRect());
     textFormatPopup_->show();
     textFormatPopup_->raise();
@@ -1981,6 +1972,7 @@ void ToolbarWidget::HideTextFormatPopup() {
     if (textFormatPopup_ != nullptr && textFormatPopup_->isVisible()) {
         textFormatPopup_->hide();
         textFormatPopup_->SetFontMenuOpen(false);
+        textFormatPopup_->SetSizeMenuOpen(false);
 
     }
 }
@@ -2159,12 +2151,22 @@ void ToolbarWidget::SetTextFormatFontMenuOpen(bool open) {
     }
 }
 
+void ToolbarWidget::SetTextFormatSizeMenuOpen(bool open) {
+    if (textFormatPopup_ == nullptr) {
+        return;
+    }
+    textFormatPopup_->SetSizeMenuOpen(open);
+    if (open) {
+        PositionOverlays();
+    }
+}
+
 void ToolbarWidget::ToggleTextFormatBold() {
     if (formatStyle_.has_value()) {
         formatStyle_->bold = !formatStyle_->bold;
     }
     if (textFormatPopup_ != nullptr) {
-        textFormatPopup_->SetState(formatStyle_, formatAlignment_);
+        textFormatPopup_->SetState(formatStyle_, formatAlignment_, formatSizePreset_);
     }
     update();
     emit TextBoldToggleRequested();
@@ -2175,7 +2177,7 @@ void ToolbarWidget::ToggleTextFormatItalic() {
         formatStyle_->italic = !formatStyle_->italic;
     }
     if (textFormatPopup_ != nullptr) {
-        textFormatPopup_->SetState(formatStyle_, formatAlignment_);
+        textFormatPopup_->SetState(formatStyle_, formatAlignment_, formatSizePreset_);
     }
     update();
     emit TextItalicToggleRequested();
@@ -2186,7 +2188,7 @@ void ToolbarWidget::ToggleTextFormatUnderline() {
         formatStyle_->underline = !formatStyle_->underline;
     }
     if (textFormatPopup_ != nullptr) {
-        textFormatPopup_->SetState(formatStyle_, formatAlignment_);
+        textFormatPopup_->SetState(formatStyle_, formatAlignment_, formatSizePreset_);
     }
     update();
     emit TextUnderlineToggleRequested();

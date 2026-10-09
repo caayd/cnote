@@ -102,6 +102,13 @@ bool SameSettings(const cnote::settings::Settings& a, const cnote::settings::Set
     if (a.eraseBrushSize != b.eraseBrushSize) return fail("eraseBrushSize");
     if (a.quickSizeSliderMax != b.quickSizeSliderMax) return fail("quickSizeSliderMax");
     if (a.brushSizePresets != b.brushSizePresets) return fail("brushSizePresets");
+    if (a.textFontFamily != b.textFontFamily) return fail("textFontFamily");
+    if (a.textBold != b.textBold) return fail("textBold");
+    if (a.textItalic != b.textItalic) return fail("textItalic");
+    if (a.textUnderline != b.textUnderline) return fail("textUnderline");
+    if (a.textAlignment != b.textAlignment) return fail("textAlignment");
+    if (a.textSizePreset != b.textSizePreset) return fail("textSizePreset");
+    if (a.textSizePresets != b.textSizePresets) return fail("textSizePresets");
     if (a.drawCursorKind != b.drawCursorKind) return fail("drawCursorKind");
     if (a.drawCursorSize != b.drawCursorSize) return fail("drawCursorSize");
     if (a.inputSpacing != b.inputSpacing) return fail("inputSpacing");
@@ -317,6 +324,15 @@ void ParsesRealPayload(const std::filesystem::path& scratch) {
     payload << "zoom_preset_2=10\n";
     payload << "zoom_preset_3=0\n";
     payload << "zoom_preset_4=abc\n";
+    payload << "text_font_family=monospace\n";
+    payload << "text_bold=1\n";
+    payload << "text_italic=0\n";
+    payload << "text_underline=3\n";
+    payload << "text_alignment=right\n";
+    payload << "text_size_preset=9\n";
+    payload << "text_size_small=2\n";
+    payload << "text_size_medium=28\n";
+    payload << "text_size_large=bogus\n";
     payload << "wheel_tools=Draw, Zoom ,Draw,Bogus\n";
     payload << "malformed-line-without-separator\n";
     payload << "# comment=ignored\n";
@@ -359,6 +375,14 @@ void ParsesRealPayload(const std::filesystem::path& scratch) {
     Check(settings.zoomPresets[1] == 4.0f, "zoom preset clamps to kMaxZoom");
     Check(settings.zoomPresets[2] == 0.0f, "non-positive zoom preset stays unset");
     Check(settings.zoomPresets[3] == 0.0f, "unparsable zoom preset keeps the default");
+
+    Check(settings.textFontFamily == cnote::TextFontFamily::Monospace, "text_font_family parsed");
+    Check(settings.textBold && !settings.textItalic && settings.textUnderline, "text style flags parsed");
+    Check(settings.textAlignment == cnote::TextAlignment::Right, "text_alignment parsed");
+    Check(settings.textSizePreset == 2U, "text_size_preset clamps to the last preset");
+    Check(settings.textSizePresets[0] == 4.0f && settings.textSizePresets[1] == 28.0f
+            && settings.textSizePresets[2] == 36.0f,
+        "text sizes clamp and keep defaults on bad input");
     Check(settings.wheelTools == std::vector<s::Tool>({ s::Tool::Draw, s::Tool::Zoom }),
         "wheel_tools dedupes known tools in order");
 

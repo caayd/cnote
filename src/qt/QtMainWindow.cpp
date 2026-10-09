@@ -469,16 +469,19 @@ void QtMainWindow::CreateChrome() {
         }
         persistPendingTextStyle();
     });
-    connect(toolbar_, &ui::ToolbarWidget::TextSizeChanged, this, [this, persistPendingTextStyle](float size) {
-        if (size <= 0.0f) {
+    connect(toolbar_, &ui::ToolbarWidget::TextSizePresetChanged, this, [this, persistPendingTextStyle](std::size_t index) {
+        if (index >= settings_.textSizePresets.size()) {
             return;
         }
-        // The popup's size is a screen point value; store it unchanged so the
-        // box round-trips the typed/read number exactly.
-        settings_.textFontSize = size;
+        // Static size: the preset is a page-unit value and goes straight into
+        // the pending style; while editing, the live editor wants the same
+        // size in screen points (FontForStyle's displayScale convention).
+        settings_.textSizePreset = index;
         if (controller_.EditingText()) {
-            ApplyTextFormat([size](QTextCharFormat& format) {
-                format.setFontPointSize(size);
+            const float points = settings_.textSizePresets[index]
+                * std::max(0.01f, canvas_->TextEditScale()) * text::kPointsPerPageUnit;
+            ApplyTextFormat([points](QTextCharFormat& format) {
+                format.setFontPointSize(points);
             });
         }
         persistPendingTextStyle();
@@ -558,10 +561,11 @@ void QtMainWindow::SyncPendingTextStyle() {
     // The editor's current char format is the last-applied style; the pending
     // popup state mirrors it so the next created text inherits it (the per-tool
     // persistence pattern: last use wins).  Color is deliberately not part of
-    // the pending style - new objects take the active palette slot.
+    // the pending style - new objects take the active palette slot - and the
+    // size comes from the preset index alone (the editor's point size is a
+    // view-scale conversion, not a pending choice).
     TextAlignment alignment = TextAlignment::Left;
     const PageTextStyle style = TextStyleFromEditor(editor, alignment);
-    settings_.textFontSize = style.fontSize;
     settings_.textFontFamily = style.fontFamily;
     settings_.textBold = style.bold;
     settings_.textItalic = style.italic;
@@ -573,7 +577,8 @@ void QtMainWindow::ApplyPendingTextStyle() {
     ui::CanvasInputSettings input = controller_.InputSettings();
     input.textFontFamily = settings_.textFontFamily;
     input.textAlignment = settings_.textAlignment;
-    input.textFontSize = settings_.textFontSize;
+    input.textFontSize = settings_.textSizePresets[
+        std::min(settings_.textSizePreset, settings_.textSizePresets.size() - 1U)];
     input.textBold = settings_.textBold;
     input.textItalic = settings_.textItalic;
     input.textUnderline = settings_.textUnderline;
@@ -1271,11 +1276,10 @@ void QtMainWindow::AddTextObject() {
     const Vec2 point = hit.has_value()
         ? canvas_->ScreenToPage(*hit, canvas_->rect().center(), false)
         : Vec2 { 60.0f, 80.0f };
-    // Same creation zoom scaling as the text tool (CanvasWidget::CreateTextAt):
-    // the pending popup size is a point value at zoom 1.
-    const float pageFontSize = std::max(1.0f, settings_.textFontSize)
-        / (text::kPointsPerPageUnit * std::max(0.1f, canvas_->Zoom()));
-    controller_.AddTextObject(pageIndex, point, pageFontSize);
+    // Static text size like the text tool's CreateTextAt: the pending preset
+    // (page units) is stored verbatim, no zoom scaling.
+    controller_.AddTextObject(pageIndex, point,
+        std::max(1.0f, controller_.InputSettings().textFontSize));
     canvas_->SyncEditOverlay();
     UpdateChrome();
 }
@@ -1702,18 +1706,20 @@ void QtMainWindow::UpdateChrome() {
         if (controller_.EditingText()) {
             TextAlignment alignment = TextAlignment::Left;
             const PageTextStyle style = TextStyleFromEditor(canvas_ != nullptr ? canvas_->TextEditor() : nullptr, alignment);
-            toolbar_->SetTextFormatState(style, alignment);
+            toolbar_->SetTextFormatState(style, alignment, settings_.textSizePreset);
         } else {
             toolbar_->SetTextFormatState(
                 PageTextStyle {
-                    settings_.textFontSize,
+                    settings_.textSizePresets[
+                        std::min(settings_.textSizePreset, settings_.textSizePresets.size() - 1U)],
                     0xFF111827U,
                     settings_.textFontFamily,
                     settings_.textBold,
                     settings_.textItalic,
                     settings_.textUnderline,
                 },
-                settings_.textAlignment);
+                settings_.textAlignment,
+                settings_.textSizePreset);
         }
     }
     // The overlay editors are created lazily by the canvas; their Ctrl+B

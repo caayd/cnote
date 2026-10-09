@@ -18,6 +18,7 @@ namespace cnote::settings {
 inline constexpr std::size_t kZoomPresetCount = 5;
 inline constexpr std::size_t kMaxRecentDocuments = 10;
 inline constexpr std::size_t kMaxPaletteColors = 12;
+inline constexpr std::size_t kTextSizePresetCount = 3;
 inline constexpr float kMinZoom = 0.35f;
 inline constexpr float kMaxZoom = 4.0f;
 inline constexpr float kMaxBrushSize = 20.0f;
@@ -87,15 +88,17 @@ struct Settings {
     std::vector<float> brushSizePresets {};
     // The text tool's pending style: the Ctrl+W text-format popup edits these
     // before a text object exists and AddTextObject seeds them, mirroring how
-    // the brush sizes persist per tool.  textFontSize is the on-screen point
-    // size at zoom 1; creation divides it by zoom (legacy zoom-relative rule)
-    // so new text lands at a constant screen size.
+    // the brush sizes persist per tool.  The size is a static preset (no zoom
+    // scaling): textSizePreset selects small/medium/large from
+    // textSizePresets, both in page units; the dropdown defaults to medium
+    // (index 1) until the user picks another preset.
     TextFontFamily textFontFamily = TextFontFamily::ShantellSans;
     bool textBold = false;
     bool textItalic = false;
     bool textUnderline = false;
     TextAlignment textAlignment = TextAlignment::Left;
-    float textFontSize = 18.0f;
+    std::size_t textSizePreset = 1;
+    std::array<float, kTextSizePresetCount> textSizePresets { 16.0f, 24.0f, 36.0f };
     DrawCursorKind drawCursorKind = DrawCursorKind::Dot;
     float drawCursorSize = 8.0f;
     float inputSpacing = 0.85f;

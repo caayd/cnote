@@ -110,10 +110,14 @@ struct TextFormatPopupLayout {
     QRectF boldRect;
     QRectF italicRect;
     QRectF underlineRect;
-    QRectF textSizeInputRect;
+    // Static small/medium/large text size: a dropdown like the font menu,
+    // replacing the legacy free-form size input.
+    QRectF sizeDropdownRect;
     QRectF fontDropdownRect;
     QRectF fontMenuRect;
     std::array<QRectF, 4> fontOptionRects;
+    QRectF sizeMenuRect;
+    std::array<QRectF, 3> sizeOptionRects;  // one per text-size preset
 };
 
 struct PaletteMenuLayout {
@@ -175,7 +179,7 @@ ToolbarLayout BuildToolbarLayout(const QRectF& clientRect, std::size_t colorCoun
 SidebarHeaderLayout BuildSidebarHeaderLayout(const QRectF& sidebarRect, bool maximized);
 QuickSizePopupLayout BuildQuickSizePopupLayout(const QRectF& clientRect, const QPointF& anchor, qreal previewExtent);
 QRectF QuickSizePopupBounds(const QuickSizePopupLayout& layout);
-TextFormatPopupLayout BuildTextFormatPopupLayout(const QRectF& canvasRect, const QRectF& editRect, bool fontMenuOpen);
+TextFormatPopupLayout BuildTextFormatPopupLayout(const QRectF& canvasRect, const QRectF& editRect, bool fontMenuOpen, bool sizeMenuOpen);
 QRectF TextFormatPopupBounds(const TextFormatPopupLayout& layout);
 PaletteMenuLayout BuildPaletteMenuLayout(const ToolbarLayout& toolbarLayout, std::size_t colorCount);
 PaletteWheelLayout BuildPaletteWheelLayout(const QRectF& clientRect, const QPointF& requestedCenter, std::size_t colorCount, qreal toolbarHeight);

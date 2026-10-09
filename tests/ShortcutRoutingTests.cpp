@@ -710,6 +710,7 @@ void PendingTextFormatSeedsNewObjects() {
     emit harness.toolbar->TextBoldToggleRequested();
     emit harness.toolbar->TextAlignCycleRequested();
     emit harness.toolbar->TextFontFamilyChanged(cnote::TextFontFamily::Serif);
+    emit harness.toolbar->TextSizePresetChanged(2U);
     QApplication::processEvents();
 
     harness.window->AddTextObject();
@@ -718,14 +719,18 @@ void PendingTextFormatSeedsNewObjects() {
     const cnote::PageText* object = harness.window->Controller().EditingTextObject();
     Check(object != nullptr, "AddTextObject leaves the editor open on the new object");
     if (object != nullptr) {
-        std::printf("created text: bold=%d align=%d family=%d\n",
+        std::printf("created text: bold=%d align=%d family=%d size=%.1f\n",
             object->bold ? 1 : 0, static_cast<int>(object->alignment),
-            static_cast<int>(object->fontFamily));
+            static_cast<int>(object->fontFamily), object->fontSize);
         Check(object->bold, "the pending bold flag seeds the created text");
         Check(object->alignment == cnote::TextAlignment::Center,
             "the pending alignment seeds the created text");
         Check(object->fontFamily == cnote::TextFontFamily::Serif,
             "the pending font family seeds the created text");
+        // Static size: the Large preset (page units) lands verbatim - no zoom
+        // compensation on the stored size.
+        Check(std::abs(object->fontSize - harness.toolbar->Settings().textSizePresets[2]) < 0.01f,
+            "the pending size preset seeds the created text verbatim");
     }
     harness.canvas->CommitActiveEdit();
     QApplication::processEvents();
@@ -737,13 +742,15 @@ void PendingTextFormatSeedsNewObjects() {
         const cnote::settings::Settings& reloaded = second.toolbar->Settings();
         Check(reloaded.textBold
                 && reloaded.textAlignment == cnote::TextAlignment::Center
-                && reloaded.textFontFamily == cnote::TextFontFamily::Serif,
+                && reloaded.textFontFamily == cnote::TextFontFamily::Serif
+                && reloaded.textSizePreset == 2U,
             "the pending text style persists across sessions");
         // Restore the defaults so later checks run against the baseline.
         emit second.toolbar->TextBoldToggleRequested();
         emit second.toolbar->TextAlignCycleRequested();
         emit second.toolbar->TextAlignCycleRequested();
         emit second.toolbar->TextFontFamilyChanged(cnote::TextFontFamily::ShantellSans);
+        emit second.toolbar->TextSizePresetChanged(1U);
         QApplication::processEvents();
     }
 }

@@ -49,12 +49,12 @@ struct CanvasInputSettings {
     float strokeSmoothing = 0.55f;  // render-time smoothing strength
     std::uint32_t objectColor = 0xFF111827;  // active palette slot; seeds new text/LaTeX objects
     // Pending style for text objects created before one exists (the Ctrl+W
-    // format popup edits these; AddTextObject seeds them).  textFontSize is the
-    // screen point size at zoom 1 - the creation sites divide it by the canvas
-    // zoom, matching the legacy constant-screen-size rule.
+    // format popup edits these; AddTextObject seeds them).  textFontSize is a
+    // static page-unit size (the selected small/medium/large preset) - text
+    // scales with the page like every other committed object.
     TextFontFamily textFontFamily = TextFontFamily::ShantellSans;
     TextAlignment textAlignment = TextAlignment::Left;
-    float textFontSize = 18.0f;
+    float textFontSize = 24.0f;
     bool textBold = false;
     bool textItalic = false;
     bool textUnderline = false;

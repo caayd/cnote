@@ -109,7 +109,7 @@ public:
     // Text-format state for the popup's active buttons (filled from the active
     // edit; the popup is only shown while SetTextFormatAvailable(true)).
     void SetTextFormatAvailable(bool available);
-    void SetTextFormatState(const std::optional<PageTextStyle>& style, TextAlignment alignment);
+    void SetTextFormatState(const std::optional<PageTextStyle>& style, TextAlignment alignment, std::size_t sizePreset);
 
     // --- geometry ---------------------------------------------------------
     [[nodiscard]] appui::qt::ToolbarLayout ComputeLayout() const;
@@ -213,7 +213,7 @@ signals:
     void TextBoldToggleRequested();
     void TextItalicToggleRequested();
     void TextUnderlineToggleRequested();
-    void TextSizeChanged(float size);
+    void TextSizePresetChanged(std::size_t presetIndex);
     void TextFontFamilyChanged(TextFontFamily family);
     void PaletteOverlayToggled(bool open);
     void ZoomPresetRequested(float zoom);
@@ -252,6 +252,7 @@ private:
     [[nodiscard]] bool IsToolInWheel(settings::Tool tool) const;
     void OnWheelZoomModeChanged(bool zoomPresetMode);
     void SetTextFormatFontMenuOpen(bool open);
+    void SetTextFormatSizeMenuOpen(bool open);
     void ToggleTextFormatBold();
     void ToggleTextFormatItalic();
     void ToggleTextFormatUnderline();
@@ -271,7 +272,7 @@ private:
     bool textFormatAvailable_ = false;
     std::optional<PageTextStyle> formatStyle_ {};
     TextAlignment formatAlignment_ = TextAlignment::Left;
-
+    std::size_t formatSizePreset_ = 1;  // medium until the shell reports otherwise
     ToolbarControl hovered_ = ToolbarControl::None;
     bool zoomEditing_ = false;
     QString zoomEditText_ {};

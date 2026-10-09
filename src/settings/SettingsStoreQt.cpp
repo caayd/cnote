@@ -733,9 +733,30 @@ Settings SettingsStoreQt::ParseText(std::string_view text) {
             continue;
         }
 
-        if (key == "text_font_size") {
+        if (key == "text_size_preset") {
+            if (const auto parsed = ParseUnsignedInt(value); parsed.has_value()) {
+                settings.textSizePreset = std::min<std::size_t>(*parsed, kTextSizePresetCount - 1U);
+            }
+            continue;
+        }
+
+        if (key == "text_size_small") {
             if (const auto parsed = ParseFloat(value); parsed.has_value()) {
-                settings.textFontSize = std::clamp(*parsed, 4.0f, 512.0f);
+                settings.textSizePresets[0] = std::clamp(*parsed, 4.0f, 512.0f);
+            }
+            continue;
+        }
+
+        if (key == "text_size_medium") {
+            if (const auto parsed = ParseFloat(value); parsed.has_value()) {
+                settings.textSizePresets[1] = std::clamp(*parsed, 4.0f, 512.0f);
+            }
+            continue;
+        }
+
+        if (key == "text_size_large") {
+            if (const auto parsed = ParseFloat(value); parsed.has_value()) {
+                settings.textSizePresets[2] = std::clamp(*parsed, 4.0f, 512.0f);
             }
             continue;
         }
@@ -959,7 +980,10 @@ std::string SettingsStoreQt::Serialize(const Settings& settings) {
     output << "text_italic=" << (settings.textItalic ? 1 : 0) << '\n';
     output << "text_underline=" << (settings.textUnderline ? 1 : 0) << '\n';
     output << "text_alignment=" << TextAlignmentConfigName(settings.textAlignment) << '\n';
-    output << "text_font_size=" << settings.textFontSize << '\n';
+    output << "text_size_preset=" << settings.textSizePreset << '\n';
+    output << "text_size_small=" << settings.textSizePresets[0] << '\n';
+    output << "text_size_medium=" << settings.textSizePresets[1] << '\n';
+    output << "text_size_large=" << settings.textSizePresets[2] << '\n';
     output << "draw_cursor_kind=" << DrawCursorKindConfigName(settings.drawCursorKind) << '\n';
     output << "draw_cursor_size=" << settings.drawCursorSize << '\n';
     output << "input_smoothing=" << settings.inputSmoothing << '\n';

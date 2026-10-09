@@ -437,7 +437,7 @@ void TestPopupPlacementAndClamping() {
     cnote::PageTextStyle style;
     style.fontSize = 24.0f;
     style.bold = true;
-    toolbar->SetTextFormatState(style, cnote::TextAlignment::Center);
+    toolbar->SetTextFormatState(style, cnote::TextAlignment::Center, 1U);
     const QRectF canvasRect(0.0, 34.0, 1000.0, 666.0);
     const QRectF editRects[] {
         QRectF(400.0, 300.0, 200.0, 80.0),
@@ -448,7 +448,7 @@ void TestPopupPlacementAndClamping() {
         toolbar->ShowTextFormatPopup(editRect);
         Check(toolbar->TextFormatPopupVisible(), "text-format popup opens");
         Check(hostRect.contains(toolbar->TextFormatPopupBounds()), "text-format popup stays inside the window");
-        const qt::TextFormatPopupLayout want = qt::BuildTextFormatPopupLayout(canvasRect, editRect, false);
+        const qt::TextFormatPopupLayout want = qt::BuildTextFormatPopupLayout(canvasRect, editRect, false, false);
         Check(hostRect.contains(want.panelRect.toAlignedRect()), "text-format panel (LayoutQt) stays inside the window");
         Check(want.panelRect.top() - 3.0 >= canvasRect.top() - 0.001 || want.panelRect.bottom() + 3.0 <= canvasRect.bottom() + 0.001,
             "text-format panel is clamped vertically into the canvas");

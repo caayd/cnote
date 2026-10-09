@@ -96,6 +96,7 @@ private:
     void applyQuickSizeSliderMaxEdit(bool normalizeText);
     void applyBrushSizePresetEdit(bool normalizeText);
     void applyAutoSaveSlider();
+    void applyTextSizePresetEdit(QLineEdit* edit, std::size_t index, bool normalizeText);
     void cancelShortcutCapture();
 
     [[nodiscard]] std::size_t selectedPaletteIndex() const;
@@ -148,6 +149,7 @@ private:
     QLineEdit* zoomPresetEdits_[settings::kZoomPresetCount] {};
     QLineEdit* quickSizeSliderMaxEdit_ = nullptr;
     QLineEdit* brushSizePresetEdit_ = nullptr;
+    QLineEdit* textSizePresetEdits_[settings::kTextSizePresetCount] {};
 
     QListWidget* shortcutList_ = nullptr;
     QPushButton* changeShortcutButton_ = nullptr;

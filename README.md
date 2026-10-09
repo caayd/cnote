@@ -17,7 +17,7 @@ inventories the licenses and lists the open release prerequisites.
 - Paste images from the clipboard onto pages.
 - Save editable `.cnote` projects.
 - Export annotated pages as PDF.
-- Customize palette, brush behavior, auto-save, zoom presets, and shortcuts.
+- Customize palette, brush behavior, text size presets, auto-save, zoom presets, and shortcuts.
 - Open linked views of a project with independent navigation and shared edits.
 
 ## Linked Project Views

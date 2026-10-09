@@ -271,6 +271,19 @@ void SettingsDialogQt::buildDrawingPage() {
     brushSizePresetEdit_->setObjectName(QStringLiteral("brushSizePresetEdit"));
     brushSizePresetEdit_->setMaxLength(96);
     form->addRow(QStringLiteral("Brush Size Presets"), brushSizePresetEdit_);
+    auto* textSizeRow = new QWidget(page);
+    auto* textSizeLayout = new QHBoxLayout(textSizeRow);
+    textSizeLayout->setContentsMargins(0, 0, 0, 0);
+    textSizeLayout->setSpacing(6);
+    for (std::size_t index = 0; index < settings::kTextSizePresetCount; ++index) {
+        textSizePresetEdits_[index] = new QLineEdit(textSizeRow);
+        textSizePresetEdits_[index]->setObjectName(QStringLiteral("textSizePresetEdit%1").arg(index + 1));
+        textSizePresetEdits_[index]->setMaxLength(8);
+        textSizePresetEdits_[index]->setFixedWidth(72);
+        textSizeLayout->addWidget(textSizePresetEdits_[index]);
+    }
+    textSizeLayout->addStretch(1);
+    form->addRow(QStringLiteral("Text Sizes (S/M/L)"), textSizeRow);
 
     categoryTabs_->addTab(page, QStringLiteral("Drawing"));
 
@@ -337,6 +350,11 @@ void SettingsDialogQt::buildDrawingPage() {
     }
     connect(quickSizeSliderMaxEdit_, &QLineEdit::editingFinished, this, [this] { applyQuickSizeSliderMaxEdit(true); });
     connect(brushSizePresetEdit_, &QLineEdit::editingFinished, this, [this] { applyBrushSizePresetEdit(true); });
+    for (std::size_t index = 0; index < settings::kTextSizePresetCount; ++index) {
+        connect(textSizePresetEdits_[index], &QLineEdit::editingFinished, this, [this, index] {
+            applyTextSizePresetEdit(textSizePresetEdits_[index], index, true);
+        });
+    }
 }
 
 void SettingsDialogQt::buildShortcutsPage() {
@@ -505,6 +523,11 @@ void SettingsDialogQt::refreshDrawingControls() {
     }
     if (!brushSizePresetEdit_->hasFocus()) {
         brushSizePresetEdit_->setText(QString::fromStdString(settings::FormatBrushSizePresets(settings_.brushSizePresets)));
+    }
+    for (std::size_t index = 0; index < settings::kTextSizePresetCount; ++index) {
+        const QSignalBlocker blockEdit(textSizePresetEdits_[index]);
+        textSizePresetEdits_[index]->setText(
+            QString::fromStdString(settings::FormatBrushSizeValue(settings_.textSizePresets[index])));
     }
 }
 
@@ -790,6 +813,28 @@ void SettingsDialogQt::applyBrushSizePresetEdit(bool normalizeText) {
         brushSizePresetEdit_->setText(QString::fromStdString(settings::FormatBrushSizePresets(settings_.brushSizePresets)));
     }
 }
+
+void SettingsDialogQt::applyTextSizePresetEdit(QLineEdit* edit, std::size_t index, bool normalizeText) {
+    if (edit == nullptr || index >= settings_.textSizePresets.size()) {
+        return;
+    }
+    const auto parsed = ParseStrictFloat(edit->text().trimmed());
+    if (!parsed.has_value()) {
+        if (normalizeText) {
+            const QSignalBlocker block(edit);
+            edit->setText(QString::fromStdString(settings::FormatBrushSizeValue(settings_.textSizePresets[index])));
+        }
+        return;
+    }
+
+    settings_.textSizePresets[index] = std::clamp(*parsed, 4.0f, 512.0f);
+    persist();
+    if (normalizeText) {
+        const QSignalBlocker block(edit);
+        edit->setText(QString::fromStdString(settings::FormatBrushSizeValue(settings_.textSizePresets[index])));
+    }
+}
+
 
 void SettingsDialogQt::applyAutoSaveSlider() {
     const int value = autoSaveSlider_->value();

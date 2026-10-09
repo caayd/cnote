@@ -205,17 +205,21 @@ Rects BuildQtRects(const Scenario& scenario, const QFont& font) {
     }
     case Kind::TextFormat: {
         const lq::TextFormatPopupLayout popup = lq::BuildTextFormatPopupLayout(
-            scenario.clientRect, scenario.editRect, scenario.fontMenuOpen);
+            scenario.clientRect, scenario.editRect, scenario.fontMenuOpen, false);
         Add(rects, "panelRect", popup.panelRect);
         Add(rects, "alignCycleRect", popup.alignCycleRect);
         Add(rects, "boldRect", popup.boldRect);
         Add(rects, "italicRect", popup.italicRect);
         Add(rects, "underlineRect", popup.underlineRect);
-        Add(rects, "textSizeInputRect", popup.textSizeInputRect);
+        Add(rects, "sizeDropdownRect", popup.sizeDropdownRect);
         Add(rects, "fontDropdownRect", popup.fontDropdownRect);
         Add(rects, "fontMenuRect", popup.fontMenuRect);
         for (std::size_t index = 0; index < popup.fontOptionRects.size(); ++index) {
             Add(rects, "fontOptionRect", popup.fontOptionRects[index]);
+        }
+        Add(rects, "sizeMenuRect", popup.sizeMenuRect);
+        for (std::size_t index = 0; index < popup.sizeOptionRects.size(); ++index) {
+            Add(rects, "sizeOptionRect", popup.sizeOptionRects[index]);
         }
         Add(rects, "bounds", lq::TextFormatPopupBounds(popup));
         break;
@@ -539,49 +543,61 @@ const std::vector<FrozenCase> kFrozenGeometry {
         { "bounds", 603.0, 836.0, 797.0, 949.0 },
     } },
     { "text-format panel", {
-        { "panelRect", 100.0, 246.0, 434.0, 290.0 },
+        { "panelRect", 100.0, 246.0, 494.0, 290.0 },
         { "alignCycleRect", 108.0, 254.0, 136.0, 282.0 },
         { "boldRect", 142.0, 254.0, 170.0, 282.0 },
         { "italicRect", 176.0, 254.0, 204.0, 282.0 },
         { "underlineRect", 210.0, 254.0, 238.0, 282.0 },
-        { "textSizeInputRect", 244.0, 254.0, 302.0, 282.0 },
-        { "fontDropdownRect", 308.0, 254.0, 426.0, 282.0 },
+        { "sizeDropdownRect", 244.0, 254.0, 362.0, 282.0 },
+        { "fontDropdownRect", 368.0, 254.0, 486.0, 282.0 },
         { "fontMenuRect", 0.0, 0.0, 0.0, 0.0 },
         { "fontOptionRect", 0.0, 0.0, 0.0, 0.0 },
         { "fontOptionRect", 0.0, 0.0, 0.0, 0.0 },
         { "fontOptionRect", 0.0, 0.0, 0.0, 0.0 },
         { "fontOptionRect", 0.0, 0.0, 0.0, 0.0 },
-        { "bounds", 97.0, 243.0, 437.0, 293.0 },
+        { "sizeMenuRect", 0.0, 0.0, 0.0, 0.0 },
+        { "sizeOptionRect", 0.0, 0.0, 0.0, 0.0 },
+        { "sizeOptionRect", 0.0, 0.0, 0.0, 0.0 },
+        { "sizeOptionRect", 0.0, 0.0, 0.0, 0.0 },
+        { "bounds", 97.0, 243.0, 497.0, 293.0 },
     } },
     { "text-format menu below", {
-        { "panelRect", 100.0, 190.0, 434.0, 234.0 },
+        { "panelRect", 100.0, 190.0, 494.0, 234.0 },
         { "alignCycleRect", 108.0, 198.0, 136.0, 226.0 },
         { "boldRect", 142.0, 198.0, 170.0, 226.0 },
         { "italicRect", 176.0, 198.0, 204.0, 226.0 },
         { "underlineRect", 210.0, 198.0, 238.0, 226.0 },
-        { "textSizeInputRect", 244.0, 198.0, 302.0, 226.0 },
-        { "fontDropdownRect", 308.0, 198.0, 426.0, 226.0 },
-        { "fontMenuRect", 308.0, 240.0, 426.0, 364.0 },
-        { "fontOptionRect", 314.0, 246.0, 420.0, 274.0 },
-        { "fontOptionRect", 314.0, 274.0, 420.0, 302.0 },
-        { "fontOptionRect", 314.0, 302.0, 420.0, 330.0 },
-        { "fontOptionRect", 314.0, 330.0, 420.0, 358.0 },
-        { "bounds", 97.0, 187.0, 437.0, 367.0 },
+        { "sizeDropdownRect", 244.0, 198.0, 362.0, 226.0 },
+        { "fontDropdownRect", 368.0, 198.0, 486.0, 226.0 },
+        { "fontMenuRect", 368.0, 240.0, 486.0, 364.0 },
+        { "fontOptionRect", 374.0, 246.0, 480.0, 274.0 },
+        { "fontOptionRect", 374.0, 274.0, 480.0, 302.0 },
+        { "fontOptionRect", 374.0, 302.0, 480.0, 330.0 },
+        { "fontOptionRect", 374.0, 330.0, 480.0, 358.0 },
+        { "sizeMenuRect", 0.0, 0.0, 0.0, 0.0 },
+        { "sizeOptionRect", 0.0, 0.0, 0.0, 0.0 },
+        { "sizeOptionRect", 0.0, 0.0, 0.0, 0.0 },
+        { "sizeOptionRect", 0.0, 0.0, 0.0, 0.0 },
+        { "bounds", 97.0, 187.0, 497.0, 367.0 },
     } },
     { "text-format menu above", {
-        { "panelRect", 100.0, 746.0, 434.0, 790.0 },
+        { "panelRect", 100.0, 746.0, 494.0, 790.0 },
         { "alignCycleRect", 108.0, 754.0, 136.0, 782.0 },
         { "boldRect", 142.0, 754.0, 170.0, 782.0 },
         { "italicRect", 176.0, 754.0, 204.0, 782.0 },
         { "underlineRect", 210.0, 754.0, 238.0, 782.0 },
-        { "textSizeInputRect", 244.0, 754.0, 302.0, 782.0 },
-        { "fontDropdownRect", 308.0, 754.0, 426.0, 782.0 },
-        { "fontMenuRect", 308.0, 616.0, 426.0, 740.0 },
-        { "fontOptionRect", 314.0, 622.0, 420.0, 650.0 },
-        { "fontOptionRect", 314.0, 650.0, 420.0, 678.0 },
-        { "fontOptionRect", 314.0, 678.0, 420.0, 706.0 },
-        { "fontOptionRect", 314.0, 706.0, 420.0, 734.0 },
-        { "bounds", 97.0, 613.0, 437.0, 793.0 },
+        { "sizeDropdownRect", 244.0, 754.0, 362.0, 782.0 },
+        { "fontDropdownRect", 368.0, 754.0, 486.0, 782.0 },
+        { "fontMenuRect", 368.0, 616.0, 486.0, 740.0 },
+        { "fontOptionRect", 374.0, 622.0, 480.0, 650.0 },
+        { "fontOptionRect", 374.0, 650.0, 480.0, 678.0 },
+        { "fontOptionRect", 374.0, 678.0, 480.0, 706.0 },
+        { "fontOptionRect", 374.0, 706.0, 480.0, 734.0 },
+        { "sizeMenuRect", 0.0, 0.0, 0.0, 0.0 },
+        { "sizeOptionRect", 0.0, 0.0, 0.0, 0.0 },
+        { "sizeOptionRect", 0.0, 0.0, 0.0, 0.0 },
+        { "sizeOptionRect", 0.0, 0.0, 0.0, 0.0 },
+        { "bounds", 97.0, 613.0, 497.0, 793.0 },
     } },
     { "palette wheel origin clamp colors=5", {
         { "innerCircle", 87.0, 121.0, 127.0, 161.0 },
