@@ -495,8 +495,8 @@ void NewPageDialogQt::applyHslSliders() {
 }
 
 void NewPageDialogQt::resetDraft() {
-    draft_.width = 612.0f;
-    draft_.height = 792.0f;
+    draft_.width = 595.0f;
+    draft_.height = 842.0f;
     draft_.backgroundColor = settings_.defaultPageColor;
     draft_.paletteProfile = ResolvedPaletteProfile({}, settings_.palette);
     draft_.applyPaletteProfileToExistingStrokes = false;

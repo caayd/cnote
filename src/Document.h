@@ -120,8 +120,8 @@ struct Page;
 [[nodiscard]] bool PageEqual(const Page& a, const Page& b);
 
 struct Page {
-    float width = 612.0f;
-    float height = 792.0f;
+    float width = 595.0f;
+    float height = 842.0f;
     std::int32_t sourcePdfSourceIndex = -1;
     std::int32_t sourcePdfPageIndex = -1;
     std::vector<std::uint32_t> paletteProfile {};
@@ -140,8 +140,8 @@ public:
     };
 
     struct PageDefaults {
-        float width = 612.0f;
-        float height = 792.0f;
+        float width = 595.0f;
+        float height = 842.0f;
         std::uint32_t backgroundColor = 0xFFFFFFFFU;
         std::vector<std::uint32_t> paletteProfile {};
     };

@@ -119,7 +119,7 @@ void ControlInventory() {
     Find<QPushButton>(dialog, "applyCurrentButton");
     Find<QPushButton>(dialog, "applyAllButton");
     Find<QPushButton>(dialog, "applyFutureButton");
-    Check(dialog.draft().width == 612.0f && dialog.draft().height == 792.0f, "draft starts at the legacy default size");
+    Check(dialog.draft().width == 595.0f && dialog.draft().height == 842.0f, "draft starts at the A4 default size");
 }
 
 // 2. Draft edits: dimensions, swatches, hex, HSL, profile, remap.
@@ -235,7 +235,7 @@ void ApplySemantics() {
     Find<QPushButton>(dialog, "applyAllButton")->click();
     Check(requests.size() == 2U && requests.back().scope == cnote::ui::NewPageApplyScope::AllPages,
         "Apply to All requests the all-pages scope");
-    Check(dialog.defaults().width == 612.0f, "Apply to All does not touch the future defaults");
+    Check(dialog.defaults().width == 595.0f, "Apply to All does not touch the future defaults");
 
     // Apply to Future Pages stores the clamped draft and records the previous colour.
     Find<QPushButton>(dialog, "applyFutureButton")->click();
@@ -284,7 +284,7 @@ void ResetAndRefresh() {
     dialog.syncDraftFromDefaults();
 
     Find<QPushButton>(dialog, "resetButton")->click();
-    Check(dialog.draft().width == 612.0f && dialog.draft().height == 792.0f, "reset restores the legacy page size");
+    Check(dialog.draft().width == 595.0f && dialog.draft().height == 842.0f, "reset restores the A4 page size");
     Check(dialog.draft().backgroundColor == settings.defaultPageColor, "reset uses the settings default page colour");
     Check(dialog.draft().paletteProfile == settings.palette, "reset resolves the current palette");
     Check(!dialog.draft().applyPaletteProfileToExistingStrokes, "reset clears the remap flag");

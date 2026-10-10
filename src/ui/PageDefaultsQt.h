@@ -19,8 +19,8 @@ inline constexpr std::size_t kMaxRecentPageColors = 8;
 
 // The dialog's editable copy (legacy NewPageSettingsWindow draft fields).
 struct NewPageDraft {
-    float width = 612.0f;
-    float height = 792.0f;
+    float width = 595.0f;
+    float height = 842.0f;
     std::uint32_t backgroundColor = 0xFFFFFFFFU;
     std::vector<std::uint32_t> paletteProfile {};
     bool applyPaletteProfileToExistingStrokes = false;
@@ -31,8 +31,8 @@ struct NewPageDraft {
 // The applied "future pages" state (legacy App::newPageSettings_; the document
 // only stores the first four fields).
 struct NewPageDefaults {
-    float width = 612.0f;
-    float height = 792.0f;
+    float width = 595.0f;
+    float height = 842.0f;
     std::uint32_t backgroundColor = 0xFFFFFFFFU;
     std::vector<std::uint32_t> paletteProfile {};
     bool applyPaletteProfileToExistingStrokes = false;
