@@ -5,9 +5,12 @@
 #include <QApplication>
 #include <QColor>
 #include <QFont>
+#include <QOperatingSystemVersion>
 #include <QPainter>
 #include <QPainterPath>
 #include <QRectF>
+#include <QStringList>
+#include <QWidget>
 
 namespace cnote::ui {
 
@@ -37,9 +40,22 @@ inline constexpr std::uint32_t kChromeTextMuted = 0xFF9CA5B2U;          // App.c
 inline constexpr std::uint32_t kChromeIconDisabled = 0xFF666F7CU;       // App.cpp:6533
 inline constexpr std::uint32_t kChromeIconSelected = 0xFF84BFFFU;       // App.cpp:6533
 inline constexpr std::uint32_t kChromeSelectionBorder = 0xFFF4F7FCU;    // UiUtil.h:21
-inline constexpr std::uint32_t kChromeCaptionHover = 0xFF3C4048U;       // App.cpp:6573
-inline constexpr std::uint32_t kChromeCaptionCloseHover = 0xFFC42B1CU;  // App.cpp:6573
-inline constexpr std::uint32_t kChromeCaptionIcon = 0xFFF8FAFCU;        // App.cpp:6577
+// In-client caption buttons paint with the OS-native chrome style: the glyphs
+// are the same codepoints every Windows caption uses (Segoe Fluent Icons on
+// Windows 11, Segoe MDL2 Assets on Windows 10) and the fills/text are the
+// WinUI 3 caption-button colors (the same values QWindows11Style hardcodes).
+// The button width is appui::qt::kCaptionButtonWidth (46, LayoutQt.h).
+inline constexpr std::uint32_t kChromeCaptionFillHover = 0x0FFFFFFFU;         // WinUI fillSubtleSecondary (dark)
+inline constexpr std::uint32_t kChromeCaptionFillPressed = 0x0AFFFFFFU;       // WinUI fillSubtleTertiary (dark)
+inline constexpr std::uint32_t kChromeCaptionFillWin10Hover = 0xFF383838U;    // Win10 dark titlebar-button hover
+inline constexpr std::uint32_t kChromeCaptionFillWin10Pressed = 0xFF2C2C2CU;  // Win10 dark titlebar-button pressed
+inline constexpr std::uint32_t kChromeCaptionCloseHover = 0xFFC42B1CU;        // App.cpp:6573 = the WinUI/DWM red
+inline constexpr std::uint32_t kChromeCaptionClosePressed = 0xE6C42B1CU;      // WinUI pressed close fill (alpha E6)
+inline constexpr std::uint32_t kChromeCaptionText = 0xE4FFFFFFU;              // WinUI textPrimary (dark, 89.56%)
+inline constexpr std::uint32_t kChromeCaptionTextInactive = 0xC8FFFFFFU;      // WinUI textSecondary (dark, 78.6%)
+inline constexpr std::uint32_t kChromeCaptionTextPressed = 0xB3FFFFFFU;       // WinUI close pressed text (alpha B3)
+inline constexpr std::uint32_t kChromeCaptionTextWin10 = 0xFFFFFFFFU;         // Win10 dark caption glyph
+inline constexpr std::uint32_t kChromeCaptionTextWin10Inactive = 0xA8FFFFFFU; // Win10 dark inactive caption glyph
 inline constexpr std::uint32_t kChromeWheelBadge = 0xFFF4F7FCU;         // App.cpp:6548
 
 inline constexpr std::uint32_t kChromeSidebarBackground = 0xFF12161DU;   // App.cpp:7070
@@ -102,6 +118,81 @@ inline void ChromeStrokeRoundedRect(QPainter& painter, const QRectF& rect, const
 inline void ChromePanel(QPainter& painter, const QRectF& rect) {
     ChromeFillRoundedRect(painter, rect, ChromeColor(kChromePanelFill));
     ChromeStrokeRoundedRect(painter, rect, ChromeColor(kChromePanelStroke), 1.0);
+}
+
+// OS-native caption button painting for the in-client chrome on Windows.
+//
+// The glyphs are the same Unicode codepoints the system caption uses:
+//   minimize E921, maximize E922, restore E923, close E8BB
+// rendered from Segoe Fluent Icons on Windows 11 (Qt's QWindows11Style uses
+// the identical family + codepoints) and Segoe MDL2 Assets on Windows 10 -
+// the two families share this block, so the family list doubles as the
+// fallback order on any non-Windows build (the cluster is not painted there).
+// Normal/hover/pressed fills are the WinUI 3 caption colors; on Windows 10
+// the classic dark-titlebar fills are used instead.  `windowActive` maps the
+// system inactive-caption glyph dimming.
+enum class CaptionGlyph {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+};
+
+inline bool Windows11OrLater() {
+    static const bool modern =
+        QOperatingSystemVersion::current() >= QOperatingSystemVersion(QOperatingSystemVersion::Windows, 10, 0, 22000);
+    return modern;
+}
+
+inline QChar CaptionGlyphChar(CaptionGlyph glyph) {
+    switch (glyph) {
+    case CaptionGlyph::Minimize: return QChar(0xE921);
+    case CaptionGlyph::Maximize: return QChar(0xE922);
+    case CaptionGlyph::Restore: return QChar(0xE923);
+    case CaptionGlyph::Close: return QChar(0xE8BB);
+    }
+    return {};
+}
+
+// `pressed` draws only while the button is also hovered (native caption
+// buttons keep the armed state but show no pressed fill when slid off).
+inline void PaintCaptionButton(
+    QPainter& painter, const QRectF& rect, CaptionGlyph glyph,
+    bool hovered, bool pressed, bool windowActive) {
+    const bool win11 = Windows11OrLater();
+    const bool isClose = glyph == CaptionGlyph::Close;
+
+    if (pressed && hovered) {
+        painter.fillRect(rect, ChromeColor(
+            isClose ? kChromeCaptionClosePressed
+                    : (win11 ? kChromeCaptionFillPressed : kChromeCaptionFillWin10Pressed)));
+    } else if (hovered) {
+        painter.fillRect(rect, ChromeColor(
+            isClose ? kChromeCaptionCloseHover
+                    : (win11 ? kChromeCaptionFillHover : kChromeCaptionFillWin10Hover)));
+    }
+
+    std::uint32_t textColor;
+    if (isClose && hovered) {
+        // White glyph over the red fill (pressed keeps the same family at a
+        // dimmer alpha, WinUI shellCaptionCloseTextFillColorSecondary).
+        textColor = pressed ? kChromeCaptionTextPressed : 0xFFFFFFFFU;
+    } else if (pressed && hovered) {
+        textColor = kChromeCaptionTextPressed;
+    } else if (!windowActive) {
+        textColor = win11 ? kChromeCaptionTextInactive : kChromeCaptionTextWin10Inactive;
+    } else {
+        textColor = win11 ? kChromeCaptionText : kChromeCaptionTextWin10;
+    }
+
+    QFont font(QStringList {
+        QStringLiteral("Segoe Fluent Icons"),
+        QStringLiteral("Segoe MDL2 Assets"),
+    });
+    font.setPixelSize(10);  // the system's caption glyph size (QWindows11Style: 8pt)
+    painter.setFont(font);
+    painter.setPen(ChromeColor(textColor));
+    painter.drawText(rect, Qt::AlignCenter, QString(CaptionGlyphChar(glyph)));
 }
 
 }  // namespace cnote::ui

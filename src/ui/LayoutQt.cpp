@@ -103,7 +103,7 @@ qreal ToolbarTopInset(bool maximized) {
 }
 
 qreal CaptionButtonReserve() {
-    return (35.0 * 3.0) + 12.0;
+    return (kCaptionButtonWidth * 3.0) + 12.0;
 }
 
 qreal PaletteWheelHoverGrow() {
@@ -204,7 +204,7 @@ ToolbarLayout BuildToolbarLayout(const QRectF& clientRect, std::size_t colorCoun
     const bool compactTitle = availableWidth < 760.0;            // Layout.cpp:212
     const qreal toolGap = compactTitle ? 8.0 : 10.0;             // Layout.cpp:213
     const qreal outerGap = compactTitle ? 12.0 : 18.0;           // Layout.cpp:214
-    constexpr qreal captionButtonWidth = 35.0;                   // Layout.cpp:215
+    constexpr qreal captionButtonWidth = kCaptionButtonWidth;
 
     layout.closeRect = MakeRect(buttonStripRight - captionButtonWidth, topInset, buttonStripRight, toolbarHeight);
     layout.maximizeRect = MakeRect(layout.closeRect.left() - captionButtonWidth, topInset, layout.closeRect.left(), toolbarHeight);

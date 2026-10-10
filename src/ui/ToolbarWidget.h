@@ -126,6 +126,14 @@ public:
     // Windows routes as non-client (the band's caption strip) and therefore
     // never reaches the widget's own mouse handlers.
     void UpdateHoverAtHostPosition(const QPointF& hostPosition);
+    // Pressed state of the in-client caption buttons.  The Windows shell's hit
+    // test answers HT*BUTTON for the cluster, so the press cycle runs in the
+    // non-client space and arrives as WM_NCLBUTTONDOWN/UP (wParam = the HT
+    // code) instead of widget mouse events; the shell mirrors it here so the
+    // native pressed fill can be drawn.  Widget-driven clicks (tests, touch
+    // paths that stay client-space) set and clear it in the mouse handlers.
+    void SetPressedControl(ToolbarControl control);
+    [[nodiscard]] ToolbarControl PressedControl() const { return pressed_; }
     [[nodiscard]] static std::optional<settings::Tool> ToolForControl(ToolbarControl control);
     [[nodiscard]] static ToolbarControl ControlForTool(settings::Tool tool);
 
@@ -234,6 +242,7 @@ protected:
     void leaveEvent(QEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
+    bool event(QEvent* event) override;
 
 private:
     void UpdateToolbarGeometry();
@@ -274,6 +283,7 @@ private:
     TextAlignment formatAlignment_ = TextAlignment::Left;
     std::size_t formatSizePreset_ = 1;  // medium until the shell reports otherwise
     ToolbarControl hovered_ = ToolbarControl::None;
+    ToolbarControl pressed_ = ToolbarControl::None;
     bool zoomEditing_ = false;
     QString zoomEditText_ {};
 

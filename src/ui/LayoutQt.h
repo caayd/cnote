@@ -142,13 +142,20 @@ enum class ToolbarAutoHide {
     Hide,
 };
 
+// Native caption button width: the Windows 11 / WinUI 3 caption button is 46
+// logical pixels (Qt's QWindows11Style uses the same 46).  The reference
+// frontend drew a narrower 35-pixel cluster (Layout.cpp:215); the Qt shell
+// uses the OS value so the in-client buttons match real system chrome.
+inline constexpr qreal kCaptionButtonWidth = 46.0;
+
 // 34 logical-pixel base toolbar, 39 when maximized (Layout.cpp:15-16,58-60).
 qreal ToolbarHeight(bool maximized);
 // 5 logical-pixel maximized inset (Layout.cpp:62-64).
 qreal ToolbarTopInset(bool maximized);
-// (35 * 3) + 12 reserved for the in-client minimize/maximize/close buttons
-// (Layout.cpp:42-44).  The Qt shell keeps the reference cluster position even
-// though native decorations supply the buttons (plan step 6.3).
+// (46 * 3) + 12 reserved for the in-client minimize/maximize/close buttons
+// (native caption width, kCaptionButtonWidth; the reference reserve was
+// (35 * 3) + 12, Layout.cpp:42-44).  The cluster's geometry is always
+// reserved even on platforms whose native decorations supply the buttons.
 qreal CaptionButtonReserve();
 
 // Paint-only palette-wheel hover feedback (App.cpp:158-159, 6773-6774).

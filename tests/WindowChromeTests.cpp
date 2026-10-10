@@ -125,13 +125,12 @@ QRect LitBounds(const QImage& image, const QRect& rect) {
     return QRect(QPoint(left, top), QPoint(right, bottom));
 }
 
-bool AnyLitNear(const QImage& image, int centerX, int y, int halfWidth) {
-    for (int x = centerX - halfWidth; x <= centerX + halfWidth; ++x) {
-        if (Lit(image, x, y)) {
-            return true;
-        }
-    }
-    return false;
+bool Reddish(const QColor& color) {
+    return color.red() > color.green() + 40 && color.red() > color.blue() + 40;
+}
+
+bool Greenish(const QColor& color) {
+    return color.green() > color.red() + 40 && color.green() > color.blue() + 40;
 }
 
 // --- native hit-test arithmetic ----------------------------------------------
@@ -168,6 +167,18 @@ void TestWindowChromeHitArithmetic() {
     Check(cnote::ui::ResolveWindowChromeHit(hit) == cnote::ui::WindowChromeHit::Caption, "band strip is HTCAPTION");
     hit.cursorOverToolbarControl = true;
     Check(cnote::ui::ResolveWindowChromeHit(hit) == cnote::ui::WindowChromeHit::Client, "band control is HTCLIENT");
+    // The in-client caption cluster reports the real non-client codes, so the
+    // system runs the press/activate cycle (and the Windows 11 snap-layouts
+    // flyout) while the widget only paints the state.
+    hit.cursorOverMinButton = true;
+    Check(cnote::ui::ResolveWindowChromeHit(hit) == cnote::ui::WindowChromeHit::MinButton, "minimize button is HTMINBUTTON");
+    hit.cursorOverMinButton = false;
+    hit.cursorOverMaxButton = true;
+    Check(cnote::ui::ResolveWindowChromeHit(hit) == cnote::ui::WindowChromeHit::MaxButton, "maximize button is HTMAXBUTTON");
+    hit.cursorOverMaxButton = false;
+    hit.cursorOverCloseButton = true;
+    Check(cnote::ui::ResolveWindowChromeHit(hit) == cnote::ui::WindowChromeHit::CloseButton, "close button is HTCLOSE");
+    hit.cursorOverCloseButton = false;
 
     // A maximized window has no resize zones: the frame strips fall through to
     // the band/client decision (MessageLoop.cpp:90-154).
@@ -201,7 +212,7 @@ void TestBandGeometryAndFrameInset() {
     CheckNear(toolbar.height(), 34.0, 0.001, "restored band height is ToolbarHeight(false)");
     CheckNear(layout.closeRect.right(), 1400.0, 0.001, "restored close button ends at the client right edge");
     CheckNear(layout.closeRect.top(), 0.0, 0.001, "restored caption cluster starts at band top");
-    CheckNear(layout.closeRect.width(), 35.0, 0.001, "caption button width is the LayoutQt 35");
+    CheckNear(layout.closeRect.width(), 46.0, 0.001, "caption button width is the native 46");
     CheckNear(layout.maximizeRect.right(), layout.closeRect.left(), 0.001, "maximize rect abuts close");
     CheckNear(layout.minimizeRect.right(), layout.maximizeRect.left(), 0.001, "minimize rect abuts maximize");
 
@@ -216,7 +227,7 @@ void TestBandGeometryAndFrameInset() {
     CheckNear(layout.closeRect.right(), 1400.0 - frameInset, 0.001, "maximized close button is inset by the native frame");
     CheckNear(layout.closeRect.top(), 5.0, 0.001, "maximized caption cluster uses the ToolbarTopInset(5)");
     CheckNear(layout.closeRect.bottom(), 39.0, 0.001, "maximized caption cluster reaches the band bottom");
-    CheckNear(layout.minimizeRect.right() - layout.minimizeRect.left(), 35.0, 0.001, "maximized minimize width");
+    CheckNear(layout.minimizeRect.right() - layout.minimizeRect.left(), 46.0, 0.001, "maximized minimize width");
 
     // Host-coordinate hit tests agree with the widget's own mouse routing, and
     // the widget's position (which carries the auto-hide reveal offset) is
@@ -255,7 +266,9 @@ void TestCaptionClusterHiddenWithoutCustomChrome() {
 
     const QImage image = toolbar.grab().toImage();
     const QRect maximizeRect = toolbar.ControlRect(cnote::ui::ToolbarControl::Maximize).toAlignedRect();
-    Check(!Lit(image, maximizeRect.center().x(), maximizeRect.center().y()), "hidden caption cluster is not painted");
+    const qreal hiddenDpr = image.devicePixelRatio();
+    Check(!Lit(image, static_cast<int>(maximizeRect.center().x() * hiddenDpr),
+            static_cast<int>(maximizeRect.center().y() * hiddenDpr)), "hidden caption cluster is not painted");
     Check(toolbar.ControlAt(QPointF(maximizeRect.center())) == cnote::ui::ToolbarControl::None,
         "hidden caption cluster is not hit-testable");
 }
@@ -273,32 +286,74 @@ void TestMaximizeGlyphTransition() {
     toolbar.SetMaximized(false);
     toolbar.resize(1400, 34);
     const QImage restored = toolbar.grab().toImage();
+    // grab() returns a physical-pixel image (devicePixelRatio 1.75 on the
+    // reference display); every rect it is indexed with must be scaled.
+    const qreal imgDpr = restored.devicePixelRatio();
+    const auto physical = [imgDpr](const QRect& logical) {
+        return QRect(
+            static_cast<int>(logical.x() * imgDpr),
+            static_cast<int>(logical.y() * imgDpr),
+            static_cast<int>(logical.width() * imgDpr),
+            static_cast<int>(logical.height() * imgDpr));
+    };
+    const auto physicalPoint = [imgDpr](const QRect& logical) {
+        return QPoint(
+            static_cast<int>(logical.x() * imgDpr) + 4,
+            static_cast<int>(logical.y() * imgDpr) + 4);
+    };
     const QRect restoredRect = toolbar.ControlRect(cnote::ui::ToolbarControl::Maximize).toAlignedRect();
-    const QRect restoredBounds = LitBounds(restored, restoredRect);
+    const QRect restoredBounds = LitBounds(restored, physical(restoredRect));
 
     toolbar.SetMaximized(true);
     toolbar.resize(1400, 39);
     const QImage maximized = toolbar.grab().toImage();
     const QRect maximizedRect = toolbar.ControlRect(cnote::ui::ToolbarControl::Maximize).toAlignedRect();
-    const QRect maximizedBounds = LitBounds(maximized, maximizedRect);
+    const QRect maximizedBounds = LitBounds(maximized, physical(maximizedRect));
 
     Check(restoredBounds.isValid(), "restored maximize glyph is painted");
     Check(maximizedBounds.isValid(), "maximized maximize glyph is painted");
-    // Reference restore glyph: a front square lifted to centre - 1 plus the
-    // offset back square reaching centre - 8, against the plain square at
-    // centre - 5 in the restored state (App.cpp:6592-6599).
-    Check(maximizedBounds.height() >= restoredBounds.height() + 2,
-        "maximized glyph is taller (restore glyph) than the restored square");
-    // Compare within each button rect: the maximized band lowers the whole
-    // cluster by the LayoutQt 5-pixel top inset.
-    Check(maximizedBounds.top() - maximizedRect.top() <= restoredBounds.top() - restoredRect.top() - 2,
-        "restore glyph reaches higher than the square");
-    // The square's top edge (centre - 5) has no ink in the restore glyph: the
-    // front square starts at centre - 1 and the back square is offset sideways.
-    Check(AnyLitNear(restored, restoredRect.center().x(), restoredRect.center().y() - 5, 4),
-        "restored square draws its top edge at centre - 5");
-    Check(!AnyLitNear(maximized, maximizedRect.center().x(), maximizedRect.center().y() - 5, 1),
-        "restore glyph leaves centre - 5 empty");
+    // The cluster draws the system's caption glyphs (Segoe Fluent/MDL2 chrome
+    // icons): the maximized state must switch to the restore glyph, verified
+    // as a different raster inside the same centred crop rather than by
+    // pinning the glyph's drawn geometry.
+    const QRect crop(
+        physical(restoredRect).center().x() - 9, physical(restoredRect).center().y() - 9, 19, 19);
+    const QImage restoredGlyph = restored.copy(crop);
+    const QImage maximizedGlyph = maximized.copy(
+        crop.translated(physical(maximizedRect).center() - physical(restoredRect).center()));
+    Check(restoredGlyph != maximizedGlyph, "maximize glyph switches to the restore glyph when maximized");
+
+    // Native caption state fills: hover on close paints the system red over
+    // the whole button, and the pressed state darkens it (WinUI
+    // shellCaptionCloseFill*).  Sampled off-centre so the glyph itself cannot
+    // pollute the fill check.
+    const QRect closeRect = toolbar.ControlRect(cnote::ui::ToolbarControl::Close).toAlignedRect();
+    const QPoint fillPoint = physicalPoint(closeRect);
+    const QColor restFill = QImage(toolbar.grab().toImage()).pixelColor(fillPoint);
+    Check(!Reddish(restFill), "resting close button does not paint the hover red");
+    toolbar.UpdateHoverAtHostPosition(QPointF(toolbar.x() + closeRect.center().x(), toolbar.y() + closeRect.center().y()));
+    const QColor hoverFill = QImage(toolbar.grab().toImage()).pixelColor(fillPoint);
+    Check(Reddish(hoverFill) && hoverFill.red() > 150, "close hover paints the system red");
+    toolbar.SetPressedControl(cnote::ui::ToolbarControl::Close);
+    const QColor pressedFill = QImage(toolbar.grab().toImage()).pixelColor(fillPoint);
+    Check(Reddish(pressedFill), "close press keeps the red family");
+    Check(pressedFill.red() < hoverFill.red() || pressedFill.alpha() < hoverFill.alpha(),
+        "close press is dimmer than close hover");
+    toolbar.SetPressedControl(cnote::ui::ToolbarControl::None);
+
+    // The min/max hover is a subtle light overlay, not a saturated colour.
+    const QRect minRect = toolbar.ControlRect(cnote::ui::ToolbarControl::Minimize).toAlignedRect();
+    const QPoint minFillPoint = physicalPoint(minRect);
+    const QColor minRestFill = QImage(toolbar.grab().toImage()).pixelColor(minFillPoint);
+    toolbar.UpdateHoverAtHostPosition(QPointF(toolbar.x() + minRect.center().x(), toolbar.y() + minRect.center().y()));
+    const QColor minHoverFill = QImage(toolbar.grab().toImage()).pixelColor(minFillPoint);
+    Check(!Reddish(minHoverFill) && !Greenish(minHoverFill),
+        "minimize hover does not paint a saturated colour");
+    Check(std::abs(minHoverFill.red() - minRestFill.red()) > 3
+            || std::abs(minHoverFill.green() - minRestFill.green()) > 3
+            || std::abs(minHoverFill.blue() - minRestFill.blue()) > 3,
+        "minimize hover changes the fill");
+    toolbar.UpdateHoverAtHostPosition(QPointF(toolbar.x() + 700.0, toolbar.y() + 20.0));
 
     // The band transition itself: 34 -> 39 logical pixels.
     toolbar.SetMaximized(false);
@@ -390,6 +445,24 @@ void TestCaptionButtonIntents() {
         Check(commands.size() == 1 && commands.front() == testCase.command,
             std::string("clicking the ") + testCase.name + " control emits its command");
     }
+
+    // The native press cycle: a press arms the button without firing, the
+    // command lands on a same-button release, and a release that slid off the
+    // button cancels like the system caption.
+    commands.clear();
+    const QRectF closeRect = toolbar.ControlRect(cnote::ui::ToolbarControl::Close);
+    SendMouse(toolbar, QEvent::MouseButtonPress, closeRect.center(), Qt::LeftButton, Qt::LeftButton);
+    Check(toolbar.PressedControl() == cnote::ui::ToolbarControl::Close, "press arms the close button");
+    Check(commands.empty(), "press alone does not emit the command");
+    SendMouse(toolbar, QEvent::MouseButtonRelease, closeRect.center(), Qt::LeftButton, Qt::NoButton);
+    Check(commands.size() == 1 && commands.front() == cnote::ui::ToolbarCommand::Close,
+        "release on the armed button emits its command");
+
+    commands.clear();
+    const QRectF minimizeRect = toolbar.ControlRect(cnote::ui::ToolbarControl::Minimize);
+    SendMouse(toolbar, QEvent::MouseButtonPress, minimizeRect.center(), Qt::LeftButton, Qt::LeftButton);
+    SendMouse(toolbar, QEvent::MouseButtonRelease, QPointF(minimizeRect.center().x() - 200.0, 20.0), Qt::LeftButton, Qt::NoButton);
+    Check(commands.empty(), "release off the armed button cancels the command");
 
     // A click on the band's caption strip belongs to the window (drag/snap), so
     // the widget must not consume it.

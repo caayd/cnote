@@ -1397,6 +1397,14 @@ void ToolbarWidget::UpdateHoverAtHostPosition(const QPointF& hostPosition) {
     }
 }
 
+void ToolbarWidget::SetPressedControl(ToolbarControl control) {
+    if (pressed_ == control) {
+        return;
+    }
+    pressed_ = control;
+    update();
+}
+
 std::optional<settings::Tool> ToolbarWidget::ToolForControl(ToolbarControl control) {
     switch (control) {
     case ToolbarControl::SelectTool:
@@ -1603,43 +1611,20 @@ void ToolbarWidget::paintEvent(QPaintEvent*) {
     };
 
     if (captionButtonsVisible_) {
-        // App::PaintToolbarContents::paintWindowButton (App.cpp:6570-6610): the
-        // hover fill covers the whole button rect (FillSolidRect, no rounding),
-        // unlike the rounded tool-button hover; the maximize button switches to
-        // the two-square restore glyph while the window is maximized.
-        const auto paintWindowButton = [&](const QRectF& rect, int kind, ToolbarControl control) {
-            if (hovered_ == control) {
-                painter.fillRect(rect, ChromeColor(kind == 2 ? kChromeCaptionCloseHover : kChromeCaptionHover));
-            }
-            painter.setBrush(Qt::NoBrush);
-            painter.setPen(QPen(ChromeColor(kChromeCaptionIcon), 1.0));
-            const QPointF center = rect.center();
-            constexpr qreal kBoxHalfWidth = 6.0;
-            constexpr qreal kBoxHalfHeight = 5.0;
-            constexpr qreal kOverlapOffset = 3.0;
-            if (kind == 0) {
-                painter.drawLine(QPointF(center.x() - 8.0, center.y() + 4.0), QPointF(center.x() + 9.0, center.y() + 4.0));
-            } else if (kind == 1) {
-                if (maximized_) {
-                    // Front square plus the offset back square of the restore
-                    // glyph (App.cpp:6592-6599).
-                    painter.drawRect(QRectF(center.x() - kBoxHalfWidth, center.y() - 1.0, (kBoxHalfWidth * 2.0) + 1.0, kBoxHalfHeight + 2.0));
-                    const QPointF backLeft(center.x() - kBoxHalfWidth + kOverlapOffset, center.y() - kBoxHalfHeight - kOverlapOffset);
-                    const QPointF backRight(center.x() + kBoxHalfWidth + kOverlapOffset + 1.0, center.y() - kBoxHalfHeight - kOverlapOffset);
-                    painter.drawLine(backLeft, backRight);
-                    painter.drawLine(backRight, QPointF(backRight.x(), center.y() + kBoxHalfHeight - kOverlapOffset + 1.0));
-                    painter.drawLine(backLeft, QPointF(backLeft.x(), center.y() - kBoxHalfHeight + kOverlapOffset));
-                } else {
-                    painter.drawRect(QRectF(center.x() - kBoxHalfWidth, center.y() - kBoxHalfHeight, (kBoxHalfWidth * 2.0) + 1.0, (kBoxHalfHeight * 2.0) + 1.0));
-                }
-            } else {
-                painter.drawLine(QPointF(center.x() - 7.0, center.y() - 7.0), QPointF(center.x() + 8.0, center.y() + 8.0));
-                painter.drawLine(QPointF(center.x() + 7.0, center.y() - 7.0), QPointF(center.x() - 8.0, center.y() + 8.0));
-            }
+        // OS-native caption styling (ChromeStyleQt.h PaintCaptionButton):
+        // Segoe Fluent/MDL2 glyphs, the WinUI 3 caption fills and the system
+        // close red; the shell's hit test answers the real HT*BUTTON codes so
+        // Windows drives the press cycle (and the Win11 snap flyout) while the
+        // pressed state mirrors through SetPressedControl.
+        const bool windowActive = window() == nullptr || window()->isActiveWindow();
+        const auto paintWindowButton = [&](const QRectF& rect, CaptionGlyph glyph, ToolbarControl control) {
+            PaintCaptionButton(painter, rect, glyph,
+                hovered_ == control, pressed_ == control, windowActive);
         };
-        paintWindowButton(layout.minimizeRect, 0, ToolbarControl::Minimize);
-        paintWindowButton(layout.maximizeRect, 1, ToolbarControl::Maximize);
-        paintWindowButton(layout.closeRect, 2, ToolbarControl::Close);
+        paintWindowButton(layout.minimizeRect, CaptionGlyph::Minimize, ToolbarControl::Minimize);
+        paintWindowButton(layout.maximizeRect,
+            maximized_ ? CaptionGlyph::Restore : CaptionGlyph::Maximize, ToolbarControl::Maximize);
+        paintWindowButton(layout.closeRect, CaptionGlyph::Close, ToolbarControl::Close);
     }
 
     if (layout.undoRect.isValid()) {
@@ -1760,18 +1745,20 @@ void ToolbarWidget::mousePressEvent(QMouseEvent* event) {
         emit ToolSelected(*tool);
         return;
     }
+
+    // The in-client caption cluster uses the native press cycle: the button
+    // arms here, fires on a release that still lands on it, and cancels when
+    // the cursor slides off.  On Windows the same transition normally arrives
+    // as WM_NCLBUTTONDOWN/UP (the hit test answers HT*BUTTON); the widget path
+    // only runs for synthetic/touch delivery.
+    if (control == ToolbarControl::Minimize || control == ToolbarControl::Maximize || control == ToolbarControl::Close) {
+        SetPressedControl(control);
+        return;
+    }
+
     switch (control) {
     case ToolbarControl::TitleMenu:
         emit CommandTriggered(ToolbarCommand::OpenTitleMenu);
-        break;
-    case ToolbarControl::Minimize:
-        emit CommandTriggered(ToolbarCommand::Minimize);
-        break;
-    case ToolbarControl::Maximize:
-        emit CommandTriggered(ToolbarCommand::Maximize);
-        break;
-    case ToolbarControl::Close:
-        emit CommandTriggered(ToolbarCommand::Close);
         break;
     case ToolbarControl::Undo:
         emit CommandTriggered(ToolbarCommand::Undo);
@@ -1797,12 +1784,28 @@ void ToolbarWidget::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void ToolbarWidget::mouseReleaseEvent(QMouseEvent* event) {
+    if (pressed_ != ToolbarControl::None) {
+        const ToolbarControl armed = pressed_;
+        SetPressedControl(ToolbarControl::None);
+        if (event->button() == Qt::LeftButton && ControlAt(event->position()) == armed) {
+            switch (armed) {
+            case ToolbarControl::Minimize: emit CommandTriggered(ToolbarCommand::Minimize); break;
+            case ToolbarControl::Maximize: emit CommandTriggered(ToolbarCommand::Maximize); break;
+            case ToolbarControl::Close: emit CommandTriggered(ToolbarCommand::Close); break;
+            default: break;
+            }
+        }
+    }
     QWidget::mouseReleaseEvent(event);
 }
 
 void ToolbarWidget::leaveEvent(QEvent* event) {
     if (hovered_ != ToolbarControl::None) {
         hovered_ = ToolbarControl::None;
+        update();
+    }
+    if (pressed_ != ToolbarControl::None) {
+        pressed_ = ToolbarControl::None;
         update();
     }
     UpdateAutoHideForCursor(QPointF(-1.0, -1.0), false);
@@ -2199,6 +2202,15 @@ void ToolbarWidget::OnWheelZoomModeChanged(bool zoomPresetMode) {
         paletteWheel_->SetEntries(settings_.palette, PaletteWheelDisplayedTools(), settings_.colorIndex, zoomPresetMode, settings_.zoomPresets);
     }
     update();
+}
+
+bool ToolbarWidget::event(QEvent* event) {
+    // The native caption glyph dims on inactive windows; the shell does not
+    // send a repaint on activation changes, so the widget asks for its own.
+    if (event->type() == QEvent::ActivationChange && captionButtonsVisible_) {
+        update();
+    }
+    return QWidget::event(event);
 }
 
 bool ToolbarWidget::eventFilter(QObject* watched, QEvent* event) {

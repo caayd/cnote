@@ -14,6 +14,7 @@
 #include "qt/QtDocumentController.h"
 #include "settings/SettingsStoreQt.h"
 #include "ui/PrecisionInputFilterQt.h"
+#include "ui/ToolbarWidget.h"
 
 #if defined(Q_OS_WIN)
 #include "platform/windows/PrecisionTouchpadQt.h"
@@ -130,6 +131,14 @@ private:
     // Handles WM_NCCALCSIZE/WM_NCHITTEST; returns true when the message was
     // consumed.  Defined on Windows only.
     bool HandleNativeChromeMessage(void* message, qintptr* result);
+    // Completes the armed caption-button press (minimize/maximize/close) when
+    // the release still lands on that button; also clears the armed state.
+    // Defined on Windows only.
+    void CompleteCaptionButtonCycle(ui::ToolbarControl released);
+    // Caption button under a client-coordinate mouse position (physical
+    // pixels, as a mouse MSG lParam carries); mirrors the WM_NCHITTEST band
+    // math.  Defined on Windows only.
+    [[nodiscard]] ui::ToolbarControl CaptionControlAtClientPosition(qintptr lParam) const;
     // Maximized state that drives the band layout.  Maximizing never goes
     // through Qt on Windows - double-clicking the band and Aero snap are system
     // paths - so this asks the reference's own source of truth (IsZoomed) first
@@ -229,6 +238,10 @@ private:
     std::unique_ptr<ui::PrecisionTouchpadQt> precisionTouchpad_;
     std::unique_ptr<ui::PrecisionInputFilterQt> precisionFilter_;
 #endif
+    // Caption button the last WM_NCLBUTTONDOWN armed on the in-client cluster
+    // (the HT*BUTTON codes leave activation to us); completed/cancelled on
+    // WM_NCLBUTTONUP / WM_NCMOUSELEAVE.
+    ui::ToolbarControl ncButtonArmed_ = ui::ToolbarControl::None;
     ui::SettingsDialogQt* settingsDialog_ = nullptr;
     ui::NewPageDialogQt* newPageDialog_ = nullptr;
     QMenu* titleMenu_ = nullptr;

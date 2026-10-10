@@ -49,6 +49,9 @@ inline QSize PreferredStartSize(const QRect& availableGeometry) {
 enum class WindowChromeHit {
     Client,   // HTCLIENT
     Caption,  // HTCAPTION
+    MinButton,   // HTMINBUTTON - the real non-client code, so the system drives
+    MaxButton,   // HTMAXBUTTON - the press/release cycle and (Windows 11) the
+    CloseButton, // HTCLOSE    - snap-layouts flyout over the maximize button
     Top,
     Bottom,
     Left,
@@ -76,6 +79,11 @@ struct WindowChromeHitTest {
     // That band position is a toolbar control (IsToolbarControlRect), i.e. it
     // must stay clickable instead of becoming a caption drag area.
     bool cursorOverToolbarControl = false;
+    // Band position over one of the in-client caption buttons; resolved to the
+    // native HT*BUTTON codes so Windows runs its own press/activate semantics.
+    bool cursorOverMinButton = false;
+    bool cursorOverMaxButton = false;
+    bool cursorOverCloseButton = false;
 };
 
 // Reference order: a maximized window has no resize zones at all
@@ -117,6 +125,15 @@ inline WindowChromeHit ResolveWindowChromeHit(const WindowChromeHitTest& test) {
     }
 
     if (test.cursorInBand) {
+        if (test.cursorOverMinButton) {
+            return WindowChromeHit::MinButton;
+        }
+        if (test.cursorOverMaxButton) {
+            return WindowChromeHit::MaxButton;
+        }
+        if (test.cursorOverCloseButton) {
+            return WindowChromeHit::CloseButton;
+        }
         return test.cursorOverToolbarControl ? WindowChromeHit::Client : WindowChromeHit::Caption;
     }
     return WindowChromeHit::Client;

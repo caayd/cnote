@@ -72,6 +72,9 @@ int NativeFrameThicknessY(HWND window) {
 LRESULT HitCodeFor(ui::WindowChromeHit hit) {
     switch (hit) {
         case ui::WindowChromeHit::Caption: return HTCAPTION;
+        case ui::WindowChromeHit::MinButton: return HTMINBUTTON;
+        case ui::WindowChromeHit::MaxButton: return HTMAXBUTTON;
+        case ui::WindowChromeHit::CloseButton: return HTCLOSE;
         case ui::WindowChromeHit::Top: return HTTOP;
         case ui::WindowChromeHit::Bottom: return HTBOTTOM;
         case ui::WindowChromeHit::Left: return HTLEFT;
@@ -83,6 +86,15 @@ LRESULT HitCodeFor(ui::WindowChromeHit hit) {
         case ui::WindowChromeHit::Client: break;
     }
     return HTCLIENT;
+}
+
+ui::ToolbarControl HitCodeControl(LRESULT code) {
+    switch (code) {
+        case HTMINBUTTON: return ui::ToolbarControl::Minimize;
+        case HTMAXBUTTON: return ui::ToolbarControl::Maximize;
+        case HTCLOSE: return ui::ToolbarControl::Close;
+        default: return ui::ToolbarControl::None;
+    }
 }
 #endif
 
@@ -1492,16 +1504,115 @@ bool QtMainWindow::HandleNativeChromeMessage(void* message, qintptr* result) {
         hit.cursorInBand = toolbar_ != nullptr
             && clientPosition.y() >= 0.0
             && clientPosition.y() < toolbar_->VisibleToolbarHeight();
-        hit.cursorOverToolbarControl = hit.cursorInBand
-            && toolbar_->ControlAtHostPosition(clientPosition) != ui::ToolbarControl::None;
-
+        const ui::ToolbarControl control = hit.cursorInBand
+            ? toolbar_->ControlAtHostPosition(clientPosition)
+            : ui::ToolbarControl::None;
+        hit.cursorOverToolbarControl = control != ui::ToolbarControl::None;
+        hit.cursorOverMinButton = control == ui::ToolbarControl::Minimize;
+        hit.cursorOverMaxButton = control == ui::ToolbarControl::Maximize;
+        hit.cursorOverCloseButton = control == ui::ToolbarControl::Close;
         *result = static_cast<qintptr>(HitCodeFor(ui::ResolveWindowChromeHit(hit)));
         return true;
     }
+    case WM_NCLBUTTONDOWN: {
+        // The HT*BUTTON hit codes make the cluster real non-client buttons
+        // (Windows 11 uses them for the snap-layouts flyout).  DefWindowProc
+        // cannot complete the click - the WM_NCCALCSIZE override leaves it no
+        // caption rect - so the press is armed here and completed on release.
+        // SetCapture routes the release to the client mouse path; consuming
+        // the message keeps DefWindowProc out of its own dead-end tracking.
+        const ui::ToolbarControl armed = HitCodeControl(static_cast<LRESULT>(msg->wParam));
+        if (armed == ui::ToolbarControl::None) {
+            // Not a caption button: DefWindowProc still needs the press (title
+            // bar drag, resize, system menu).
+            return false;
+        }
+        ncButtonArmed_ = armed;
+        SetCapture(reinterpret_cast<HWND>(winId()));
+        if (toolbar_ != nullptr) {
+            toolbar_->SetPressedControl(armed);
+        }
+        *result = 0;
+        return true;
+    }
+    case WM_CAPTURECHANGED:
+        // Another window stealing the capture mid-press abandons the cycle.
+        ncButtonArmed_ = ui::ToolbarControl::None;
+        if (toolbar_ != nullptr) {
+            toolbar_->SetPressedControl(ui::ToolbarControl::None);
+        }
+        return false;
+    case WM_MOUSEMOVE:
+        // Drag off/on the armed button mirrors the native push feel.
+        if (ncButtonArmed_ != ui::ToolbarControl::None && (msg->wParam & MK_LBUTTON) != 0 && toolbar_ != nullptr) {
+            const ui::ToolbarControl over = (ncButtonArmed_ == CaptionControlAtClientPosition(msg->lParam))
+                ? ncButtonArmed_
+                : ui::ToolbarControl::None;
+            toolbar_->SetPressedControl(over);
+        }
+        return false;
+    case WM_LBUTTONUP:
+        // The release lands here while the press is captured; complete the
+        // cycle only when it still lands on the armed button.
+        if (ncButtonArmed_ != ui::ToolbarControl::None) {
+            // Complete before ReleaseCapture: its WM_CAPTURECHANGED clears the
+            // armed state.
+            CompleteCaptionButtonCycle(CaptionControlAtClientPosition(msg->lParam));
+            ReleaseCapture();
+            *result = 0;
+            return true;
+        }
+        return false;
+    case WM_NCLBUTTONUP:
+        // Defensive: a press armed without capture still completes here.
+        CompleteCaptionButtonCycle(HitCodeControl(static_cast<LRESULT>(msg->wParam)));
+        return false;
+    case WM_NCMOUSELEAVE:
+        // The pressed visual and any armed press clear when the non-client
+        // area loses the cursor.
+        ncButtonArmed_ = ui::ToolbarControl::None;
+        if (toolbar_ != nullptr) {
+            toolbar_->SetPressedControl(ui::ToolbarControl::None);
+        }
+        return false;
     default:
         break;
     }
     return false;
+}
+
+void QtMainWindow::CompleteCaptionButtonCycle(ui::ToolbarControl released) {
+    const ui::ToolbarControl armed = ncButtonArmed_;
+    ncButtonArmed_ = ui::ToolbarControl::None;
+    if (toolbar_ != nullptr) {
+        toolbar_->SetPressedControl(ui::ToolbarControl::None);
+    }
+    if (armed == ui::ToolbarControl::None || released != armed) {
+        return;
+    }
+    switch (armed) {
+    case ui::ToolbarControl::Minimize: showMinimized(); break;
+    case ui::ToolbarControl::Maximize:
+        IsWindowMaximized() ? showNormal() : showMaximized();
+        UpdateChrome();
+        break;
+    case ui::ToolbarControl::Close: close(); break;
+    default: break;
+    }
+}
+
+ui::ToolbarControl QtMainWindow::CaptionControlAtClientPosition(qintptr lParam) const {
+    if (toolbar_ == nullptr) {
+        return ui::ToolbarControl::None;
+    }
+    const qreal ratio = devicePixelRatioF() > 0.0 ? devicePixelRatioF() : 1.0;
+    const QPointF clientPosition(
+        static_cast<qreal>(GET_X_LPARAM(static_cast<LPARAM>(lParam))) / ratio,
+        static_cast<qreal>(GET_Y_LPARAM(static_cast<LPARAM>(lParam))) / ratio);
+    if (clientPosition.y() < 0.0 || clientPosition.y() >= toolbar_->VisibleToolbarHeight()) {
+        return ui::ToolbarControl::None;
+    }
+    return toolbar_->ControlAtHostPosition(clientPosition);
 }
 #endif  // Q_OS_WIN
 

@@ -438,58 +438,58 @@ std::vector<Scenario> FrozenTitleScenarios() {
 // FROZEN-GEOMETRY-BEGIN
 const std::vector<FrozenCase> kFrozenGeometry {
     { "toolbar 1400x960 colors=5", {
-        { "titleAreaRect", 12.0, 0.0, 911.0, 34.0 },
-        { "minimizeRect", 1295.0, 0.0, 1330.0, 34.0 },
-        { "maximizeRect", 1330.0, 0.0, 1365.0, 34.0 },
-        { "closeRect", 1365.0, 0.0, 1400.0, 34.0 },
-        { "undoRect", 927.0, 2.0, 957.0, 32.0 },
-        { "redoRect", 967.0, 2.0, 997.0, 32.0 },
-        { "selectToolRect", 1053.0, 2.0, 1083.0, 32.0 },
-        { "textToolRect", 1093.0, 2.0, 1123.0, 32.0 },
-        { "moveToolRect", 1013.0, 2.0, 1043.0, 32.0 },
-        { "drawToolRect", 1173.0, 2.0, 1203.0, 32.0 },
-        { "panToolRect", 1213.0, 2.0, 1243.0, 32.0 },
-        { "eraseToolRect", 1133.0, 2.0, 1163.0, 32.0 },
-        { "currentColorRect", 1261.0, 6.0, 1283.0, 28.0 },
+        { "titleAreaRect", 12.0, 0.0, 878.0, 34.0 },
+        { "minimizeRect", 1262.0, 0.0, 1308.0, 34.0 },
+        { "maximizeRect", 1308.0, 0.0, 1354.0, 34.0 },
+        { "closeRect", 1354.0, 0.0, 1400.0, 34.0 },
+        { "undoRect", 894.0, 2.0, 924.0, 32.0 },
+        { "redoRect", 934.0, 2.0, 964.0, 32.0 },
+        { "selectToolRect", 1020.0, 2.0, 1050.0, 32.0 },
+        { "textToolRect", 1060.0, 2.0, 1090.0, 32.0 },
+        { "moveToolRect", 980.0, 2.0, 1010.0, 32.0 },
+        { "drawToolRect", 1140.0, 2.0, 1170.0, 32.0 },
+        { "panToolRect", 1180.0, 2.0, 1210.0, 32.0 },
+        { "eraseToolRect", 1100.0, 2.0, 1130.0, 32.0 },
+        { "currentColorRect", 1228.0, 6.0, 1250.0, 28.0 },
     } },
     { "toolbar compact 700x600 colors=5", {
-        { "titleAreaRect", 12.0, 0.0, 233.0, 34.0 },
-        { "minimizeRect", 595.0, 0.0, 630.0, 34.0 },
-        { "maximizeRect", 630.0, 0.0, 665.0, 34.0 },
-        { "closeRect", 665.0, 0.0, 700.0, 34.0 },
-        { "undoRect", 249.0, 2.0, 279.0, 32.0 },
-        { "redoRect", 287.0, 2.0, 317.0, 32.0 },
-        { "selectToolRect", 367.0, 2.0, 397.0, 32.0 },
-        { "textToolRect", 405.0, 2.0, 435.0, 32.0 },
-        { "moveToolRect", 329.0, 2.0, 359.0, 32.0 },
-        { "drawToolRect", 481.0, 2.0, 511.0, 32.0 },
-        { "panToolRect", 519.0, 2.0, 549.0, 32.0 },
-        { "eraseToolRect", 443.0, 2.0, 473.0, 32.0 },
-        { "currentColorRect", 561.0, 6.0, 583.0, 28.0 },
+        { "titleAreaRect", 12.0, 0.0, 200.0, 34.0 },
+        { "minimizeRect", 562.0, 0.0, 608.0, 34.0 },
+        { "maximizeRect", 608.0, 0.0, 654.0, 34.0 },
+        { "closeRect", 654.0, 0.0, 700.0, 34.0 },
+        { "undoRect", 216.0, 2.0, 246.0, 32.0 },
+        { "redoRect", 254.0, 2.0, 284.0, 32.0 },
+        { "selectToolRect", 334.0, 2.0, 364.0, 32.0 },
+        { "textToolRect", 372.0, 2.0, 402.0, 32.0 },
+        { "moveToolRect", 296.0, 2.0, 326.0, 32.0 },
+        { "drawToolRect", 448.0, 2.0, 478.0, 32.0 },
+        { "panToolRect", 486.0, 2.0, 516.0, 32.0 },
+        { "eraseToolRect", 410.0, 2.0, 440.0, 32.0 },
+        { "currentColorRect", 528.0, 6.0, 550.0, 28.0 },
     } },
     { "toolbar narrow 500x400 colors=10", {
         { "titleAreaRect", 0.0, 0.0, 0.0, 0.0 },
-        { "minimizeRect", 395.0, 0.0, 430.0, 34.0 },
-        { "maximizeRect", 430.0, 0.0, 465.0, 34.0 },
-        { "closeRect", 465.0, 0.0, 500.0, 34.0 },
+        { "minimizeRect", 362.0, 0.0, 408.0, 34.0 },
+        { "maximizeRect", 408.0, 0.0, 454.0, 34.0 },
+        { "closeRect", 454.0, 0.0, 500.0, 34.0 },
         { "undoRect", 0.0, 0.0, 0.0, 0.0 },
         { "redoRect", 0.0, 0.0, 0.0, 0.0 },
-        { "selectToolRect", 167.0, 2.0, 197.0, 32.0 },
-        { "textToolRect", 205.0, 2.0, 235.0, 32.0 },
-        { "moveToolRect", 129.0, 2.0, 159.0, 32.0 },
-        { "drawToolRect", 281.0, 2.0, 311.0, 32.0 },
-        { "panToolRect", 319.0, 2.0, 349.0, 32.0 },
-        { "eraseToolRect", 243.0, 2.0, 273.0, 32.0 },
-        { "currentColorRect", 361.0, 6.0, 383.0, 28.0 },
+        { "selectToolRect", 134.0, 2.0, 164.0, 32.0 },
+        { "textToolRect", 172.0, 2.0, 202.0, 32.0 },
+        { "moveToolRect", 96.0, 2.0, 126.0, 32.0 },
+        { "drawToolRect", 248.0, 2.0, 278.0, 32.0 },
+        { "panToolRect", 286.0, 2.0, 316.0, 32.0 },
+        { "eraseToolRect", 210.0, 2.0, 240.0, 32.0 },
+        { "currentColorRect", 328.0, 6.0, 350.0, 28.0 },
     } },
     { "palette menu 1400x960 colors=5", {
-        { "panelRect", 1123.0, 36.0, 1283.0, 124.0 },
-        { "swatchRect", 1135.0, 48.0, 1163.0, 76.0 },
-        { "swatchRect", 1171.0, 48.0, 1199.0, 76.0 },
-        { "swatchRect", 1207.0, 48.0, 1235.0, 76.0 },
-        { "swatchRect", 1243.0, 48.0, 1271.0, 76.0 },
-        { "swatchRect", 1135.0, 84.0, 1163.0, 112.0 },
-        { "palettePickerRect", 1171.0, 84.0, 1199.0, 112.0 },
+        { "panelRect", 1090.0, 36.0, 1250.0, 124.0 },
+        { "swatchRect", 1102.0, 48.0, 1130.0, 76.0 },
+        { "swatchRect", 1138.0, 48.0, 1166.0, 76.0 },
+        { "swatchRect", 1174.0, 48.0, 1202.0, 76.0 },
+        { "swatchRect", 1210.0, 48.0, 1238.0, 76.0 },
+        { "swatchRect", 1102.0, 84.0, 1130.0, 112.0 },
+        { "palettePickerRect", 1138.0, 84.0, 1166.0, 112.0 },
     } },
     { "sidebar 960 normal", {
         { "metric.width", 176.0, 0.0, 176.0, 0.0 },
@@ -735,13 +735,52 @@ void RunAutoHideTable() {
     Check(metrics.width == 176.0, "sidebar width is 176 logical pixels");
     Check(lq::ToolbarHeight(false) == 34.0, "toolbar height is 34 logical pixels");
     Check(lq::ToolbarHeight(true) == 39.0, "maximized toolbar height is 39 logical pixels");
-    Check(lq::CaptionButtonReserve() == 117.0, "caption button reserve is (35 * 3) + 12 logical pixels");
+    Check(lq::CaptionButtonReserve() == 150.0, "caption button reserve is (46 * 3) + 12 logical pixels");
     // Palette wheel: paint-path hover feedback vs interaction slop (the one
     // duplicate that disagrees; see LayoutQt.h).
     Check(lq::BuildPaletteWheelLayout(QRectF(0.0, 0.0, 1400.0, 960.0), QPointF(0.0, 0.0), 5U, 34.0).hitOuterRadius == 86.0 + 8.0,
         "wheel hit radius uses the appui interaction slop (outer + 8)");
     Check(lq::PaletteWheelHoverGrow() == 12.0, "wheel paint hover grow keeps the App.cpp paint value (12)");
     Check(lq::PaletteWheelHoverOffset() == 10.0, "wheel paint hover offset keeps the App.cpp paint value (10)");
+}
+
+// --dump: reprints the frozen tables in source form so an intentional layout
+// change can regenerate expectations deterministically instead of hand-editing
+// every rect.  The title cases reuse the frozen *measured* advances (those are
+// reference-input values, not layout outputs).
+void DumpFrozenTables() {
+    std::printf("const std::vector<FrozenCase> kFrozenGeometry {\n");
+    for (const Scenario& scenario : FrozenGeometryScenarios()) {
+        std::printf("    { \"%s\", {\n", scenario.label.c_str());
+        for (const FrozenRect& rect : BuildQtRects(scenario, {})) {
+            std::printf("        { \"%s\", %.1f, %.1f, %.1f, %.1f },\n",
+                rect.name, rect.left, rect.top, rect.right, rect.bottom);
+        }
+        std::printf("    } },\n");
+    }
+    std::printf("};\n");
+    std::printf("const std::vector<FrozenTitleCase> kFrozenTitles {\n");
+    for (const Scenario& scenario : FrozenTitleScenarios()) {
+        const FrozenTitleCase* frozen = nullptr;
+        for (const FrozenTitleCase& candidate : kFrozenTitles) {
+            if (scenario.label == candidate.label) {
+                frozen = &candidate;
+                break;
+            }
+        }
+        if (frozen == nullptr) {
+            continue;
+        }
+        std::printf("    { \"%s\", %.1f, %.1f, {\n",
+            scenario.label.c_str(), frozen->measuredTitleWidth, frozen->measuredZoomWidth);
+        for (const FrozenRect& rect : BuildQtTitleRectsWithWidths(
+                scenario, frozen->measuredTitleWidth, frozen->measuredZoomWidth)) {
+            std::printf("        { \"%s\", %.1f, %.1f, %.1f, %.1f },\n",
+                rect.name, rect.left, rect.top, rect.right, rect.bottom);
+        }
+        std::printf("    } },\n");
+    }
+    std::printf("};\n");
 }
 
 }  // namespace
@@ -792,6 +831,12 @@ int main(int argc, char** argv) {
         reference.setPixelSize(15);
         return reference;
     }();
+    for (int index = 1; index < argc; ++index) {
+        if (std::strcmp(argv[index], "--dump") == 0) {
+            DumpFrozenTables();
+            return 0;
+        }
+    }
 
     RunFrozenTable(font);
 
