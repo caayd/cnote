@@ -320,6 +320,7 @@ void InteractionRouter::HandlePointerRelease(const PointerSample& sample) {
         SetActive(InteractionKind::None);
         UpdateCapture();
         if (pageIndex.has_value() && textIndex.has_value()) {
+            host_.ClearSelection();
             host_.BeginTextEdit(*pageIndex, *textIndex);
         }
         host_.InvalidateCanvas();
@@ -891,7 +892,11 @@ void InteractionRouter::BeginTextTool(const QPointF& logical) {
     if (const std::optional<std::pair<std::size_t, std::size_t>> hitText = host_.HitTestText(logical); hitText.has_value()) {
         host_.SetViewPage(hitText->first);
         SetActive(InteractionKind::None);
+        // The editor replaces the selection frame: clear it the same way the
+        // outside-canvas branch below does so the box never overlaps the caret.
+        host_.ClearSelection();
         host_.BeginTextEdit(hitText->first, hitText->second);
+        host_.InvalidateCanvas();
         return;
     }
 
@@ -903,7 +908,9 @@ void InteractionRouter::BeginTextTool(const QPointF& logical) {
     }
     host_.SetViewPage(hit->pageIndex);
     SetActive(InteractionKind::None);
+    host_.ClearSelection();
     host_.CreateTextAt(hit->pageIndex, host_.ScreenToPage(logical, true));
+    host_.InvalidateCanvas();
 }
 
 void InteractionRouter::BeginLatexTool(const QPointF& logical) {
@@ -911,7 +918,10 @@ void InteractionRouter::BeginLatexTool(const QPointF& logical) {
     if (const std::optional<std::pair<std::size_t, std::size_t>> hitLatex = host_.HitTestLatex(logical); hitLatex.has_value()) {
         host_.SetViewPage(hitLatex->first);
         SetActive(InteractionKind::None);
+        // Same rule as BeginTextTool: an editor opening hides the selection.
+        host_.ClearSelection();
         host_.BeginLatexEdit(hitLatex->first, hitLatex->second);
+        host_.InvalidateCanvas();
         return;
     }
 
@@ -923,7 +933,9 @@ void InteractionRouter::BeginLatexTool(const QPointF& logical) {
     }
     host_.SetViewPage(hit->pageIndex);
     SetActive(InteractionKind::None);
+    host_.ClearSelection();
     host_.CreateLatexAt(hit->pageIndex, host_.ScreenToPage(logical, true));
+    host_.InvalidateCanvas();
 }
 
 }  // namespace cnote::ui

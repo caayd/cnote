@@ -288,6 +288,9 @@ void TestToolRouting() {
         router.HandlePointerPress(Press(50.0, 50.0));
         Check(host.HasOp("BeginTextEdit(0,3)"), "text tool edits the text under the cursor\n" + host.Dump());
         Check(router.ActiveInteraction() == ui::InteractionKind::None, "text hit does not leave an interaction active");
+        const int clear = host.IndexOfOp("ClearSelection");
+        const int edit = host.IndexOfOp("BeginTextEdit");
+        Check(clear >= 0 && clear < edit, "opening the editor clears the selection frame first\n" + host.Dump());
     }
     {
         RecordingHost host;
@@ -295,6 +298,9 @@ void TestToolRouting() {
         router.SetTool(ui::Tool::Text);
         router.HandlePointerPress(Press(50.0, 50.0));
         Check(host.HasOp("CreateTextAt(0,(0.500,0.500))"), "text tool creates a text box on the page\n" + host.Dump());
+        const int clear = host.IndexOfOp("ClearSelection");
+        const int create = host.IndexOfOp("CreateTextAt");
+        Check(clear >= 0 && clear < create, "creating a text clears the selection frame first\n" + host.Dump());
     }
     {
         RecordingHost host;
@@ -303,6 +309,9 @@ void TestToolRouting() {
         router.SetTool(ui::Tool::Latex);
         router.HandlePointerPress(Press(150.0, 50.0));
         Check(host.HasOp("BeginLatexEdit(1,2)"), "latex tool edits the equation under the cursor\n" + host.Dump());
+        const int clear = host.IndexOfOp("ClearSelection");
+        const int edit = host.IndexOfOp("BeginLatexEdit");
+        Check(clear >= 0 && clear < edit, "opening the latex editor clears the selection frame first\n" + host.Dump());
     }
     {
         RecordingHost host;
@@ -750,6 +759,9 @@ void TestTextClickVersusDrag() {
         host.Reset();
         router.HandlePointerRelease(Release(53.0, 53.0));
         Check(host.HasOp("BeginTextEdit(0,2)"), "releasing inside the threshold opens the editor\n" + host.Dump());
+        const int clear = host.IndexOfOp("ClearSelection");
+        const int edit = host.IndexOfOp("BeginTextEdit");
+        Check(clear >= 0 && clear < edit, "click-to-edit clears the selection frame first\n" + host.Dump());
         Check(router.ActiveInteraction() == ui::InteractionKind::None, "the click interaction ends");
     }
     {
