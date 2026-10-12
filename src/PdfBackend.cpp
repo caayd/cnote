@@ -520,7 +520,7 @@ std::optional<std::vector<PdfTextCharBox>> PdfiumBackend::ExtractTextCharBoxes(
 
         for (int characterIndex = 0; characterIndex < characterCount; ++characterIndex) {
             const unsigned int unicode = FPDFText_GetUnicode(textPage, characterIndex);
-            if (unicode == 0U || unicode == static_cast<unsigned int>(L'\r') || unicode == static_cast<unsigned int>(L'\n')) {
+            if (unicode == 0U) {
                 continue;
             }
 
@@ -532,9 +532,21 @@ std::optional<std::vector<PdfTextCharBox>> PdfiumBackend::ExtractTextCharBoxes(
                 || !std::isfinite(left)
                 || !std::isfinite(right)
                 || !std::isfinite(bottom)
-                || !std::isfinite(top)
-                || right <= left
-                || top <= bottom) {
+                || !std::isfinite(top)) {
+                continue;
+            }
+
+            // PDFium reports whitespace as a degenerate box: space chars that
+            // carry a word gap sit at a point, and its inserted \r/\n line
+            // markers always are.  Those chars are the only source of spaces
+            // and line breaks for copied text, so they stay in the list (a
+            // point/zero-area box still cannot contain a hit-test point);
+            // anything else without extent is a broken glyph and goes.
+            const bool whitespace = unicode == static_cast<unsigned int>(L' ')
+                || unicode == static_cast<unsigned int>(L'\t')
+                || unicode == static_cast<unsigned int>(L'\r')
+                || unicode == static_cast<unsigned int>(L'\n');
+            if (!whitespace && (right <= left || top <= bottom)) {
                 continue;
             }
 

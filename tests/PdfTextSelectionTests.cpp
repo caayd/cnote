@@ -220,6 +220,47 @@ int main(int argc, char** argv) {
     Check(controller.SelectionFor(0).pdfText.empty(),
           "a drag off the text is an ordinary (empty) object selection");
 
+    // Copied-text ordering, fed with the same char shapes PDFium emits for
+    // word gaps and line ends: degenerate (zero-area) space and \r/\n boxes.
+    // The regression this pins copied "fractionF" and broke "Design]In" and
+    // dropped real line breaks in Homework-3.pdf.
+    {
+        ui::PageSelection crafted;
+        const auto charBox = [](std::uint32_t unicode, float left, float right, float top, float bottom) {
+            return cnote::PdfTextCharBox { unicode, left, top, right, bottom };
+        };
+        // "ab cd" where the space is a zero-width box, \r\n, then "ef" whose
+        // own gap needs no geometric break (the \r\n supplies it).
+        crafted.pdfText = {
+            charBox(u'a', 10.0f, 15.0f, 0.0f, 10.0f),
+            charBox(u'b', 15.0f, 20.0f, 0.0f, 10.0f),
+            charBox(u' ', 20.0f, 20.0f, 10.0f, 10.0f),
+            charBox(u'c', 25.0f, 30.0f, 0.0f, 10.0f),
+            charBox(u'd', 30.0f, 35.0f, 0.0f, 10.0f),
+            charBox(u'\r', 35.0f, 35.0f, 10.0f, 10.0f),
+            charBox(u'\n', 35.0f, 35.0f, 10.0f, 10.0f),
+            charBox(u'e', 10.0f, 15.0f, 20.0f, 30.0f),
+            charBox(u'f', 15.0f, 20.0f, 20.0f, 30.0f),
+        };
+        controller.SelectObjects(0, crafted);
+        const QString ordered = controller.SelectedPdfText();
+        Check(ordered == QStringLiteral("ab cd\nef"),
+              "real \\r\\n markers collapse to one break and zero-width spaces survive: '"
+              + ordered.toUtf8().toStdString() + "'");
+
+        // A PDF without \r\n markers still breaks geometrically: second line
+        // drops below the first and wraps back to the left margin.
+        ui::PageSelection geometric;
+        geometric.pdfText = {
+            charBox(u'x', 10.0f, 15.0f, 0.0f, 10.0f),
+            charBox(u'y', 40.0f, 45.0f, 30.0f, 40.0f),
+        };
+        controller.SelectObjects(0, geometric);
+        Check(controller.SelectedPdfText() == QStringLiteral("x\ny"),
+              "the geometric line-break fallback still applies without markers");
+        controller.ClearSelection();
+    }
+
     std::error_code ec;
     std::filesystem::remove(pdfPath, ec);
     std::printf(g_failures == 0 ? "ALL PDF TEXT CHECKS PASSED\n" : "%d PDF TEXT CHECK(S) FAILED\n", g_failures);

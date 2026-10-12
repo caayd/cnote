@@ -881,22 +881,40 @@ bool QtDocumentController::HasSelectedPdfText() const {
 
 QString QtDocumentController::SelectedPdfText() const {
     // App::CopyPdfTextSelectionToClipboard (Clipboard.cpp:73-113): characters
-    // are emitted in document order; a line break is inserted when the next
-    // box sits well below the previous one or wraps back to the left.
+    // are emitted in document order.  PDFium marks line ends with real \r/\n
+    // chars; they normalize to a single '\n'.  Where a PDF supplies no line
+    // markers at all, the geometric check stays as the fallback: a line break
+    // is inserted when the next box sits well below the previous one or wraps
+    // back to the left.
+    const auto isLineBreak = [](std::uint32_t unicode) {
+        return unicode == static_cast<std::uint32_t>(L'\r') || unicode == static_cast<std::uint32_t>(L'\n');
+    };
     std::u16string text;
     const PdfTextCharBox* previousBox = nullptr;
     for (const auto& [pageIndex, selection] : selection_) {
         for (const PdfTextCharBox& box : selection.pdfText) {
-            if (previousBox != nullptr) {
-                const float previousHeight = previousBox->bottom - previousBox->top;
-                const float currentHeight = box.bottom - box.top;
-                const float lineBreakThreshold = std::max(previousHeight, currentHeight) * 0.5f;
-                if (box.top > previousBox->bottom + lineBreakThreshold
-                    || box.left + (box.right - box.left) * 0.5f < previousBox->left) {
+            if (isLineBreak(box.unicode)) {
+                // A \r\n pair collapses to one break.
+                if (previousBox == nullptr || !isLineBreak(previousBox->unicode)) {
                     text.push_back(L'\n');
                 }
+            } else {
+                // Whitespace carries a word gap at a degenerate box and is no
+                // layout anchor: a zero-width space left of the previous
+                // glyph would trip the wrap-back check as a phantom break.
+                const bool whitespace = box.unicode == static_cast<std::uint32_t>(L' ')
+                    || box.unicode == static_cast<std::uint32_t>(L'\t');
+                if (previousBox != nullptr && !whitespace && !isLineBreak(previousBox->unicode)) {
+                    const float previousHeight = previousBox->bottom - previousBox->top;
+                    const float currentHeight = box.bottom - box.top;
+                    const float lineBreakThreshold = std::max(previousHeight, currentHeight) * 0.5f;
+                    if (box.top > previousBox->bottom + lineBreakThreshold
+                        || box.left + (box.right - box.left) * 0.5f < previousBox->left) {
+                        text.push_back(L'\n');
+                    }
+                }
+                AppendPdfUnicode(text, box.unicode);
             }
-            AppendPdfUnicode(text, box.unicode);
             previousBox = &box;
         }
     }
