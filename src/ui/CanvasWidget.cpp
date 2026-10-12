@@ -3551,12 +3551,7 @@ void CanvasWidget::PaintSelectionOverlay(QPainter& painter) {
         painter.drawLine(QPointF(frame.center().x(), frame.top()), rotate);
         painter.setBrush(QColor(255, 255, 255));
         painter.drawEllipse(rotate, 4.0, 4.0);
-
-        // Move grip at the frame centre (reference App::CursorHitsSelectionMoveGrip).
-        painter.setBrush(QColor(59, 130, 246));
-        painter.drawEllipse(frame.center(), 3.0, 3.0);
     }
-
     // PDF text highlight (App::PaintPdfTextSelection App.cpp:7818-7915):
     // committed boxes paint translucent over the text; a pdf text drag paints
     // the live range instead of the marquee.
