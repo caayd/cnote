@@ -205,6 +205,10 @@ void QtDocumentController::BroadcastChange(ProjectChange::Kind kind) {
             view->OnSessionChanged(change, view == this);
         }
     }
+    // OnSessionChanged skips the originating view (it already knows), but the
+    // save mutates observable state (FilePath, dirty), so the window still
+    // needs the signal to refresh its chrome — title included.
+    emit SessionChanged();
 }
 
 bool QtDocumentController::ExportPdf(const std::filesystem::path& path, bool embedProject, std::string* error) {

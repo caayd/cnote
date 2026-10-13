@@ -173,6 +173,8 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
     : QMainWindow(parent),
       manager_(manager),
       controller_(manager) {
+    // The window title starts as the default and UpdateChrome (below) swaps in
+    // the document's file name once the session exists.
     setWindowTitle(QStringLiteral("cnote"));
     settings_ = settingsStore_.Load();
 
@@ -1794,6 +1796,9 @@ void QtMainWindow::UpdateChrome() {
     const QString fileLabel = document.FilePath().empty()
         ? QStringLiteral("Untitled")
         : QFileInfo(QString::fromStdU16String(document.FilePath().u16string())).fileName();
+    // The title that taskbar/Alt-Tab and any native frame show follows the
+    // open document's file name, matching the toolbar band's own label.
+    setWindowTitle(fileLabel);
     (void)pages;
     // The reference frontend has no status bar: file/zoom live in the toolbar
     // band and the page indicator lives in the sidebar, so the canvas keeps the
