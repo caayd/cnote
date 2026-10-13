@@ -266,6 +266,9 @@ public:
     virtual void CommitSelection(const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click) = 0;
     virtual void AddObjectToSelection(ObjectRef object) = 0;
     virtual void BeginMoveSelection(std::size_t pageIndex) = 0;
+    // Alt-press variant: the host duplicates the selection inside the move
+    // gesture so the drag carries the clones, not the originals.
+    virtual void BeginCloneMoveSelection(std::size_t pageIndex) = 0;
     virtual void UpdateMoveSelection(const QPointF& logicalDelta) = 0;
     virtual void CommitMoveSelection() = 0;
 
@@ -338,7 +341,7 @@ private:
     void BeginSelection(const QPointF& logical, bool boxOverride);
     void ExtendSelection(const PointerSample& sample);
     void EndSelection();
-    void BeginMoveSelection(const QPointF& logical);
+    void BeginMoveSelection(const PointerSample& sample);
     void UpdateMoveSelection(const PointerSample& sample);
     void EndMoveSelection();
     void BeginErase(const QPointF& logical);

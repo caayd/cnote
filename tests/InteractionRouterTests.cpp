@@ -143,6 +143,7 @@ public:
         ops.push_back("AddObjectToSelection(kind=" + std::to_string(static_cast<int>(object.kind)) + ",index=" + std::to_string(object.objectIndex) + ")");
     }
     void BeginMoveSelection(std::size_t pageIndex) override { ops.push_back("BeginMoveSelection(" + std::to_string(pageIndex) + ")"); }
+    void BeginCloneMoveSelection(std::size_t pageIndex) override { ops.push_back("BeginCloneMoveSelection(" + std::to_string(pageIndex) + ")"); }
     void UpdateMoveSelection(const QPointF& delta) override { ops.push_back("UpdateMoveSelection(" + Format(delta.x()) + "," + Format(delta.y()) + ")"); }
     void CommitMoveSelection() override { ops.push_back("CommitMoveSelection"); }
 
@@ -796,6 +797,78 @@ void TestTextClickVersusDrag() {
     }
 }
 
+// Alt turns a move drag into clone-and-move: the press routes to
+// BeginCloneMoveSelection instead of BeginMoveSelection, and on an already-
+// selected text it skips the click-to-edit arming entirely.
+void TestAltCloneMove() {
+    {
+        // Inside the selection bounds with no object under the cursor.
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Move);
+        host.hasSelection = true;
+        host.cursorInteractsWithSelection = true;
+        ui::PointerSample press = Press(50.0, 50.0);
+        press.modifiers = Qt::AltModifier;
+        router.HandlePointerPress(press);
+        Check(host.HasOp("BeginCloneMoveSelection(0)"), "an Alt press inside the selection starts a clone move\n" + host.Dump());
+        Check(host.CountOp("BeginMoveSelection") == 0, "the Alt press does not start a plain move");
+        Check(router.ActiveInteraction() == ui::InteractionKind::MoveSelection, "the clone press is still a move interaction");
+
+        host.Reset();
+        router.HandlePointerMove(Move(70.0, 80.0));
+        Check(host.HasOp("UpdateMoveSelection(20.000,30.000)"), "the clones follow the pointer\n" + host.Dump());
+        host.Reset();
+        router.HandlePointerRelease(Release(70.0, 80.0));
+        Check(host.CountOp("CommitMoveSelection") == 1, "the clone move commits through the shared end path");
+    }
+    {
+        // Pressing an unselected object selects it, then clones.
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Move);
+        host.selectionObject = ui::SelectionHit { ui::ObjectKind::Stroke, 4U, false, false };
+        ui::PointerSample press = Press(50.0, 50.0);
+        press.modifiers = Qt::AltModifier;
+        router.HandlePointerPress(press);
+        Check(host.HasOp("AddObjectToSelection(kind=0,index=4)"), "an unselected object is selected before cloning\n" + host.Dump());
+        const int add = host.IndexOfOp("AddObjectToSelection");
+        const int clone = host.IndexOfOp("BeginCloneMoveSelection");
+        Check(clone > add && add >= 0, "the clone move starts after the object joins the selection\n" + host.Dump());
+    }
+    {
+        // An already-selected text under Alt: a clone move, not click-to-edit.
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Move);
+        host.hasSelection = true;
+        host.cursorInteractsWithSelection = true;
+        host.selectionObject = ui::SelectionHit { ui::ObjectKind::Text, 2U, true, false };
+        ui::PointerSample press = Press(50.0, 50.0);
+        press.modifiers = Qt::AltModifier;
+        router.HandlePointerPress(press);
+        Check(router.ActiveInteraction() == ui::InteractionKind::MoveSelection, "Alt skips the pending text click\n" + host.Dump());
+        Check(host.HasOp("BeginCloneMoveSelection(0)"), "Alt on a selected text clones it\n" + host.Dump());
+
+        host.Reset();
+        router.HandlePointerRelease(Release(50.0, 50.0));
+        Check(host.CountOp("BeginTextEdit") == 0, "releasing without a drag never opens the editor\n" + host.Dump());
+        Check(host.CountOp("CommitMoveSelection") == 1, "the Alt click still commits the clone");
+    }
+    {
+        // Without Alt the same presses keep the plain move behavior.
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Move);
+        host.hasSelection = true;
+        host.cursorInteractsWithSelection = true;
+        router.HandlePointerPress(Press(50.0, 50.0));
+        Check(host.HasOp("BeginMoveSelection(0)") && host.CountOp("BeginCloneMoveSelection") == 0,
+            "a press without Alt keeps the plain move\n" + host.Dump());
+    }
+}
+
+
 // Session.cpp:95-108: finishing is idempotent, commits the partial interaction
 // once, and releases capture once.
 void TestFinishInteractionIdempotent() {
@@ -954,6 +1027,7 @@ int main() {
     TestSelectionLassoClickVersusLoop();
     TestSelectionPrecedence();
     TestTextClickVersusDrag();
+    TestAltCloneMove();
     TestFinishInteractionIdempotent();
     TestWheelIntents();
     TestPortedReferenceValues();

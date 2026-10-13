@@ -90,6 +90,11 @@ public:
     [[nodiscard]] std::optional<std::size_t> GesturePageIndex() const override { return gesturePage_; }
     [[nodiscard]] Page* GesturePage();
     void MoveSelectionBy(std::size_t pageIndex, Vec2 delta) override;
+    // Alt-drag move: duplicates the selected objects on `pageIndex` in place
+    // inside the open gesture (new ids for texts/LaTeX), repoints the
+    // selection at the clones and marks the gesture changed so the commit
+    // records the clone even without a drag. False when nothing was selected.
+    bool CloneSelection(std::size_t pageIndex) override;
     // Whole-selection affine transform for a resize/rotate gesture: restores
     // the gesture snapshot first, so `transform` is absolute, not cumulative.
     void TransformSelection(std::size_t pageIndex, const ui::SelectionTransform& transform) override;

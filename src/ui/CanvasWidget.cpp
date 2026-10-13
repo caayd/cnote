@@ -2964,6 +2964,15 @@ void CanvasWidget::BeginMoveSelection(std::size_t pageIndex) {
     BeginGestureOverlay(pageIndex, false);
 }
 
+void CanvasWidget::BeginCloneMoveSelection(std::size_t pageIndex) {
+    // Alt-drag: open the move gesture, duplicate the selection inside it, then
+    // lift the clones into the drag overlay so the originals stay painted.
+    controller_.BeginPageGesture(pageIndex);
+    static_cast<void>(controller_.CloneSelection(pageIndex));
+    BeginGestureOverlay(pageIndex, false);
+}
+
+
 void CanvasWidget::UpdateMoveSelection(const QPointF& logicalDelta) {
     const std::optional<std::size_t> pageIndex = controller_.GesturePageIndex();
     if (!pageIndex.has_value()) {

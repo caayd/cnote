@@ -1148,6 +1148,60 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
         gestureChanged_ = true;
     }
 }
+
+bool QtDocumentController::CloneSelection(std::size_t pageIndex) {
+    Page* page = GesturePage();
+    if (page == nullptr) {
+        return false;
+    }
+    ui::PageSelection clones {};
+    const ui::PageSelection& selection = SelectionFor(pageIndex);
+    // Copy first, then append: a push_back of the source element straight out
+    // of the same vector can invalidate the argument on reallocation.
+    for (const std::size_t index : selection.strokes) {
+        if (index >= page->strokes.size()) {
+            continue;
+        }
+        Stroke clone = page->strokes[index];
+        clones.strokes.push_back(page->strokes.size());
+        page->strokes.push_back(std::move(clone));
+    }
+    for (const std::size_t index : selection.images) {
+        if (index >= page->images.size()) {
+            continue;
+        }
+        PageImage clone = page->images[index];
+        clones.images.push_back(page->images.size());
+        page->images.push_back(std::move(clone));
+    }
+    for (const std::size_t index : selection.texts) {
+        if (index >= page->texts.size()) {
+            continue;
+        }
+        PageText clone = page->texts[index];
+        clone.id = NextObjectId();
+        clones.texts.push_back(page->texts.size());
+        page->texts.push_back(std::move(clone));
+    }
+    for (const std::size_t index : selection.latexes) {
+        if (index >= page->latexes.size()) {
+            continue;
+        }
+        PageLatex clone = page->latexes[index];
+        clone.id = NextObjectId();
+        clones.latexes.push_back(page->latexes.size());
+        page->latexes.push_back(std::move(clone));
+    }
+    if (clones.Empty()) {
+        return false;
+    }
+    selection_[pageIndex] = std::move(clones);
+    // The clone is a change even if the pointer never moves afterwards, so
+    // CommitPageGesture must not compare-and-skip it.
+    gestureChanged_ = true;
+    return true;
+}
+
 void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::SelectionTransform& transform) {
     Page* page = GesturePage();
     if (page == nullptr || !transform.from.valid) {

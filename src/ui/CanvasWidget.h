@@ -161,6 +161,7 @@ public:
     void CommitSelection(const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click) override;
     void AddObjectToSelection(ObjectRef object) override;
     void BeginMoveSelection(std::size_t pageIndex) override;
+    void BeginCloneMoveSelection(std::size_t pageIndex) override;
     void UpdateMoveSelection(const QPointF& logicalDelta) override;
     void CommitMoveSelection() override;
     void BeginTransform(const TransformRequest& request) override;

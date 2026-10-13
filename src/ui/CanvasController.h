@@ -149,6 +149,12 @@ public:
     virtual void CancelPageGesture() = 0;
     [[nodiscard]] virtual std::optional<std::size_t> GesturePageIndex() const = 0;
     virtual void MoveSelectionBy(std::size_t pageIndex, Vec2 delta) = 0;
+    // Duplicates every selected object on `pageIndex` in place (new ids for
+    // texts/LaTeX) and repoints the selection at the clones. Must be called
+    // inside an open page gesture so the clone plus the drag that follows it
+    // commits as one ReplacePages action (the Alt-drag move path); false when
+    // nothing was cloned.
+    virtual bool CloneSelection(std::size_t pageIndex) = 0;
     // One affine transform of the whole selection on `pageIndex`, applied on top
     // of the gesture's begin snapshot (implementations restore the snapshot before
     // applying, so calls are absolute, not cumulative). `from` is the selection

@@ -220,7 +220,7 @@ void InteractionRouter::BeginPressInteraction(const PointerSample& sample) {
         return;
     case Tool::Select:
         if (host_.HasSelection() && host_.CursorInteractsWithSelection(sample.position)) {
-            BeginMoveSelection(sample.position);
+            BeginMoveSelection(sample);
             return;
         }
         if (host_.HasSelection()) {
@@ -758,11 +758,14 @@ void InteractionRouter::BeginSelectOrMove(const PointerSample& sample, bool move
     static_cast<void>(moveTool);
     // MessageLoop.cpp:228 routes both Move and Select interactions that start
     // inside a selection through App::BeginMoveSelection.
-    BeginMoveSelection(sample.position);
+    BeginMoveSelection(sample);
 }
 
-void InteractionRouter::BeginMoveSelection(const QPointF& logical) {
-    // Selection.cpp:1453-1620 BeginMoveSelection.
+void InteractionRouter::BeginMoveSelection(const PointerSample& sample) {
+    // Selection.cpp:1453-1620 BeginMoveSelection, plus the Alt modifier that
+    // turns the drag into a clone-and-move.
+    const QPointF& logical = sample.position;
+    const bool clone = (sample.modifiers & Qt::AltModifier) != 0;
     const std::optional<PageHit> hit = host_.HitTestPage(logical);
     if (!hit.has_value()) {
         if (host_.HasSelection()) {
@@ -792,7 +795,11 @@ void InteractionRouter::BeginMoveSelection(const QPointF& logical) {
             movePageIndex_ = pageIndex;
             moveLastPosition_ = logical;
             UpdateCapture();
-            host_.BeginMoveSelection(pageIndex);
+            if (clone) {
+                host_.BeginCloneMoveSelection(pageIndex);
+            } else {
+                host_.BeginMoveSelection(pageIndex);
+            }
             host_.InvalidateCanvas();
             return;
         }
@@ -809,10 +816,11 @@ void InteractionRouter::BeginMoveSelection(const QPointF& logical) {
         host_.AddObjectToSelection(object);
     }
 
-    if (!objectHit->moveGrip && tool_ == Tool::Move && objectHit->kind == ObjectKind::Text && objectHit->selected) {
+    if (!clone && !objectHit->moveGrip && tool_ == Tool::Move && objectHit->kind == ObjectKind::Text && objectHit->selected) {
         // An already-selected text under the Move tool is a click-to-edit until
         // the pointer travels past kTextEditDragThreshold (Selection.cpp:1605-1613
-        // and 1650-1687).
+        // and 1650-1687). Alt presses clone instead, so they skip the pending
+        // click entirely.
         pendingTextClickPage_ = pageIndex;
         pendingTextClickIndex_ = objectHit->objectIndex;
         pendingTextClickPosition_ = logical;
@@ -825,7 +833,11 @@ void InteractionRouter::BeginMoveSelection(const QPointF& logical) {
     movePageIndex_ = pageIndex;
     moveLastPosition_ = logical;
     UpdateCapture();
-    host_.BeginMoveSelection(pageIndex);
+    if (clone) {
+        host_.BeginCloneMoveSelection(pageIndex);
+    } else {
+        host_.BeginMoveSelection(pageIndex);
+    }
     host_.InvalidateCanvas();
 }
 
