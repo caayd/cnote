@@ -477,7 +477,18 @@ const QImage* SidebarWidget::ThumbnailAt(std::size_t index, int width, int heigh
     if (pdfBackground_ != nullptr && page.sourcePdfSourceIndex >= 0 && page.sourcePdfPageIndex >= 0) {
         const QImage background = pdfBackground_->PageBackground(page.sourcePdfSourceIndex, page.sourcePdfPageIndex, scale);
         if (!background.isNull()) {
-            painter.drawImage(destination, background);
+            // The provider renders source orientation; page rotation applies
+            // about the thumbnail centre.
+            painter.save();
+            painter.translate(destination.center());
+            painter.rotate(static_cast<qreal>(page.rotationDegrees));
+            painter.drawImage(QRectF(
+                    -static_cast<qreal>(background.width()) * 0.5,
+                    -static_cast<qreal>(background.height()) * 0.5,
+                    static_cast<qreal>(background.width()),
+                    static_cast<qreal>(background.height())),
+                background);
+            painter.restore();
             drewBackground = true;
         }
     }

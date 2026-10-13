@@ -43,7 +43,7 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 14;
+constexpr std::uint32_t kProjectVersion = 15;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
 constexpr std::uint8_t kStrokeStyleFlagDotted = 1U << 0U;
@@ -327,6 +327,7 @@ void AppendText(std::vector<std::uint8_t>& output, const PageText& text) {
     AppendValue(output, text.width);
     AppendValue(output, text.height);
     AppendValue(output, text.fontSize);
+    AppendValue(output, text.rotationDegrees);
     AppendValue(output, text.color);
     AppendValue(output, alignment);
     AppendValue(output, fontFamily);
@@ -354,15 +355,17 @@ void AppendLatex(std::vector<std::uint8_t>& output, const PageLatex& latex) {
     AppendValue(output, latex.x);
     AppendValue(output, latex.y);
     AppendValue(output, latex.fontSize);
+    AppendValue(output, latex.rotationDegrees);
     AppendValue(output, latex.color);
     AppendString(output, latex.content);
 }
 
-bool ReadLatex(ByteReader& reader, PageLatex& latex) {
+bool ReadLatex(ByteReader& reader, std::uint32_t version, PageLatex& latex) {
     return reader.Read(latex.id)
         && reader.Read(latex.x)
         && reader.Read(latex.y)
         && reader.Read(latex.fontSize)
+        && (version < 15U || reader.Read(latex.rotationDegrees))
         && reader.Read(latex.color)
         && reader.ReadString(latex.content);
 }
@@ -379,6 +382,7 @@ bool ReadText(ByteReader& reader, std::uint32_t version, PageText& text) {
         && reader.Read(text.width)
         && reader.Read(text.height)
         && reader.Read(text.fontSize)
+        && (version < 15U || reader.Read(text.rotationDegrees))
         && reader.Read(text.color)
         && reader.Read(alignment)
         && reader.Read(fontFamily)
@@ -527,7 +531,7 @@ std::optional<Document> LoadProjectPayload(
     const std::size_t minimumPageBytes = 16U + (version >= 2U ? 4U : 0U)
         + (version >= 3U ? 4U : 0U) + (version >= 4U ? 4U : 0U)
         + (version >= 5U ? 4U : 0U) + (version >= 11U ? 4U : 0U)
-        + (version >= 14U ? 4U : 0U);
+        + (version >= 14U ? 4U : 0U) + (version >= 15U ? 4U : 0U);
     if (pageCount > reader.Remaining() / minimumPageBytes) return std::nullopt;
 
     std::vector<Page> savedPages;
@@ -540,6 +544,9 @@ std::optional<Document> LoadProjectPayload(
         std::uint32_t latexCount = 0;
         std::uint32_t imageCount = 0;
         if (!reader.Read(page.width) || !reader.Read(page.height)) {
+            return std::nullopt;
+        }
+        if (version >= 15U && !reader.Read(page.rotationDegrees)) {
             return std::nullopt;
         }
         if (version >= 4U) {
@@ -581,7 +588,7 @@ std::optional<Document> LoadProjectPayload(
             page.strokes.push_back(std::move(stroke));
         }
 
-        const std::size_t minimumTextBytes = version >= 13U ? 44U
+        const std::size_t minimumTextBytes = version >= 15U ? 48U : version >= 13U ? 44U
             : version >= 8U ? 32U : version >= 7U ? 28U : version >= 6U ? 24U : 20U;
         if (textCount > reader.Remaining() / minimumTextBytes) return std::nullopt;
         page.texts.reserve(textCount);
@@ -627,11 +634,11 @@ std::optional<Document> LoadProjectPayload(
             }
         }
 
-        if (latexCount > reader.Remaining() / 28U) return std::nullopt;
+        if (latexCount > reader.Remaining() / (version >= 15U ? 32U : 28U)) return std::nullopt;
         page.latexes.reserve(latexCount);
         for (std::uint32_t latexIndex = 0; latexIndex < latexCount; ++latexIndex) {
             PageLatex latex {};
-            if (!ReadLatex(reader, latex)) {
+            if (!ReadLatex(reader, version, latex)) {
                 return std::nullopt;
             }
             page.latexes.push_back(std::move(latex));
@@ -683,6 +690,7 @@ std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
         const auto imageCount = static_cast<std::uint32_t>(page.images.size());
         AppendValue(bytes, page.width);
         AppendValue(bytes, page.height);
+        AppendValue(bytes, page.rotationDegrees);
         AppendValue(bytes, page.sourcePdfSourceIndex);
         AppendValue(bytes, page.sourcePdfPageIndex);
         AppendValue(bytes, pageFlags);

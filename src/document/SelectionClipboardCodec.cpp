@@ -92,7 +92,7 @@ struct ByteReader {
 
 std::vector<std::uint8_t> EncodeSelectionClipboard(const SelectionClipboardData& data) {
     std::vector<std::uint8_t> bytes;
-    const char magic[] = { 'C', 'T', 'S', '8' };
+    const char magic[] = { 'C', 'T', 'S', '9' };
     AppendBytes(bytes, magic, sizeof(magic));
     AppendUint32(bytes, static_cast<std::uint32_t>(data.strokes.size()));
     AppendUint32(bytes, static_cast<std::uint32_t>(data.texts.size()));
@@ -135,7 +135,7 @@ std::vector<std::uint8_t> EncodeSelectionClipboard(const SelectionClipboardData&
         AppendFloat(bytes, text.y);
         AppendFloat(bytes, text.width);
         AppendFloat(bytes, text.height);
-        AppendFloat(bytes, text.fontSize);
+        AppendFloat(bytes, text.rotationDegrees);
         AppendUint32(bytes, text.color);
         AppendUint32(bytes, flags);
         AppendUint32(bytes, static_cast<std::uint32_t>(text.content.size()));
@@ -174,6 +174,7 @@ std::vector<std::uint8_t> EncodeSelectionClipboard(const SelectionClipboardData&
         AppendFloat(bytes, latex.x);
         AppendFloat(bytes, latex.y);
         AppendFloat(bytes, latex.fontSize);
+        AppendFloat(bytes, latex.rotationDegrees);
         AppendUint32(bytes, latex.color);
         AppendUint32(bytes, static_cast<std::uint32_t>(latex.content.size()));
         AppendUtf16(bytes, latex.content);
@@ -197,16 +198,18 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
     const bool isCts6 = std::memcmp(magic, "CTS6", 4) == 0;
     const bool isCts7 = std::memcmp(magic, "CTS7", 4) == 0;
     const bool isCts8 = std::memcmp(magic, "CTS8", 4) == 0;
-    if (!isCts1 && !isCts2 && !isCts3 && !isCts4 && !isCts5 && !isCts6 && !isCts7 && !isCts8) {
+    const bool isCts9 = std::memcmp(magic, "CTS9", 4) == 0;
+    if (!isCts1 && !isCts2 && !isCts3 && !isCts4 && !isCts5 && !isCts6 && !isCts7 && !isCts8 && !isCts9) {
         return std::nullopt;
     }
 
     const bool hasTextCount = !isCts1;
-    const bool hasTextWidth = isCts3 || isCts4 || isCts5 || isCts6 || isCts7 || isCts8;
-    const bool hasTextHeight = isCts4 || isCts5 || isCts6 || isCts7 || isCts8;
-    const bool hasTextFlags = isCts5 || isCts6 || isCts7 || isCts8;
-    const bool hasStrokeFlags = isCts6 || isCts7 || isCts8;
-    const bool hasStrokeSmoothing = isCts7 || isCts8;
+    const bool hasTextWidth = isCts3 || isCts4 || isCts5 || isCts6 || isCts7 || isCts8 || isCts9;
+    const bool hasTextHeight = isCts4 || isCts5 || isCts6 || isCts7 || isCts8 || isCts9;
+    const bool hasTextFlags = isCts5 || isCts6 || isCts7 || isCts8 || isCts9;
+    const bool hasStrokeFlags = isCts6 || isCts7 || isCts8 || isCts9;
+    const bool hasStrokeSmoothing = isCts7 || isCts8 || isCts9;
+    const bool hasObjectRotation = isCts9;
 
     ByteReader reader { bytes, 4U };
     SelectionClipboardData data;
@@ -277,6 +280,11 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
             ok = reader.ReadFloat(text.height);
         } else {
             text.height = 0.0f;
+        }
+        if (ok && hasObjectRotation) {
+            ok = reader.ReadFloat(text.rotationDegrees);
+        } else {
+            text.rotationDegrees = 0.0f;
         }
         ok = ok && reader.ReadFloat(text.fontSize) && reader.ReadUint32(text.color);
         if (ok && hasTextFlags) {
@@ -353,6 +361,7 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
             ok = reader.ReadFloat(latex.x)
                 && reader.ReadFloat(latex.y)
                 && reader.ReadFloat(latex.fontSize)
+                && (!hasObjectRotation || reader.ReadFloat(latex.rotationDegrees))
                 && reader.ReadUint32(latex.color)
                 && reader.ReadUint32(charCount);
             if (ok) {

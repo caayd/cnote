@@ -85,14 +85,10 @@ std::optional<RasterImage> ComposeTextOverlayRaster(const Page& page, float rend
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
     for (const PageText& text : page.texts) {
-        text::DrawPageTextQt(painter, text, page.width, renderScale, text.x * renderScale, text.y * renderScale, 1.0f);
+        render::PaintPageText(painter, text, page.width, renderScale, 1.0f);
     }
     for (const PageLatex& latexBlock : page.latexes) {
-        const latex::FormulaHandle formula = latex::Parse(latexBlock);
-        if (formula == nullptr) {
-            continue;
-        }
-        latex::Draw(formula, painter, latexBlock.x * renderScale, latexBlock.y * renderScale, renderScale, latexBlock.color);
+        render::PaintPageLatex(painter, latexBlock, renderScale, 1.0f);
     }
     painter.end();
 
@@ -120,6 +116,12 @@ RasterImage ComposePageRaster(
         && page.raster.width > 0
         && page.raster.height > 0;
     RasterImage raster = pdfRaster.value_or(CreateBlankRaster(page.width, page.height, renderScale));
+    if (pdfRaster.has_value() && std::abs(page.rotationDegrees) > 0.0001f) {
+        // Source-page rasters render at source orientation; rotate into the
+        // page's final space like the canvas does at paint time.
+        raster = RotateRasterQuarterTurn(*pdfRaster,
+            static_cast<int>(std::lround(page.rotationDegrees / 90.0f)));
+    }
 
     QImage image(raster.width, raster.height, QImage::Format_ARGB32_Premultiplied);
     image.fill(Qt::white);

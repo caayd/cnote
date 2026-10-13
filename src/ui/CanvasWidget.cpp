@@ -1118,10 +1118,18 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                             {
                                 const text::QtTextBounds textBounds =
                                     text::MeasurePageTextBoundsQt(page.texts[item.index], page.width);
-                                minX = textBounds.left;
-                                minY = textBounds.top;
-                                maxX = textBounds.right;
-                                maxY = textBounds.bottom;
+                                minX = page.width;
+                                minY = page.height;
+                                maxX = 0.0f;
+                                maxY = 0.0f;
+                                for (const Vec2& corner : RotatedRectCorners(
+                                        textBounds.left, textBounds.top, textBounds.right, textBounds.bottom,
+                                        page.texts[item.index].rotationDegrees)) {
+                                    minX = std::min(minX, corner.x);
+                                    minY = std::min(minY, corner.y);
+                                    maxX = std::max(maxX, corner.x);
+                                    maxY = std::max(maxY, corner.y);
+                                }
                             }
                             item.trackX = page.texts[item.index].x;
                             item.trackY = page.texts[item.index].y;
@@ -1135,10 +1143,18 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                             {
                                 const LatexBounds latexBounds =
                                     MeasurePageLatexBounds(page.latexes[item.index], page.width);
-                                minX = latexBounds.left;
-                                minY = latexBounds.top;
-                                maxX = latexBounds.right;
-                                maxY = latexBounds.bottom;
+                                minX = page.width;
+                                minY = page.height;
+                                maxX = 0.0f;
+                                maxY = 0.0f;
+                                for (const Vec2& corner : RotatedRectCorners(
+                                        latexBounds.left, latexBounds.top, latexBounds.right, latexBounds.bottom,
+                                        page.latexes[item.index].rotationDegrees)) {
+                                    minX = std::min(minX, corner.x);
+                                    minY = std::min(minY, corner.y);
+                                    maxX = std::max(maxX, corner.x);
+                                    maxY = std::max(maxY, corner.y);
+                                }
                             }
                             item.trackX = page.latexes[item.index].x;
                             item.trackY = page.latexes[item.index].y;
@@ -2116,9 +2132,9 @@ std::optional<ObjectRef> CanvasWidget::TopmostObjectAt(const QPointF& logical, b
         }
     }
     for (std::size_t index = page.texts.size(); index-- > 0U;) {
-        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
-        if (pagePoint.x >= bounds.left && pagePoint.x <= bounds.right
-            && pagePoint.y >= bounds.top && pagePoint.y <= bounds.bottom) {
+        const PageText& text = page.texts[index];
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page.width);
+        if (PointInRotatedRect(pagePoint, bounds.left, bounds.top, bounds.right, bounds.bottom, text.rotationDegrees)) {
             return ObjectRef { view->pageIndex, ObjectKind::Text, index };
         }
     }
@@ -2322,14 +2338,18 @@ std::vector<ObjectRef> CanvasWidget::EraseTargetsAt(std::size_t pageIndex, Vec2 
         }
     }
     for (std::size_t index = 0; index < page.texts.size(); ++index) {
-        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
-        if (SegmentHitsRect(bounds.left, bounds.top, bounds.right, bounds.bottom, start, end, radiusPage)) {
+        const PageText& text = page.texts[index];
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page.width);
+        if (RotatedRectHitsSegment(bounds.left, bounds.top, bounds.right, bounds.bottom,
+                text.rotationDegrees, start, end, radiusPage)) {
             targets.push_back(ObjectRef { pageIndex, ObjectKind::Text, index });
         }
     }
     for (std::size_t index = 0; index < page.latexes.size(); ++index) {
-        const LatexBounds bounds = MeasurePageLatexBounds(page.latexes[index], page.width);
-        if (SegmentHitsRect(bounds.left, bounds.top, bounds.right, bounds.bottom, start, end, radiusPage)) {
+        const PageLatex& latex = page.latexes[index];
+        const LatexBounds bounds = MeasurePageLatexBounds(latex, page.width);
+        if (RotatedRectHitsSegment(bounds.left, bounds.top, bounds.right, bounds.bottom,
+                latex.rotationDegrees, start, end, radiusPage)) {
             targets.push_back(ObjectRef { pageIndex, ObjectKind::Latex, index });
         }
     }
@@ -2855,8 +2875,10 @@ void CanvasWidget::CommitSelection(
             }
         }
         for (std::size_t index = 0; index < page.texts.size(); ++index) {
-            const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
-            if (!(bounds.right < a.x || bounds.left > b.x || bounds.bottom < a.y || bounds.top > b.y)) {
+            const PageText& text = page.texts[index];
+            const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page.width);
+            if (RotatedRectIntersectsRect(bounds.left, bounds.top, bounds.right, bounds.bottom,
+                    text.rotationDegrees, a, b)) {
                 selection.texts.push_back(index);
             }
         }
@@ -2883,16 +2905,10 @@ void CanvasWidget::CommitSelection(
                 }
             }
             for (std::size_t index = 0; index < page.texts.size(); ++index) {
-                const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
-                const std::array<Vec2, 4> corners {{
-                    { bounds.left, bounds.top }, { bounds.right, bounds.top },
-                    { bounds.right, bounds.bottom }, { bounds.left, bounds.bottom },
-                }};
-                bool hit = false;
-                for (const Vec2& corner : corners) {
-                    hit = hit || PointInPolygon(corner, polygon);
-                }
-                if (hit) {
+                const PageText& text = page.texts[index];
+                const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page.width);
+                if (RotatedRectIntersectsPolygon(bounds.left, bounds.top, bounds.right, bounds.bottom,
+                        text.rotationDegrees, polygon)) {
                     selection.texts.push_back(index);
                 }
             }
@@ -2920,8 +2936,10 @@ void CanvasWidget::CommitSelection(
             }
         }
         for (std::size_t index = 0; index < page.texts.size(); ++index) {
-            const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
-            if (!(bounds.right < left || bounds.left > right || bounds.bottom < top || bounds.top > bottom)) {
+            const PageText& text = page.texts[index];
+            const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page.width);
+            if (RotatedRectIntersectsRect(bounds.left, bounds.top, bounds.right, bounds.bottom,
+                    text.rotationDegrees, a, b)) {
                 selection.texts.push_back(index);
             }
         }
@@ -3367,17 +3385,33 @@ std::optional<QRectF> CanvasWidget::PendingEraseObjectBounds(
         if (object.objectIndex >= page.texts.size()) {
             return std::nullopt;
         }
-        const text::QtTextBounds bounds =
-            text::MeasurePageTextBoundsQt(page.texts[object.objectIndex], page.width);
-        return QRectF(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+        const PageText& text = page.texts[object.objectIndex];
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page.width);
+        float minX = page.width, minY = page.height, maxX = 0.0f, maxY = 0.0f;
+        for (const Vec2& corner : RotatedRectCorners(
+                bounds.left, bounds.top, bounds.right, bounds.bottom, text.rotationDegrees)) {
+            minX = std::min(minX, corner.x);
+            minY = std::min(minY, corner.y);
+            maxX = std::max(maxX, corner.x);
+            maxY = std::max(maxY, corner.y);
+        }
+        return QRectF(minX, minY, maxX - minX, maxY - minY);
     }
     case ObjectKind::Latex: {
         if (object.objectIndex >= page.latexes.size()) {
             return std::nullopt;
         }
-        const LatexBounds bounds =
-            MeasurePageLatexBounds(page.latexes[object.objectIndex], page.width);
-        return QRectF(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+        const PageLatex& latex = page.latexes[object.objectIndex];
+        const LatexBounds bounds = MeasurePageLatexBounds(latex, page.width);
+        float minX = page.width, minY = page.height, maxX = 0.0f, maxY = 0.0f;
+        for (const Vec2& corner : RotatedRectCorners(
+                bounds.left, bounds.top, bounds.right, bounds.bottom, latex.rotationDegrees)) {
+            minX = std::min(minX, corner.x);
+            minY = std::min(minY, corner.y);
+            maxX = std::max(maxX, corner.x);
+            maxY = std::max(maxY, corner.y);
+        }
+        return QRectF(minX, minY, maxX - minX, maxY - minY);
     }
     }
     return std::nullopt;
@@ -3484,14 +3518,22 @@ std::optional<SelectionBounds> CanvasWidget::SelectionBoundsForPage(std::size_t 
             continue;
         }
         const text::QtTextBounds textBounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
-        include(textBounds.left, textBounds.top, textBounds.right, textBounds.bottom);
+        for (const Vec2& corner : RotatedRectCorners(
+                textBounds.left, textBounds.top, textBounds.right, textBounds.bottom,
+                page.texts[index].rotationDegrees)) {
+            include(corner.x, corner.y, corner.x, corner.y);
+        }
     }
     for (const std::size_t index : selection.latexes) {
         if (index >= page.latexes.size()) {
             continue;
         }
         const LatexBounds latexBounds = MeasurePageLatexBounds(page.latexes[index], page.width);
-        include(latexBounds.left, latexBounds.top, latexBounds.right, latexBounds.bottom);
+        for (const Vec2& corner : RotatedRectCorners(
+                latexBounds.left, latexBounds.top, latexBounds.right, latexBounds.bottom,
+                page.latexes[index].rotationDegrees)) {
+            include(corner.x, corner.y, corner.x, corner.y);
+        }
     }
     return bounds.valid ? std::optional<SelectionBounds>(bounds) : std::nullopt;
 }

@@ -81,6 +81,9 @@ struct PageText {
     bool bold = false;
     bool italic = false;
     bool underline = false;
+    // Clockwise degrees the text is rotated about its own bounds centre; 0 is
+    // upright.  Page rotation adds multiples of 90.
+    float rotationDegrees = 0.0f;
     std::u16string content {};
     std::vector<PageTextStyleSpan> styleSpans {};
 };
@@ -96,6 +99,8 @@ struct PageLatex {
     float fontSize = 24.0f;
     std::uint32_t color = 0xFF111827;
     std::u16string content {};
+    // Clockwise degrees the formula is rotated about its bounds centre.
+    float rotationDegrees = 0.0f;
 };
 
 struct RasterImage {
@@ -119,9 +124,32 @@ struct Page;
 [[nodiscard]] bool PageTextStyleEqual(const PageTextStyle& a, const PageTextStyle& b);
 [[nodiscard]] bool PageEqual(const Page& a, const Page& b);
 
+// Clockwise rotation of a point inside a W×H frame for a quarter turn; the
+// result lives inside the rotated frame (H×W for odd turns).  `quarterTurns`
+// is normalized to 0-3.
+[[nodiscard]] Vec2 RotatePointQuarterTurn(Vec2 point, float width, float height, int quarterTurns);
+
+// Rotates a BGRA raster clockwise by quarter turns, swapping dimensions and
+// rebasing the stride to width*4; a no-op (input returned) for 0 turns or an
+// empty raster.
+[[nodiscard]] RasterImage RotateRasterQuarterTurn(const RasterImage& raster, int quarterTurns);
+
+// Rotates every page coordinate-bearing object clockwise by quarter turns
+// about the page frame and swaps width/height for odd turns.  Strokes,
+// images (rotation accumulated), texts (box rotated, rotation accumulated),
+// LaTeX (bounds rotated, rotation accumulated) and the stored raster move
+// with the page; Page::rotationDegrees accumulates.  PDF source pages keep
+// their source indices - their background rotates at draw time.
+void RotatePageContents(Page& page, int quarterTurns);
+
 struct Page {
     float width = 595.0f;
     float height = 842.0f;
+    // Clockwise degrees the page was rotated (sidebar Rotate actions); always
+    // a multiple of 90 in this UI.  Object coordinates and the stored raster
+    // are already transformed; PDF source backgrounds and PDF text boxes are
+    // rendered/extracted unrotated and rotated by this value at use sites.
+    float rotationDegrees = 0.0f;
     std::int32_t sourcePdfSourceIndex = -1;
     std::int32_t sourcePdfPageIndex = -1;
     std::vector<std::uint32_t> paletteProfile {};

@@ -852,21 +852,37 @@ const std::vector<PdfTextCharBox>* QtDocumentController::PdfTextCharBoxesFor(std
     const PdfTextCacheKey key {
         pdfSource->pdfData,
         static_cast<std::size_t>(page->sourcePdfPageIndex),
+        static_cast<int>(std::lround(page->rotationDegrees / 90.0f)) & 3,
     };
     if (const auto cached = pdfTextCache_.find(key); cached != pdfTextCache_.end()) {
         return &cached->second;
     }
-    const std::optional<std::vector<PdfTextCharBox>> boxes = pdfBackend_->ExtractTextCharBoxes(
+    const std::optional<std::vector<PdfTextCharBox>> extracted = pdfBackend_->ExtractTextCharBoxes(
         pdfSource->pdfData, static_cast<std::size_t>(page->sourcePdfPageIndex));
-    if (!boxes.has_value()) {
+    if (!extracted.has_value()) {
         return nullptr;
+    }
+    std::vector<PdfTextCharBox> boxes = *extracted;
+    if (key.quarterTurns != 0) {
+        // Boxes come back in source-page space; the page already swapped its
+        // frame, so the source dims are the swapped-back page dims.
+        const float sourceWidth = (key.quarterTurns % 2 != 0) ? page->height : page->width;
+        const float sourceHeight = (key.quarterTurns % 2 != 0) ? page->width : page->height;
+        for (PdfTextCharBox& box : boxes) {
+            const Vec2 tl = RotatePointQuarterTurn({ box.left, box.top }, sourceWidth, sourceHeight, key.quarterTurns);
+            const Vec2 br = RotatePointQuarterTurn({ box.right, box.bottom }, sourceWidth, sourceHeight, key.quarterTurns);
+            box.left = std::min(tl.x, br.x);
+            box.right = std::max(tl.x, br.x);
+            box.top = std::min(tl.y, br.y);
+            box.bottom = std::max(tl.y, br.y);
+        }
     }
     // Extraction reads the whole PDF text page (pdfium LoadMemDocument + text
     // page walk), so hit-testing without this cache cost ~10 ms per probe.
     if (pdfTextCache_.size() >= kPdfTextCacheCapacity) {
         pdfTextCache_.clear();
     }
-    const auto inserted = pdfTextCache_.emplace(key, std::move(*boxes));
+    const auto inserted = pdfTextCache_.emplace(key, std::move(boxes));
     return &inserted.first->second;
 }
 
@@ -1017,20 +1033,40 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
         for (const std::size_t index : selection.texts) {
             ui::SelectionBounds bounds {};
             if (index < page->texts.size()) {
-                const text::QtTextBounds textBounds =
-                    text::MeasurePageTextBoundsQt(page->texts[index], page->width);
-                bounds = ui::SelectionBounds {
-                    textBounds.left, textBounds.top, textBounds.right, textBounds.bottom, true };
+                const PageText& text = page->texts[index];
+                const text::QtTextBounds textBounds = text::MeasurePageTextBoundsQt(text, page->width);
+                for (const Vec2& corner : ui::RotatedRectCorners(
+                        textBounds.left, textBounds.top, textBounds.right, textBounds.bottom,
+                        text.rotationDegrees)) {
+                    if (!bounds.valid) {
+                        bounds = ui::SelectionBounds { corner.x, corner.y, corner.x, corner.y, true };
+                        continue;
+                    }
+                    bounds.left = std::min(bounds.left, corner.x);
+                    bounds.top = std::min(bounds.top, corner.y);
+                    bounds.right = std::max(bounds.right, corner.x);
+                    bounds.bottom = std::max(bounds.bottom, corner.y);
+                }
             }
             moveBounds_.texts.push_back(bounds);
         }
         for (const std::size_t index : selection.latexes) {
             ui::SelectionBounds bounds {};
             if (index < page->latexes.size()) {
-                const ui::LatexBounds latexBounds =
-                    ui::MeasurePageLatexBounds(page->latexes[index], page->width);
-                bounds = ui::SelectionBounds {
-                    latexBounds.left, latexBounds.top, latexBounds.right, latexBounds.bottom, true };
+                const PageLatex& latex = page->latexes[index];
+                const ui::LatexBounds latexBounds = ui::MeasurePageLatexBounds(latex, page->width);
+                for (const Vec2& corner : ui::RotatedRectCorners(
+                        latexBounds.left, latexBounds.top, latexBounds.right, latexBounds.bottom,
+                        latex.rotationDegrees)) {
+                    if (!bounds.valid) {
+                        bounds = ui::SelectionBounds { corner.x, corner.y, corner.x, corner.y, true };
+                        continue;
+                    }
+                    bounds.left = std::min(bounds.left, corner.x);
+                    bounds.top = std::min(bounds.top, corner.y);
+                    bounds.right = std::max(bounds.right, corner.x);
+                    bounds.bottom = std::max(bounds.bottom, corner.y);
+                }
             }
             moveBounds_.latexes.push_back(bounds);
         }
@@ -1188,10 +1224,23 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
             // Rotation and Shift-resize keep the reference behaviour: the
             // origin follows the mapped top-left and the font scales with the
             // frame (App::UpdateTextTransform shift path, App.cpp:5032-5038).
-            const Vec2 mapped = ui::MapSelectionTransformPoint(
-                { bounds.left, bounds.top }, transform.from, transform.to, transform.rotateDegrees);
-            text.x += mapped.x - bounds.left;
-            text.y += mapped.y - bounds.top;
+            // Already-rotated text instead tracks its bounds centre - the
+            // reference had no rotated text, and a centre-anchor keeps the
+            // accumulated object rotation meaningful.
+            if (std::abs(text.rotationDegrees) > 0.0001f) {
+                const Vec2 boundsCenter {
+                    (bounds.left + bounds.right) * 0.5f, (bounds.top + bounds.bottom) * 0.5f };
+                const Vec2 mappedCenter = ui::MapSelectionTransformPoint(
+                    boundsCenter, transform.from, transform.to, transform.rotateDegrees);
+                text.x += mappedCenter.x - boundsCenter.x;
+                text.y += mappedCenter.y - boundsCenter.y;
+            } else {
+                const Vec2 mapped = ui::MapSelectionTransformPoint(
+                    { bounds.left, bounds.top }, transform.from, transform.to, transform.rotateDegrees);
+                text.x += mapped.x - bounds.left;
+                text.y += mapped.y - bounds.top;
+            }
+            text.rotationDegrees += transform.rotateDegrees;
             if (transform.scaleTextFont) {
                 const float textScale = std::max(0.05f,
                     (transform.to.right - transform.to.left) / std::max(1.0f, transform.from.right - transform.from.left));
@@ -1240,10 +1289,22 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         }
         PageLatex& object = page->latexes[index];
         const ui::LatexBounds bounds = ui::MeasurePageLatexBounds(object, page->width);
-        const Vec2 mapped = ui::MapSelectionTransformPoint(
-            { bounds.left, bounds.top }, transform.from, transform.to, transform.rotateDegrees);
-        object.x += mapped.x - bounds.left;
-        object.y += mapped.y - bounds.top;
+        // Same centre-anchor rule as text: rotated latex tracks its bounds
+        // centre so the accumulated rotation stays meaningful.
+        if (std::abs(object.rotationDegrees) > 0.0001f || transform.rotateDegrees != 0.0f) {
+            const Vec2 boundsCenter {
+                (bounds.left + bounds.right) * 0.5f, (bounds.top + bounds.bottom) * 0.5f };
+            const Vec2 mappedCenter = ui::MapSelectionTransformPoint(
+                boundsCenter, transform.from, transform.to, transform.rotateDegrees);
+            object.x += mappedCenter.x - boundsCenter.x;
+            object.y += mappedCenter.y - boundsCenter.y;
+            object.rotationDegrees += transform.rotateDegrees;
+        } else {
+            const Vec2 mapped = ui::MapSelectionTransformPoint(
+                { bounds.left, bounds.top }, transform.from, transform.to, transform.rotateDegrees);
+            object.x += mapped.x - bounds.left;
+            object.y += mapped.y - bounds.top;
+        }
         object.fontSize *= scaleY;
         gestureChanged_ = true;
     }
@@ -1510,6 +1571,62 @@ bool QtDocumentController::PastePage(std::size_t index) {
     session_->dirty = true;
     ++session_->revision;
     currentPage_ = insertIndex;
+    NotifySessionChanged(true);
+    return true;
+}
+
+bool QtDocumentController::RotatePage(std::size_t pageIndex, int quarterTurns) {
+    const int turns = ((quarterTurns % 4) + 4) % 4;
+    if (session_ == nullptr || turns == 0 || pageIndex >= session_->document.PageCount()) {
+        return false;
+    }
+    Document& document = session_->document;
+    Page& page = document.PageAt(pageIndex);
+    const Page before = page;
+
+    // LaTeX boxes derive from Measure (no stored extents), so their x/y maps
+    // by bounds centre before the object rotation accumulates inside
+    // RotatePageContents.
+    const float width = page.width;
+    const float height = page.height;
+    std::vector<Vec2> latexCenters;
+    latexCenters.reserve(page.latexes.size());
+    for (const PageLatex& latex : page.latexes) {
+        const ui::LatexBounds bounds = ui::MeasurePageLatexBounds(latex, width);
+        latexCenters.push_back({ (bounds.left + bounds.right) * 0.5f, (bounds.top + bounds.bottom) * 0.5f });
+    }
+    std::vector<ui::LatexBounds> latexBounds;
+    latexBounds.reserve(page.latexes.size());
+    for (const PageLatex& latex : page.latexes) {
+        latexBounds.push_back(ui::MeasurePageLatexBounds(latex, width));
+    }
+
+    RotatePageContents(page, turns);
+
+    for (std::size_t index = 0; index < page.latexes.size(); ++index) {
+        const Vec2 mapped = RotatePointQuarterTurn(latexCenters[index], width, height, turns);
+        const float halfWidth = (latexBounds[index].right - latexBounds[index].left) * 0.5f;
+        const float halfHeight = (latexBounds[index].bottom - latexBounds[index].top) * 0.5f;
+        if (turns % 2 != 0) {
+            page.latexes[index].x = mapped.x - halfHeight;
+            page.latexes[index].y = mapped.y - halfWidth;
+        } else {
+            page.latexes[index].x = mapped.x - halfWidth;
+            page.latexes[index].y = mapped.y - halfHeight;
+        }
+    }
+
+    document.TouchPage(pageIndex);
+    pdfTextCache_.clear();
+    HistoryAction action {};
+    action.type = HistoryActionType::ReplacePages;
+    action.pageIndices = { pageIndex };
+    action.pages = { std::move(before) };
+    action.replacementPages = { page };
+    session_->undoActions.push_back(std::move(action));
+    session_->redoActions.clear();
+    session_->dirty = true;
+    ++session_->revision;
     NotifySessionChanged(true);
     return true;
 }

@@ -528,6 +528,10 @@ void QtMainWindow::CreateChrome() {
             QAction* cut = menu.addAction(QStringLiteral("Cut Page"));
             QAction* paste = menu.addAction(QStringLiteral("Paste Page"));
             QAction* deletePage = menu.addAction(QStringLiteral("Delete Page"));
+            menu.addSeparator();
+            QAction* rotateCw = menu.addAction(QStringLiteral("Rotate 90° Clockwise"));
+            QAction* rotateCcw = menu.addAction(QStringLiteral("Rotate 90° Counterclockwise"));
+            QAction* rotate180 = menu.addAction(QStringLiteral("Rotate 180°"));
             paste->setEnabled(manager_.HasClipboardPage());
             deletePage->setEnabled(controller_.DocumentRef().PageCount() > 1U);
             QAction* chosen = menu.exec(globalPosition);
@@ -539,6 +543,12 @@ void QtMainWindow::CreateChrome() {
                 static_cast<void>(controller_.PastePage(pageIndex));
             } else if (chosen == deletePage) {
                 static_cast<void>(controller_.RemovePage(pageIndex));
+            } else if (chosen == rotateCw) {
+                static_cast<void>(controller_.RotatePage(pageIndex, 1));
+            } else if (chosen == rotateCcw) {
+                static_cast<void>(controller_.RotatePage(pageIndex, 3));
+            } else if (chosen == rotate180) {
+                static_cast<void>(controller_.RotatePage(pageIndex, 2));
             }
         });
     connect(sidebar_, &ui::SidebarWidget::OpenChanged, this, [this](bool open) {

@@ -130,6 +130,12 @@ public:
     // focuses the inserted page and records one AddPages undo step; false
     // when the page clipboard is empty.
     bool PastePage(std::size_t index);
+    // Rotates page `index` clockwise by quarter turns (1 = 90°, 2 = 180°,
+    // 3 = 90° counter-clockwise): every object coordinate and the stored
+    // raster transform with it, the page frame swaps dims for odd turns and
+    // Page::rotationDegrees accumulates for PDF backgrounds.  One ReplacePages
+    // undo step; false when out of range or the turn count is 0.
+    bool RotatePage(std::size_t pageIndex, int quarterTurns);
 
     // --- selection clipboard, document side (the shell owns QClipboard) ------
     // Collects the selected objects of every page the view has a selection on,
@@ -257,11 +263,16 @@ private:
     struct PdfTextCacheKey {
         std::shared_ptr<const std::vector<std::uint8_t>> pdfData;
         std::size_t sourcePage = 0;
+        // Page rotation bakes into the cached boxes, so it keys them too.
+        int quarterTurns = 0;
         [[nodiscard]] bool operator<(const PdfTextCacheKey& other) const {
             if (pdfData != other.pdfData) {
                 return std::owner_less<std::shared_ptr<const std::vector<std::uint8_t>>> {}(pdfData, other.pdfData);
             }
-            return sourcePage < other.sourcePage;
+            if (sourcePage != other.sourcePage) {
+                return sourcePage < other.sourcePage;
+            }
+            return quarterTurns < other.quarterTurns;
         }
     };
     mutable std::map<PdfTextCacheKey, std::vector<PdfTextCharBox>> pdfTextCache_;

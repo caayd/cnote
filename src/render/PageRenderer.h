@@ -110,6 +110,12 @@ void PaintImage(QPainter& painter, const PageImage& image, const PageRenderParam
 // maps page units to painter units exactly like PaintPage.
 void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRenderParams& params, float opacity);
 
+// Draws one text/LaTeX block in page units (rotation and opacity applied),
+// same transform rules as the committed render.  Exported so the PDF export
+// text overlay reuses the rotation-aware path.
+void PaintPageText(QPainter& painter, const PageText& text, float pageWidth, float scale, float opacity);
+void PaintPageLatex(QPainter& painter, const PageLatex& latex, float scale, float opacity);
+
 // Renders only `region` (page units) of a page into a premultiplied ARGB32
 // QImage sized region * scale * devicePixelRatio, for compositing over a
 // cached full-page surface.  Objects outside `region` are culled.

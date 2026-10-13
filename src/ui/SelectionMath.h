@@ -107,6 +107,113 @@ inline Vec2 ToImageLocalPoint(const PageImage& image, Vec2 point) {
     return RotatePointAround(point, center, -image.rotationDegrees);
 }
 
+inline bool SegmentIntersectsRectF(Vec2 a, Vec2 b, float left, float top, float right, float bottom);
+
+// Generic rotated-rect probes for the page-rotation feature: texts and LaTeX
+// blocks carry a rotationDegrees about their bounds centre exactly like
+// images.  `left/top/right/bottom` is the unrotated (object-space) rect.
+
+inline std::array<Vec2, 4> RotatedRectCorners(float left, float top, float right, float bottom, float rotationDegrees) {
+    std::array<Vec2, 4> corners {{
+        { left, top }, { right, top }, { right, bottom }, { left, bottom },
+    }};
+    const Vec2 center { (left + right) * 0.5f, (top + bottom) * 0.5f };
+    for (Vec2& corner : corners) {
+        corner = RotatePointAround(corner, center, rotationDegrees);
+    }
+    return corners;
+}
+
+inline bool PointInRotatedRect(Vec2 point, float left, float top, float right, float bottom, float rotationDegrees) {
+    const Vec2 center { (left + right) * 0.5f, (top + bottom) * 0.5f };
+    const Vec2 local = RotatePointAround(point, center, -rotationDegrees);
+    return local.x >= left && local.x <= right && local.y >= top && local.y <= bottom;
+}
+
+// Axis-aligned bounds of the rotated rect (the selection frame encloses it).
+inline void IncludeRotatedRect(float left, float top, float right, float bottom, float rotationDegrees,
+    float& outLeft, float& outTop, float& outRight, float& outBottom) {
+    const std::array<Vec2, 4> corners = RotatedRectCorners(left, top, right, bottom, rotationDegrees);
+    outLeft = corners[0].x;
+    outTop = corners[0].y;
+    outRight = corners[0].x;
+    outBottom = corners[0].y;
+    for (std::size_t index = 1; index < corners.size(); ++index) {
+        outLeft = std::min(outLeft, corners[index].x);
+        outTop = std::min(outTop, corners[index].y);
+        outRight = std::max(outRight, corners[index].x);
+        outBottom = std::max(outBottom, corners[index].y);
+    }
+}
+
+// Rotated rect vs axis-aligned rect: any rotated corner inside the rect, any
+// rect corner inside the rotated rect, or an edge intersection.
+inline bool RotatedRectIntersectsRect(float left, float top, float right, float bottom, float rotationDegrees, Vec2 a, Vec2 b) {
+    const float selLeft = std::min(a.x, b.x);
+    const float selTop = std::min(a.y, b.y);
+    const float selRight = std::max(a.x, b.x);
+    const float selBottom = std::max(a.y, b.y);
+    const std::array<Vec2, 4> corners = RotatedRectCorners(left, top, right, bottom, rotationDegrees);
+    for (const Vec2& corner : corners) {
+        if (PointInRectF(corner, selLeft, selTop, selRight, selBottom)) {
+            return true;
+        }
+    }
+    const std::array<Vec2, 4> selCorners {{
+        { selLeft, selTop }, { selRight, selTop }, { selRight, selBottom }, { selLeft, selBottom },
+    }};
+    for (const Vec2& corner : selCorners) {
+        if (PointInRotatedRect(corner, left, top, right, bottom, rotationDegrees)) {
+            return true;
+        }
+    }
+    for (std::size_t index = 0; index < 4U; ++index) {
+        if (SegmentIntersectsRectF(corners[index], corners[(index + 1U) % 4U], selLeft, selTop, selRight, selBottom)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline bool RotatedRectIntersectsPolygon(float left, float top, float right, float bottom, float rotationDegrees,
+    const std::vector<Vec2>& polygon) {
+    const std::array<Vec2, 4> corners = RotatedRectCorners(left, top, right, bottom, rotationDegrees);
+    for (const Vec2& corner : corners) {
+        if (PointInPolygon(corner, polygon)) {
+            return true;
+        }
+    }
+    for (const Vec2& point : polygon) {
+        if (PointInRotatedRect(point, left, top, right, bottom, rotationDegrees)) {
+            return true;
+        }
+    }
+    for (std::size_t index = 0; index < 4U; ++index) {
+        const Vec2 edgeA = corners[index];
+        const Vec2 edgeB = corners[(index + 1U) % 4U];
+        for (std::size_t edgeIndex = 0; edgeIndex < polygon.size(); ++edgeIndex) {
+            if (SegmentsIntersect(edgeA, edgeB, polygon[edgeIndex], polygon[(edgeIndex + 1U) % polygon.size()])) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Segment (eraser path inflated by `radius`) vs a rotated rect: approximate
+// the rotated rect by its polygon edges plus a containment check.
+inline bool RotatedRectHitsSegment(float left, float top, float right, float bottom, float rotationDegrees,
+    Vec2 a, Vec2 b, float radius) {
+    const std::array<Vec2, 4> corners = RotatedRectCorners(left, top, right, bottom, rotationDegrees);
+    for (std::size_t index = 0; index < 4U; ++index) {
+        if (DistanceSegmentToSegmentSquared(a, b, corners[index], corners[(index + 1U) % 4U]) <= radius * radius) {
+            return true;
+        }
+    }
+    return PointInRotatedRect(a, left, top, right, bottom, rotationDegrees)
+        || PointInRotatedRect(b, left, top, right, bottom, rotationDegrees);
+}
+
 inline bool SegmentIntersectsRectF(Vec2 a, Vec2 b, float left, float top, float right, float bottom) {
     if (PointInRectF(a, left, top, right, bottom) || PointInRectF(b, left, top, right, bottom)) {
         return true;
@@ -413,16 +520,12 @@ inline bool StrokeIntersectsPolygonSelection(const Stroke& stroke, const std::ve
 
 inline bool LatexHitsPoint(const PageLatex& latex, float pageWidth, Vec2 point) {
     const LatexBounds bounds = MeasurePageLatexBounds(latex, pageWidth);
-    return PointInRectF(point, bounds.left, bounds.top, bounds.right, bounds.bottom);
+    return PointInRotatedRect(point, bounds.left, bounds.top, bounds.right, bounds.bottom, latex.rotationDegrees);
 }
 
 inline bool LatexIntersectsRectSelection(const PageLatex& latex, float pageWidth, Vec2 a, Vec2 b) {
     const LatexBounds bounds = MeasurePageLatexBounds(latex, pageWidth);
-    const float left = std::min(a.x, b.x);
-    const float right = std::max(a.x, b.x);
-    const float top = std::min(a.y, b.y);
-    const float bottom = std::max(a.y, b.y);
-    return !(bounds.right < left || bounds.left > right || bounds.bottom < top || bounds.top > bottom);
+    return RotatedRectIntersectsRect(bounds.left, bounds.top, bounds.right, bounds.bottom, latex.rotationDegrees, a, b);
 }
 
 inline bool LatexIntersectsPolygonSelection(const PageLatex& latex, float pageWidth, const std::vector<Vec2>& polygon) {
@@ -431,33 +534,7 @@ inline bool LatexIntersectsPolygonSelection(const PageLatex& latex, float pageWi
     }
 
     const LatexBounds bounds = MeasurePageLatexBounds(latex, pageWidth);
-    const std::array<Vec2, 4> corners {{
-        { bounds.left, bounds.top },
-        { bounds.right, bounds.top },
-        { bounds.right, bounds.bottom },
-        { bounds.left, bounds.bottom },
-    }};
-
-    for (const Vec2& corner : corners) {
-        if (PointInPolygon(corner, polygon)) {
-            return true;
-        }
-    }
-    for (const Vec2& point : polygon) {
-        if (LatexHitsPoint(latex, pageWidth, point)) {
-            return true;
-        }
-    }
-    for (std::size_t edgeIndex = 0; edgeIndex < polygon.size(); ++edgeIndex) {
-        const Vec2 polyA = polygon[edgeIndex];
-        const Vec2 polyB = polygon[(edgeIndex + 1U) % polygon.size()];
-        for (std::size_t rectEdgeIndex = 0; rectEdgeIndex < corners.size(); ++rectEdgeIndex) {
-            if (SegmentsIntersect(polyA, polyB, corners[rectEdgeIndex], corners[(rectEdgeIndex + 1U) % corners.size()])) {
-                return true;
-            }
-        }
-    }
-    return false;
+    return RotatedRectIntersectsPolygon(bounds.left, bounds.top, bounds.right, bounds.bottom, latex.rotationDegrees, polygon);
 }
 
 inline Vec2 RotatePointAround(Vec2 point, Vec2 center, float degrees) {

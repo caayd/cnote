@@ -315,6 +315,7 @@ bool PageTextEqual(const PageText& a, const PageText& b) {
         && a.italic == b.italic
         && a.underline == b.underline
         && a.content == b.content
+        && a.rotationDegrees == b.rotationDegrees
         && a.styleSpans.size() == b.styleSpans.size()
         && std::equal(
             a.styleSpans.begin(),
@@ -333,12 +334,14 @@ bool PageLatexEqual(const PageLatex& a, const PageLatex& b) {
         && a.y == b.y
         && a.fontSize == b.fontSize
         && a.color == b.color
-        && a.content == b.content;
+        && a.content == b.content
+        && a.rotationDegrees == b.rotationDegrees;
 }
 
 bool PageEqual(const Page& a, const Page& b) {
     if (a.width != b.width
         || a.height != b.height
+        || a.rotationDegrees != b.rotationDegrees
         || a.sourcePdfSourceIndex != b.sourcePdfSourceIndex
         || a.sourcePdfPageIndex != b.sourcePdfPageIndex
         || a.paletteProfile != b.paletteProfile
@@ -370,6 +373,109 @@ bool PageEqual(const Page& a, const Page& b) {
         }
     }
     return true;
+}
+
+Vec2 RotatePointQuarterTurn(Vec2 point, float width, float height, int quarterTurns) {
+    const int turns = ((quarterTurns % 4) + 4) % 4;
+    switch (turns) {
+    case 1:
+        return { height - point.y, point.x };
+    case 2:
+        return { width - point.x, height - point.y };
+    case 3:
+        return { point.y, width - point.x };
+    default:
+        return point;
+    }
+}
+
+RasterImage RotateRasterQuarterTurn(const RasterImage& raster, int quarterTurns) {
+    const int turns = ((quarterTurns % 4) + 4) % 4;
+    if (turns == 0 || raster.pixels.empty() || raster.width <= 0 || raster.height <= 0 || raster.stride < raster.width * 4) {
+        return raster;
+    }
+
+    RasterImage rotated {};
+    rotated.width = (turns % 2 == 0) ? raster.width : raster.height;
+    rotated.height = (turns % 2 == 0) ? raster.height : raster.width;
+    rotated.stride = rotated.width * 4;
+    rotated.scale = raster.scale;
+    rotated.pixels.resize(static_cast<std::size_t>(rotated.stride) * static_cast<std::size_t>(rotated.height));
+
+    for (int y = 0; y < rotated.height; ++y) {
+        for (int x = 0; x < rotated.width; ++x) {
+            // Map the destination pixel back to its source: the inverse turn.
+            int sourceX = 0;
+            int sourceY = 0;
+            switch (turns) {
+            case 1:
+                sourceX = y;
+                sourceY = raster.height - 1 - x;
+                break;
+            case 2:
+                sourceX = raster.width - 1 - x;
+                sourceY = raster.height - 1 - y;
+                break;
+            default:
+                sourceX = raster.width - 1 - y;
+                sourceY = x;
+                break;
+            }
+            const auto* source = raster.pixels.data()
+                + (static_cast<std::size_t>(sourceY) * static_cast<std::size_t>(raster.stride))
+                + (static_cast<std::size_t>(sourceX) * 4U);
+            std::uint8_t* destination = rotated.pixels.data()
+                + (static_cast<std::size_t>(y) * static_cast<std::size_t>(rotated.stride))
+                + (static_cast<std::size_t>(x) * 4U);
+            std::copy_n(source, 4U, destination);
+        }
+    }
+    return rotated;
+}
+
+void RotatePageContents(Page& page, int quarterTurns) {
+    const int turns = ((quarterTurns % 4) + 4) % 4;
+    if (turns == 0) {
+        return;
+    }
+    const float width = page.width;
+    const float height = page.height;
+
+    for (Stroke& stroke : page.strokes) {
+        for (Vec2& point : stroke.points) {
+            point = RotatePointQuarterTurn(point, width, height, turns);
+        }
+    }
+    const auto rotateCenteredRect = [width, height, turns](float& x, float& y, float& rectWidth, float& rectHeight) {
+        const Vec2 center = RotatePointQuarterTurn({ x + rectWidth * 0.5f, y + rectHeight * 0.5f }, width, height, turns);
+        if (turns % 2 != 0) {
+            std::swap(rectWidth, rectHeight);
+        }
+        x = center.x - rectWidth * 0.5f;
+        y = center.y - rectHeight * 0.5f;
+    };
+    const auto normalizeDegrees = [](float value) {
+        const float wrapped = std::fmod(value, 360.0f);
+        return wrapped < 0.0f ? wrapped + 360.0f : wrapped;
+    };
+    for (PageImage& image : page.images) {
+        rotateCenteredRect(image.x, image.y, image.width, image.height);
+        image.rotationDegrees = normalizeDegrees(image.rotationDegrees + static_cast<float>(turns) * 90.0f);
+    }
+    for (PageText& text : page.texts) {
+        rotateCenteredRect(text.x, text.y, text.width, text.height);
+        text.rotationDegrees = normalizeDegrees(text.rotationDegrees + static_cast<float>(turns) * 90.0f);
+    }
+    for (PageLatex& latex : page.latexes) {
+        // The box is derived from latex::Measure, so callers remap (x,y) by
+        // the measured bounds centre instead of stored extents.
+        latex.rotationDegrees = normalizeDegrees(latex.rotationDegrees + static_cast<float>(turns) * 90.0f);
+    }
+    page.raster = RotateRasterQuarterTurn(page.raster, turns);
+    if (turns % 2 != 0) {
+        std::swap(page.width, page.height);
+    }
+    page.rotationDegrees = normalizeDegrees(page.rotationDegrees + static_cast<float>(turns) * 90.0f);
 }
 
 }  // namespace cnote

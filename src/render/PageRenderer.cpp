@@ -48,13 +48,34 @@ void PaintPageBackground(QPainter& painter, const Page& page, const PageRenderPa
             page.sourcePdfPageIndex,
             scale);
         if (!background.isNull()) {
-            painter.drawImage(pageRect, background);
+            // The source page renders at its stored orientation; page
+            // rotation applies about the (already swapped) page centre.
+            painter.save();
+            painter.translate(pageRect.center());
+            painter.rotate(static_cast<qreal>(page.rotationDegrees));
+            painter.drawImage(
+                QRectF(-static_cast<qreal>(background.width()) * 0.5, -static_cast<qreal>(background.height()) * 0.5,
+                    static_cast<qreal>(background.width()), static_cast<qreal>(background.height())),
+                background);
+            painter.restore();
         }
     }
 }
 
 
 void PaintText(QPainter& painter, const PageText& text, float pageWidth, float scale, float opacity) {
+    if (std::abs(text.rotationDegrees) > 0.0001f) {
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, pageWidth);
+        const qreal centerX = static_cast<qreal>(bounds.left + bounds.right) * 0.5 * scale;
+        const qreal centerY = static_cast<qreal>(bounds.top + bounds.bottom) * 0.5 * scale;
+        painter.save();
+        painter.translate(centerX, centerY);
+        painter.rotate(static_cast<qreal>(text.rotationDegrees));
+        painter.translate(-centerX, -centerY);
+        text::DrawPageTextQt(painter, text, pageWidth, scale, text.x * scale, text.y * scale, opacity);
+        painter.restore();
+        return;
+    }
     text::DrawPageTextQt(painter, text, pageWidth, scale, text.x * scale, text.y * scale, opacity);
 }
 
@@ -67,6 +88,18 @@ void PaintLatex(QPainter& painter, const PageLatex& latex, float scale, float op
     const std::uint32_t alpha = static_cast<std::uint32_t>(
         std::lround(static_cast<float>((latex.color >> 24U) & 0xFFU) * clampedOpacity));
     const std::uint32_t color = (latex.color & 0x00FFFFFFU) | (alpha << 24U);
+    if (std::abs(latex.rotationDegrees) > 0.0001f) {
+        const latex::FormulaMetrics metrics = latex::Measure(formula);
+        const qreal centerX = (static_cast<qreal>(latex.x) + static_cast<qreal>(metrics.width) * 0.5) * scale;
+        const qreal centerY = (static_cast<qreal>(latex.y) + static_cast<qreal>(metrics.height) * 0.5) * scale;
+        painter.save();
+        painter.translate(centerX, centerY);
+        painter.rotate(static_cast<qreal>(latex.rotationDegrees));
+        painter.translate(-centerX, -centerY);
+        latex::Draw(formula, painter, latex.x * scale, latex.y * scale, scale, color);
+        painter.restore();
+        return;
+    }
     latex::Draw(formula, painter, latex.x * scale, latex.y * scale, scale, color);
 }
 
@@ -133,16 +166,75 @@ bool ImageIntersectsCull(const PageImage& image, const QRectF& cull) {
 
 bool TextIntersectsCull(const PageText& text, float pageWidth, const QRectF& cull) {
     const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, pageWidth);
-    return QRectF(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top)
-        .intersects(cull);
+    float minX = bounds.left;
+    float minY = bounds.top;
+    float maxX = bounds.right;
+    float maxY = bounds.bottom;
+    if (std::abs(text.rotationDegrees) > 0.0001f) {
+        const float radians = text.rotationDegrees * (3.14159265358979323846f / 180.0f);
+        const float sine = std::sin(radians);
+        const float cosine = std::cos(radians);
+        const float centerX = (bounds.left + bounds.right) * 0.5f;
+        const float centerY = (bounds.top + bounds.bottom) * 0.5f;
+        minX = std::numeric_limits<float>::max();
+        minY = std::numeric_limits<float>::max();
+        maxX = std::numeric_limits<float>::lowest();
+        maxY = std::numeric_limits<float>::lowest();
+        for (const Vec2 corner : { Vec2 { bounds.left, bounds.top }, Vec2 { bounds.right, bounds.top },
+                 Vec2 { bounds.right, bounds.bottom }, Vec2 { bounds.left, bounds.bottom } }) {
+            const float dx = corner.x - centerX;
+            const float dy = corner.y - centerY;
+            minX = std::min(minX, centerX + (dx * cosine) - (dy * sine));
+            minY = std::min(minY, centerY + (dx * sine) + (dy * cosine));
+            maxX = std::max(maxX, centerX + (dx * cosine) - (dy * sine));
+            maxY = std::max(maxY, centerY + (dx * sine) + (dy * cosine));
+        }
+    }
+    return QRectF(minX, minY, maxX - minX, maxY - minY).intersects(cull);
 }
 
 bool LatexIntersectsCull(const PageLatex& latex, const QRectF& cull) {
     const latex::FormulaMetrics metrics = latex::Measure(latex::Parse(latex));
-    return QRectF(latex.x, latex.y, metrics.width, metrics.height).intersects(cull);
+    float minX = latex.x;
+    float minY = latex.y;
+    float maxX = latex.x + metrics.width;
+    float maxY = latex.y + metrics.height;
+    if (std::abs(latex.rotationDegrees) > 0.0001f) {
+        const float radians = latex.rotationDegrees * (3.14159265358979323846f / 180.0f);
+        const float sine = std::sin(radians);
+        const float cosine = std::cos(radians);
+        const float centerX = (minX + maxX) * 0.5f;
+        const float centerY = (minY + maxY) * 0.5f;
+        float outMinX = std::numeric_limits<float>::max();
+        float outMinY = std::numeric_limits<float>::max();
+        float outMaxX = std::numeric_limits<float>::lowest();
+        float outMaxY = std::numeric_limits<float>::lowest();
+        for (const Vec2 corner : { Vec2 { minX, minY }, Vec2 { maxX, minY }, Vec2 { maxX, maxY }, Vec2 { minX, maxY } }) {
+            const float dx = corner.x - centerX;
+            const float dy = corner.y - centerY;
+            outMinX = std::min(outMinX, centerX + (dx * cosine) - (dy * sine));
+            outMinY = std::min(outMinY, centerY + (dx * sine) + (dy * cosine));
+            outMaxX = std::max(outMaxX, centerX + (dx * cosine) - (dy * sine));
+            outMaxY = std::max(outMaxY, centerY + (dx * sine) + (dy * cosine));
+        }
+        minX = outMinX;
+        minY = outMinY;
+        maxX = outMaxX;
+        maxY = outMaxY;
+    }
+    return QRectF(minX, minY, maxX - minX, maxY - minY).intersects(cull);
 }
 
 }  // namespace
+
+void PaintPageText(QPainter& painter, const PageText& text, float pageWidth, float scale, float opacity) {
+    PaintText(painter, text, pageWidth, scale, opacity);
+}
+
+void PaintPageLatex(QPainter& painter, const PageLatex& latex, float scale, float opacity) {
+    PaintLatex(painter, latex, scale, opacity);
+}
+
 
 void PaintImage(QPainter& painter, const PageImage& image, const PageRenderParams& params, float opacity) {
     if (image.pixels.empty() || image.pixelWidth <= 0 || image.pixelHeight <= 0) {
@@ -426,6 +518,7 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     hash = HashValue(hash, page.raster.stride);
     hash = HashValue(hash, page.raster.pixels.size());
     hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(page.raster.pixels.data()));
+    hash = HashFloat(hash, page.rotationDegrees);
 
     hash = HashValue(hash, page.images.size());
     hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(page.images.data()));
@@ -458,6 +551,7 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
         hash = HashFloat(hash, text.y);
         hash = HashFloat(hash, text.width);
         hash = HashFloat(hash, text.height);
+        hash = HashFloat(hash, text.rotationDegrees);
     }
 
     hash = HashValue(hash, page.latexes.size());
@@ -471,6 +565,7 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
         hash = HashFloat(hash, latex.y);
         hash = HashFloat(hash, latex.fontSize);
         hash = HashValue(hash, latex.color);
+        hash = HashFloat(hash, latex.rotationDegrees);
         for (char16_t unit : latex.content) {
             hash = HashValue(hash, static_cast<std::uint16_t>(unit));
         }
