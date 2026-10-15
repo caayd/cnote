@@ -22,10 +22,10 @@ struct SelectionClipboardData {
     float maxY = 0.0f;
 };
 
-// CTS8 writer order, explicit little-endian fields and two-byte UTF-16LE.
+// CTS9 writer order, explicit little-endian fields and two-byte UTF-16LE.
 [[nodiscard]] std::vector<std::uint8_t> EncodeSelectionClipboard(const SelectionClipboardData& data);
 
-// Accepts CTS1..CTS8. Returns nullopt for unknown magic or truncated/overflowing
+// Accepts CTS1..CTS9. Returns nullopt for unknown magic or truncated/overflowing
 // records, so callers can leave the document untouched.
 [[nodiscard]] std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const std::uint8_t> bytes);
 

@@ -1,6 +1,6 @@
 // Self-contained Qt clipboard-bridge test (migration plan step 2.6).
 //
-// Exercises the real OS clipboard through the Qt bridge: the structured CTS8
+// Exercises the real OS clipboard through the Qt bridge: the structured CTS9
 // round trip, flavor priority (structured > image > text), invalid/empty
 // payload handling, and - on Windows - the Qt Windows MIME bridge that exposes
 // the same bytes under the legacy registered format `cnote.selection.v1` in
@@ -196,6 +196,7 @@ bool SameSelection(const SelectionClipboardData& a, const SelectionClipboardData
         const PageText& right = b.texts[i];
         if (!SameFloat(left.x, right.x) || !SameFloat(left.y, right.y) || !SameFloat(left.width, right.width)
             || !SameFloat(left.height, right.height) || !SameFloat(left.fontSize, right.fontSize)
+            || !SameFloat(left.rotationDegrees, right.rotationDegrees)
             || left.color != right.color || left.alignment != right.alignment
             || left.fontFamily != right.fontFamily || left.bold != right.bold || left.italic != right.italic
             || left.underline != right.underline || left.content != right.content
@@ -221,6 +222,7 @@ bool SameSelection(const SelectionClipboardData& a, const SelectionClipboardData
         const PageLatex& right = b.latexes[i];
         if (!SameFloat(left.x, right.x) || !SameFloat(left.y, right.y)
             || !SameFloat(left.fontSize, right.fontSize) || left.color != right.color
+            || !SameFloat(left.rotationDegrees, right.rotationDegrees)
             || left.content != right.content) {
             return false;
         }
@@ -270,6 +272,7 @@ SelectionClipboardData MakeSelection() {
     text.width = 180.0f;
     text.height = 60.0f;
     text.fontSize = 18.5f;
+    text.rotationDegrees = 17.0f;
     text.color = 0xFF102030U;
     text.alignment = cnote::TextAlignment::Center;
     text.fontFamily = cnote::TextFontFamily::Serif;
@@ -285,6 +288,7 @@ SelectionClipboardData MakeSelection() {
     latex.x = 30.0f;
     latex.y = 40.0f;
     latex.fontSize = 22.0f;
+    latex.rotationDegrees = -23.0f;
     latex.color = 0xFF00FF00U;
     latex.content = u"\\frac{a}{b}";
     data.latexes.push_back(latex);
@@ -412,7 +416,7 @@ int main(int argc, char** argv) {
     Check(QString::fromLatin1(cnote::clipboard::kSelectionMimeType) == QStringLiteral("application/x-cnote-selection"),
         "the structured flavor is published as application/x-cnote-selection");
 
-    // --- frozen pre-port CTS8 payload decodes and re-encodes identically ----
+    // --- frozen pre-port CTS8 payload preserves values in the current format -
     {
         const std::vector<std::uint8_t> legacy(
             kLegacyCts8RichBytes, kLegacyCts8RichBytes + sizeof(kLegacyCts8RichBytes));
@@ -438,8 +442,9 @@ int main(int argc, char** argv) {
             Check(decoded->minX == -3.25f && decoded->minY == 2.5f
                     && decoded->maxX == 200.0f && decoded->maxY == 120.0f,
                 "the frozen payload keeps its selection bounds");
-            Check(cnote::EncodeSelectionClipboard(*decoded) == legacy,
-                "the current encoder re-emits the frozen pre-port bytes byte-for-byte");
+            const auto upgraded = cnote::DecodeSelectionClipboard(cnote::EncodeSelectionClipboard(*decoded));
+            Check(upgraded.has_value() && SameSelection(*upgraded, *decoded),
+                "legacy objects preserve their content and formatting through a current-format copy");
         }
     }
 

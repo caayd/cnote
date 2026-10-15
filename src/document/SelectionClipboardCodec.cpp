@@ -136,6 +136,7 @@ std::vector<std::uint8_t> EncodeSelectionClipboard(const SelectionClipboardData&
         AppendFloat(bytes, text.width);
         AppendFloat(bytes, text.height);
         AppendFloat(bytes, text.rotationDegrees);
+        AppendFloat(bytes, text.fontSize);
         AppendUint32(bytes, text.color);
         AppendUint32(bytes, flags);
         AppendUint32(bytes, static_cast<std::uint32_t>(text.content.size()));
@@ -299,7 +300,7 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
         text.bold = (flags & (1U << 16U)) != 0;
         text.italic = (flags & (1U << 17U)) != 0;
         text.underline = (flags & (1U << 18U)) != 0;
-        if (ok && isCts8) {
+        if (ok && (isCts8 || isCts9)) {
             std::uint32_t spanCount = 0;
             ok = reader.ReadUint32(spanCount) && spanCount <= text.content.size() + 1U;
             for (std::uint32_t spanIndex = 0; ok && spanIndex < spanCount; ++spanIndex) {
@@ -346,7 +347,7 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
         }
     }
 
-    if (ok && isCts8 && reader.Remaining() >= sizeof(std::uint32_t)) {
+    if (ok && (isCts8 || isCts9) && reader.Remaining() >= sizeof(std::uint32_t)) {
         std::uint32_t latexCount = 0;
         ok = reader.ReadUint32(latexCount);
         if (ok && latexCount > reader.Remaining() / 16U) {

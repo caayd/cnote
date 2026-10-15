@@ -559,6 +559,65 @@ void SelectionEnablesCopyAndCutImmediately() {
     Check(copy != nullptr && copy->isEnabled(), "a paste that selects what it inserted enables Copy immediately");
 }
 
+void TextObjectsCopyPasteThroughShortcuts() {
+    Harness harness;
+    cnote::SelectionClipboardData payload;
+    cnote::PageText text;
+    text.content = u"Copy \U0001F600\nrich text";
+    text.width = 180.0f;
+    text.height = 70.0f;
+    text.fontSize = 23.5f;
+    text.rotationDegrees = 17.0f;
+    text.color = 0xFF123456U;
+    text.alignment = cnote::TextAlignment::Center;
+    text.fontFamily = cnote::TextFontFamily::Serif;
+    text.bold = true;
+    text.italic = true;
+    text.underline = true;
+    text.styleSpans.push_back({ 8U, 4U, { 31.0f, 0xFFABCDEFU,
+        cnote::TextFontFamily::Sans, false, true, false } });
+    payload.texts.push_back(text);
+    payload.maxX = text.width;
+    payload.maxY = text.height;
+    Check(harness.window->Controller().PastePayload(0U, { 200.0f, 200.0f }, payload),
+        "the source rich-text object is inserted and selected");
+    const cnote::PageText source = harness.window->Controller().DocumentRef().PageAt(0U).texts.front();
+
+    harness.FocusCanvas();
+    harness.Press(Qt::Key_C, Qt::ControlModifier);
+    harness.Press(Qt::Key_V, Qt::ControlModifier);
+    const auto& texts = harness.window->Controller().DocumentRef().PageAt(0U).texts;
+    Check(texts.size() == 2U, "Ctrl+C then Ctrl+V duplicates the selected text object");
+    if (texts.size() != 2U) {
+        return;
+    }
+    const cnote::PageText& pasted = texts.back();
+    Check(pasted.id != source.id && pasted.content == source.content,
+        "pasted text has a fresh identity and preserves Unicode and line breaks");
+    Check(pasted.width == source.width && pasted.height == source.height
+            && pasted.rotationDegrees == source.rotationDegrees,
+        "pasted text preserves dimensions and rotation");
+    Check(pasted.fontSize == source.fontSize && pasted.color == source.color
+            && pasted.alignment == source.alignment && pasted.fontFamily == source.fontFamily
+            && pasted.bold == source.bold && pasted.italic == source.italic
+            && pasted.underline == source.underline
+            && std::equal(pasted.styleSpans.begin(), pasted.styleSpans.end(),
+                source.styleSpans.begin(), source.styleSpans.end(),
+                [](const cnote::PageTextStyleSpan& a, const cnote::PageTextStyleSpan& b) {
+                    return a.start == b.start && a.length == b.length
+                        && a.style.fontSize == b.style.fontSize && a.style.color == b.style.color
+                        && a.style.fontFamily == b.style.fontFamily && a.style.bold == b.style.bold
+                        && a.style.italic == b.style.italic && a.style.underline == b.style.underline;
+                }),
+        "pasted text preserves base formatting and rich-text spans");
+    harness.window->Undo();
+    Check(harness.window->Controller().DocumentRef().PageAt(0U).texts.size() == 1U,
+        "undo removes only the pasted text");
+    harness.window->Redo();
+    Check(harness.window->Controller().DocumentRef().PageAt(0U).texts.size() == 2U,
+        "redo restores the pasted text");
+}
+
 void ZoomInKeysAreNotDead() {
     Harness harness;
     harness.FocusCanvas();
@@ -771,6 +830,7 @@ int main(int argc, char** argv) {
     PendingTextFormatSeedsNewObjects();
     EditorKeepsCtrlBWhileEditingText();
     SelectionEnablesCopyAndCutImmediately();
+    TextObjectsCopyPasteThroughShortcuts();
     ZoomInKeysAreNotDead();
     SettingsTableShortcutsAreBoundAndFire();
     UndoRedoFireWhenApplicable();

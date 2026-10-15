@@ -14,6 +14,7 @@ inventories the licenses and lists the open release prerequisites.
 
 - Open a PDF or start from a blank document.
 - Draw, erase, select, move, and transform annotations.
+- Copy, cut, and paste annotation objects; text retains rich formatting and rotation.
 - Paste images from the clipboard onto pages.
 - Save editable `.cnote` projects.
 - Export annotated pages as PDF.
@@ -169,6 +170,10 @@ Windows-only. On Windows, `selection_clipboard_qt` (real clipboard bridge),
 `layout_parity_qt` and `font_fallback_qt` (real font metrics) run on the
 native platform; `layout_parity_qt` compares the Qt chrome geometry against
 the frozen reference table captured from the removed Win32 frontend.
+`shortcut_routing_qt` includes a selected rich-text object's Ctrl+C/Ctrl+V
+round trip through the window, preserving Unicode, formatting, dimensions and
+rotation, with undo/redo. `selection_clipboard_qt` also checks mixed-object
+round trips and reading legacy CTS8 data into the current CTS9 format.
 `window_chrome_qt` covers the borderless window chrome offscreen (band
 geometry under the native frame inset, the maximize/restore glyph, the
 auto-hide band state machine and the caption-button intents); its native half
