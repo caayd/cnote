@@ -19,6 +19,7 @@
 
 #include "ProjectFile.h"
 #include "Unicode.h"
+#include "ui/SettingsFormatQt.h"
 
 namespace cnote::settings {
 
@@ -638,6 +639,14 @@ Settings SettingsStoreQt::ParseText(std::string_view text) {
             continue;
         }
 
+        if (key == "default_page_size_preset") {
+            if (const auto parsed = ParseUnsignedInt(value);
+                parsed.has_value() && *parsed < ui::DimensionPresets().size()) {
+                settings.defaultPageSizePreset = static_cast<std::size_t>(*parsed);
+            }
+            continue;
+        }
+
         if (key.starts_with("recent_document_")) {
             if (const auto index = ParseUnsignedInt(key.substr(16)); index.has_value()
                 && *index >= 1U
@@ -968,6 +977,7 @@ std::string SettingsStoreQt::Serialize(const Settings& settings) {
     output << "settings_palette_index=" << settings.paletteIndex << '\n';
     output << "default_page_color=" << std::hex << std::uppercase << settings.defaultPageColor
            << std::dec << std::nouppercase << '\n';
+    output << "default_page_size_preset=" << settings.defaultPageSizePreset << '\n';
     for (std::size_t index = 0; index < settings.recentDocumentPaths.size(); ++index) {
         output << "recent_document_" << (index + 1U) << '=' << cnote::PathToUtf8(settings.recentDocumentPaths[index]) << '\n';
     }

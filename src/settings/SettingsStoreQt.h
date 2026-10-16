@@ -81,6 +81,10 @@ struct Settings {
     std::size_t colorIndex = 0;
     std::size_t paletteIndex = 0;
     std::uint32_t defaultPageColor = kDefaultPageColors.front();
+    // Global new-page size as an index into ui::DimensionPresets(); the default
+    // is A4 Portrait.  A missing or out-of-range stored value keeps this
+    // default.  Custom sizes stay per-project, so they are not a preset here.
+    std::size_t defaultPageSizePreset = 3;
     std::vector<std::filesystem::path> recentDocumentPaths {};
     float drawBrushSize = 3.0f;
     float eraseBrushSize = 3.0f;

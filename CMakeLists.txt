@@ -222,7 +222,6 @@ add_library(cnote_ui STATIC
     src/ui/ChromeAssetsQt.cpp
     src/ui/ToolbarWidget.cpp
     src/ui/SidebarWidget.cpp
-    src/ui/SettingsFormatQt.cpp
     src/ui/PageDefaultsQt.cpp
     src/ui/SettingsDialogQt.cpp
     src/ui/NewPageDialogQt.cpp
@@ -382,6 +381,7 @@ add_library(cnote_services STATIC
     src/render/PdfiumBackgroundProvider.cpp
     src/settings/SettingsStoreQt.cpp
     src/settings/KeyBindingQt.cpp
+    src/ui/SettingsFormatQt.cpp
     src/Unicode.cpp
     src/document/SelectionClipboardCodec.cpp
     src/document/SelectionClipboardQt.cpp
@@ -898,6 +898,9 @@ set_tests_properties(persistence_semantics_qt PROPERTIES TIMEOUT 180
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 add_test(NAME rotated_pdf_persistence_qt COMMAND cnote_persistence_tests --rotated-pdf)
 set_tests_properties(rotated_pdf_persistence_qt PROPERTIES TIMEOUT 30
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
+add_test(NAME default_page_size_qt COMMAND cnote_persistence_tests --default-page-size)
+set_tests_properties(default_page_size_qt PROPERTIES TIMEOUT 30
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
 # --- Window chrome (borderless custom caption) --------------------------------

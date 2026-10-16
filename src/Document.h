@@ -172,6 +172,9 @@ public:
         float height = 842.0f;
         std::uint32_t backgroundColor = 0xFFFFFFFFU;
         std::vector<std::uint32_t> paletteProfile {};
+        // False follows the application page-size preset for future pages.
+        // Explicit project page settings pin width/height instead.
+        bool sizeOverridden = false;
     };
 
     static Document CreateBlank();

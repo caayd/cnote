@@ -309,6 +309,12 @@ void DrawingOperations(const std::filesystem::path& scratch) {
     Check(settings.drawCursorKind == s::DrawCursorKind::Dot, "cursor kind combo restores the dot");
     Check(cursorSize->isEnabled(), "cursor size re-enables for the dot");
 
+    auto* pageSize = Find<QComboBox>(dialog, "defaultPageSizeCombo");
+    pageSize->setCurrentIndex(5);
+    Check(settings.defaultPageSizePreset == 5U, "default page size selection applies");
+    pageSize->setCurrentIndex(1);
+    Check(settings.defaultPageSizePreset == 1U, "default page size selection changes");
+
     auto* quickSize = Find<QLineEdit>(dialog, "quickSizeSliderMaxEdit");
     settings.drawBrushSize = 15.0f;
     settings.eraseBrushSize = 18.0f;
@@ -358,6 +364,7 @@ void DrawingOperations(const std::filesystem::path& scratch) {
     Check(reloaded.autoSaveIntervalSeconds == settings.autoSaveIntervalSeconds, "auto save persisted");
     Check(reloaded.brushSizePresets == settings.brushSizePresets, "brush presets persisted");
     Check(reloaded.zoomPresets == settings.zoomPresets, "zoom presets persisted");
+    Check(reloaded.defaultPageSizePreset == settings.defaultPageSizePreset, "default page size preset persisted");
     Check(reloaded.autoHideToolbar && !reloaded.embedProjectInExportedPdfs, "toggles persisted");
 }
 
@@ -428,20 +435,33 @@ void RefreshAndOwnership(const std::filesystem::path& scratch) {
     auto* spacing = Find<QSlider>(dialog, "spacingSlider");
     auto* zoom1 = Find<QLineEdit>(dialog, "zoomPresetEdit1");
     auto* paletteList = Find<QListWidget>(dialog, "paletteList");
+    auto* pageSize = Find<QComboBox>(dialog, "defaultPageSizeCombo");
 
     settings.zoomPresets[0] = 2.0f;
     settings.inputSpacing = 2.5f;
     settings.palette.push_back(0xFF222222U);
+    settings.defaultPageSizePreset = 5U;
     dialog.hide();
     dialog.show();
     Check(zoom1->text() == QStringLiteral("200"), "zoom preset control re-read the model on open");
     Check(spacing->value() == 250, "spacing slider re-read the model on open");
     Check(paletteList->count() == 3, "palette list re-read the model on open");
+    Check(pageSize->currentIndex() == 5, "default page size combo re-read the model on open");
 
     dialog.refreshFromSettings();
     settings.inputSpacing = 1.25f;
     dialog.refreshFromSettings();
     Check(spacing->value() == 125, "refreshFromSettings re-reads the model");
+
+    // Refreshing syncs the combo from the model without re-applying it.
+    pageSize->setCurrentIndex(2);
+    settings.defaultPageSizePreset = 4U;
+    int changedDuringRefresh = 0;
+    QObject::connect(&dialog, &cnote::ui::SettingsDialogQt::settingsChanged, [&] { ++changedDuringRefresh; });
+    dialog.refreshFromSettings();
+    Check(changedDuringRefresh == 0, "refreshFromSettings does not re-apply the page-size selection");
+    Check(pageSize->currentIndex() == 4, "refreshFromSettings re-reads the default page size");
+    Check(settings.defaultPageSizePreset == 4U, "refreshFromSettings keeps the model page-size value");
 
     // The legacy dialog had no OK/Cancel: closing does not revert applied edits.
     spacing->setValue(275);

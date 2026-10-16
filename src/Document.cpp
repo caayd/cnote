@@ -13,6 +13,8 @@ Document Document::CreateBlank(PageDefaults pageDefaults) {
     Document document;
     document.ResetToBlank();
     document.SetNewPageDefaults(pageDefaults);
+    document.CurrentPage().width = pageDefaults.width;
+    document.CurrentPage().height = pageDefaults.height;
     return document;
 }
 

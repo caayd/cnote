@@ -51,6 +51,8 @@ public:
     void AttachSession(std::shared_ptr<ProjectSession> session);
     [[nodiscard]] bool OpenFile(const std::filesystem::path& path, std::string* error);
     void NewBlankDocument();
+    // App-level fallback; does not resize existing pages or override project settings.
+    void SetDefaultPageSize(float width, float height);
     [[nodiscard]] bool SaveTo(const std::filesystem::path& path, std::string* error);
     [[nodiscard]] bool ExportPdf(const std::filesystem::path& path, bool embedProject, std::string* error);
 
@@ -238,6 +240,8 @@ private:
 
     ui::CanvasInputSettings input_ {};
     StrokeStyle strokeStyle_ {};
+    float defaultPageWidth_ = 595.0f;
+    float defaultPageHeight_ = 842.0f;
     std::size_t currentPage_ = 0;
 
     ui::EditContentSource* editContent_ = nullptr;

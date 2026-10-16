@@ -210,6 +210,13 @@ void SettingsDialogQt::buildDrawingPage() {
     drawCursorKindCombo_->addItem(QStringLiteral("Precision Crosshair"));
     form->addRow(QStringLiteral("Draw Cursor"), drawCursorKindCombo_);
 
+    defaultPageSizeCombo_ = new QComboBox(page);
+    defaultPageSizeCombo_->setObjectName(QStringLiteral("defaultPageSizeCombo"));
+    for (const DimensionPreset& preset : DimensionPresets()) {
+        defaultPageSizeCombo_->addItem(QString::fromUtf8(preset.label));
+    }
+    form->addRow(QStringLiteral("Default Page Size"), defaultPageSizeCombo_);
+
     drawCursorSizeSlider_ = new QSlider(Qt::Horizontal, page);
     drawCursorSizeSlider_->setObjectName(QStringLiteral("drawCursorSizeSlider"));
     drawCursorSizeSlider_->setRange(4, 24);
@@ -341,6 +348,14 @@ void SettingsDialogQt::buildDrawingPage() {
         if (refreshing_) return;
         settings_.drawCursorKind = index == 1 ? settings::DrawCursorKind::PrecisionCrosshair : settings::DrawCursorKind::Dot;
         refreshDrawingControls();
+        persist();
+    });
+    connect(defaultPageSizeCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (refreshing_) return;
+        if (index < 0 || static_cast<std::size_t>(index) >= DimensionPresets().size()) {
+            return;
+        }
+        settings_.defaultPageSizePreset = static_cast<std::size_t>(index);
         persist();
     });
     for (std::size_t index = 0; index < settings::kZoomPresetCount; ++index) {
@@ -488,6 +503,7 @@ void SettingsDialogQt::refreshDrawingControls() {
     const QSignalBlocker blockDashGap(dashGapSlider_);
     const QSignalBlocker blockAutoSave(autoSaveSlider_);
     const QSignalBlocker blockCursorKind(drawCursorKindCombo_);
+    const QSignalBlocker blockDefaultPageSize(defaultPageSizeCombo_);
     const QSignalBlocker blockAutoHide(autoHideToolbarCheck_);
     const QSignalBlocker blockEmbed(embedProjectInPdfCheck_);
 
@@ -499,6 +515,8 @@ void SettingsDialogQt::refreshDrawingControls() {
     dashGapSlider_->setValue(static_cast<int>(std::lround(settings_.dashGap * 10.0f)));
     autoSaveSlider_->setValue(static_cast<int>(settings_.autoSaveIntervalSeconds));
     drawCursorKindCombo_->setCurrentIndex(settings_.drawCursorKind == settings::DrawCursorKind::PrecisionCrosshair ? 1 : 0);
+    defaultPageSizeCombo_->setCurrentIndex(static_cast<int>(
+        std::min(settings_.defaultPageSizePreset, DimensionPresets().size() - 1U)));
     autoHideToolbarCheck_->setChecked(settings_.autoHideToolbar);
     embedProjectInPdfCheck_->setChecked(settings_.embedProjectInExportedPdfs);
 

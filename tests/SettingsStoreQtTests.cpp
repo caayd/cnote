@@ -97,6 +97,7 @@ bool SameSettings(const cnote::settings::Settings& a, const cnote::settings::Set
     if (a.colorIndex != b.colorIndex) return fail("colorIndex");
     if (a.paletteIndex != b.paletteIndex) return fail("paletteIndex");
     if (a.defaultPageColor != b.defaultPageColor) return fail("defaultPageColor");
+    if (a.defaultPageSizePreset != b.defaultPageSizePreset) return fail("defaultPageSizePreset");
     if (a.recentDocumentPaths != b.recentDocumentPaths) return fail("recentDocumentPaths");
     if (a.drawBrushSize != b.drawBrushSize) return fail("drawBrushSize");
     if (a.eraseBrushSize != b.eraseBrushSize) return fail("eraseBrushSize");
@@ -302,6 +303,7 @@ void ParsesRealPayload(const std::filesystem::path& scratch) {
     payload << "active_color=5\n";
     payload << "settings_palette_index=9\n";
     payload << "default_page_color=FFEEDDCC\n";
+    payload << "default_page_size_preset=4\n";
     payload << "recent_cnote_2=" << second.string() << "\n";
     payload << "recent_document_1=" << first.string() << "\n";
     payload << "recent_document_3=" << third.string() << "\n";
@@ -352,6 +354,7 @@ void ParsesRealPayload(const std::filesystem::path& scratch) {
     Check(settings.colorIndex == 1U, "active_color clamps to the palette size");
     Check(settings.paletteIndex == 1U, "settings_palette_index clamps to the palette size");
     Check(settings.defaultPageColor == 0xFFEEDDCCU, "default_page_color parsed as hex");
+    Check(settings.defaultPageSizePreset == 4U, "default_page_size_preset parses an in-range index");
     Check(settings.recentDocumentPaths.size() == 3U, "recent files keep index 1..10 and drop other extensions");
     Check(settings.recentDocumentPaths.size() == 3U
             && settings.recentDocumentPaths[0] == first
@@ -390,6 +393,7 @@ void ParsesRealPayload(const std::filesystem::path& scratch) {
     const std::string serialized = cnote::settings::SettingsStoreQt::Serialize(settings);
     Check(serialized.find("palette=FF112233,FF445566\n") != std::string::npos, "serializer writes the palette");
     Check(serialized.find("default_page_color=FFEEDDCC\n") != std::string::npos, "serializer writes hex colors uppercase");
+    Check(serialized.find("default_page_size_preset=4\n") != std::string::npos, "serializer writes the page-size preset index");
     Check(serialized.find("shortcut_format=qt-portable-v1\n") != std::string::npos, "serializer writes the marker");
     Check(serialized.find("shortcut.Undo=Ctrl+Z\n") != std::string::npos, "serializer writes portable text");
     Check(serialized.find("malformed") == std::string::npos && serialized.find("comment") == std::string::npos,
@@ -403,6 +407,16 @@ void ParsesRealPayload(const std::filesystem::path& scratch) {
 
     // Missing and empty files keep the defaults.
     CheckSameSettings(cnote::settings::SettingsStoreQt::ParseText(""), cnote::settings::Settings {}, "empty text keeps defaults");
+
+    // default_page_size_preset keeps the A4 default on missing or invalid values.
+    Check(cnote::settings::SettingsStoreQt::ParseText("palette=FF112233\n").defaultPageSizePreset == 3U,
+        "missing default_page_size_preset keeps A4");
+    Check(cnote::settings::SettingsStoreQt::ParseText("palette=FF112233\ndefault_page_size_preset=99\n").defaultPageSizePreset == 3U,
+        "out-of-range default_page_size_preset keeps A4");
+    Check(cnote::settings::SettingsStoreQt::ParseText("palette=FF112233\ndefault_page_size_preset=abc\n").defaultPageSizePreset == 3U,
+        "unparsable default_page_size_preset keeps A4");
+    Check(cnote::settings::SettingsStoreQt::ParseText("palette=FF112233\ndefault_page_size_preset=0\n").defaultPageSizePreset == 0U,
+        "in-range default_page_size_preset overrides the default");
 }
 
 // 5. Storage location rules.

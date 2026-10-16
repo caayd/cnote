@@ -22,6 +22,25 @@ inventories the licenses and lists the open release prerequisites.
 - Customize palette, brush behavior, text size presets, auto-save, zoom presets, and shortcuts.
 - Open linked views of a project with independent navigation and shared edits.
 
+## Default page size
+
+**Settings → Drawing → Default Page Size** selects Letter Portrait, Letter
+Landscape, Legal Portrait, A4 Portrait, A4 Landscape, or Tabloid Landscape.
+A4 Portrait is the initial preset. New projects use it for their first page;
+future blank pages follow the app preset, including pages added to imported
+PDFs. Changing the preset updates future-page defaults in open windows, never
+the dimensions of existing pages or imported PDF backgrounds.
+
+In **New Page Settings**, choose a common size or custom dimensions and
+**Apply to Future Pages** to override the app preset for that project. The
+override persists in `.cnote` files and PDFs with embedded projects. **Reset
+Defaults** restores the app preset to the draft; apply it to future pages to
+save that choice for the project. Projects saved by older versions retain
+their stored future-page sizes.
+
+New saves use project format 16 to distinguish inherited and explicit page
+sizes; older app versions cannot read these files.
+
 ## Linked Project Views
 
 Choose **New view of this project** from the title menu to open another window
@@ -166,7 +185,7 @@ ctest --test-dir build-qt -E '^(xpress_codec|session_manager_qt|interaction_rout
 The headless set is `xpress_codec` (pure C++), `session_manager_qt`
 (`QCoreApplication` only), `interaction_router_qt` and
 `precision_input_router_qt` (no Qt application object). On Windows the suite
-has 31 tests; Linux and macOS have 30 because `precision_touchpad_qt` is
+has 32 tests; Linux and macOS have 31 because `precision_touchpad_qt` is
 Windows-only. On Windows, `selection_clipboard_qt` (real clipboard bridge),
 `layout_parity_qt` and `font_fallback_qt` (real font metrics) run on the
 native platform; `layout_parity_qt` compares the Qt chrome geometry against
@@ -178,6 +197,9 @@ round trips and reading legacy CTS8 data into the current CTS9 format.
 `rotated_pdf_persistence_qt` checks unrotated, clockwise and counterclockwise
 PDF-backed pages through native-project and embedded-PDF save/reopen paths,
 including page dimensions and pixel-identical background rendering.
+`default_page_size_qt` checks app-preset inheritance across windows and new
+projects, imported-PDF page creation, saved project overrides, and legacy
+project defaults.
 `window_chrome_qt` covers the borderless window chrome offscreen (band
 geometry under the native frame inset, the maximize/restore glyph, the
 auto-hide band state machine and the caption-button intents); its native half

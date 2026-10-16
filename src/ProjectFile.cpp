@@ -43,8 +43,9 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 15;
+constexpr std::uint32_t kProjectVersion = 16;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
+constexpr std::uint32_t kProjectFlagInheritPageSize = 1U << 1U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
 constexpr std::uint8_t kStrokeStyleFlagDotted = 1U << 0U;
 constexpr std::uint8_t kTextStyleFlagBold = 1U << 0U;
@@ -526,6 +527,10 @@ std::optional<Document> LoadProjectPayload(
             });
         }
     }
+    // Older projects stored concrete future-page defaults without inheritance
+    // metadata. Preserve those choices rather than applying a new app preset.
+    pageDefaults.sizeOverridden = version >= 3U
+        && (version < 16U || (flags & kProjectFlagInheritPageSize) == 0U);
 
     // Minimum wire bytes per page, excluding optional rasters and object data.
     const std::size_t minimumPageBytes = 16U + (version >= 2U ? 4U : 0U)
@@ -662,7 +667,8 @@ std::optional<Document> LoadProjectPayload(
 
 std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
     std::vector<std::uint8_t> bytes;
-    const std::uint32_t flags = document.HasPdfData() ? kProjectFlagHasPdf : 0U;
+    const std::uint32_t flags = (document.HasPdfData() ? kProjectFlagHasPdf : 0U)
+        | (document.NewPageDefaults().sizeOverridden ? 0U : kProjectFlagInheritPageSize);
     const std::uint32_t currentPageIndex = static_cast<std::uint32_t>(document.CurrentPageIndex());
     const std::uint32_t pageCount = static_cast<std::uint32_t>(document.PageCount());
     const std::uint32_t sourceCount = static_cast<std::uint32_t>(document.PdfSourceCount());

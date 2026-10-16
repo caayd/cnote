@@ -33,6 +33,7 @@
 #include "ui/LayoutQt.h"
 #include "ui/NewPageDialogQt.h"
 #include "ui/SettingsDialogQt.h"
+#include "ui/SettingsFormatQt.h"
 #include "ui/SidebarWidget.h"
 #include "ui/ToolbarWidget.h"
 #include "ui/WindowBehaviorQt.h"
@@ -610,6 +611,15 @@ void QtMainWindow::ApplyPendingTextStyle() {
 }
 
 void QtMainWindow::ApplySettingsToShell() {
+    const auto presets = ui::DimensionPresets();
+    const auto& pageSize = presets[settings_.defaultPageSizePreset];
+    controller_.SetDefaultPageSize(pageSize.width, pageSize.height);
+    if (newPageDialog_ != nullptr
+        && !controller_.DocumentRef().NewPageDefaults().sizeOverridden
+        && (newPageDialog_->defaults().width != pageSize.width || newPageDialog_->defaults().height != pageSize.height)) {
+        newPageDialog_->setDefaults(controller_.NewPageDefaults(), recentPageColors_);
+        newPageDialog_->syncDraftFromDefaults();
+    }
     ui::CanvasInputSettings input {};
     input.inputSpacing = settings_.inputSpacing;
     input.inputSmoothing = settings_.inputSmoothing;
@@ -915,7 +925,7 @@ void QtMainWindow::OpenRecentPath(const std::filesystem::path& path) {
 }
 
 ui::NewPageDraft QtMainWindow::CurrentPageDraft() const {
-    if (newPageDialog_ != nullptr) {
+    if (newPageDialog_ != nullptr && newPageDialog_->isVisible()) {
         return newPageDialog_->draft();
     }
     ui::NewPageDraft draft {};
@@ -935,6 +945,20 @@ void QtMainWindow::ToggleSettingsDialog() {
             ApplySettingsToShell();
             RefreshShortcutBindings();
             UpdateChrome();
+            // The app preset is global across open windows, while each
+            // controller resolves its project's explicit override separately.
+            for (QWidget* widget : QApplication::topLevelWidgets()) {
+                auto* window = qobject_cast<QtMainWindow*>(widget);
+                if (window != nullptr && window != this
+                    && window->settings_.defaultPageSizePreset != settings_.defaultPageSizePreset) {
+                    window->settings_.defaultPageSizePreset = settings_.defaultPageSizePreset;
+                    window->ApplySettingsToShell();
+                    if (window->settingsDialog_ != nullptr) {
+                        window->settingsDialog_->refreshFromSettings();
+                    }
+                    window->UpdateChrome();
+                }
+            }
         });
         connect(settingsDialog_, &ui::SettingsDialogQt::settingsSaveFailed, this, [this](const QString& reason) {
             ReportError(QStringLiteral("Could not save settings: %1").arg(reason));
@@ -1000,8 +1024,8 @@ void QtMainWindow::OpenNewPageSettings() {
             AddPage();
         });
     }
-    newPageDialog_->refreshFromSettings();
     newPageDialog_->setDefaults(controller_.NewPageDefaults(), recentPageColors_);
+    newPageDialog_->refreshFromSettings();
     newPageDialog_->show();
     newPageDialog_->raise();
     newPageDialog_->activateWindow();
@@ -1136,6 +1160,10 @@ bool QtMainWindow::OpenPath(const std::filesystem::path& path) {
             .arg(QString::fromStdString(path.string()), QString::fromStdString(error)));
         return false;
     }
+    if (newPageDialog_ != nullptr) {
+        newPageDialog_->setDefaults(controller_.NewPageDefaults(), recentPageColors_);
+        newPageDialog_->syncDraftFromDefaults();
+    }
 
     canvas_->SetPdfBackgroundProvider(controller_.PdfBackground());
     // Reference open: zoom 1.0 and panY_ 0, i.e. the current page's top sits
@@ -1166,6 +1194,10 @@ void QtMainWindow::NewDocument() {
     canvas_->CancelActiveEdit();
     controller_.NewBlankDocument();
     canvas_->SetPdfBackgroundProvider(controller_.PdfBackground());
+    if (newPageDialog_ != nullptr) {
+        newPageDialog_->setDefaults(controller_.NewPageDefaults(), recentPageColors_);
+        newPageDialog_->syncDraftFromDefaults();
+    }
     canvas_->ResetView();
     UpdateChrome();
 }

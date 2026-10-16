@@ -283,8 +283,10 @@ void ResetAndRefresh() {
     dialog.setDefaults({ 300.0f, 400.0f, 0xFF010101U, { 0xFF111111U }, true }, { 0xFFABC001U });
     dialog.syncDraftFromDefaults();
 
+    settings.defaultPageSizePreset = 1U;  // Letter Landscape, not the A4 default.
     Find<QPushButton>(dialog, "resetButton")->click();
-    Check(dialog.draft().width == 595.0f && dialog.draft().height == 842.0f, "reset restores the A4 page size");
+    Check(dialog.draft().width == 792.0f && dialog.draft().height == 612.0f,
+        "reset uses the selected global page-size preset");
     Check(dialog.draft().backgroundColor == settings.defaultPageColor, "reset uses the settings default page colour");
     Check(dialog.draft().paletteProfile == settings.palette, "reset resolves the current palette");
     Check(!dialog.draft().applyPaletteProfileToExistingStrokes, "reset clears the remap flag");

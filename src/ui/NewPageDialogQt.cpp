@@ -495,8 +495,10 @@ void NewPageDialogQt::applyHslSliders() {
 }
 
 void NewPageDialogQt::resetDraft() {
-    draft_.width = 595.0f;
-    draft_.height = 842.0f;
+    const auto presets = DimensionPresets();
+    const std::size_t presetIndex = std::min(settings_.defaultPageSizePreset, presets.size() - 1U);
+    draft_.width = presets[presetIndex].width;
+    draft_.height = presets[presetIndex].height;
     draft_.backgroundColor = settings_.defaultPageColor;
     draft_.paletteProfile = ResolvedPaletteProfile({}, settings_.palette);
     draft_.applyPaletteProfileToExistingStrokes = false;

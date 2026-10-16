@@ -37,6 +37,7 @@
 #include <vector>
 
 #include <QApplication>
+#include <QComboBox>
 #include <QMessageBox>
 #include <QAbstractButton>
 #include <QPainter>
@@ -55,6 +56,8 @@
 #include "settings/SettingsStoreQt.h"
 #include "render/PageRenderer.h"
 #include "shell/AppManager.h"
+#include "ui/NewPageDialogQt.h"
+#include "ui/SettingsDialogQt.h"
 
 namespace {
 
@@ -234,6 +237,123 @@ void RotatedPdfGeometrySurvivesReopen() {
                 "reopened PDF background renders without clipping: " + target.filename().string());
         }
     }
+}
+
+void DefaultPageSizePrecedence() {
+    const std::filesystem::path dir = MakeTempDir("page-size");
+#ifdef _WIN32
+    qputenv("APPDATA", dir.string().c_str());
+#else
+    qputenv("XDG_CONFIG_HOME", dir.string().c_str());
+#endif
+    cnote::qt::QtMainWindow::SetHeadlessModals(true);
+    cnote::settings::Settings settings;
+    settings.defaultPageSizePreset = 1; // Letter Landscape.
+    cnote::settings::SettingsStoreQt store;
+    Check(store.Save(settings), "persist the app page-size preset before opening windows");
+
+    const auto hasSize = [](const cnote::Page& page, float width, float height) {
+        return page.width == width && page.height == height;
+    };
+    cnote::Document::PageDefaults modelDefaults;
+    modelDefaults.width = 400.0f;
+    modelDefaults.height = 700.0f;
+    Check(hasSize(cnote::Document::CreateBlank(modelDefaults).CurrentPage(), 400, 700),
+        "blank document applies its defaults to the first page");
+
+    // Version 15 has the same payload layout but no inheritance metadata.
+    // Its stored defaults must remain authoritative when opened by this app.
+    modelDefaults.sizeOverridden = true;
+    auto legacyBytes = cnote::ProjectFile::Serialize(cnote::Document::CreateBlank(modelDefaults));
+    const std::uint32_t legacyVersion = 15;
+    std::memcpy(legacyBytes.data() + 8, &legacyVersion, sizeof(legacyVersion));
+    auto legacy = cnote::ProjectFile::LoadFromBytes(legacyBytes, dir / "legacy.cnote");
+    Check(legacy.has_value() && legacy->NewPageDefaults().sizeOverridden
+            && legacy->NewPageDefaults().width == 400 && legacy->NewPageDefaults().height == 700,
+        "legacy projects retain their stored future-page size");
+
+    cnote::AppManager manager;
+    cnote::qt::QtMainWindow window(manager);
+    cnote::qt::QtMainWindow other(manager);
+    Check(hasSize(window.Controller().DocumentRef().PageAt(0), 792, 612),
+        "startup project uses the saved app preset for its first page");
+    window.AddPage();
+    Check(hasSize(window.Controller().DocumentRef().PageAt(1), 792, 612),
+        "new pages inherit the app preset");
+
+    window.ToggleSettingsDialog();
+    auto* combo = window.findChild<QComboBox*>(QStringLiteral("defaultPageSizeCombo"));
+    Check(combo != nullptr, "the drawing settings expose the page-size preset");
+    if (combo == nullptr) {
+        return;
+    }
+    combo->setCurrentIndex(2); // Legal Portrait.
+    window.AddPage();
+    other.AddPage();
+    Check(hasSize(window.Controller().DocumentRef().PageAt(2), 612, 1008)
+            && hasSize(other.Controller().DocumentRef().PageAt(1), 612, 1008),
+        "changing the app preset affects future pages in every open window");
+    Check(hasSize(window.Controller().DocumentRef().PageAt(0), 792, 612),
+        "changing the app preset never resizes existing pages");
+
+    const auto inheritedPath = dir / "inherited.cnote";
+    std::string error;
+    Check(window.Controller().SaveTo(inheritedPath, &error), "save an inheriting project");
+    combo->setCurrentIndex(4); // A4 Landscape.
+    cnote::qt::QtMainWindow reopened(manager);
+    // Controller open forces a disk load rather than joining the live session.
+    Check(reopened.Controller().OpenFile(inheritedPath, &error), "reload an inheriting project from disk");
+    reopened.AddPage();
+    Check(hasSize(reopened.Controller().DocumentRef().PageAt(reopened.Controller().CurrentPageIndex()), 842, 595),
+        "a reopened inheriting project follows the current app preset");
+
+    // Explicitly choosing even the current effective size must pin the project.
+    window.Controller().SetNewPageDefaults(window.Controller().NewPageDefaults());
+    combo->setCurrentIndex(0); // Letter Portrait.
+    window.AddPage();
+    Check(hasSize(window.Controller().DocumentRef().PageAt(3), 842, 595),
+        "explicit project defaults override later app preset changes");
+    window.Controller().SetNewPageDefaults({ 410, 730, 0xFFFFFFFFU, {} });
+    const auto customPath = dir / "custom.cnote";
+    const auto embeddedPath = dir / "custom.pdf";
+    Check(window.Controller().SaveTo(customPath, &error), "save custom project page defaults");
+    Check(window.Controller().ExportPdf(embeddedPath, true, &error), "embed custom project page defaults in PDF");
+    for (const auto& path : { customPath, embeddedPath }) {
+        Check(reopened.Controller().OpenFile(path, &error), "reload an explicit project page-size override");
+        reopened.AddPage();
+        const auto& document = reopened.Controller().DocumentRef();
+        Check(hasSize(document.PageAt(reopened.Controller().CurrentPageIndex()), 410, 730),
+            "custom future-page size survives native and embedded-project round trips");
+    }
+    window.NewDocument();
+    Check(hasSize(window.Controller().DocumentRef().PageAt(0), 612, 792),
+        "New Project discards the old project override and uses the app preset");
+
+    // Plain PDF import must retain source geometry but inherit the app preset
+    // for appended blank pages.
+    const auto plainPdf = dir / "plain.pdf";
+    {
+        QPdfWriter writer(QString::fromStdString(plainPdf.string()));
+        writer.setResolution(72);
+        writer.setPageSize(QPageSize(QSizeF(300, 500), QPageSize::Point));
+        QPainter painter(&writer);
+        painter.fillRect(QRect(0, 0, 300, 500), Qt::white);
+    }
+    Check(window.OpenPath(plainPdf), "import a PDF without project defaults");
+    window.AddPage();
+    Check(hasSize(window.Controller().DocumentRef().PageAt(0), 300, 500)
+            && hasSize(window.Controller().DocumentRef().PageAt(1), 612, 792),
+        "PDF import preserves source geometry and uses app defaults for blank pages");
+
+    // A discarded dialog draft must not leak into another project's Add Page.
+    window.OpenNewPageSettings();
+    auto* pageDialog = window.findChild<cnote::ui::NewPageDialogQt*>();
+    pageDialog->setDraft({ 900, 900, 0xFFFFFFFFU, {} });
+    pageDialog->hide();
+    window.NewDocument();
+    window.AddPage();
+    Check(hasSize(window.Controller().DocumentRef().PageAt(1), 612, 792),
+        "a hidden old page-settings draft cannot override a new project's preset");
 }
 
 void FailedSaveKeepsDestinationDirtyAndPath() {
@@ -710,6 +830,10 @@ int main(int argc, char** argv) {
     QCoreApplication::setApplicationName(QStringLiteral("cnote"));
     if (argc == 2 && std::string_view(argv[1]) == "--rotated-pdf") {
         RotatedPdfGeometrySurvivesReopen();
+        return gFailures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--default-page-size") {
+        DefaultPageSizePrecedence();
         return gFailures == 0 ? 0 : 1;
     }
 

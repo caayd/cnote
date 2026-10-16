@@ -142,7 +142,18 @@ bool QtDocumentController::OpenFile(const std::filesystem::path& path, std::stri
 
 void QtDocumentController::NewBlankDocument() {
     auto session = std::make_shared<ProjectSession>();
+    Document::PageDefaults defaults;
+    defaults.width = defaultPageWidth_;
+    defaults.height = defaultPageHeight_;
+    session->document.SetNewPageDefaults(defaults);
+    session->document.CurrentPage().width = defaults.width;
+    session->document.CurrentPage().height = defaults.height;
     AttachSession(std::move(session));
+}
+
+void QtDocumentController::SetDefaultPageSize(float width, float height) {
+    defaultPageWidth_ = width;
+    defaultPageHeight_ = height;
 }
 
 void QtDocumentController::DetachForClose() {
@@ -1769,10 +1780,12 @@ void QtDocumentController::SetNewPageDefaults(const ui::NewPageDefaults& default
     pageDefaults.height = std::max(ui::kMinPageSize, defaults.height);
     pageDefaults.backgroundColor = defaults.backgroundColor;
     pageDefaults.paletteProfile = defaults.paletteProfile;
+    pageDefaults.sizeOverridden = true;
     const Document::PageDefaults& stored = document.NewPageDefaults();
     const bool same = stored.width == pageDefaults.width && stored.height == pageDefaults.height
         && stored.backgroundColor == pageDefaults.backgroundColor
-        && stored.paletteProfile == pageDefaults.paletteProfile;
+        && stored.paletteProfile == pageDefaults.paletteProfile
+        && stored.sizeOverridden;
     if (same) {
         return;
     }
@@ -1788,8 +1801,8 @@ ui::NewPageDefaults QtDocumentController::NewPageDefaults() const {
     const Document& document = DocumentRef();
     const Document::PageDefaults& stored = document.NewPageDefaults();
     ui::NewPageDefaults defaults {};
-    defaults.width = stored.width;
-    defaults.height = stored.height;
+    defaults.width = stored.sizeOverridden ? stored.width : defaultPageWidth_;
+    defaults.height = stored.sizeOverridden ? stored.height : defaultPageHeight_;
     defaults.backgroundColor = stored.backgroundColor;
     defaults.paletteProfile = stored.paletteProfile;
     return defaults;
