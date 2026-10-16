@@ -39,6 +39,9 @@
 #include <QApplication>
 #include <QMessageBox>
 #include <QAbstractButton>
+#include <QPainter>
+#include <QPdfWriter>
+#include <QPageSize>
 #include <QString>
 #include <QTimer>
 
@@ -50,6 +53,7 @@
 #include "qt/QtDocumentController.h"
 #include "qt/QtMainWindow.h"
 #include "settings/SettingsStoreQt.h"
+#include "render/PageRenderer.h"
 #include "shell/AppManager.h"
 
 namespace {
@@ -166,6 +170,70 @@ void SuccessfulSaveClearsDirtyAndStopsAutoSave() {
     // one ProjectChange::Kind::Saved change is broadcast (plan 6.6).
     Check(!manager.IsAutoSaveTimerActive(session), "a successful save disarms the session autosave timer");
     Check(controller.SavedChangeCount() == 1U, "a successful save broadcasts exactly one Saved change");
+}
+
+void RotatedPdfGeometrySurvivesReopen() {
+    const std::filesystem::path dir = MakeTempDir("rotated-pdf");
+    const std::filesystem::path source = dir / "background.pdf";
+    {
+        QPdfWriter writer(QString::fromStdString(source.string()));
+        writer.setResolution(72);
+        writer.setPageSize(QPageSize(QSizeF(120, 200), QPageSize::Point));
+        writer.setPageMargins(QMarginsF(0, 0, 0, 0));
+        QPainter painter(&writer);
+        painter.fillRect(QRect(0, 0, 60, 100), Qt::red);
+        painter.fillRect(QRect(60, 0, 60, 100), Qt::green);
+        painter.fillRect(QRect(0, 100, 60, 100), Qt::blue);
+        painter.fillRect(QRect(60, 100, 60, 100), Qt::yellow);
+    }
+
+    for (const int turns : { 0, 1, 2, 3, -1 }) {
+        cnote::AppManager manager;
+        cnote::qt::QtDocumentController controller(manager);
+        std::string error;
+        if (!controller.OpenFile(source, &error)) {
+            Check(false, "open the asymmetric PDF background: " + error);
+            return;
+        }
+        if (turns != 0) {
+            Check(controller.RotatePage(0, turns), "rotate the PDF-backed page");
+        }
+        const cnote::Page& expected = controller.DocumentRef().PageAt(0);
+        cnote::render::PageRenderParams params;
+        params.pdfBackground = controller.PdfBackground();
+        const QImage before = cnote::render::RenderPageSurface(expected, params);
+        Check(before.size() == (turns % 2 == 0 ? QSize(120, 200) : QSize(200, 120)),
+            "rotated PDF surface uses the page orientation");
+
+        for (const bool embeddedPdf : { false, true }) {
+            const std::filesystem::path target = dir / (std::to_string(turns)
+                + (embeddedPdf ? ".pdf" : ".cnote"));
+            const bool saved = embeddedPdf ? controller.ExportPdf(target, true, &error)
+                                          : controller.SaveTo(target, &error);
+            Check(saved, "save rotated project: " + target.filename().string());
+            if (!saved) {
+                continue;
+            }
+            // A separate manager forces a disk reload instead of joining the
+            // already-open session.
+            cnote::AppManager reopenedManager;
+            cnote::qt::QtDocumentController reopened(reopenedManager);
+            if (!reopened.OpenFile(target, &error)) {
+                Check(false, "reopen rotated project: " + error);
+                continue;
+            }
+            const cnote::Page& actual = reopened.DocumentRef().PageAt(0);
+            Check(actual.width == expected.width && actual.height == expected.height
+                    && actual.rotationDegrees == expected.rotationDegrees,
+                "reopened PDF-backed page preserves frame and rotation: " + target.filename().string());
+            Check(actual.sourcePdfSourceIndex == expected.sourcePdfSourceIndex
+                    && actual.sourcePdfPageIndex == expected.sourcePdfPageIndex,
+                "reopened page retains its PDF background source");
+            params.pdfBackground = reopened.PdfBackground();
+            Check(cnote::render::RenderPageSurface(actual, params) == before,
+                "reopened PDF background renders without clipping: " + target.filename().string());
+        }
+    }
 }
 
 void FailedSaveKeepsDestinationDirtyAndPath() {
@@ -640,6 +708,10 @@ void CancelledUnsavedPromptKeepsWindowAlive() {
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("cnote"));
+    if (argc == 2 && std::string_view(argv[1]) == "--rotated-pdf") {
+        RotatedPdfGeometrySurvivesReopen();
+        return gFailures == 0 ? 0 : 1;
+    }
 
     SuccessfulSaveClearsDirtyAndStopsAutoSave();
     FailedSaveKeepsDestinationDirtyAndPath();

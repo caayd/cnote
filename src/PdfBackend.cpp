@@ -441,8 +441,8 @@ void PdfiumBackend::HydrateProject(Document& document) const {
         if (hasValidPdfSource) {
             const Document& sourceDocument = *openedSources[static_cast<std::size_t>(page.sourcePdfSourceIndex)];
             const Page& sourcePage = sourceDocument.PageAt(static_cast<std::size_t>(page.sourcePdfPageIndex));
-            page.width = sourcePage.width;
-            page.height = sourcePage.height;
+            // The saved frame already includes page rotation; the source PDF
+            // dimensions describe the unrotated background, not this page.
             page.raster = sourcePage.raster;
         } else {
             page.sourcePdfSourceIndex = -1;

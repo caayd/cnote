@@ -17,6 +17,7 @@ inventories the licenses and lists the open release prerequisites.
 - Copy, cut, and paste annotation objects; text retains rich formatting and rotation.
 - Paste images from the clipboard onto pages.
 - Save editable `.cnote` projects.
+- Rotate pages with their PDF backgrounds; saved projects retain the rotated page dimensions on reopen.
 - Export annotated pages as PDF.
 - Customize palette, brush behavior, text size presets, auto-save, zoom presets, and shortcuts.
 - Open linked views of a project with independent navigation and shared edits.
@@ -165,7 +166,7 @@ ctest --test-dir build-qt -E '^(xpress_codec|session_manager_qt|interaction_rout
 The headless set is `xpress_codec` (pure C++), `session_manager_qt`
 (`QCoreApplication` only), `interaction_router_qt` and
 `precision_input_router_qt` (no Qt application object). On Windows the suite
-has 28 tests; Linux and macOS have 27 because `precision_touchpad_qt` is
+has 31 tests; Linux and macOS have 30 because `precision_touchpad_qt` is
 Windows-only. On Windows, `selection_clipboard_qt` (real clipboard bridge),
 `layout_parity_qt` and `font_fallback_qt` (real font metrics) run on the
 native platform; `layout_parity_qt` compares the Qt chrome geometry against
@@ -174,6 +175,9 @@ the frozen reference table captured from the removed Win32 frontend.
 round trip through the window, preserving Unicode, formatting, dimensions and
 rotation, with undo/redo. `selection_clipboard_qt` also checks mixed-object
 round trips and reading legacy CTS8 data into the current CTS9 format.
+`rotated_pdf_persistence_qt` checks unrotated, clockwise and counterclockwise
+PDF-backed pages through native-project and embedded-PDF save/reopen paths,
+including page dimensions and pixel-identical background rendering.
 `window_chrome_qt` covers the borderless window chrome offscreen (band
 geometry under the native frame inset, the maximize/restore glyph, the
 auto-hide band state machine and the caption-button intents); its native half

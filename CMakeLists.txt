@@ -896,6 +896,9 @@ target_link_libraries(cnote_persistence_tests PRIVATE cnote_ui cnote_services)
 add_test(NAME persistence_semantics_qt COMMAND cnote_persistence_tests)
 set_tests_properties(persistence_semantics_qt PROPERTIES TIMEOUT 180
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
+add_test(NAME rotated_pdf_persistence_qt COMMAND cnote_persistence_tests --rotated-pdf)
+set_tests_properties(rotated_pdf_persistence_qt PROPERTIES TIMEOUT 30
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
 # --- Window chrome (borderless custom caption) --------------------------------
 # The Windows shell removes the native caption through the window handle
