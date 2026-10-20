@@ -139,7 +139,10 @@ bool PrecisionTouchpadQt::nativeEventFilter(const QByteArray& eventType, void* m
     }
 
     auto* msg = static_cast<MSG*>(message);
-    if (msg == nullptr) {
+    // Native filters are application-wide and run newest-first. Only the
+    // addressed window may feed this frame to its interaction context; a
+    // cursor hit-test alone also matches overlapping background canvases.
+    if (msg == nullptr || window_ == nullptr || msg->hwnd != window_) {
         return false;
     }
 

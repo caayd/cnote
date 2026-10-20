@@ -165,6 +165,51 @@ void InstallLifecycle() {
     }
 }
 
+// Overlapping windows both geometrically accept the same anchor. Each native
+// filter still must pass messages addressed to the other window through.
+void MultipleWindowDispatch() {
+    QWidget first;
+    QWidget second;
+    first.setGeometry(100, 100, 800, 600);
+    second.setGeometry(first.geometry());
+    first.show();
+    second.show();
+    QApplication::processEvents();
+
+    FakeSink firstSink;
+    FakeSink secondSink;
+    cnote::ui::PrecisionTouchpadQt firstTouchpad(firstSink);
+    cnote::ui::PrecisionTouchpadQt secondTouchpad(secondSink);
+    const bool firstAvailable = firstTouchpad.Install(first.winId());
+    const bool secondAvailable = secondTouchpad.Install(second.winId());
+    std::printf("multi-window adapters available: %s / %s\n",
+        firstAvailable ? "yes" : "no", secondAvailable ? "yes" : "no");
+
+    for (const auto& stream : {QByteArrayLiteral("windows_generic_MSG"),
+             QByteArrayLiteral("windows_dispatcher_MSG")}) {
+        for (const UINT type : {WM_POINTERDOWN, WM_POINTERUPDATE, WM_POINTERUP}) {
+            MSG message {};
+            message.message = type;
+            qintptr result = -1;
+            message.hwnd = reinterpret_cast<HWND>(first.winId());
+            Check(!secondTouchpad.nativeEventFilter(stream, &message, &result),
+                "newer window passes the older window's pointer frames through");
+            Check(result == -1, "foreign pointer frames preserve the native result");
+            message.hwnd = reinterpret_cast<HWND>(second.winId());
+            Check(!firstTouchpad.nativeEventFilter(stream, &message, &result),
+                "older window passes the newer window's pointer frames through");
+            message.hwnd = nullptr;
+            Check(!secondTouchpad.nativeEventFilter(stream, &message, &result),
+                "thread pointer messages have no window owner");
+        }
+    }
+    Check(!firstTouchpad.Router().ShouldDropWheelDuplicate()
+            && !secondTouchpad.Router().ShouldDropWheelDuplicate(),
+        "foreign frames do not suppress either window's subsequent wheel input");
+    Check(firstSink.beginCount == 0 && secondSink.beginCount == 0,
+        "foreign frames do not start a canvas gesture");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -172,6 +217,7 @@ int main(int argc, char** argv) {
 
     UnavailableFallback();
     InstallLifecycle();
+    MultipleWindowDispatch();
 
     std::printf(g_failures == 0 ? "ALL PRECISION TOUCHPAD CHECKS PASSED\n" : "%d PRECISION TOUCHPAD CHECK(S) FAILED\n", g_failures);
     return g_failures == 0 ? 0 : 1;

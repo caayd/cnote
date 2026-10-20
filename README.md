@@ -229,6 +229,15 @@ for its Windows target and dynamically loads the documented `ninput.dll`
 APIs, including the Windows 11 ordinal-2507 pointer-frame API; it does not
 link or redistribute Windows system binaries.
 
+Each window's application-wide native filter handles only messages whose
+`MSG::hwnd` matches that window. Overlapping background windows cannot claim
+another window's precision pan/pinch frames or arm duplicate-wheel suppression
+for them; Windows retains responsibility for choosing the input target.
+`precision_touchpad_qt` exercises two overlapping windows and foreign/thread
+pointer-message pass-through. These synthetic messages do not contain real
+touchpad history; physical multi-window gesture routing still needs a device
+check.
+
 ## Package
 
 The application installs and packages through Qt's CMake deploy API
