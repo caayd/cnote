@@ -14,10 +14,16 @@
 #include <QCryptographicHash>
 #include <QGuiApplication>
 #include <QImage>
+#include <QAbstractTextDocumentLayout>
+#include <QPainter>
+#include <QPalette>
+#include <QTextDocument>
+#include <QTextOption>
 
 #include "Document.h"
 #include "latex/LatexEngine.h"
 #include "render/PageRenderer.h"
+#include "text/TextEditingQt.h"
 #include "text/TextLayoutQt.h"
 
 namespace {
@@ -244,6 +250,73 @@ int main(int argc, char** argv) {
         Check(dotExtent > 0 && std::abs(dotExtent - lineExtent) <= 2,
             "single-point dot matches stroke thickness (dot=" + std::to_string(dotExtent)
                 + " line=" + std::to_string(lineExtent) + ")");
+    }
+
+    // --- committed text is pixel-identical to the live editor ---------------
+    // The editor (CanvasWidget::ShowTextOverlay) formats its document at the
+    // view zoom; Qt rounds font pixel sizes, so a commit laid out in page
+    // units and painter-scaled visibly re-spaced every glyph.  The canvas
+    // surface must lay text out at the zoom and only scale by the DPR.
+    {
+        cnote::Page textPage {};
+        textPage.width = 400.0f;
+        textPage.height = 160.0f;
+        // At the page origin so both sides share an exact (zero) translation;
+        // the comparison then isolates glyph layout from origin rounding.
+        cnote::PageText note {};
+        note.fontSize = 15.0f;
+        note.color = 0xFF000000U;
+        note.content = u"The quick brown fox jumps over the lazy dog.\nIllicit WWW mmm iii 0123456789 wrapping text";
+        note.styleSpans.push_back({ 4U, 5U, { 15.0f, 0xFF000000U, cnote::TextFontFamily::Sans, true, false, false } });
+        for (const float width : { 0.0f, 230.0f }) {
+            note.width = width;
+            textPage.texts = { note };
+            for (const float zoom : { 0.85f, 1.37f, 2.1f }) {
+                for (const float dpr : { 1.0f, 1.5f }) {
+                    cnote::render::PageRenderParams textParams;
+                    textParams.scale = zoom;
+                    textParams.devicePixelRatio = dpr;
+                    textParams.textPixelRatio = 1.0f;
+                    const QImage committedImage = cnote::render::RenderPageSurface(textPage, textParams);
+
+                    QTextDocument editor;
+                    editor.setDocumentMargin(0.0);
+                    QTextOption option;
+                    option.setWrapMode(width > 0.0f ? QTextOption::WrapAtWordBoundaryOrAnywhere : QTextOption::NoWrap);
+                    editor.setDefaultTextOption(option);
+                    editor.setPlainText(QString::fromUtf16(note.content.data(), static_cast<qsizetype>(note.content.size())));
+                    cnote::text::ApplyPageTextFormatting(editor, note, zoom);
+                    if (width > 0.0f) {
+                        editor.setTextWidth(cnote::text::TextWrapWidthPx(note, zoom));
+                    }
+                    QImage editorImage(committedImage.size(), QImage::Format_ARGB32_Premultiplied);
+                    editorImage.fill(Qt::white);
+                    {
+                        QPainter painter(&editorImage);
+                        painter.setRenderHint(QPainter::Antialiasing, true);
+                        painter.scale(dpr, dpr);
+                        QAbstractTextDocumentLayout::PaintContext context;
+                        context.palette.setColor(QPalette::Text, Qt::black);
+                        editor.documentLayout()->draw(&painter, context);
+                    }
+                    // Compare inside the page only: the surface's last
+                    // row/column is partially covered when page * scale is
+                    // fractional.
+                    int worst = 0;
+                    for (int y = 0; y < committedImage.height(); ++y) {
+                        for (int x = 0; x < committedImage.width(); ++x) {
+                            const QRgb committedPixel = committedImage.pixel(x, y);
+                            if (qAlpha(committedPixel) == 255) {
+                                worst = std::max(worst, std::abs(qGray(committedPixel) - qGray(editorImage.pixel(x, y))));
+                            }
+                        }
+                    }
+                    Check(worst <= 8, "committed text matches the live editor pixel for pixel (width "
+                        + std::to_string(width) + ", zoom " + std::to_string(zoom) + ", dpr " + std::to_string(dpr)
+                        + ", worst gray delta " + std::to_string(worst) + ")");
+                }
+            }
+        }
     }
 
     std::printf("surface sha256: %s\n", firstHash.c_str());

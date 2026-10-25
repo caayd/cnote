@@ -49,37 +49,6 @@ struct BuiltDocument {
     TextOffsetMap map;
 };
 
-BuiltDocument BuildDocument(const PageText& text, float wrapWidth) {
-    BuiltDocument built;
-    built.map = BuildTextOffsetMap(text.content);
-
-    auto document = std::make_unique<QTextDocument>();
-    document->setDocumentMargin(0.0);
-    document->setDefaultFont(FontForStyle({
-        text.fontSize,
-        text.color,
-        text.fontFamily,
-        text.bold,
-        text.italic,
-        text.underline,
-    }));
-    QTextOption option;
-    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-    option.setAlignment(AlignmentFor(text.alignment));
-    document->setDefaultTextOption(option);
-    document->setPlainText(QString::fromUtf16(
-        built.map.normalized.data(),
-        static_cast<qsizetype>(built.map.normalized.size())));
-
-    ApplyPageTextFormatting(*document, text);
-
-    document->setTextWidth(static_cast<qreal>(wrapWidth));
-    // Force the layout so block/line geometry is available to callers.
-    static_cast<void>(document->documentLayout()->documentSize());
-    built.document = std::move(document);
-    return built;
-}
-
 float ResolvedTextWidth(const PageText& text, float pageWidth) {
     static_cast<void>(pageWidth);
     if (text.width > 0.0f) {
@@ -99,6 +68,38 @@ float ResolvedTextWidth(const PageText& text, float pageWidth) {
     }));
     measure.setPlainText(QString::fromUtf16(measureText.data(), static_cast<qsizetype>(measureText.size())));
     return std::max(1.0f, static_cast<float>(measure.idealWidth()));
+}
+
+// Builds the document exactly like the live editor configures its own at
+// view zoom `layoutScale` (CanvasWidget::ShowTextOverlay): fonts scaled by
+// it, word-or-anywhere wrapping at the integer wrap width for fixed-width
+// objects, no wrapping for auto-width ones.
+BuiltDocument BuildDocument(const PageText& text, float layoutScale) {
+    BuiltDocument built;
+    built.map = BuildTextOffsetMap(text.content);
+
+    auto document = std::make_unique<QTextDocument>();
+    document->setDocumentMargin(0.0);
+    QTextOption option;
+    option.setWrapMode(text.width > 0.0f
+        ? QTextOption::WrapAtWordBoundaryOrAnywhere
+        : QTextOption::NoWrap);
+    option.setAlignment(AlignmentFor(text.alignment));
+    document->setDefaultTextOption(option);
+    document->setPlainText(QString::fromUtf16(
+        built.map.normalized.data(),
+        static_cast<qsizetype>(built.map.normalized.size())));
+
+    ApplyPageTextFormatting(*document, text, layoutScale);
+
+    // Auto-width text never wraps; the width only anchors paragraph alignment.
+    document->setTextWidth(text.width > 0.0f
+        ? static_cast<qreal>(TextWrapWidthPx(text, layoutScale))
+        : static_cast<qreal>(ResolvedTextWidth(text, 0.0f) * layoutScale));
+    // Force the layout so block/line geometry is available to callers.
+    static_cast<void>(document->documentLayout()->documentSize());
+    built.document = std::move(document);
+    return built;
 }
 
 std::uint64_t HashValue(std::uint64_t hash, std::uint64_t value) {
@@ -169,8 +170,7 @@ QtTextLayout LayoutPageTextQt(const PageText& text, float pageWidth) {
 
     ++LayoutMisses();
 
-    const float wrapWidth = ResolvedTextWidth(text, pageWidth);
-    BuiltDocument built = BuildDocument(text, wrapWidth);
+    BuiltDocument built = BuildDocument(text, 1.0f);
     QTextDocument& document = *built.document;
 
     QtTextLayout layout;
@@ -222,22 +222,30 @@ QtTextBounds MeasurePageTextBoundsQt(const PageText& text, float pageWidth) {
     };
 }
 
-void DrawPageTextQt(QPainter& painter, const PageText& text, float pageWidth, float scale, float x, float y, float opacity) {
+int TextWrapWidthPx(const PageText& text, float layoutScale) {
+    return std::max(1, static_cast<int>(std::lround(text.width * layoutScale)));
+}
+
+void DrawPageTextQt(QPainter& painter, const PageText& text, float pageWidth, float scale, float pixelRatio,
+    float x, float y, float opacity) {
+    static_cast<void>(pageWidth);
     if (text.content.empty()) {
         return;
     }
 
-    const float wrapWidth = ResolvedTextWidth(text, pageWidth);
-    BuiltDocument built = BuildDocument(text, wrapWidth);
+    const float ratio = std::max(0.0001f, pixelRatio);
+    BuiltDocument built = BuildDocument(text, std::max(0.01f, scale / ratio));
     QTextDocument& document = *built.document;
 
     painter.save();
     painter.translate(x, y);
-    painter.scale(scale, scale);
+    painter.scale(ratio, ratio);
     painter.setOpacity(painter.opacity() * std::clamp(opacity, 0.0f, 1.0f));
 
     QAbstractTextDocumentLayout::PaintContext context;
-    context.clip = QRectF(0.0, 0.0, document.textWidth(), document.size().height());
+    // Auto-width lines may run a little past the page-unit width once fonts
+    // are rounded at the layout scale; the editor shows them, so do we.
+    context.clip = QRectF(0.0, 0.0, std::max(document.textWidth(), document.idealWidth()), document.size().height());
     context.palette.setColor(QPalette::Text, QColor::fromRgba(text.color));
     context.palette.setBrush(QPalette::Base, Qt::NoBrush);
     document.documentLayout()->draw(&painter, context);

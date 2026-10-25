@@ -406,6 +406,9 @@ render::PageRenderParams CanvasWidget::RenderParamsFor(const CanvasPageView& vie
     render::PageRenderParams params;
     params.scale = view.scale;
     params.devicePixelRatio = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
+    // Committed text lays out at the logical zoom and paints 1:1 in logical
+    // pixels, exactly like the live editor, so committing does not shift glyphs.
+    params.textPixelRatio = 1.0f;
     // Per-page content epoch: a commit on one page invalidates only its own
     // cached surface.  The old session-global revision re-rendered every
     // visible page on the first paint after each stroke commit (a dense
@@ -1172,6 +1175,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                         render::PageRenderParams params = RenderParamsFor(view);
                         params.scale = deviceScale;
                         params.devicePixelRatio = 1.0f;
+                        params.textPixelRatio = cachedDevicePixelRatio_;
                         item.image = QImage(
                             std::max(1, static_cast<int>(std::lround(item.width * deviceScale))),
                             std::max(1, static_cast<int>(std::lround(item.height * deviceScale))),
@@ -1536,8 +1540,7 @@ void CanvasWidget::ShowTextOverlay(const PageText& text) {
     // width is the object's page width at the view scale, same as the
     // committed layout; PositionOverlays keeps it in sync on zoom.
     if (text.width > 0.0f) {
-        textEditor_->setLineWrapColumnOrWidth(
-            std::max(1, static_cast<int>(std::lround(text.width * textEditScale_))));
+        textEditor_->setLineWrapColumnOrWidth(text::TextWrapWidthPx(text, textEditScale_));
     }
     {
         QSignalBlocker blocker(textEditor_);
@@ -1638,8 +1641,7 @@ void CanvasWidget::PositionOverlays() {
         // way so the live preview cannot draw past the page edge.
         const QRect clip = geometry.intersected(view.rect.toAlignedRect()).translated(-geometry.topLeft());
         if (object.width > 0.0f) {
-            const int wrapWidth = std::max(1,
-                static_cast<int>(std::lround(object.width * view.scale)));
+            const int wrapWidth = text::TextWrapWidthPx(object, view.scale);
             if (textEditor_->lineWrapColumnOrWidth() != wrapWidth) {
                 textEditor_->setLineWrapColumnOrWidth(wrapWidth);
             }

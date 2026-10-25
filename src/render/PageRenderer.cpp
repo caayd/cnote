@@ -63,7 +63,10 @@ void PaintPageBackground(QPainter& painter, const Page& page, const PageRenderPa
 }
 
 
-void PaintText(QPainter& painter, const PageText& text, float pageWidth, float scale, float opacity) {
+void PaintText(QPainter& painter, const PageText& text, float pageWidth, float scale,
+    std::optional<float> pixelRatio, float opacity) {
+    // No ratio: lay out in page units (layout scale 1).
+    const float ratio = pixelRatio.value_or(scale);
     if (std::abs(text.rotationDegrees) > 0.0001f) {
         const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, pageWidth);
         const qreal centerX = static_cast<qreal>(bounds.left + bounds.right) * 0.5 * scale;
@@ -72,11 +75,11 @@ void PaintText(QPainter& painter, const PageText& text, float pageWidth, float s
         painter.translate(centerX, centerY);
         painter.rotate(static_cast<qreal>(text.rotationDegrees));
         painter.translate(-centerX, -centerY);
-        text::DrawPageTextQt(painter, text, pageWidth, scale, text.x * scale, text.y * scale, opacity);
+        text::DrawPageTextQt(painter, text, pageWidth, scale, ratio, text.x * scale, text.y * scale, opacity);
         painter.restore();
         return;
     }
-    text::DrawPageTextQt(painter, text, pageWidth, scale, text.x * scale, text.y * scale, opacity);
+    text::DrawPageTextQt(painter, text, pageWidth, scale, ratio, text.x * scale, text.y * scale, opacity);
 }
 
 void PaintLatex(QPainter& painter, const PageLatex& latex, float scale, float opacity) {
@@ -227,8 +230,9 @@ bool LatexIntersectsCull(const PageLatex& latex, const QRectF& cull) {
 
 }  // namespace
 
-void PaintPageText(QPainter& painter, const PageText& text, float pageWidth, float scale, float opacity) {
-    PaintText(painter, text, pageWidth, scale, opacity);
+void PaintPageText(QPainter& painter, const PageText& text, float pageWidth, float scale,
+    std::optional<float> pixelRatio, float opacity) {
+    PaintText(painter, text, pageWidth, scale, pixelRatio, opacity);
 }
 
 void PaintPageLatex(QPainter& painter, const PageLatex& latex, float scale, float opacity) {
@@ -373,7 +377,8 @@ void PaintPage(QPainter& painter, const Page& page, const QPointF& pageOrigin, c
             || (params.cullRect.has_value() && !TextIntersectsCull(page.texts[index], page.width, *params.cullRect))) {
             continue;
         }
-        PaintText(painter, page.texts[index], page.width, scale, pendingOpacity(params.pendingErase.texts, index));
+        PaintText(painter, page.texts[index], page.width, scale, params.textPixelRatio,
+            pendingOpacity(params.pendingErase.texts, index));
     }
 
     for (std::size_t index = 0; index < page.latexes.size(); ++index) {
@@ -412,7 +417,7 @@ void PaintPageSubset(QPainter& painter, const Page& page, const QPointF& pageOri
     }
     for (const std::size_t index : only.texts) {
         if (index < page.texts.size()) {
-            PaintText(painter, page.texts[index], page.width, scale, 1.0f);
+            PaintText(painter, page.texts[index], page.width, scale, params.textPixelRatio, 1.0f);
         }
     }
     for (const std::size_t index : only.latexes) {
@@ -440,6 +445,9 @@ QImage RenderPageSurface(const Page& page, const PageRenderParams& params) {
     PageRenderParams deviceParams = params;
     deviceParams.scale = deviceScale;
     deviceParams.devicePixelRatio = 1.0f;
+    if (params.textPixelRatio.has_value()) {
+        deviceParams.textPixelRatio = *params.textPixelRatio * params.devicePixelRatio;
+    }
     PaintPage(painter, page, QPointF(0.0, 0.0), deviceParams);
     painter.end();
     return image;
@@ -458,6 +466,9 @@ QImage RenderPageSurfaceRegion(const Page& page, const PageRenderParams& params,
     PageRenderParams deviceParams = params;
     deviceParams.scale = deviceScale;
     deviceParams.devicePixelRatio = 1.0f;
+    if (params.textPixelRatio.has_value()) {
+        deviceParams.textPixelRatio = *params.textPixelRatio * params.devicePixelRatio;
+    }
     deviceParams.cullRect = clipped;
     // The image's origin is the region's top-left: shift the page so the
     // region lands at (0,0) in device pixels.
@@ -479,6 +490,7 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     hash = HashFloat(hash, page.height);
     hash = HashFloat(hash, params.scale);
     hash = HashFloat(hash, params.devicePixelRatio);
+    hash = HashFloat(hash, params.textPixelRatio.value_or(0.0f));
     hash = HashFloat(hash, params.strokeSmoothing);
     hash = HashFloat(hash, params.dashLength);
     hash = HashFloat(hash, params.dashGap);

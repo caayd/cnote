@@ -56,6 +56,15 @@ struct ExcludedIndices {
 struct PageRenderParams {
     float scale = 1.0f;
     float devicePixelRatio = 1.0f;
+    // Painter units per text layout pixel.  When set, committed text is laid
+    // out at scale / textPixelRatio (fonts and wrap width multiplied by it,
+    // exactly like the live editor at that zoom) and the painter scales the
+    // layout by exactly this ratio; Qt rounds font pixel sizes, so this is
+    // what keeps committed glyphs where the editor drew them.  The canvas
+    // sets 1 (logical-pixel painter); raster surfaces multiply in
+    // devicePixelRatio as they fold it into `scale`.  Unset lays text out in
+    // page units, like the hit-test geometry and PDF export.
+    std::optional<float> textPixelRatio;
     float strokeSmoothing = 0.55f;
     float dashLength = 3.0f;
     float dashGap = 2.0f;
@@ -111,9 +120,11 @@ void PaintImage(QPainter& painter, const PageImage& image, const PageRenderParam
 void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRenderParams& params, float opacity);
 
 // Draws one text/LaTeX block in page units (rotation and opacity applied),
-// same transform rules as the committed render.  Exported so the PDF export
-// text overlay reuses the rotation-aware path.
-void PaintPageText(QPainter& painter, const PageText& text, float pageWidth, float scale, float opacity);
+// same transform rules as the committed render; `pixelRatio` is
+// PageRenderParams::textPixelRatio (nullopt lays out in page units).
+// Exported so the PDF export text overlay reuses the rotation-aware path.
+void PaintPageText(QPainter& painter, const PageText& text, float pageWidth, float scale,
+    std::optional<float> pixelRatio, float opacity);
 void PaintPageLatex(QPainter& painter, const PageLatex& latex, float scale, float opacity);
 
 // Renders only `region` (page units) of a page into a premultiplied ARGB32

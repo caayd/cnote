@@ -85,7 +85,7 @@ std::optional<RasterImage> ComposeTextOverlayRaster(const Page& page, float rend
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
     for (const PageText& text : page.texts) {
-        render::PaintPageText(painter, text, page.width, renderScale, 1.0f);
+        render::PaintPageText(painter, text, page.width, renderScale, std::nullopt, 1.0f);
     }
     for (const PageLatex& latexBlock : page.latexes) {
         render::PaintPageLatex(painter, latexBlock, renderScale, 1.0f);

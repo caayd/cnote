@@ -40,10 +40,22 @@ struct QtTextBounds {
 // Bounds in page units (same space as PageText::x/y).
 [[nodiscard]] QtTextBounds MeasurePageTextBoundsQt(const PageText& text, float pageWidth);
 
+// Wrap width in layout pixels for a fixed-width text laid out at
+// `layoutScale`.  Integer because QTextEdit's FixedPixelWidth is: the live
+// editor and the committed render must wrap at the identical width.
+[[nodiscard]] int TextWrapWidthPx(const PageText& text, float layoutScale);
+
 // Draws the text with its top-left at (x, y) in the painter's current
-// coordinate space, scaled by `scale`. Glyphs are painted transparently; no
-// background rectangle is ever filled.
-void DrawPageTextQt(QPainter& painter, const PageText& text, float pageWidth, float scale, float x, float y, float opacity);
+// coordinate space, scaled by `scale`. The text is laid out at
+// scale / pixelRatio (fonts and wrap width multiplied by it, exactly like the
+// live editor at that view zoom) and the painter then scales that layout by
+// exactly `pixelRatio`. Qt rounds font pixel sizes to integers, so glyph
+// advances depend on the layout scale: committed text only matches the editor
+// glyph for glyph when both lay out at the same zoom and paint at the same
+// ratio. Glyphs are painted transparently; no background rectangle is ever
+// filled.
+void DrawPageTextQt(QPainter& painter, const PageText& text, float pageWidth, float scale, float pixelRatio,
+    float x, float y, float opacity);
 
 // Diagnostics: number of layouts actually built (cache misses).
 [[nodiscard]] std::uint64_t TextLayoutCacheMisses();
