@@ -373,6 +373,7 @@ add_library(cnote_services STATIC
     src/latex/LatexEngineQt.cpp
     src/text/TextLayoutQt.cpp
     src/text/TextEditingQt.cpp
+    src/text/InlineMath.cpp
     src/latex/LatexCompletion.cpp
     src/render/PageRenderer.cpp
     src/selection/StrokeSmoothing.cpp

@@ -17,6 +17,7 @@
 #include "latex/LatexEngine.h"
 #include "text/TextEditingQt.h"
 #include "text/TextLayoutQt.h"
+#include "text/InlineMath.h"
 
 namespace {
 
@@ -110,6 +111,49 @@ int main(int argc, char** argv) {
         const cnote::text::QtTextLayout layout = cnote::text::LayoutPageTextQt(paragraphs, 200.0f);
         Check(layout.lines.size() == 3U, "empty paragraph is preserved as its own line");
         Check(layout.lines.size() == 3U && layout.lines[1].text.empty(), "the middle line is empty");
+    }
+
+    // --- inline math detection (Pandoc tex_math_dollars rules) --------------
+    {
+        using Ranges = std::vector<cnote::text::InlineMathRange>;
+        struct MathCase {
+            const char16_t* content;
+            Ranges expected;
+        };
+        const MathCase cases[] = {
+            { u"area is $x^2$ here", { { 8U, 13U } } },
+            { u"$a$ and $b$", { { 0U, 3U }, { 8U, 11U } } },
+            { u"$a$b$", { { 0U, 3U } } },
+            { u"$5 and $10", {} },                       // prices
+            { u"costs $5, maybe $6.", {} },              // closer before a digit
+            { u"$x$5", {} },                             // closer followed by a digit
+            { u"$ x$", {} },                             // space after the opener
+            { u"$x $", {} },                             // space before the closer
+            { u"$x $y$", { { 0U, 6U } } },               // skips an invalid closer
+            { u"\\$x$", {} },                            // escaped opener
+            { u"$a\\$b$", { { 0U, 6U } } },              // escaped dollar inside
+            { u"\\\\$x$", { { 2U, 5U } } },              // escaped backslash, then math
+            { u"$x\ny$", {} },                           // never spans a line break
+            { u"$x\r\ny$ $z$", { { 7U, 10U } } },
+            { u"$$x$$", {} },                            // display math is literal for now
+            { u"$a$$b$", {} },                           // a $$ run ends the search
+            { u"$", {} },
+            { u"$$", {} },
+            { u"lone $ sign", {} },
+            { u"$\U0001F600$", { { 0U, 4U } } },         // surrogate pair inside
+            { u"", {} },
+        };
+        for (const MathCase& test : cases) {
+            const Ranges found = cnote::text::FindInlineMath(test.content);
+            std::string description;
+            for (const auto& range : found) {
+                description += " [" + std::to_string(range.start) + "," + std::to_string(range.end) + ")";
+            }
+            Check(found == test.expected, "inline math in \"" + cnote::Utf16ToUtf8(test.content) + "\" found:" + description);
+        }
+        const Ranges source = cnote::text::FindInlineMath(u"see $\\frac{a}{b}$");
+        Check(source.size() == 1U && source.front().SourceStart() == 5U && source.front().SourceLength() == 11U,
+            "the formula source excludes both delimiters");
     }
 
     // --- empty-object deletion ----------------------------------------------
