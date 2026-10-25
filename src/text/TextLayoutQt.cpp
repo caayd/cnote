@@ -49,34 +49,13 @@ struct BuiltDocument {
     TextOffsetMap map;
 };
 
-float ResolvedTextWidth(const PageText& text, float pageWidth) {
-    static_cast<void>(pageWidth);
-    if (text.width > 0.0f) {
-        return std::max(1.0f, text.width);
-    }
-
-    const std::u16string measureText = TrimTrailingLayoutWhitespace(text.content);
-    QTextDocument measure;
-    measure.setDocumentMargin(0.0);
-    measure.setDefaultFont(FontForStyle({
-        text.fontSize,
-        text.color,
-        text.fontFamily,
-        text.bold,
-        text.italic,
-        text.underline,
-    }));
-    measure.setPlainText(QString::fromUtf16(measureText.data(), static_cast<qsizetype>(measureText.size())));
-    return std::max(1.0f, static_cast<float>(measure.idealWidth()));
-}
-
 // Builds the document exactly like the live editor configures its own at
 // view zoom `layoutScale` (CanvasWidget::ShowTextOverlay): fonts scaled by
-// it, word-or-anywhere wrapping at the integer wrap width for fixed-width
-// objects, no wrapping for auto-width ones.
-BuiltDocument BuildDocument(const PageText& text, float layoutScale) {
+// it, word-or-anywhere wrapping for fixed-width objects, no wrapping for
+// auto-width ones, inline math rendered.  The text width is left unset.
+BuiltDocument BuildFormattedDocument(const PageText& text, float layoutScale) {
     BuiltDocument built;
-    built.map = BuildTextOffsetMap(text.content);
+    built.map = BuildTextOffsetMap(text, InlineMathMode::Rendered);
 
     auto document = std::make_unique<QTextDocument>();
     document->setDocumentMargin(0.0);
@@ -90,15 +69,34 @@ BuiltDocument BuildDocument(const PageText& text, float layoutScale) {
         built.map.normalized.data(),
         static_cast<qsizetype>(built.map.normalized.size())));
 
-    ApplyPageTextFormatting(*document, text, layoutScale);
+    ApplyPageTextFormatting(*document, text, layoutScale, InlineMathMode::Rendered);
+    built.document = std::move(document);
+    return built;
+}
 
+float ResolvedTextWidth(const PageText& text, float pageWidth) {
+    static_cast<void>(pageWidth);
+    if (text.width > 0.0f) {
+        return std::max(1.0f, text.width);
+    }
+
+    // Measured on the formatted document, so style spans and rendered
+    // formulas count; trailing blanks do not.
+    PageText measured = text;
+    measured.content = TrimTrailingLayoutWhitespace(text.content);
+    const BuiltDocument built = BuildFormattedDocument(measured, 1.0f);
+    return std::max(1.0f, static_cast<float>(built.document->idealWidth()));
+}
+
+BuiltDocument BuildDocument(const PageText& text, float layoutScale) {
+    BuiltDocument built = BuildFormattedDocument(text, layoutScale);
+    QTextDocument& document = *built.document;
     // Auto-width text never wraps; the width only anchors paragraph alignment.
-    document->setTextWidth(text.width > 0.0f
+    document.setTextWidth(text.width > 0.0f
         ? static_cast<qreal>(TextWrapWidthPx(text, layoutScale))
         : static_cast<qreal>(ResolvedTextWidth(text, 0.0f) * layoutScale));
     // Force the layout so block/line geometry is available to callers.
-    static_cast<void>(document->documentLayout()->documentSize());
-    built.document = std::move(document);
+    static_cast<void>(document.documentLayout()->documentSize());
     return built;
 }
 
@@ -203,7 +201,13 @@ QtTextLayout LayoutPageTextQt(const PageText& text, float pageWidth) {
         }
     }
 
-    layout.height = std::max(layout.lineHeight, static_cast<int>(layout.lines.size()) * layout.lineHeight);
+    // Lines holding a tall inline formula grow past the font line height;
+    // the laid-out document height covers them.
+    layout.height = std::max({
+        layout.lineHeight,
+        static_cast<int>(layout.lines.size()) * layout.lineHeight,
+        static_cast<int>(std::ceil(document.size().height())),
+    });
 
     cache.push_back({ signature, layout });
     if (cache.size() > kMaxCachedLayouts) {

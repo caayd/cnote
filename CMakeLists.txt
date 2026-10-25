@@ -374,6 +374,7 @@ add_library(cnote_services STATIC
     src/text/TextLayoutQt.cpp
     src/text/TextEditingQt.cpp
     src/text/InlineMath.cpp
+    src/text/InlineMathQt.cpp
     src/latex/LatexCompletion.cpp
     src/render/PageRenderer.cpp
     src/selection/StrokeSmoothing.cpp
@@ -390,6 +391,8 @@ add_library(cnote_services STATIC
 )
 target_include_directories(cnote_services PUBLIC src)
 target_compile_features(cnote_services PUBLIC cxx_std_20)
+# InlineMathQt.cpp declares a Q_INTERFACES text-object handler.
+set_target_properties(cnote_services PROPERTIES AUTOMOC ON)
 target_compile_options(cnote_services PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )

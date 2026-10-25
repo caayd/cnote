@@ -6,6 +6,7 @@
 // application, cache reuse without re-layout, and model stability.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -19,12 +20,14 @@
 #include <QPalette>
 #include <QTextDocument>
 #include <QTextOption>
+#include <QFontMetricsF>
 
 #include "Document.h"
 #include "latex/LatexEngine.h"
 #include "render/PageRenderer.h"
 #include "text/TextEditingQt.h"
 #include "text/TextLayoutQt.h"
+#include "Unicode.h"
 
 namespace {
 
@@ -317,6 +320,137 @@ int main(int argc, char** argv) {
                 }
             }
         }
+    }
+
+    // --- inline $...$ math in committed text --------------------------------
+    {
+        cnote::PageText math {};
+        math.fontSize = 20.0f;
+        math.content = u"a $x^2$ b $5 and $10 $\\frac{}{}$";
+        const cnote::text::TextOffsetMap map = cnote::text::BuildTextOffsetMap(math, cnote::text::InlineMathMode::Rendered);
+        Check(map.normalized == u"a \uFFFC b $5 and $10 $\\frac{}{}$",
+            "only the renderable formula collapses to a placeholder (prices and unparsable source stay text)");
+        Check(map.math.size() == 1U && cnote::text::DocumentOffsetForModel(map, 2U) == 2U
+                && cnote::text::DocumentOffsetForModel(map, 5U) == 2U
+                && cnote::text::DocumentOffsetForModel(map, 7U) == 3U
+                && cnote::text::ModelOffsetForDocument(map, 2U) == 2U
+                && cnote::text::ModelOffsetForDocument(map, 3U) == 7U,
+            "model offsets inside a formula map to its placeholder and back to the formula edges");
+        const cnote::text::QtTextLayout mathLayout = cnote::text::LayoutPageTextQt(math, 400.0f);
+        Check(mathLayout.lines.size() == 1U && mathLayout.lines.front().text == math.content,
+            "layout lines still report the stored source");
+
+        // Renders one line of Segoe UI text at 48px and finds its glyph
+        // clusters (ink columns separated by blank columns).
+        struct Cluster {
+            int left = 0;
+            int right = 0;
+        };
+        const auto renderLine = [](const std::u16string& content) {
+            cnote::Page mathPage {};
+            mathPage.width = 400.0f;
+            mathPage.height = 200.0f;
+            cnote::PageText line {};
+            line.fontSize = 48.0f;
+            line.fontFamily = cnote::TextFontFamily::Sans;
+            line.color = 0xFF000000U;
+            line.content = content;
+            mathPage.texts = { line };
+            cnote::render::PageRenderParams mathParams;
+            mathParams.textPixelRatio = 1.0f;
+            return cnote::render::RenderPageSurface(mathPage, mathParams);
+        };
+        const auto inkAt = [](const QImage& image, int x, int y) { return qGray(image.pixel(x, y)) < 128; };
+        const auto clusters = [&](const QImage& image) {
+            std::vector<Cluster> found;
+            bool inside = false;
+            for (int x = 0; x < image.width(); ++x) {
+                bool ink = false;
+                for (int y = 0; y < image.height() && !ink; ++y) {
+                    ink = inkAt(image, x, y);
+                }
+                if (ink && !inside) {
+                    found.push_back({ x, x });
+                }
+                if (ink) {
+                    found.back().right = x;
+                }
+                inside = ink;
+            }
+            return found;
+        };
+        // Lowest ink row across the cluster's first three columns: the left
+        // stem of an upright or italic "n" ends on the baseline.
+        const auto stemBottom = [&](const QImage& image, const Cluster& cluster) {
+            int bottom = -1;
+            for (int x = cluster.left; x <= std::min(cluster.left + 2, cluster.right); ++x) {
+                for (int y = 0; y < image.height(); ++y) {
+                    if (inkAt(image, x, y)) {
+                        bottom = std::max(bottom, y);
+                    }
+                }
+            }
+            return bottom;
+        };
+        const auto inkBottom = [&](const QImage& image, int left, int right) {
+            int bottom = -1;
+            for (int x = left; x <= right; ++x) {
+                for (int y = 0; y < image.height(); ++y) {
+                    if (inkAt(image, x, y)) {
+                        bottom = std::max(bottom, y);
+                    }
+                }
+            }
+            return bottom;
+        };
+        const int fontDescent = static_cast<int>(std::ceil(QFontMetricsF(cnote::text::FontForStyle(
+            { 48.0f, 0xFF000000U, cnote::TextFontFamily::Sans, false, false, false })).descent()));
+
+        // Shallow formula (fits the font descent) and a deep one (a fraction
+        // in the subscript) both put their base on the text baseline.  MicroTeX
+        // metrics are whole layout pixels, so allow 2px at this 48px size.
+        int deepBaseline = -1;
+        int deepInkBottom = -1;
+        for (const std::u16string& content : { std::u16string(u"n $n$ n"), std::u16string(u"n $n_{\\frac{n}{\\frac{n}{n}}}$ n") }) {
+            const QImage image = renderLine(content);
+            const std::vector<Cluster> found = clusters(image);
+            Check(found.size() >= 3U, "inline math line renders separate glyph clusters for " + cnote::Utf16ToUtf8(content));
+            if (found.size() < 3U) {
+                continue;
+            }
+            const int baseline = stemBottom(image, found.front());
+            const int formulaBase = stemBottom(image, found[1]);
+            const int trailing = stemBottom(image, found.back());
+            const int formulaInkBottom = inkBottom(image, found[1].left, found[found.size() - 2U].right);
+            std::printf("     math baseline %s text=%d formula=%d trailing=%d formula ink bottom=%d descent=%d\n",
+                cnote::Utf16ToUtf8(content).c_str(), baseline, formulaBase, trailing, formulaInkBottom, fontDescent);
+            Check(std::abs(formulaBase - baseline) <= 2 && trailing == baseline,
+                "formula base sits on the text baseline for " + cnote::Utf16ToUtf8(content));
+            if (content.find(u"frac") != std::u16string::npos) {
+                Check(formulaInkBottom - baseline > fontDescent,
+                    "the deep probe hangs below the font descent (exercises the enlarged placeholder descent)");
+                deepBaseline = baseline;
+                deepInkBottom = formulaInkBottom;
+            }
+        }
+
+        // A deep formula reserves its depth: the next line (a glyph reaching
+        // the font's full ascent) starts below it.
+        const QImage twoLines = renderLine(u"n $n_{\\frac{n}{\\frac{n}{n}}}$ n\n\u0124");
+        const std::vector<Cluster> twoLineClusters = clusters(twoLines);
+        int secondLineTop = -1;
+        if (!twoLineClusters.empty() && deepBaseline >= 0) {
+            for (int y = deepBaseline + 1; y < twoLines.height() && secondLineTop < 0; ++y) {
+                for (int x = twoLineClusters.front().left; x <= twoLineClusters.front().right; ++x) {
+                    if (inkAt(twoLines, x, y)) {
+                        secondLineTop = y;
+                        break;
+                    }
+                }
+            }
+        }
+        std::printf("     math next line top=%d formula ink bottom=%d\n", secondLineTop, deepInkBottom);
+        Check(secondLineTop > deepInkBottom, "the line after a deep formula starts below its ink");
     }
 
     std::printf("surface sha256: %s\n", firstHash.c_str());

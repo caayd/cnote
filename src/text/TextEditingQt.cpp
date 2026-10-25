@@ -13,6 +13,8 @@
 #include <QTextDocument>
 #include <QtGui/qtextobject.h>
 
+#include "text/InlineMathQt.h"
+
 // qt_add_resources initializer for the bundled text fonts (cnote_services is a
 // static library, so the resource must be pulled in explicitly - same pattern
 // as qInitResources_cnote_chrome_assets in ui/ChromeAssetsQt.cpp).
@@ -130,7 +132,7 @@ PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextSt
     return style;
 }
 
-void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, float displayScale) {
+void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, float displayScale, InlineMathMode mathMode) {
     const PageTextStyle defaultStyle = DefaultStyleFor(text);
     document.setDefaultFont(FontForStyle(defaultStyle, displayScale));
 
@@ -138,7 +140,7 @@ void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, floa
     cursor.select(QTextCursor::Document);
     cursor.setCharFormat(CharFormatForStyle(defaultStyle, displayScale));
 
-    const TextOffsetMap map = BuildTextOffsetMap(text.content);
+    const TextOffsetMap map = BuildTextOffsetMap(text, mathMode);
     for (const PageTextStyleSpan& span : text.styleSpans) {
         const std::uint32_t start = DocumentOffsetForModel(map, span.start);
         const std::uint32_t end = DocumentOffsetForModel(map, span.start + span.length);
@@ -149,6 +151,22 @@ void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, floa
         spanCursor.setPosition(static_cast<int>(start));
         spanCursor.setPosition(static_cast<int>(end), QTextCursor::KeepAnchor);
         spanCursor.mergeCharFormat(CharFormatForStyle(span.style, displayScale));
+    }
+
+    if (map.math.empty()) {
+        return;
+    }
+    RegisterInlineMathHandler(document);
+    for (const InlineMathRange& range : map.math) {
+        const std::uint32_t placeholder = DocumentOffsetForModel(map, range.start);
+        QTextCursor objectCursor(&document);
+        objectCursor.setPosition(static_cast<int>(placeholder));
+        objectCursor.setPosition(static_cast<int>(placeholder) + 1, QTextCursor::KeepAnchor);
+        QTextCharFormat format = objectCursor.charFormat();
+        MakeInlineMathFormat(format,
+            std::u16string_view(text.content).substr(range.SourceStart(), range.SourceLength()),
+            displayScale);
+        objectCursor.setCharFormat(format);
     }
 }
 
@@ -197,15 +215,30 @@ std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& do
 }
 
 TextOffsetMap BuildTextOffsetMap(std::u16string_view content) {
+    return BuildTextOffsetMap(content, {});
+}
+
+TextOffsetMap BuildTextOffsetMap(std::u16string_view content, std::vector<InlineMathRange> math) {
     TextOffsetMap map;
+    map.math = std::move(math);
     map.normalized.reserve(content.size());
     map.documentToModel.reserve(content.size() + 1U);
     map.modelToDocument.resize(content.size() + 1U);
 
+    auto nextMath = map.math.cbegin();
     for (std::size_t index = 0; index < content.size();) {
         const std::uint32_t documentIndex = static_cast<std::uint32_t>(map.normalized.size());
         map.modelToDocument[index] = documentIndex;
-        if (content[index] == u'\r') {
+        if (nextMath != map.math.cend() && nextMath->start == index) {
+            // The whole formula collapses to one object character.
+            map.documentToModel.push_back(static_cast<std::uint32_t>(index));
+            map.normalized.push_back(u'\uFFFC');
+            for (std::size_t inside = index + 1U; inside < nextMath->end; ++inside) {
+                map.modelToDocument[inside] = documentIndex;
+            }
+            index = nextMath->end;
+            ++nextMath;
+        } else if (content[index] == u'\r') {
             map.documentToModel.push_back(static_cast<std::uint32_t>(index));
             map.normalized.push_back(u'\n');
             if (index + 1U < content.size() && content[index + 1U] == u'\n') {
@@ -223,6 +256,13 @@ TextOffsetMap BuildTextOffsetMap(std::u16string_view content) {
     map.modelToDocument[content.size()] = static_cast<std::uint32_t>(map.normalized.size());
     map.documentToModel.push_back(static_cast<std::uint32_t>(content.size()));
     return map;
+}
+
+TextOffsetMap BuildTextOffsetMap(const PageText& text, InlineMathMode mode) {
+    if (mode == InlineMathMode::Source) {
+        return BuildTextOffsetMap(text.content);
+    }
+    return BuildTextOffsetMap(text.content, RenderableInlineMath(text.content, text.fontSize));
 }
 
 std::uint32_t DocumentOffsetForModel(const TextOffsetMap& map, std::uint32_t modelOffset) {

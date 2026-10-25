@@ -10,6 +10,7 @@
 
 #include "Document.h"
 #include "latex/LatexCompletion.h"
+#include "text/InlineMath.h"
 
 class QFont;
 class QString;
@@ -38,8 +39,20 @@ inline constexpr float kPointsPerPageUnit = 72.0f / 96.0f;
 [[nodiscard]] QTextCharFormat CharFormatForStyle(const PageTextStyle& style, float displayScale = 1.0f);
 [[nodiscard]] PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextStyle& fallback, float displayScale = 1.0f);
 
-// Applies the model's default style and every span to the document.
-void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, float displayScale = 1.0f);
+// How `$...$` formulas appear in a QTextDocument built from a PageText:
+// as their source characters (the editor, for now) or as one rendered
+// inline-math object each (the committed render).
+enum class InlineMathMode {
+    Source,
+    Rendered,
+};
+
+// Applies the model's default style and every span to the document.  In
+// Rendered mode the document must hold BuildTextOffsetMap(text, Rendered)
+// text; each formula placeholder becomes an inline math object styled like
+// the run it sits in.
+void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, float displayScale = 1.0f,
+    InlineMathMode mathMode = InlineMathMode::Source);
 
 // Captures the document's character formats back into spans in model UTF-16
 // offsets.  displayScale must match the scale the document was formatted with.
@@ -47,15 +60,24 @@ void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, floa
 
 // --- offset mapping ---------------------------------------------------------
 
-// Maps model UTF-16 offsets to QTextDocument offsets (a CRLF pair becomes one
-// paragraph separator) and back.
+// Maps model UTF-16 offsets to QTextDocument offsets and back.  A CRLF pair
+// becomes one paragraph separator; in Rendered mode each formula (delimiters
+// included) becomes one U+FFFC placeholder.  Model offsets inside a formula
+// map to its placeholder; the placeholder maps back to the opening `$`.
 struct TextOffsetMap {
     std::u16string normalized;
     std::vector<std::uint32_t> modelToDocument;
     std::vector<std::uint32_t> documentToModel;
+    // Rendered formulas in model offsets, in order.
+    std::vector<InlineMathRange> math;
 };
 
 [[nodiscard]] TextOffsetMap BuildTextOffsetMap(std::u16string_view content);
+// Rendered-mode map: `math` must be ordered, non-overlapping ranges inside
+// `content` (RenderableInlineMath).
+[[nodiscard]] TextOffsetMap BuildTextOffsetMap(std::u16string_view content, std::vector<InlineMathRange> math);
+// The map ApplyPageTextFormatting and the renderer use for `text` in `mode`.
+[[nodiscard]] TextOffsetMap BuildTextOffsetMap(const PageText& text, InlineMathMode mode);
 [[nodiscard]] std::uint32_t DocumentOffsetForModel(const TextOffsetMap& map, std::uint32_t modelOffset);
 [[nodiscard]] std::uint32_t ModelOffsetForDocument(const TextOffsetMap& map, std::uint32_t documentOffset);
 
