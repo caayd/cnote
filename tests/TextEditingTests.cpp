@@ -10,6 +10,7 @@
 #include <QGuiApplication>
 #include <QString>
 #include <QTextCharFormat>
+#include <QTextCursor>
 #include <QTextDocument>
 
 #include "Document.h"
@@ -214,6 +215,62 @@ int main(int argc, char** argv) {
         }
         Check(cnote::latex::Parse(u"\\frac{1}{2}", 28.0f, true) != nullptr,
             "a real formula still parses");
+
+        // --- documents with formula placeholders read back to the model -----
+        cnote::PageText mathText {};
+        mathText.fontSize = 20.0f;
+        mathText.color = 0xFF000000U;
+        mathText.content = u"Area $x^2$ is\r\nbold $\\frac{a}{b}$ end";
+        mathText.styleSpans.push_back({ 15U, 5U, { 20.0f, 0xFF000000U, cnote::TextFontFamily::ShantellSans, true, false, false } });
+        mathText.styleSpans.push_back({ 20U, 13U, { 36.0f, 0xFF000000U, cnote::TextFontFamily::ShantellSans, true, false, false } });
+        const cnote::PageText normalizedMath = cnote::text::NormalizeCommittedText(mathText);
+        const auto spansMatch = [](const std::vector<cnote::PageTextStyleSpan>& got, const std::vector<cnote::PageTextStyleSpan>& want) {
+            if (got.size() != want.size()) {
+                return false;
+            }
+            for (std::size_t index = 0; index < got.size(); ++index) {
+                if (got[index].start != want[index].start || got[index].length != want[index].length
+                    || std::abs(got[index].style.fontSize - want[index].style.fontSize) > 0.01f
+                    || got[index].style.bold != want[index].style.bold) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        for (const float scale : { 1.0f, 1.5f }) {
+            const std::string at = " at scale " + std::to_string(scale);
+            const cnote::text::TextOffsetMap rendered =
+                cnote::text::BuildTextOffsetMap(mathText, cnote::text::InlineMathMode::Rendered);
+            Check(rendered.math.size() == 2U, "both formulas render" + at);
+            QTextDocument mathDocument;
+            mathDocument.setPlainText(QString::fromUtf16(rendered.normalized.data(), static_cast<qsizetype>(rendered.normalized.size())));
+            cnote::text::ApplyPageTextFormatting(mathDocument, mathText, scale, cnote::text::InlineMathMode::Rendered);
+
+            const cnote::text::DocumentContent read = cnote::text::ReadDocumentContent(mathDocument);
+            Check(read.content == normalizedMath.content, "placeholders read back as their $...$ source" + at);
+            Check(read.map.math.size() == 2U && read.map.math[1].start == 19U && read.map.math[1].end == 32U,
+                "read map records formula ranges in model offsets" + at);
+            Check(spansMatch(cnote::text::CapturePageTextFormatting(mathDocument, mathText, scale), normalizedMath.styleSpans),
+                "spans over and around formulas capture back unchanged (placeholder size ignored)" + at);
+
+            // The live editor will show the caret's formula as source: a mix
+            // of expanded and rendered formulas must read back identically.
+            QTextCursor expand(&mathDocument);
+            expand.setPosition(5);
+            expand.setPosition(6, QTextCursor::KeepAnchor);
+            QTextCursor plainFormat(&mathDocument);
+            plainFormat.setPosition(4);
+            expand.insertText(QStringLiteral("$x^2$"), plainFormat.charFormat());
+            const cnote::text::DocumentContent mixed = cnote::text::ReadDocumentContent(mathDocument);
+            Check(mixed.content == normalizedMath.content, "mixed source and rendered formulas read back" + at);
+            Check(mixed.map.math.size() == 1U && cnote::text::ModelOffsetForDocument(mixed.map, 19U) == 19U
+                    && cnote::text::ModelOffsetForDocument(mixed.map, 20U) == 32U
+                    && cnote::text::DocumentOffsetForModel(mixed.map, 25U) == 19U
+                    && cnote::text::DocumentOffsetForModel(mixed.map, 32U) == 20U,
+                "mixed document offsets map through the remaining placeholder" + at);
+            Check(spansMatch(cnote::text::CapturePageTextFormatting(mathDocument, mathText, scale), normalizedMath.styleSpans),
+                "mixed document spans capture back unchanged" + at);
+        }
         cnote::latex::Shutdown();
     }
 

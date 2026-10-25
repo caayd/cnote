@@ -55,7 +55,9 @@ void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, floa
     InlineMathMode mathMode = InlineMathMode::Source);
 
 // Captures the document's character formats back into spans in model UTF-16
-// offsets.  displayScale must match the scale the document was formatted with.
+// offsets (the model being ReadDocumentContent(document).content; `text`
+// supplies the default style).  displayScale must match the scale the
+// document was formatted with.
 [[nodiscard]] std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& document, const PageText& text, float displayScale = 1.0f);
 
 // --- offset mapping ---------------------------------------------------------
@@ -80,6 +82,16 @@ struct TextOffsetMap {
 [[nodiscard]] TextOffsetMap BuildTextOffsetMap(const PageText& text, InlineMathMode mode);
 [[nodiscard]] std::uint32_t DocumentOffsetForModel(const TextOffsetMap& map, std::uint32_t modelOffset);
 [[nodiscard]] std::uint32_t ModelOffsetForDocument(const TextOffsetMap& map, std::uint32_t documentOffset);
+
+// The model content a document holds, with the offset map between the two.
+// Formula placeholders expand back to their `$...$` source, so this works
+// for any mix of rendered and source formulas; separators and non-breaking
+// spaces convert like QTextDocument::toPlainText.
+struct DocumentContent {
+    std::u16string content;
+    TextOffsetMap map;
+};
+[[nodiscard]] DocumentContent ReadDocumentContent(const QTextDocument& document);
 
 // --- commit normalization ---------------------------------------------------
 

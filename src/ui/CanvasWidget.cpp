@@ -1428,9 +1428,7 @@ void CanvasWidget::CommitActiveEdit() {
     PageText edited {};
     QString latexSource;
     if (committingText) {
-        edited = controller_.EditingTextObject() != nullptr ? *controller_.EditingTextObject() : PageText {};
-        edited.content = ToUtf16(textEditor_->toPlainText());
-        edited.styleSpans = text::CapturePageTextFormatting(*textEditor_->document(), edited, textEditScale_);
+        edited = CaptureEditedText();
     } else if (committingLatex) {
         latexSource = latexEditor_->toPlainText();
     }
@@ -1612,9 +1610,7 @@ void CanvasWidget::PositionOverlays() {
         // scale, so a zoom change mid-edit re-applies formatting at the new
         // scale (capture/re-apply round-trips the user's current content).
         if (std::abs(view.scale - textEditScale_) > 0.0001f) {
-            PageText live = object;
-            live.content = ToUtf16(textEditor_->toPlainText());
-            live.styleSpans = text::CapturePageTextFormatting(*textEditor_->document(), live, textEditScale_);
+            const PageText live = CaptureEditedText();
             const int cursorPosition = textEditor_->textCursor().position();
             {
                 QSignalBlocker blocker(textEditor_);
@@ -1707,7 +1703,7 @@ void CanvasWidget::ApplyTextFormatToSelection(const PageTextStyle& style) {
 PageText CanvasWidget::CaptureEditedText() const {
     PageText edited = controller_.EditingTextObject() != nullptr ? *controller_.EditingTextObject() : PageText {};
     if (textEditor_ != nullptr) {
-        edited.content = ToUtf16(textEditor_->toPlainText());
+        edited.content = text::ReadDocumentContent(*textEditor_->document()).content;
         edited.styleSpans = text::CapturePageTextFormatting(*textEditor_->document(), edited, textEditScale_);
     }
     return edited;

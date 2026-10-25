@@ -107,7 +107,11 @@ QTextCharFormat CharFormatForStyle(const PageTextStyle& style, float displayScal
 PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextStyle& fallback, float displayScale) {
     PageTextStyle style = fallback;
     const QFont font = format.font();
-    if (font.pointSizeF() > 0.0) {
+    if (format.objectType() == kInlineMathObjectType && format.hasProperty(kInlineMathFontSizeProperty)) {
+        // A formula placeholder's font may be enlarged to reserve line space;
+        // the run's real text size travels in its own property.
+        style.fontSize = static_cast<float>(format.doubleProperty(kInlineMathFontSizeProperty));
+    } else if (font.pointSizeF() > 0.0) {
         style.fontSize = static_cast<float>(font.pointSizeF()) / (kPointsPerPixel * std::max(0.01f, displayScale));
     }
     if (format.hasProperty(QTextFormat::ForegroundBrush)) {
@@ -172,7 +176,7 @@ void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, floa
 
 std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& document, const PageText& text, float displayScale) {
     const PageTextStyle defaultStyle = DefaultStyleFor(text);
-    const TextOffsetMap map = BuildTextOffsetMap(text.content);
+    const TextOffsetMap map = ReadDocumentContent(document).map;
     std::vector<PageTextStyleSpan> spans;
     std::optional<PageTextStyleSpan> active;
 
@@ -212,6 +216,56 @@ std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& do
         spans.push_back(*active);
     }
     return spans;
+}
+
+DocumentContent ReadDocumentContent(const QTextDocument& document) {
+    DocumentContent read;
+    TextOffsetMap& map = read.map;
+    const auto appendModel = [&](char16_t character, std::uint32_t documentIndex) {
+        read.content.push_back(character);
+        map.modelToDocument.push_back(documentIndex);
+    };
+    for (QTextBlock block = document.begin(); block.isValid(); block = block.next()) {
+        for (QTextBlock::iterator iterator = block.begin(); !iterator.atEnd(); ++iterator) {
+            const QTextFragment fragment = iterator.fragment();
+            if (!fragment.isValid()) {
+                continue;
+            }
+            const QTextCharFormat format = fragment.charFormat();
+            const bool isMath = format.objectType() == kInlineMathObjectType;
+            const std::u16string source = isMath
+                ? format.stringProperty(kInlineMathSourceProperty).toStdU16String()
+                : std::u16string();
+            const QString text = fragment.text();
+            for (qsizetype offset = 0; offset < text.size(); ++offset) {
+                const std::uint32_t documentIndex = static_cast<std::uint32_t>(fragment.position() + offset);
+                const char16_t character = text.at(offset).unicode();
+                map.normalized.push_back(character);
+                map.documentToModel.push_back(static_cast<std::uint32_t>(read.content.size()));
+                if (isMath && character == u'\uFFFC') {
+                    const std::uint32_t start = static_cast<std::uint32_t>(read.content.size());
+                    appendModel(u'$', documentIndex);
+                    for (const char16_t unit : source) {
+                        appendModel(unit, documentIndex);
+                    }
+                    appendModel(u'$', documentIndex);
+                    map.math.push_back({ start, static_cast<std::uint32_t>(read.content.size()) });
+                } else {
+                    // Same conversions as QTextDocument::toPlainText.
+                    appendModel(character == u'\u00A0' ? u' ' : (character == u'\u2028' ? u'\n' : character), documentIndex);
+                }
+            }
+        }
+        if (block.next().isValid()) {
+            const std::uint32_t separator = static_cast<std::uint32_t>(block.position() + block.length() - 1);
+            map.normalized.push_back(u'\n');
+            map.documentToModel.push_back(static_cast<std::uint32_t>(read.content.size()));
+            appendModel(u'\n', separator);
+        }
+    }
+    map.modelToDocument.push_back(static_cast<std::uint32_t>(map.normalized.size()));
+    map.documentToModel.push_back(static_cast<std::uint32_t>(read.content.size()));
+    return read;
 }
 
 TextOffsetMap BuildTextOffsetMap(std::u16string_view content) {
