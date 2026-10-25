@@ -163,6 +163,7 @@ Rects BuildQtRects(const Scenario& scenario, const QFont& font) {
         Add(rects, "redoRect", layout.redoRect);
         Add(rects, "selectToolRect", layout.selectToolRect);
         Add(rects, "textToolRect", layout.textToolRect);
+        Add(rects, "latexToolRect", layout.latexToolRect);
         Add(rects, "moveToolRect", layout.moveToolRect);
         Add(rects, "drawToolRect", layout.drawToolRect);
         Add(rects, "panToolRect", layout.panToolRect);
@@ -434,34 +435,38 @@ std::vector<Scenario> FrozenTitleScenarios() {
 }
 
 // Frozen reference values captured from the Win32 reference implementation:
-// they are the expectations the Qt port is compared against below.
+// they are the expectations the Qt port is compared against below.  The
+// toolbar cases since gained the LaTeX tool button left of the text tool,
+// which moves select, move, undo/redo and the title area one button left.
 // FROZEN-GEOMETRY-BEGIN
 const std::vector<FrozenCase> kFrozenGeometry {
     { "toolbar 1400x960 colors=5", {
-        { "titleAreaRect", 12.0, 0.0, 878.0, 34.0 },
+        { "titleAreaRect", 12.0, 0.0, 838.0, 34.0 },
         { "minimizeRect", 1262.0, 0.0, 1308.0, 34.0 },
         { "maximizeRect", 1308.0, 0.0, 1354.0, 34.0 },
         { "closeRect", 1354.0, 0.0, 1400.0, 34.0 },
-        { "undoRect", 894.0, 2.0, 924.0, 32.0 },
-        { "redoRect", 934.0, 2.0, 964.0, 32.0 },
-        { "selectToolRect", 1020.0, 2.0, 1050.0, 32.0 },
+        { "undoRect", 854.0, 2.0, 884.0, 32.0 },
+        { "redoRect", 894.0, 2.0, 924.0, 32.0 },
+        { "selectToolRect", 980.0, 2.0, 1010.0, 32.0 },
         { "textToolRect", 1060.0, 2.0, 1090.0, 32.0 },
-        { "moveToolRect", 980.0, 2.0, 1010.0, 32.0 },
+        { "latexToolRect", 1020.0, 2.0, 1050.0, 32.0 },
+        { "moveToolRect", 940.0, 2.0, 970.0, 32.0 },
         { "drawToolRect", 1140.0, 2.0, 1170.0, 32.0 },
         { "panToolRect", 1180.0, 2.0, 1210.0, 32.0 },
         { "eraseToolRect", 1100.0, 2.0, 1130.0, 32.0 },
         { "currentColorRect", 1228.0, 6.0, 1250.0, 28.0 },
     } },
     { "toolbar compact 700x600 colors=5", {
-        { "titleAreaRect", 12.0, 0.0, 200.0, 34.0 },
+        { "titleAreaRect", 12.0, 0.0, 162.0, 34.0 },
         { "minimizeRect", 562.0, 0.0, 608.0, 34.0 },
         { "maximizeRect", 608.0, 0.0, 654.0, 34.0 },
         { "closeRect", 654.0, 0.0, 700.0, 34.0 },
-        { "undoRect", 216.0, 2.0, 246.0, 32.0 },
-        { "redoRect", 254.0, 2.0, 284.0, 32.0 },
-        { "selectToolRect", 334.0, 2.0, 364.0, 32.0 },
+        { "undoRect", 178.0, 2.0, 208.0, 32.0 },
+        { "redoRect", 216.0, 2.0, 246.0, 32.0 },
+        { "selectToolRect", 296.0, 2.0, 326.0, 32.0 },
         { "textToolRect", 372.0, 2.0, 402.0, 32.0 },
-        { "moveToolRect", 296.0, 2.0, 326.0, 32.0 },
+        { "latexToolRect", 334.0, 2.0, 364.0, 32.0 },
+        { "moveToolRect", 258.0, 2.0, 288.0, 32.0 },
         { "drawToolRect", 448.0, 2.0, 478.0, 32.0 },
         { "panToolRect", 486.0, 2.0, 516.0, 32.0 },
         { "eraseToolRect", 410.0, 2.0, 440.0, 32.0 },
@@ -474,9 +479,10 @@ const std::vector<FrozenCase> kFrozenGeometry {
         { "closeRect", 454.0, 0.0, 500.0, 34.0 },
         { "undoRect", 0.0, 0.0, 0.0, 0.0 },
         { "redoRect", 0.0, 0.0, 0.0, 0.0 },
-        { "selectToolRect", 134.0, 2.0, 164.0, 32.0 },
+        { "selectToolRect", 96.0, 2.0, 126.0, 32.0 },
         { "textToolRect", 172.0, 2.0, 202.0, 32.0 },
-        { "moveToolRect", 96.0, 2.0, 126.0, 32.0 },
+        { "latexToolRect", 134.0, 2.0, 164.0, 32.0 },
+        { "moveToolRect", 58.0, 2.0, 88.0, 32.0 },
         { "drawToolRect", 248.0, 2.0, 278.0, 32.0 },
         { "panToolRect", 286.0, 2.0, 316.0, 32.0 },
         { "eraseToolRect", 210.0, 2.0, 240.0, 32.0 },
@@ -643,11 +649,11 @@ const std::vector<FrozenTitleCase> kFrozenTitles {
         { "dividerX", 321.0, 0.0, 321.0, 0.0 },
     } },
     { "title compact width", 91.0, 28.0, {
-        { "fileTitleRect", 12.0, 0.0, 111.0, 34.0 },
-        { "titleTextRect", 16.0, 0.0, 107.0, 34.0 },
-        { "zoomRect", 123.0, 0.0, 167.0, 34.0 },
-        { "zoomTextRect", 129.0, 0.0, 161.0, 34.0 },
-        { "dividerX", 117.0, 0.0, 117.0, 0.0 },
+        { "fileTitleRect", 12.0, 0.0, 106.0, 34.0 },
+        { "titleTextRect", 16.0, 0.0, 102.0, 34.0 },
+        { "zoomRect", 118.0, 0.0, 162.0, 34.0 },
+        { "zoomTextRect", 124.0, 0.0, 156.0, 34.0 },
+        { "dividerX", 112.0, 0.0, 112.0, 0.0 },
     } },
 };
 // FROZEN-TITLES-END

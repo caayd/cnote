@@ -462,9 +462,8 @@ void QuickActionsFireEverywhere() {
         for (const bool toolbarFocus : { false, true }) {
             Harness harness;
             SelectTool(harness, tool);
-            // Note: there is no Latex tool button (ControlForTool maps Latex to
-            // TextTool), so expectations follow the tool actually selected.
             const cnote::settings::Tool active = harness.ActiveTool();
+            Check(active == tool, std::string("the toolbar button selects ") + ToolName(tool));
             const bool brushTool = active == cnote::settings::Tool::Draw || active == cnote::settings::Tool::Erase;
             const bool textTool = active == cnote::settings::Tool::Text;
             toolbarFocus ? harness.FocusToolbar() : harness.FocusCanvas();

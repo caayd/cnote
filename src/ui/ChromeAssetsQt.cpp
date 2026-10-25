@@ -3,6 +3,10 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <cctype>
+#include <string_view>
+#include <vector>
 
 #include <QCoreApplication>
 #include <QDir>
@@ -24,12 +28,13 @@ namespace cnote::ui {
 namespace {
 
 // Reference SVG parsing, ported from App::LoadSvgIcon / App::ParseSvgPathData
-// (src/App.cpp:785-1390).  The legacy frontend reads only <path d> plus the
-// per-path fill/stroke/stroke-width/linecap/linejoin attributes and the root
-// viewBox, and paints the result as one monochrome tint; that is exactly what
-// this port does, with QPainterPath instead of Gdiplus::GraphicsPath.  No QtSvg
-// dependency: the reference icon set only uses M/L/H/V/C/A/Z commands, which
-// this parser covers (verified against assets/icons/**, plan step 6.1).
+// (src/App.cpp:785-1390).  It reads <path d> plus the fill/stroke/
+// stroke-width/linecap/linejoin presentation attributes, inherited from <svg>
+// and <g> as SVG specifies (the legacy port read them from <path> only, which
+// drew stroke-only icons styled on their root as filled shapes), and the root
+// viewBox, and paints the result as one monochrome tint with QPainterPath
+// instead of Gdiplus::GraphicsPath.  No QtSvg dependency: the reference icon
+// set only uses M/L/H/V/C/A/Z commands, which this parser covers.
 
 constexpr double kPi = 3.14159265358979323846;
 
@@ -368,6 +373,45 @@ Qt::PenJoinStyle ParseSvgLineJoin(const std::string& value) {
     return Qt::RoundJoin;
 }
 
+// Applies the presentation attributes on one tag over the inherited style.
+// SVG cascades fill/stroke/stroke-width/linecap/linejoin from <svg> and <g>
+// to the shapes inside; a shape's own attribute wins.
+SvgPathStyle ApplySvgStyle(SvgPathStyle style, std::string_view tag) {
+    if (const auto fill = ExtractSvgAttribute(tag, "fill"); fill.has_value()) {
+        style.fill = *fill != "none";
+    }
+    if (const auto stroke = ExtractSvgAttribute(tag, "stroke"); stroke.has_value()) {
+        style.stroke = *stroke != "none";
+    }
+    if (const auto strokeWidth = ExtractSvgAttribute(tag, "stroke-width"); strokeWidth.has_value()) {
+        const char* cursor = strokeWidth->c_str();
+        float parsedWidth = 1.0f;
+        if (ConsumeSvgFloat(cursor, parsedWidth)) {
+            style.strokeWidth = parsedWidth;
+        }
+    }
+    if (const auto lineCap = ExtractSvgAttribute(tag, "stroke-linecap"); lineCap.has_value()) {
+        style.lineCap = ParseSvgLineCap(*lineCap);
+    }
+    if (const auto lineJoin = ExtractSvgAttribute(tag, "stroke-linejoin"); lineJoin.has_value()) {
+        style.lineJoin = ParseSvgLineJoin(*lineJoin);
+    }
+    return style;
+}
+
+// Element name of a tag body ("<g ...>" -> "g", "</g>" -> "g").
+std::string_view SvgTagName(std::string_view tag) {
+    std::size_t start = 1;
+    if (start < tag.size() && tag[start] == '/') {
+        ++start;
+    }
+    std::size_t end = start;
+    while (end < tag.size() && tag[end] != '>' && tag[end] != '/' && std::isspace(static_cast<unsigned char>(tag[end])) == 0) {
+        ++end;
+    }
+    return tag.substr(start, end - start);
+}
+
 std::optional<SvgIcon> LoadSvgIcon(const QString& path) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
@@ -400,20 +444,54 @@ std::optional<SvgIcon> LoadSvgIcon(const QString& path) {
         }
     }
 
-    std::size_t searchStart = 0;
-    while (true) {
-        const std::size_t pathStart = contents.find("<path", searchStart);
-        if (pathStart == std::string::npos) {
-            break;
+    // Walk the tags after <svg>: <g> pushes an inherited style, </g> pops it,
+    // and paths inside non-rendered containers (clip paths, masks, defs) are
+    // skipped.
+    std::vector<SvgPathStyle> styles { ApplySvgStyle(SvgPathStyle {}, svgTag) };
+    int hiddenDepth = 0;
+    std::size_t cursor = svgEnd + 1U;
+    while ((cursor = contents.find('<', cursor)) != std::string::npos) {
+        if (contents.compare(cursor, 4, "<!--") == 0) {
+            const std::size_t commentEnd = contents.find("-->", cursor);
+            if (commentEnd == std::string::npos) {
+                break;
+            }
+            cursor = commentEnd + 3U;
+            continue;
         }
-        const std::size_t pathEnd = contents.find('>', pathStart);
-        if (pathEnd == std::string::npos) {
+        const std::size_t tagEnd = contents.find('>', cursor);
+        if (tagEnd == std::string::npos) {
             return std::nullopt;
         }
-        const std::string_view pathTag(contents.data() + pathStart, (pathEnd - pathStart) + 1U);
-        searchStart = pathEnd + 1U;
+        const std::string_view tag(contents.data() + cursor, (tagEnd - cursor) + 1U);
+        cursor = tagEnd + 1U;
+        const bool closing = tag.size() > 1U && tag[1] == '/';
+        const bool selfClosing = tag.size() > 2U && tag[tag.size() - 2U] == '/';
+        const std::string_view name = SvgTagName(tag);
 
-        const auto pathData = ExtractSvgAttribute(pathTag, "d");
+        if (name == "defs" || name == "clipPath" || name == "mask" || name == "symbol" || name == "pattern") {
+            if (closing) {
+                hiddenDepth = std::max(0, hiddenDepth - 1);
+            } else if (!selfClosing) {
+                ++hiddenDepth;
+            }
+            continue;
+        }
+        if (name == "g") {
+            if (closing) {
+                if (styles.size() > 1U) {
+                    styles.pop_back();
+                }
+            } else if (!selfClosing) {
+                styles.push_back(ApplySvgStyle(styles.back(), tag));
+            }
+            continue;
+        }
+        if (name != "path" || closing || hiddenDepth > 0) {
+            continue;
+        }
+
+        const auto pathData = ExtractSvgAttribute(tag, "d");
         if (!pathData.has_value()) {
             continue;
         }
@@ -421,25 +499,7 @@ std::optional<SvgIcon> LoadSvgIcon(const QString& path) {
         if (!ParseSvgPathData(*pathData, shape.path)) {
             return std::nullopt;
         }
-        if (const auto fill = ExtractSvgAttribute(pathTag, "fill"); fill.has_value()) {
-            shape.style.fill = *fill != "none";
-        }
-        if (const auto stroke = ExtractSvgAttribute(pathTag, "stroke"); stroke.has_value()) {
-            shape.style.stroke = *stroke != "none";
-        }
-        if (const auto strokeWidth = ExtractSvgAttribute(pathTag, "stroke-width"); strokeWidth.has_value()) {
-            const char* cursor = strokeWidth->c_str();
-            float parsedWidth = 1.0f;
-            if (ConsumeSvgFloat(cursor, parsedWidth)) {
-                shape.style.strokeWidth = parsedWidth;
-            }
-        }
-        if (const auto lineCap = ExtractSvgAttribute(pathTag, "stroke-linecap"); lineCap.has_value()) {
-            shape.style.lineCap = ParseSvgLineCap(*lineCap);
-        }
-        if (const auto lineJoin = ExtractSvgAttribute(pathTag, "stroke-linejoin"); lineJoin.has_value()) {
-            shape.style.lineJoin = ParseSvgLineJoin(*lineJoin);
-        }
+        shape.style = ApplySvgStyle(styles.back(), tag);
         icon.shapes.push_back(std::move(shape));
     }
 

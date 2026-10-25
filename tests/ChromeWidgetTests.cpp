@@ -26,6 +26,10 @@
 #include <QMouseEvent>
 #include <QPixmap>
 #include <QWheelEvent>
+#include <QDir>
+#include <QDirIterator>
+#include <QPainter>
+#include <QSvgRenderer>
 #include <QWidget>
 
 #include <optional>
@@ -154,7 +158,8 @@ void TestToolbarLayoutMatrix() {
 
             Check(got.titleAreaRect == want.titleAreaRect, "titleAreaRect matches LayoutQt" + context);
             Check(got.undoRect == want.undoRect && got.redoRect == want.redoRect, "undo/redo rects match LayoutQt" + context);
-            Check(got.selectToolRect == want.selectToolRect && got.textToolRect == want.textToolRect, "select/text rects match LayoutQt" + context);
+            Check(got.selectToolRect == want.selectToolRect && got.textToolRect == want.textToolRect
+                    && got.latexToolRect == want.latexToolRect, "select/text/latex rects match LayoutQt" + context);
             Check(got.moveToolRect == want.moveToolRect && got.eraseToolRect == want.eraseToolRect, "move/erase rects match LayoutQt" + context);
             Check(got.drawToolRect == want.drawToolRect && got.panToolRect == want.panToolRect, "draw/pan rects match LayoutQt" + context);
             Check(got.currentColorRect == want.currentColorRect, "color swatch rect matches LayoutQt" + context);
@@ -175,6 +180,7 @@ void TestToolbarLayoutMatrix() {
         { cnote::ui::ToolbarControl::SelectTool, "select" },
         { cnote::ui::ToolbarControl::MoveTool, "move" },
         { cnote::ui::ToolbarControl::TextTool, "text" },
+        { cnote::ui::ToolbarControl::LatexTool, "latex" },
         { cnote::ui::ToolbarControl::DrawTool, "draw" },
         { cnote::ui::ToolbarControl::PanTool, "pan" },
         { cnote::ui::ToolbarControl::EraseTool, "erase" },
@@ -737,6 +743,70 @@ void TestOverlayDismissalConsumesPaletteMenu() {
     Check(counter.presses == 0, "the closing click is consumed by the palette menu, like the reference");
 }
 
+// Every toolbar tool button draws its artwork from the compiled resource
+// bundle; an icon missing from CMake's resource list silently falls back to
+// a letter glyph (or to a stray filesystem copy).
+void TestToolbarToolIconsAreBundled() {
+    for (const char* name : { "lasso.svg", "cursor.svg", "text.svg", "latex.svg", "draw.svg", "pan.svg", "erase.svg", "zoom.svg" }) {
+        const QString fileName = QString::fromLatin1(name);
+        Check(cnote::ui::ChromeIconPath(fileName).startsWith(QStringLiteral(":/")),
+            std::string("tool icon ") + name + " is in the compiled resources");
+        Check(!cnote::ui::ChromeIconPixmap(fileName, QSize(30, 30), Qt::black).isNull(),
+            std::string("tool icon ") + name + " renders");
+    }
+}
+
+// Every bundled icon renders as its SVG describes: the chrome's own parser
+// (no QtSvg in the app) is compared against Qt's SVG renderer at the same
+// fit.  Catches styles the parser drops - e.g. fill/stroke set on the root
+// <svg> instead of the <path>, which drew stroke-only icons as filled shapes.
+void TestBundledIconsMatchSvgRenderer() {
+    static_cast<void>(cnote::ui::ChromeIconPath(QStringLiteral("draw.svg")));  // registers the resource bundle
+    const QString root = QStringLiteral(":/cnote/icons/");
+    int compared = 0;
+    QDirIterator icons(root, { QStringLiteral("*.svg") }, QDir::Files, QDirIterator::Subdirectories);
+    while (icons.hasNext()) {
+        const QString resource = icons.next();
+        const QString name = resource.mid(root.size());
+        constexpr int kSize = 64;
+        const QImage ours = cnote::ui::ChromeIconPixmap(name, QSize(kSize, kSize), Qt::black).toImage()
+            .convertToFormat(QImage::Format_ARGB32);
+        QSvgRenderer renderer(resource);
+        Check(!ours.isNull() && renderer.isValid(), "icon " + name.toStdString() + " loads in both renderers");
+        if (ours.isNull() || !renderer.isValid()) {
+            continue;
+        }
+        // Same fit as ChromeIconPixmap: viewBox into the size minus 8, centred.
+        const QRectF box = renderer.viewBoxF();
+        const qreal scale = std::min((kSize - 8.0) / box.width(), (kSize - 8.0) / box.height());
+        const QRectF target((kSize - box.width() * scale) / 2.0, (kSize - box.height() * scale) / 2.0,
+            box.width() * scale, box.height() * scale);
+        QImage reference(kSize, kSize, QImage::Format_ARGB32);
+        reference.fill(Qt::transparent);
+        QPainter painter(&reference);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        renderer.render(&painter, target);
+        painter.end();
+
+        int referenceInk = 0;
+        int mismatch = 0;
+        for (int y = 0; y < kSize; ++y) {
+            for (int x = 0; x < kSize; ++x) {
+                const bool oursInk = qAlpha(ours.pixel(x, y)) > 128;
+                const bool referenceHasInk = qAlpha(reference.pixel(x, y)) > 128;
+                referenceInk += referenceHasInk ? 1 : 0;
+                mismatch += oursInk != referenceHasInk ? 1 : 0;
+            }
+        }
+        // Anti-aliasing differs by a few edge pixels; a dropped style differs
+        // by a large share of the ink.
+        Check(mismatch <= std::max(4, referenceInk / 50), "icon " + name.toStdString() + " matches its SVG ("
+            + std::to_string(mismatch) + " of " + std::to_string(referenceInk) + " ink pixels differ)");
+        ++compared;
+    }
+    Check(compared >= 18, "every bundled icon is compared (" + std::to_string(compared) + ")");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -753,6 +823,8 @@ int main(int argc, char** argv) {
     TestSidebarEnsureVisibleFromScrolled();
     TestToolbarAutoHide();
     TestOverlayDismissalConsumesPaletteMenu();
+    TestToolbarToolIconsAreBundled();
+    TestBundledIconsMatchSvgRenderer();
 
     std::printf(g_failures == 0 ? "ALL CHROME CHECKS PASSED\n" : "%d CHROME CHECK(S) FAILED\n", g_failures);
     return g_failures == 0 ? 0 : 1;

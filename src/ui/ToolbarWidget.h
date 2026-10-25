@@ -39,6 +39,7 @@ enum class ToolbarControl {
     SelectTool,
     MoveTool,
     TextTool,
+    LatexTool,
     DrawTool,
     PanTool,
     EraseTool,

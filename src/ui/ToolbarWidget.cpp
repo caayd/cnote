@@ -107,8 +107,9 @@ QString ToolIconName(settings::Tool tool) {
     case settings::Tool::Move:
         return QStringLiteral("cursor.svg");
     case settings::Tool::Text:
-    case settings::Tool::Latex:
         return QStringLiteral("text.svg");
+    case settings::Tool::Latex:
+        return QStringLiteral("latex.svg");
     case settings::Tool::Draw:
         return QStringLiteral("draw.svg");
     case settings::Tool::Pan:
@@ -128,8 +129,9 @@ QString ToolFallbackLabel(settings::Tool tool) {
     case settings::Tool::Move:
         return QStringLiteral("M");
     case settings::Tool::Text:
-    case settings::Tool::Latex:
         return QStringLiteral("T");
+    case settings::Tool::Latex:
+        return QStringLiteral("L");
     case settings::Tool::Draw:
         return QStringLiteral("D");
     case settings::Tool::Pan:
@@ -1184,8 +1186,9 @@ bool ToolbarWidget::IsToolInWheel(settings::Tool tool) const {
 
 bool ToolbarWidget::ShowWheelToolMenu(const QPointF& widgetPosition, const QPoint& globalPosition) {
     // Reference App::HandleToolbarRightClick (App.cpp:6195-6239): the zoom
-    // indicator is probed first, then the six tool buttons in the reference
-    // order; a hit shows the single-item "Add/Remove from Quick Wheel" menu.
+    // indicator is probed first, then the tool buttons in the reference order
+    // (plus the LaTeX button); a hit shows the single-item "Add/Remove from
+    // Quick Wheel" menu.
     std::optional<settings::Tool> tool;
     if (ContainsPoint(ComputeTitleLayout().zoomRect, widgetPosition)) {
         tool = settings::Tool::Zoom;
@@ -1196,6 +1199,7 @@ bool ToolbarWidget::ShowWheelToolMenu(const QPointF& widgetPosition, const QPoin
         } toolButtons[] = {
             { ToolbarControl::SelectTool, settings::Tool::Select },
             { ToolbarControl::TextTool, settings::Tool::Text },
+            { ToolbarControl::LatexTool, settings::Tool::Latex },
             { ToolbarControl::MoveTool, settings::Tool::Move },
             { ToolbarControl::DrawTool, settings::Tool::Draw },
             { ToolbarControl::PanTool, settings::Tool::Pan },
@@ -1335,6 +1339,8 @@ QRectF ToolbarWidget::ControlRect(ToolbarControl control) const {
         return layout.moveToolRect;
     case ToolbarControl::TextTool:
         return layout.textToolRect;
+    case ToolbarControl::LatexTool:
+        return layout.latexToolRect;
     case ToolbarControl::DrawTool:
         return layout.drawToolRect;
     case ToolbarControl::PanTool:
@@ -1361,6 +1367,7 @@ ToolbarControl ToolbarWidget::ControlAt(const QPointF& widgetPosition) const {
         ToolbarControl::SelectTool,
         ToolbarControl::MoveTool,
         ToolbarControl::TextTool,
+        ToolbarControl::LatexTool,
         ToolbarControl::DrawTool,
         ToolbarControl::PanTool,
         ToolbarControl::EraseTool,
@@ -1413,6 +1420,8 @@ std::optional<settings::Tool> ToolbarWidget::ToolForControl(ToolbarControl contr
         return settings::Tool::Move;
     case ToolbarControl::TextTool:
         return settings::Tool::Text;
+    case ToolbarControl::LatexTool:
+        return settings::Tool::Latex;
     case ToolbarControl::DrawTool:
         return settings::Tool::Draw;
     case ToolbarControl::PanTool:
@@ -1431,8 +1440,9 @@ ToolbarControl ToolbarWidget::ControlForTool(settings::Tool tool) {
     case settings::Tool::Move:
         return ToolbarControl::MoveTool;
     case settings::Tool::Text:
-    case settings::Tool::Latex:
         return ToolbarControl::TextTool;
+    case settings::Tool::Latex:
+        return ToolbarControl::LatexTool;
     case settings::Tool::Draw:
         return ToolbarControl::DrawTool;
     case settings::Tool::Pan:
@@ -1644,6 +1654,7 @@ void ToolbarWidget::paintEvent(QPaintEvent*) {
     } toolButtons[] = {
         { layout.selectToolRect, settings::Tool::Select },
         { layout.textToolRect, settings::Tool::Text },
+        { layout.latexToolRect, settings::Tool::Latex },
         { layout.moveToolRect, settings::Tool::Move },
         { layout.eraseToolRect, settings::Tool::Erase },
         { layout.drawToolRect, settings::Tool::Draw },

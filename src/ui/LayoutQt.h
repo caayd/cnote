@@ -60,6 +60,7 @@ struct ToolbarLayout {
     QRectF redoRect;
     QRectF selectToolRect;
     QRectF textToolRect;
+    QRectF latexToolRect;
     QRectF moveToolRect;
     QRectF drawToolRect;
     QRectF panToolRect;

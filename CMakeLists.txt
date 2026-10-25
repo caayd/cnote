@@ -250,6 +250,7 @@ qt_add_resources(cnote_ui "cnote_chrome_assets"
     FILES
         assets/icons/zoom.svg
         assets/icons/text.svg
+        assets/icons/latex.svg
         assets/icons/new-page.svg
         assets/icons/pan.svg
         assets/icons/settings.svg
@@ -792,7 +793,16 @@ add_executable(cnote_chrome_tests tests/ChromeWidgetTests.cpp)
 target_compile_options(cnote_chrome_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
-target_link_libraries(cnote_chrome_tests PRIVATE cnote_ui cnote_model Qt6::Widgets)
+# QtSvg is the reference renderer the icon-fidelity check compares the
+# chrome's own SVG parser against; the application itself does not link it.
+find_package(Qt6 6.11.2 REQUIRED COMPONENTS Svg)
+target_link_libraries(cnote_chrome_tests PRIVATE cnote_ui cnote_model Qt6::Widgets Qt6::Svg)
+if(WIN32)
+    add_custom_command(TARGET cnote_chrome_tests POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:Qt6::Svg>"
+            "$<TARGET_FILE_DIR:cnote_chrome_tests>")
+endif()
 add_test(NAME chrome_qt COMMAND cnote_chrome_tests)
 set_tests_properties(chrome_qt PROPERTIES TIMEOUT 120
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")

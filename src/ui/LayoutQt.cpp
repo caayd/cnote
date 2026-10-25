@@ -222,7 +222,8 @@ ToolbarLayout BuildToolbarLayout(const QRectF& clientRect, std::size_t colorCoun
     layout.drawToolRect = MakeRect(layout.panToolRect.left() - toolGap - kIconButtonSize, toolbarTop, layout.panToolRect.left() - toolGap, toolbarTop + kIconButtonSize);
     layout.eraseToolRect = MakeRect(layout.drawToolRect.left() - toolGap - kIconButtonSize, toolbarTop, layout.drawToolRect.left() - toolGap, toolbarTop + kIconButtonSize);
     layout.textToolRect = MakeRect(layout.eraseToolRect.left() - toolGap - kIconButtonSize, toolbarTop, layout.eraseToolRect.left() - toolGap, toolbarTop + kIconButtonSize);
-    layout.selectToolRect = MakeRect(layout.textToolRect.left() - toolGap - kIconButtonSize, toolbarTop, layout.textToolRect.left() - toolGap, toolbarTop + kIconButtonSize);
+    layout.latexToolRect = MakeRect(layout.textToolRect.left() - toolGap - kIconButtonSize, toolbarTop, layout.textToolRect.left() - toolGap, toolbarTop + kIconButtonSize);
+    layout.selectToolRect = MakeRect(layout.latexToolRect.left() - toolGap - kIconButtonSize, toolbarTop, layout.latexToolRect.left() - toolGap, toolbarTop + kIconButtonSize);
     layout.moveToolRect = MakeRect(layout.selectToolRect.left() - toolGap - kIconButtonSize, toolbarTop, layout.selectToolRect.left() - toolGap, toolbarTop + kIconButtonSize);
 
     const qreal redoRight = layout.moveToolRect.left() - (compactTitle ? 12.0 : 16.0);  // Layout.cpp:258
@@ -472,8 +473,9 @@ std::optional<std::size_t> PaletteWheelIndexAtPoint(const PaletteWheelLayout& la
 }
 
 bool IsToolbarControlRect(const ToolbarLayout& layout, const ToolbarTitleLayout& titleLayout, const QPointF& cursor) {
-    // Same 12-control list and order as Layout.cpp:444-462.
-    const std::array<QRectF, 12> controls {
+    // The 12-control list and order of Layout.cpp:444-462, plus the LaTeX
+    // tool button cnote added beside the text tool.
+    const std::array<QRectF, 13> controls {
         titleLayout.fileTitleRect,
         titleLayout.zoomRect,
         layout.minimizeRect,
@@ -483,6 +485,7 @@ bool IsToolbarControlRect(const ToolbarLayout& layout, const ToolbarTitleLayout&
         layout.redoRect,
         layout.selectToolRect,
         layout.textToolRect,
+        layout.latexToolRect,
         layout.moveToolRect,
         layout.drawToolRect,
         layout.panToolRect,
