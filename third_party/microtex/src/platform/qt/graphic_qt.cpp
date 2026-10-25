@@ -198,11 +198,15 @@ Graphics2D_qt::Graphics2D_qt(QPainter* painter)
     : _painter(painter),
       _initial_transform(painter->transform()) {
   // cnote: the caller may hand us a painter that already carries its page/DPR
-  // transform (see cnote::latex::Draw).  Remember both that transform and its
-  // scale, so reset() (which MicroTeX calls at the end of TeXRender::draw())
-  // restores it and the 1/sx(), 1/sy() hairline helpers stay device-relative.
-  _initial_sx = CnoteScaleX(_initial_transform);
-  _initial_sy = CnoteScaleY(_initial_transform);
+  // transform (see cnote::latex::Draw).  Remember that transform, so reset()
+  // (which MicroTeX calls at the end of TeXRender::draw()) restores it.  The
+  // scale comes from the device transform: a widget painter carries its
+  // device pixel ratio there rather than in the world transform, and glyphs
+  // must rasterize at the same device size whichever way the DPR arrives
+  // (the text editor vs. the committed page surface).  It also keeps the
+  // 1/sx(), 1/sy() hairline helpers device-relative.
+  _initial_sx = CnoteScaleX(painter->deviceTransform());
+  _initial_sy = CnoteScaleY(painter->deviceTransform());
   _sx = _initial_sx;
   _sy = _initial_sy;
   setColor(BLACK);

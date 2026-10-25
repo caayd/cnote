@@ -22,6 +22,10 @@ inline constexpr int kInlineMathObjectType = QTextFormat::UserObject + 1;
 inline constexpr int kInlineMathSourceProperty = QTextFormat::UserProperty + 1;
 inline constexpr int kInlineMathScaleProperty = QTextFormat::UserProperty + 2;
 inline constexpr int kInlineMathFontSizeProperty = QTextFormat::UserProperty + 3;
+// The point size MakeInlineMathFormat gave the placeholder.  A different
+// font size on the placeholder means the user restyled it (toolbar size),
+// which then wins over kInlineMathFontSizeProperty.
+inline constexpr int kInlineMathPlaceholderPointSizeProperty = QTextFormat::UserProperty + 4;
 
 // The formulas in `content` that will render: FindInlineMath ranges whose
 // source parses at `fontSize`.  Source that does not parse (or a missing

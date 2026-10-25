@@ -100,6 +100,7 @@ band there never draws the in-client window buttons.
 - `H` pan
 - `L` latex equation (edit source with live preview; type `\` for command suggestions, `Tab` or `Enter` completes the selected command, `Ctrl+Enter` commits)
 - LaTeX editing auto-closes `{}`, `()`, and `[]`; completing `\frac` inserts both argument slots
+- Text objects render inline `$...$` LaTeX (Pandoc rules: no space just inside the `$`, no digit right after the closing `$`, `\$` is a literal dollar, `$$` stays text), so prices like `$5 and $10` stay prose; the formula under the caret shows its source while editing, and `Ctrl+Z`/`Ctrl+Y` in the text editor undo typed text, never a formula rendering
 - `Ctrl+Z` undo
 - `Ctrl+Y` redo
 - `Ctrl+O` open
@@ -185,7 +186,7 @@ ctest --test-dir build-qt -E '^(xpress_codec|session_manager_qt|interaction_rout
 The headless set is `xpress_codec` (pure C++), `session_manager_qt`
 (`QCoreApplication` only), `interaction_router_qt` and
 `precision_input_router_qt` (no Qt application object). On Windows the suite
-has 32 tests; Linux and macOS have 31 because `precision_touchpad_qt` is
+has 34 tests; Linux and macOS have 33 because `precision_touchpad_qt` is
 Windows-only. On Windows, `selection_clipboard_qt` (real clipboard bridge),
 `layout_parity_qt` and `font_fallback_qt` (real font metrics) run on the
 native platform; `layout_parity_qt` compares the Qt chrome geometry against
@@ -197,6 +198,10 @@ round trips and reading legacy CTS8 data into the current CTS9 format.
 `rotated_pdf_persistence_qt` checks unrotated, clockwise and counterclockwise
 PDF-backed pages through native-project and embedded-PDF save/reopen paths,
 including page dimensions and pixel-identical background rendering.
+`inline_math_editor_qt` (and its `_dpr15` run at device pixel ratio 1.5)
+types into the text editor and checks formula rendering around the caret,
+source-level undo/redo, source copy, price text, and that the editor is
+pixel-identical to the committed render.
 `default_page_size_qt` checks app-preset inheritance across windows and new
 projects, imported-PDF page creation, saved project overrides, and legacy
 project defaults.

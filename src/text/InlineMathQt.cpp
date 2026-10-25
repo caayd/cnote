@@ -88,11 +88,17 @@ public:
             return;
         }
         const QColor color = charFormat.foreground().color();
+        // Formula rules (fraction bars, radicals) are filled shapes: draw them
+        // antialiased whatever the host painter's hints, so the editor and
+        // the page surface rasterize them identically.
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
         latex::Draw(placement.formula, *painter,
             static_cast<float>(rect.left()),
             static_cast<float>(rect.top()),
             1.0f,
             color.isValid() ? color.rgba() : 0xFF000000U);
+        painter->restore();
     }
 };
 
@@ -134,6 +140,7 @@ void MakeInlineMathFormat(QTextCharFormat& format, std::u16string_view source, f
         descent = QFontMetricsF(font).descent();
     }
     format.setFontPointSize(font.pointSizeF());
+    format.setProperty(kInlineMathPlaceholderPointSizeProperty, font.pointSizeF());
 }
 
 }  // namespace cnote::text

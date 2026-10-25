@@ -1463,7 +1463,7 @@ void CanvasWidget::EnsureTextEditor() {
     if (textEditor_ != nullptr) {
         return;
     }
-    textEditor_ = new QTextEdit(this);
+    textEditor_ = new InlineMathTextEdit(this);
     textEditor_->setAcceptRichText(false);
     // The editor IS the live preview: frameless and transparent so the styled
     // text sits directly on the page (the committed object is excluded from
@@ -1517,7 +1517,6 @@ void CanvasWidget::ShowTextOverlay(const PageText& text) {
         ? CalculatePageView(*overlayPageIndex_)
         : CanvasPageView {};
     textEditScale_ = view.valid ? view.scale : 1.0f;
-    const text::TextOffsetMap map = text::BuildTextOffsetMap(text.content);
     textEditor_->document()->setDocumentMargin(0.0);
     // Match the canvas renderer's text option (TextLayoutQt BuildDocument):
     // same wrap mode and paragraph alignment so the live preview wraps and
@@ -1541,8 +1540,7 @@ void CanvasWidget::ShowTextOverlay(const PageText& text) {
     }
     {
         QSignalBlocker blocker(textEditor_);
-        textEditor_->setPlainText(FromUtf16(map.normalized));
-        text::ApplyPageTextFormatting(*textEditor_->document(), text, textEditScale_);
+        textEditor_->LoadPageText(text, textEditScale_);
         // Newly typed text takes the cursor's current format, not the document
         // default: seed it with the object's style so fresh input matches the
         // committed colour (and the toolbar's format readout).
@@ -1607,19 +1605,12 @@ void CanvasWidget::PositionOverlays() {
     if (textEditor_ != nullptr && textEditor_->isVisible() && controller_.EditingTextObject() != nullptr) {
         const PageText& object = *controller_.EditingTextObject();
         // The editor is the live preview: fonts are formatted at the view
-        // scale, so a zoom change mid-edit re-applies formatting at the new
-        // scale (capture/re-apply round-trips the user's current content).
+        // scale, so a zoom change mid-edit re-formats at the new scale (the
+        // editor round-trips content, caret and undo history).
         if (std::abs(view.scale - textEditScale_) > 0.0001f) {
-            const PageText live = CaptureEditedText();
-            const int cursorPosition = textEditor_->textCursor().position();
-            {
-                QSignalBlocker blocker(textEditor_);
-                text::ApplyPageTextFormatting(*textEditor_->document(), live, view.scale);
-            }
-            QTextCursor cursor = textEditor_->textCursor();
-            cursor.setPosition(std::min(cursorPosition, static_cast<int>(textEditor_->document()->characterCount() - 1)));
-            textEditor_->setTextCursor(cursor);
             textEditScale_ = view.scale;
+            QSignalBlocker blocker(textEditor_);
+            textEditor_->SetDisplayScale(view.scale);
         }
         const qreal left = view.rect.left() + (static_cast<qreal>(object.x) * view.scale);
         const qreal top = view.rect.top() + (static_cast<qreal>(object.y) * view.scale);
@@ -1703,8 +1694,9 @@ void CanvasWidget::ApplyTextFormatToSelection(const PageTextStyle& style) {
 PageText CanvasWidget::CaptureEditedText() const {
     PageText edited = controller_.EditingTextObject() != nullptr ? *controller_.EditingTextObject() : PageText {};
     if (textEditor_ != nullptr) {
-        edited.content = text::ReadDocumentContent(*textEditor_->document()).content;
-        edited.styleSpans = text::CapturePageTextFormatting(*textEditor_->document(), edited, textEditScale_);
+        const PageText captured = textEditor_->CapturePageText();
+        edited.content = captured.content;
+        edited.styleSpans = captured.styleSpans;
     }
     return edited;
 }

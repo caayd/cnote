@@ -64,6 +64,8 @@
 #include "settings/KeyBindingQt.h"
 #include "settings/SettingsStoreQt.h"
 #include "shell/AppManager.h"
+#include "text/TextEditingQt.h"
+#include "latex/LatexEngine.h"
 #include "ui/CanvasWidget.h"
 #include "ui/InteractionRouter.h"
 #include "ui/SidebarWidget.h"
@@ -302,6 +304,33 @@ void EditorOwnsToolKeys() {
             typed.toUtf8().constData(), ToolName(harness.ActiveTool()));
         Check(harness.ActiveTool() == cnote::settings::Tool::Draw, "typing D/E/S/M/H/L in the text editor does not switch tools");
         Check(typed == QStringLiteral("desmhl"), "every typed character reaches the text editor");
+
+        // Ctrl+Z / Ctrl+Y through the window reach the editor's own history
+        // (the window's Undo action stands down while the editor is open).
+        harness.Press(Qt::Key_Z, Qt::ControlModifier);
+        const QString undone = editor != nullptr ? editor->toPlainText() : QString();
+        harness.Press(Qt::Key_Y, Qt::ControlModifier);
+        const QString redone = editor != nullptr ? editor->toPlainText() : QString();
+        std::printf("text editor undo -> '%s' redo -> '%s'\n", undone.toUtf8().constData(), redone.toUtf8().constData());
+        Check(undone.isEmpty(), "Ctrl+Z in the text editor undoes the typed word");
+        Check(redone == QStringLiteral("desmhl"), "Ctrl+Y in the text editor redoes it");
+
+        // A typed $...$ formula renders once the caret moves on and commits
+        // as its source.
+        for (const char character : std::string(" $x^2$ ")) {
+            QTest::keyClick(harness.window->windowHandle(), character);
+            QApplication::processEvents();
+        }
+        const std::size_t rendered = editor != nullptr
+            ? cnote::text::ReadDocumentContent(*editor->document()).map.math.size()
+            : 0U;
+        Check(rendered == 1U, "a typed formula renders in the text editor");
+        harness.canvas->CommitActiveEdit();
+        QApplication::processEvents();
+        const auto& texts = harness.window->Controller().DocumentRef().PageAt(0U).texts;
+        const std::u16string committed = texts.empty() ? std::u16string() : texts.back().content;
+        std::printf("committed text with formula: '%s'\n", cnote::Utf16ToUtf8(committed).c_str());
+        Check(committed == u"desmhl $x^2$ ", "the committed text stores the formula source");
     }
     {
         Harness harness;
@@ -820,6 +849,12 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("cnote"));
     RedirectSettingsStore();
+    // Inline $...$ formulas render only with the engine up (the app's
+    // AppManager initializes it from the installed resources).
+    if (!cnote::latex::Initialize(std::filesystem::path(CNOTE_LATEX_RES_ROOT))) {
+        std::printf("FAIL latex engine did not initialize\n");
+        return 1;
+    }
 
     ToolKeysSwitchToolsWhileTextToolActive();
     EditorOwnsToolKeys();

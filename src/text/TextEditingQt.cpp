@@ -107,7 +107,10 @@ QTextCharFormat CharFormatForStyle(const PageTextStyle& style, float displayScal
 PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextStyle& fallback, float displayScale) {
     PageTextStyle style = fallback;
     const QFont font = format.font();
-    if (format.objectType() == kInlineMathObjectType && format.hasProperty(kInlineMathFontSizeProperty)) {
+    const bool placeholderSize = format.objectType() == kInlineMathObjectType
+        && format.hasProperty(kInlineMathFontSizeProperty)
+        && std::abs(font.pointSizeF() - format.doubleProperty(kInlineMathPlaceholderPointSizeProperty)) < 1e-3;
+    if (placeholderSize) {
         // A formula placeholder's font may be enlarged to reserve line space;
         // the run's real text size travels in its own property.
         style.fontSize = static_cast<float>(format.doubleProperty(kInlineMathFontSizeProperty));

@@ -218,6 +218,7 @@ find_package(Qt6 6.11.2 REQUIRED COMPONENTS Widgets)
 
 add_library(cnote_ui STATIC
     src/ui/CanvasWidget.cpp
+    src/ui/InlineMathTextEdit.cpp
     src/ui/LayoutQt.cpp
     src/ui/ChromeAssetsQt.cpp
     src/ui/ToolbarWidget.cpp
@@ -1036,6 +1037,8 @@ find_package(Qt6 6.11.2 REQUIRED COMPONENTS Test)
 add_executable(cnote_shortcut_routing_tests tests/ShortcutRoutingTests.cpp)
 target_include_directories(cnote_shortcut_routing_tests PRIVATE src)
 target_compile_features(cnote_shortcut_routing_tests PRIVATE cxx_std_20)
+target_compile_definitions(cnote_shortcut_routing_tests PRIVATE
+    CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
 target_compile_options(cnote_shortcut_routing_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )
@@ -1049,6 +1052,28 @@ if(WIN32)
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "$<TARGET_FILE:Qt6::Test>"
             "$<TARGET_FILE_DIR:cnote_shortcut_routing_tests>")
+endif()
+
+# --- Inline $...$ math in the text editor ------------------------------------
+# Real key events into the text tool's editor: formulas render except the one
+# under the caret, undo/redo act on typed source (never on formulas rendering
+# or expanding), copy exports source, and prices stay text.
+add_executable(cnote_inline_math_editor_tests tests/InlineMathEditorTests.cpp)
+target_compile_definitions(cnote_inline_math_editor_tests PRIVATE
+    CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
+target_link_libraries(cnote_inline_math_editor_tests PRIVATE cnote_ui Qt6::Widgets Qt6::Test)
+add_test(NAME inline_math_editor_qt COMMAND cnote_inline_math_editor_tests)
+set_tests_properties(inline_math_editor_qt PROPERTIES TIMEOUT 120
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
+add_test(NAME inline_math_editor_dpr15_qt COMMAND cnote_inline_math_editor_tests)
+set_tests_properties(inline_math_editor_dpr15_qt PROPERTIES TIMEOUT 120
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins};QT_SCALE_FACTOR=1.5")
+if(WIN32)
+    cnote_stage_test_runtime(cnote_inline_math_editor_tests)
+    add_custom_command(TARGET cnote_inline_math_editor_tests POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:Qt6::Test>"
+            "$<TARGET_FILE_DIR:cnote_inline_math_editor_tests>")
 endif()
 
 # --- Canvas input feel (precision scrolling and the configured cursor) --------

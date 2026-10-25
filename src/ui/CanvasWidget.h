@@ -23,6 +23,7 @@
 #include "settings/SettingsStoreQt.h"
 #include "ui/CanvasController.h"
 #include "ui/InteractionRouter.h"
+#include "ui/InlineMathTextEdit.h"
 #include "ui/PrecisionInputSink.h"
 #include "selection/StrokeSmoothing.h"
 #include "ui/SelectionMath.h"
@@ -507,7 +508,7 @@ private:
     // right after it and captures the press point this way.
     mutable QPointF lastHandleProbeLogical_ {};
 
-    QTextEdit* textEditor_ = nullptr;
+    InlineMathTextEdit* textEditor_ = nullptr;
     QPlainTextEdit* latexEditor_ = nullptr;
     QListView* latexPopup_ = nullptr;
     QStringListModel* latexPopupModel_ = nullptr;
