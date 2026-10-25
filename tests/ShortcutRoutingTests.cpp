@@ -193,6 +193,73 @@ void MakeUndoableEdit(Harness& harness) {
     QApplication::processEvents();
 }
 
+// Text typed after the editor has been emptied must keep the object's style.
+// The editor palette is the dark chrome's (white text), so a character that
+// lost its explicit colour drew white on the white page: invisible.  The
+// common trigger was a Ctrl+Backspace pressed with nothing left to delete.
+void TypingAfterEmptyingKeepsObjectStyle() {
+    struct Route {
+        const char* name;
+        std::vector<std::pair<Qt::Key, Qt::KeyboardModifiers>> keys;
+    };
+    const std::vector<Route> routes {
+        { "Ctrl+Backspace pressed past empty", { { Qt::Key_Backspace, Qt::ControlModifier },
+              { Qt::Key_Backspace, Qt::ControlModifier }, { Qt::Key_Backspace, Qt::ControlModifier } } },
+        { "Backspace pressed past empty", std::vector<std::pair<Qt::Key, Qt::KeyboardModifiers>>(13, { Qt::Key_Backspace, Qt::NoModifier }) },
+        { "select all, Delete twice", { { Qt::Key_A, Qt::ControlModifier }, { Qt::Key_Delete, Qt::NoModifier },
+              { Qt::Key_Delete, Qt::NoModifier } } },
+        { "select all, cut, Backspace", { { Qt::Key_A, Qt::ControlModifier }, { Qt::Key_X, Qt::ControlModifier },
+              { Qt::Key_Backspace, Qt::NoModifier } } },
+    };
+    for (const Route& route : routes) {
+        Harness harness;
+        harness.window->AddTextObject();
+        QApplication::processEvents();
+        QTextEdit* editor = harness.canvas->TextEditor();
+        const cnote::PageText* object = harness.window->Controller().EditingTextObject();
+        Check(editor != nullptr && object != nullptr, std::string("text overlay opens for ") + route.name);
+        if (editor == nullptr || object == nullptr) {
+            continue;
+        }
+        const QColor objectColor = QColor::fromRgba(object->color);
+        editor->setFocus(Qt::OtherFocusReason);
+        QApplication::processEvents();
+        for (const char character : std::string("hello world")) {
+            QTest::keyClick(harness.window->windowHandle(), character);
+        }
+        for (const auto& [key, modifiers] : route.keys) {
+            harness.Press(key, modifiers);
+        }
+        Check(editor->toPlainText().isEmpty(), std::string("the editor is empty after ") + route.name);
+        for (const char character : std::string("abc")) {
+            QTest::keyClick(harness.window->windowHandle(), character);
+        }
+        QApplication::processEvents();
+
+        bool styled = editor->toPlainText() == QStringLiteral("abc");
+        QTextCursor probe(editor->document());
+        for (int position = 1; position < editor->document()->characterCount(); ++position) {
+            probe.setPosition(position);
+            const QTextCharFormat format = probe.charFormat();
+            styled = styled && format.hasProperty(QTextFormat::ForegroundBrush)
+                && format.foreground().color() == objectColor
+                && format.fontPointSize() > 0.0 && !format.fontFamilies().toStringList().isEmpty();
+        }
+        Check(styled, std::string("text typed after ") + route.name + " keeps the object's colour, size and family");
+        // And it draws: pixels in the object's colour appear in the editor.
+        const QImage shot = editor->grab().toImage();
+        int ink = 0;
+        for (int y = 0; y < shot.height(); ++y) {
+            for (int x = 0; x < shot.width(); ++x) {
+                const QRgb pixel = shot.pixel(x, y);
+                ink += qAlpha(pixel) > 128 && std::abs(qGray(pixel) - qGray(objectColor.rgb())) < 64 ? 1 : 0;
+            }
+        }
+        std::printf("typed after %s: '%s' ink=%d\n", route.name, editor->toPlainText().toUtf8().constData(), ink);
+        Check(ink > 0, std::string("text typed after ") + route.name + " is visible");
+    }
+}
+
 // Finds the single window action carrying `sequence` (empty when none, exactly
 // one for every wired settings binding).
 QAction* FindActionBySequence(cnote::qt::QtMainWindow& window, const QKeySequence& sequence) {
@@ -856,6 +923,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    TypingAfterEmptyingKeepsObjectStyle();
     ToolKeysSwitchToolsWhileTextToolActive();
     EditorOwnsToolKeys();
     ToolKeysRecoverAfterEditorCloses();

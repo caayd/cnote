@@ -1475,18 +1475,7 @@ void CanvasWidget::EnsureTextEditor() {
     textEditor_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     textEditor_->installEventFilter(this);
     textEditor_->hide();
-    connect(textEditor_, &QTextEdit::textChanged, this, [this]() {
-        // Qt resets the current char format when the document empties, which
-        // would drop the seeded object colour; re-seed it so the next typed
-        // character still matches the committed style.
-        if (textEditor_->document()->isEmpty() && controller_.EditingTextObject() != nullptr) {
-            const PageText& object = *controller_.EditingTextObject();
-            textEditor_->setCurrentCharFormat(text::CharFormatForStyle(
-                { object.fontSize, object.color, object.fontFamily, object.bold, object.italic, object.underline },
-                textEditScale_));
-        }
-        PositionOverlays();
-    });
+    connect(textEditor_, &QTextEdit::textChanged, this, [this]() { PositionOverlays(); });
 }
 
 void CanvasWidget::EnsureLatexEditor() {
@@ -1886,6 +1875,12 @@ bool CanvasWidget::HandleEditorKey(QObject* watched, QKeyEvent* event) {
             cursor.setPosition(static_cast<int>(range.start));
             cursor.setPosition(static_cast<int>(range.end), QTextCursor::KeepAnchor);
             cursor.removeSelectedText();
+            return true;
+        }
+        // Nothing before the caret to delete: swallow the chord.  Passing it
+        // on ran QTextEdit's own word deletion, which on an emptied editor
+        // reset the typing format to an unstyled one (invisible new text).
+        if (!cursor.hasSelection()) {
             return true;
         }
     }

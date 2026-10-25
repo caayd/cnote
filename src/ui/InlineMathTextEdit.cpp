@@ -9,6 +9,7 @@
 #include <QKeyEvent>
 #include <QMenu>
 #include <QMimeData>
+#include <QPalette>
 #include <QTextCursor>
 #include <QTextDocument>
 
@@ -58,6 +59,12 @@ void InlineMathTextEdit::LoadPageText(const PageText& text, float displayScale) 
     undo_.clear();
     redo_.clear();
     lastKind_ = ChangeKind::Other;
+    // Characters without an explicit colour draw in the palette's text
+    // colour, which the app's dark chrome palette makes white: on a white
+    // page that is invisible.  Fall back to the object's colour instead.
+    QPalette textPalette = palette();
+    textPalette.setColor(QPalette::Text, QColor::fromRgba(text.color));
+    setPalette(textPalette);
     const PageText normalized = text::NormalizeCommittedText(text);
     const auto end = static_cast<std::uint32_t>(normalized.content.size());
     Rebuild(normalized, end, end);
