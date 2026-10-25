@@ -18,6 +18,7 @@
 
 #include "Document.h"
 #include "latex/LatexCompletion.h"
+#include "latex/LatexEngine.h"
 #include "render/PageRenderer.h"
 #include "settings/SettingsStoreQt.h"
 #include "ui/CanvasController.h"
@@ -426,6 +427,9 @@ private:
     void ShowLatexOverlay(const PageLatex& object);
     void HideOverlays();
     void PositionOverlays();
+    // The LaTeX object being edited with the source box's current text: what
+    // the live preview draws, so the source box is placed around it.
+    [[nodiscard]] PageLatex LiveLatexPreview(const PageLatex& object) const;
     void SyncLatexPopup();
     bool HandleEditorKey(QObject* watched, QKeyEvent* event);
     bool HandleLatexPairKey(QPlainTextEdit& editor, const QString& text);
@@ -508,6 +512,10 @@ private:
     QListView* latexPopup_ = nullptr;
     QStringListModel* latexPopupModel_ = nullptr;
     std::vector<latex::CompletionItem> latexSuggestions_ {};
+    // Size of the last live source that parsed in this LaTeX edit.  Half-typed
+    // source (e.g. a fresh "\frac{}{}") does not parse; the source box keeps
+    // its place below the last drawable formula instead of jumping up.
+    latex::FormulaMetrics latexPreviewMetrics_ {};
     std::optional<std::size_t> overlayPageIndex_ {};
     std::optional<std::size_t> overlayTextIndex_ {};
     std::optional<std::size_t> overlayLatexIndex_ {};

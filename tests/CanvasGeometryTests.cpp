@@ -434,6 +434,35 @@ int main(int argc, char** argv) {
                       "created LaTeX page x at zoom " + std::to_string(zoom), editingLatex->x, expectedLatex.x, pageTolerance);
             CheckNear(std::abs(editingLatex->y - expectedLatex.y) <= pageTolerance,
                       "created LaTeX page y at zoom " + std::to_string(zoom), editingLatex->y, expectedLatex.y, pageTolerance);
+
+            // The source box must stay clear of the live preview as the typed
+            // formula grows (a new object starts empty, so measuring the
+            // object as it was when the edit began put the box over it).
+            const QString tallSource = QStringLiteral("\\sum_{i=0}^{n}\\frac{\\frac{a_i}{b_i}}{\\frac{c_i}{d_i}}");
+            canvas.LatexEditor()->setPlainText(tallSource);
+            canvas.repaint();
+            QCoreApplication::processEvents();
+            const cnote::latex::FormulaMetrics tall = cnote::latex::Measure(
+                cnote::latex::Parse(tallSource.toStdU16String(), editingLatex->fontSize, true));
+            Check(tall.height > 0.0f, "tall probe formula parses at zoom " + std::to_string(zoom));
+            const QRectF previewRect(
+                view.rect.left() + static_cast<double>(editingLatex->x) * scale,
+                view.rect.top() + static_cast<double>(editingLatex->y) * scale,
+                static_cast<double>(tall.width) * scale,
+                static_cast<double>(tall.height) * scale);
+            const QRect tallBox = canvas.LatexEditor()->geometry();
+            std::printf("LATEX zoom=%.2f preview=(%.1f,%.1f %.1fx%.1f) box=(%d,%d %dx%d)\n", zoom,
+                previewRect.left(), previewRect.top(), previewRect.width(), previewRect.height(),
+                tallBox.left(), tallBox.top(), tallBox.width(), tallBox.height());
+            Check(!QRectF(tallBox).intersects(previewRect),
+                "LaTeX source box does not cover the live preview at zoom " + std::to_string(zoom));
+
+            // Half-typed source that does not parse keeps the box in place.
+            canvas.LatexEditor()->setPlainText(tallSource + QStringLiteral("+\\frac{}{}"));
+            canvas.repaint();
+            QCoreApplication::processEvents();
+            Check(canvas.LatexEditor()->geometry() == tallBox,
+                "unparsable LaTeX source keeps the source box in place at zoom " + std::to_string(zoom));
         }
         canvas.CancelActiveEdit();
         QCoreApplication::processEvents();

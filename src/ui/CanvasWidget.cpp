@@ -1270,8 +1270,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
             && overlayPageIndex_.has_value() && *overlayPageIndex_ == view.pageIndex
             && overlayLatexIndex_.has_value()) {
             if (const PageLatex* object = controller_.EditingLatexObject(); object != nullptr) {
-                PageLatex preview = *object;
-                preview.content = ToUtf16(latexEditor_->toPlainText());
+                const PageLatex preview = LiveLatexPreview(*object);
                 if (const latex::FormulaHandle formula = latex::Parse(preview); formula != nullptr) {
                     painter.save();
                     painter.translate(view.rect.topLeft());
@@ -1562,6 +1561,7 @@ void CanvasWidget::ShowTextOverlay(const PageText& text) {
 
 void CanvasWidget::ShowLatexOverlay(const PageLatex& object) {
     EnsureLatexEditor();
+    latexPreviewMetrics_ = latex::Measure(latex::Parse(object));
     {
         QSignalBlocker blocker(latexEditor_);
         latexEditor_->setPlainText(FromUtf16(object.content));
@@ -1649,8 +1649,14 @@ void CanvasWidget::PositionOverlays() {
         textEditor_->setMask(QRegion(clip));
     }
     if (latexEditor_ != nullptr && latexEditor_->isVisible() && controller_.EditingLatexObject() != nullptr) {
-        const PageLatex& object = *controller_.EditingLatexObject();
-        const latex::FormulaMetrics metrics = latex::Measure(latex::Parse(object));
+        // Measure what the preview draws (the typed source), not the object
+        // as it was when the edit began, or a growing formula slides under
+        // the box.
+        const PageLatex object = LiveLatexPreview(*controller_.EditingLatexObject());
+        if (const latex::FormulaHandle formula = latex::Parse(object); formula != nullptr) {
+            latexPreviewMetrics_ = latex::Measure(formula);
+        }
+        const latex::FormulaMetrics& metrics = latexPreviewMetrics_;
         const qreal objectLeft = view.rect.left() + (static_cast<qreal>(object.x) * view.scale);
         const qreal objectTop = view.rect.top() + (static_cast<qreal>(object.y) * view.scale);
         const qreal objectHeight = std::max<qreal>(8.0, static_cast<qreal>(metrics.height) * view.scale);
@@ -1674,6 +1680,14 @@ void CanvasWidget::PositionOverlays() {
             latexPopup_->raise();
         }
     }
+}
+
+PageLatex CanvasWidget::LiveLatexPreview(const PageLatex& object) const {
+    PageLatex preview = object;
+    if (latexEditor_ != nullptr) {
+        preview.content = ToUtf16(latexEditor_->toPlainText());
+    }
+    return preview;
 }
 
 void CanvasWidget::ApplyTextFormatToSelection(const PageTextStyle& style) {
