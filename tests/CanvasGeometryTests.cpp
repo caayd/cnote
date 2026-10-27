@@ -44,6 +44,7 @@
 #include "shell/AppManager.h"
 #include "text/TextLayoutQt.h"
 #include <QTextBlock>
+#include <QKeyEvent>
 #include "ui/CanvasWidget.h"
 
 namespace {
@@ -126,6 +127,15 @@ bool BoxNear(const InkBox& a, const InkBox& b, int tolerance) {
         && std::abs(a.y0 - b.y0) <= tolerance
         && std::abs(a.x1 - b.x1) <= tolerance
         && std::abs(a.y1 - b.y1) <= tolerance;
+}
+
+void TypeText(QWidget& widget, const QString& text) {
+    for (const QChar character : text) {
+        QKeyEvent press(QEvent::KeyPress, 0, Qt::NoModifier, QString(character));
+        QApplication::sendEvent(&widget, &press);
+        QKeyEvent release(QEvent::KeyRelease, 0, Qt::NoModifier, QString(character));
+        QApplication::sendEvent(&widget, &release);
+    }
 }
 
 }  // namespace
@@ -672,6 +682,56 @@ int main(int argc, char** argv) {
         controller.Undo();
         QCoreApplication::processEvents();
         Check(controller.DocumentRef().PageAt(0).texts.empty(), "wrap probe cleaned up");
+    }
+
+    // (j) Reopening an existing text keeps it visible while editing.  The
+    // committed object is excluded from the cached raster during the edit and
+    // the transparent editor draws it instead; the reopened editor must show
+    // the object's glyphs (and fresh keystrokes), not a blank page.
+    {
+        ui::CanvasInputSettings input = controller.InputSettings();
+        const std::uint32_t savedColor = input.objectColor;
+        input.objectColor = 0xFFFF0000U;
+        controller.SetInputSettings(input);
+        canvas.SetTool(ui::Tool::Text);
+        SendMouse(canvas, QEvent::MouseButtonPress, center, Qt::LeftButton, Qt::LeftButton);
+        SendMouse(canvas, QEvent::MouseButtonRelease, center, Qt::LeftButton, Qt::NoButton);
+        QCoreApplication::processEvents();
+        Check(canvas.TextEditor() != nullptr && canvas.TextEditor()->isVisible(), "reopen probe editor opens");
+        if (canvas.TextEditor() != nullptr && canvas.TextEditor()->isVisible()) {
+            TypeText(*canvas.TextEditor(), QStringLiteral("WWWW MMMM"));
+            QCoreApplication::processEvents();
+            const InkBox typing = RedInk(canvas.grab().toImage());
+            canvas.CommitActiveEdit();
+            QCoreApplication::processEvents();
+            canvas.repaint();
+            const InkBox committed = RedInk(canvas.grab().toImage());
+
+            const QPointF textPt = canvas.PageToScreen(0, {
+                controller.DocumentRef().PageAt(0).texts.back().x + 4.0f,
+                controller.DocumentRef().PageAt(0).texts.back().y + 4.0f });
+            SendMouse(canvas, QEvent::MouseButtonPress, textPt, Qt::LeftButton, Qt::LeftButton);
+            SendMouse(canvas, QEvent::MouseButtonRelease, textPt, Qt::LeftButton, Qt::NoButton);
+            QCoreApplication::processEvents();
+            Check(controller.EditingTextIndex().has_value(), "clicking the committed text reopens it");
+            const InkBox reopened = RedInk(canvas.grab().toImage());
+            TypeText(*canvas.TextEditor(), QStringLiteral(" WWWW"));
+            QCoreApplication::processEvents();
+            const InkBox edited = RedInk(canvas.grab().toImage());
+            std::printf("REOPEN typing=%s committed=%s reopened=%s edited=%s\n",
+                        FormatBox(typing).c_str(), FormatBox(committed).c_str(),
+                        FormatBox(reopened).c_str(), FormatBox(edited).c_str());
+            Check(typing.valid() && committed.valid(), "new text is visible while typing and after commit");
+            Check(BoxNear(reopened, committed, static_cast<int>(3 * devicePixelRatio) + 2),
+                  "the reopened editor shows the text where it was committed");
+            Check(edited.valid() && edited.x1 > reopened.x1, "keystrokes in the reopened editor are visible");
+            canvas.CancelActiveEdit();
+            QCoreApplication::processEvents();
+            Check(controller.Undo(), "undo removes the reopen probe text");
+            QCoreApplication::processEvents();
+        }
+        input.objectColor = savedColor;
+        controller.SetInputSettings(input);
     }
 
     // (i) Precision touchpad routing over overlay chrome.  The sidebar is a

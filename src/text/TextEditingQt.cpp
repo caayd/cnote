@@ -146,11 +146,15 @@ void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, floa
     QTextCursor cursor(&document);
     cursor.select(QTextCursor::Document);
     const QTextCharFormat defaultFormat = CharFormatForStyle(defaultStyle, displayScale);
-    cursor.setCharFormat(defaultFormat);
     // Empty blocks (an emptied editor, a fresh line) take their typing format
     // from the block char format; without it Qt falls back to an unstyled
     // format and new text loses the object's colour, size and family.
+    // Order matters: setBlockCharFormat clears the first block's layout
+    // without scheduling a relayout, so a reopened editor painted nothing
+    // until the next keystroke.  The whole-document setCharFormat after it
+    // relayouts every block.
     cursor.setBlockCharFormat(defaultFormat);
+    cursor.setCharFormat(defaultFormat);
 
     const TextOffsetMap map = BuildTextOffsetMap(text, mathMode);
     for (const PageTextStyleSpan& span : text.styleSpans) {
