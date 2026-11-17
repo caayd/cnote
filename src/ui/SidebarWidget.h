@@ -9,6 +9,7 @@
 #include <QString>
 #include <QWidget>
 
+#include "cnote_ui_export.h"
 #include "ui/LayoutQt.h"
 
 namespace cnote {
@@ -40,7 +41,7 @@ namespace cnote::ui {
 // Thumbnails reproduce App::EnsureSidebarThumbnailCache (src/App.cpp:4354):
 // white page, PDF/raster background, images, strokes - text and LaTeX are
 // deliberately absent, matching the reference list rendering.
-class SidebarWidget : public QWidget {
+class CNOTE_UI_EXPORT SidebarWidget : public QWidget {
     Q_OBJECT
 
 public:

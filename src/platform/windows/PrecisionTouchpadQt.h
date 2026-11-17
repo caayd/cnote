@@ -11,6 +11,7 @@
 
 #include <windows.h>
 
+#include "cnote_ui_export.h"
 #include "platform/windows/PrecisionTouchpad.h"
 #include "ui/PrecisionInputRouter.h"
 #include "ui/PrecisionInputSink.h"
@@ -32,7 +33,7 @@ namespace cnote::ui {
 //   * When the dynamically loaded touchpad APIs are unavailable Install()
 //     returns false, the router reports the same, and every message passes
 //     through to Qt's own wheel/gesture handling.
-class PrecisionTouchpadQt final : public QObject, public QAbstractNativeEventFilter {
+class CNOTE_UI_EXPORT PrecisionTouchpadQt final : public QObject, public QAbstractNativeEventFilter {
     Q_OBJECT
 
 public:

@@ -11,6 +11,7 @@
 #include <QString>
 #include <QWidget>
 
+#include "cnote_ui_export.h"
 #include "Document.h"
 #include "settings/SettingsStoreQt.h"
 #include "ui/LayoutQt.h"
@@ -73,7 +74,7 @@ enum class ToolbarCommand {
 // Overlays are children of window() positioned in host coordinates; the host
 // must therefore be the top-level window, and it must not use a QLayout for the
 // toolbar or its overlays.
-class ToolbarWidget : public QWidget {
+class CNOTE_UI_EXPORT ToolbarWidget : public QWidget {
     Q_OBJECT
 
 public:

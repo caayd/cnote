@@ -16,6 +16,7 @@
 #include <QStringList>
 #include <QWidget>
 
+#include "cnote_ui_export.h"
 #include "Document.h"
 #include "latex/LatexCompletion.h"
 #include "latex/LatexEngine.h"
@@ -53,7 +54,7 @@ struct CanvasPageView {
 // only a view: committed objects come from render::PageRenderer, text layout
 // from text::TextLayoutQt, edit decisions from text::TextEditingQt and every
 // document mutation goes through CanvasController.
-class CanvasWidget : public QWidget, public EditContentSource, public InteractionHost, public PrecisionInputSink {
+class CNOTE_UI_EXPORT CanvasWidget : public QWidget, public EditContentSource, public InteractionHost, public PrecisionInputSink {
     Q_OBJECT
 
 public:

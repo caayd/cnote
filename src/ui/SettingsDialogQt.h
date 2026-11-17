@@ -5,6 +5,7 @@
 
 #include <optional>
 
+#include "cnote_ui_export.h"
 #include "settings/KeyBindingQt.h"
 #include "settings/SettingsStoreQt.h"
 
@@ -34,7 +35,7 @@ namespace cnote::ui {
 // so the owning window can re-read palette/brush/chrome values.  A failed
 // persist still applies the in-memory value (legacy semantics) but reports
 // false through lastSaveSucceeded() and emits settingsSaveFailed().
-class SettingsDialogQt : public QDialog {
+class CNOTE_UI_EXPORT SettingsDialogQt : public QDialog {
     Q_OBJECT
 
 public:

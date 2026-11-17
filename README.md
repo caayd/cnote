@@ -167,6 +167,28 @@ macOS uses the same two commands with `-DCMAKE_PREFIX_PATH=<qt>/clang_64`,
 `pdfium-mac-<arch>` SDK. **The macOS build has not been executed** - see the
 release status below.
 
+### Presets
+
+`CMakePresets.json` wraps the commands above. Set `CNOTE_QT` to the Qt kit
+(e.g. `C:/Qt/6.11.2/mingw_64`) and, on Windows, `CNOTE_CXX` to the kit's
+compiler (e.g. `C:/Qt/Tools/mingw1310_64/bin/g++.exe`); PDFium defaults to the
+vendored `third_party/pdfium`.
+
+| Preset | Build dir | What |
+| --- | --- | --- |
+| `dev` | `build-dev/` | Shared project libraries and [ccache](https://ccache.dev): about 90 MB instead of about 250 MB, and a fresh worktree reuses cached objects. For development and tests only; `cmake --install` refuses it. |
+| `release` | `build-release/` | Static, the configuration CI and packages use. |
+
+```bash
+cmake --preset dev && cmake --build --preset dev && ctest --preset dev
+```
+
+Use `cmake --build --preset dev` rather than `cmake --build build-dev`: the
+build preset sets `CCACHE_BASEDIR`, which lets worktrees share cache entries.
+QObject classes in `cnote_ui` that declare signals need `CNOTE_UI_EXPORT`
+(`#include "cnote_ui_export.h"`), or connecting to them from a test fails with
+"signal not found" in the shared build.
+
 ## Test
 
 The suite needs no display for the model/codec tests. Every Qt test selects

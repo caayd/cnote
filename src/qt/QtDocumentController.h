@@ -11,6 +11,7 @@
 #include <QObject>
 #include <QString>
 
+#include "cnote_ui_export.h"
 #include "Document.h"
 #include "document/SelectionClipboardCodec.h"
 #include "ui/PageDefaultsQt.h"
@@ -38,7 +39,7 @@ namespace cnote::qt {
 // History goes through the portable cnote_model reducer
 // (cnote::ApplyHistoryAction); this class only moves the stacks, bumps the
 // revision once per commit and broadcasts to the session's views.
-class QtDocumentController final : public QObject, public ui::CanvasController, public SessionView {
+class CNOTE_UI_EXPORT QtDocumentController final : public QObject, public ui::CanvasController, public SessionView {
     Q_OBJECT
 
 public:

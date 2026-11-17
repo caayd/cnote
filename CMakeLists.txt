@@ -7,10 +7,21 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/Pdfium.cmake")
 
+# Library linkage.  Releases, CI and packaging use the default static build.
+# BUILD_SHARED_LIBS=ON (the `dev` preset) builds the project libraries as
+# DLLs/shared objects so the ~30 test executables share one copy of the code
+# instead of each linking all of it: a development/test configuration only.
+option(BUILD_SHARED_LIBS "Build project libraries as shared libraries (development builds only)" OFF)
+if(BUILD_SHARED_LIBS AND MINGW)
+    # GNU ld exports every symbol only while no dllexport is present; the
+    # CNOTE_UI_EXPORT classes below would otherwise turn that off for cnote_ui.
+    string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,--export-all-symbols")
+endif()
+
 find_package(Qt6 6.11.2 REQUIRED COMPONENTS Core)
 
 
-add_library(cnote_model STATIC
+add_library(cnote_model
     src/Document.cpp
     src/document/HistoryReducer.cpp
 )
@@ -22,7 +33,7 @@ target_compile_options(cnote_model PRIVATE
 
 
 # Vendored tinyxml2 10.0.0 (zlib license), required by MicroTeX's XML parsers.
-add_library(tinyxml2 STATIC third_party/tinyxml2/tinyxml2.cpp)
+add_library(tinyxml2 third_party/tinyxml2/tinyxml2.cpp)
 target_include_directories(tinyxml2 PUBLIC third_party/tinyxml2)
 
 # Vendored MicroTeX (NanoMichael/MicroTeX @ 0e3707f6, MIT).
@@ -132,7 +143,7 @@ enable_testing()
 # executable, and the GPLv3 res/greek + res/cyrillic directories stay stripped.
 find_package(Qt6 6.11.2 REQUIRED COMPONENTS Gui)
 
-add_library(microtex_qt STATIC
+add_library(microtex_qt
     ${CNOTE_MICROTEX_ENGINE_SOURCES}
     third_party/microtex/src/platform/qt/graphic_qt.cpp
 )
@@ -216,7 +227,7 @@ add_test(NAME session_manager_qt COMMAND cnote_session_manager_tests)
 # No App/HWND/HDC and no second rendering or text path.
 find_package(Qt6 6.11.2 REQUIRED COMPONENTS Widgets)
 
-add_library(cnote_ui STATIC
+add_library(cnote_ui
     src/ui/CanvasWidget.cpp
     src/ui/InlineMathTextEdit.cpp
     src/ui/LayoutQt.cpp
@@ -243,6 +254,18 @@ target_compile_options(cnote_ui PRIVATE
 )
 # cnote_services provides PdfiumBackend plus the portable file-loader service.
 target_link_libraries(cnote_ui PUBLIC cnote_services Qt6::Widgets)
+
+# QObject classes with signals carry CNOTE_UI_EXPORT: in a shared build a
+# pointer-to-member signal taken outside the DLL (connect(&w, &Widget::sig, ...))
+# must resolve to the DLL's own function, which only a dllimport'ed class gives
+# on Windows; MinGW's auto-import would hand out a local thunk instead and Qt
+# reports "signal not found".  Empty in the static build.
+include(GenerateExportHeader)
+generate_export_header(cnote_ui BASE_NAME cnote_ui)
+target_include_directories(cnote_ui PUBLIC "${CMAKE_CURRENT_BINARY_DIR}")
+if(NOT BUILD_SHARED_LIBS)
+    target_compile_definitions(cnote_ui PUBLIC CNOTE_UI_STATIC_DEFINE)
+endif()
 
 qt_add_resources(cnote_ui "cnote_chrome_assets"
     PREFIX "/cnote"
@@ -366,7 +389,7 @@ endif()
 # --- cnote_services: project codecs, settings, text layout, LaTeX, PDFium and
 # page rendering (plan step 1.5).  Qt Core/Gui only: no widgets, no window
 # handles, no App state.
-add_library(cnote_services STATIC
+add_library(cnote_services
     # Project codecs and file loading.
     src/ProjectFile.cpp
     src/document/LoadDocumentFile.cpp
@@ -528,6 +551,11 @@ else()
     set(_cnote_resource_dest "${CMAKE_INSTALL_BINDIR}")
 endif()
 
+# The install tree only carries the executable's own runtime: shared project
+# libraries are a development configuration and are never packaged.
+if(BUILD_SHARED_LIBS)
+    install(CODE "message(FATAL_ERROR \"cnote packages need the static build: reconfigure with BUILD_SHARED_LIBS=OFF\")")
+endif()
 install(TARGETS cnote
     BUNDLE DESTINATION .
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"

@@ -43,8 +43,14 @@ env:
 
 jobs:
   windows-x64:
-    name: Windows x64 (MinGW)
+    # BUILD_SHARED_LIBS=ON is the `dev` preset agents and worktrees build with;
+    # OFF is the shipped configuration.  Both must pass.
+    name: Windows x64 (MinGW, shared libs ${{ matrix.shared }})
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        shared: [OFF, ON]
     env:
       PDFIUM_ASSET: pdfium-win-x64.tgz
     steps:
@@ -95,7 +101,8 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER="$CNOTE_CXX_COMPILER" \
             -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
-            -DCNOTE_PDFIUM_ROOT="$CNOTE_PDFIUM_ROOT"
+            -DCNOTE_PDFIUM_ROOT="$CNOTE_PDFIUM_ROOT" \
+            -DBUILD_SHARED_LIBS=${{ matrix.shared }}
 
       - name: Build
         shell: bash

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "cnote_ui_export.h"
 #include "settings/SettingsStoreQt.h"
 #include "ui/PageDefaultsQt.h"
 
@@ -32,7 +33,7 @@ namespace cnote::ui {
 // scope.  Document mutation, history and cache invalidation belong to the
 // owning controller, which also pushes futureDefaultsChanged() into
 // Document::SetNewPageDefaults.
-class NewPageDialogQt : public QDialog {
+class CNOTE_UI_EXPORT NewPageDialogQt : public QDialog {
     Q_OBJECT
 
 public:
