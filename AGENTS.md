@@ -61,14 +61,20 @@ ctest --preset dev                             # or: -R chrome_qt
 - A new test is an executable plus `add_test` in `CMakeLists.txt`; on Windows, also add the target to the
   test runtime staging list (`cnote_stage_test_runtime`) so it finds the Qt and PDFium DLLs.
 - Don't set `QT_QPA_PLATFORM` globally; each test picks its platform (see "Test" in `README.md`).
+- Agents never open a visible window: the suite runs offscreen or keeps its native windows off screen, and the
+  app is exercised with `--capture`/`--script` (below). A new test that shows a window on the native platform
+  must keep it off screen too (`cnote::shell::OffscreenWindows`, as `window_chrome_native_qt` does).
 
 ## Before opening a PR
 
 - `ctest --preset dev` passes in full, with no new compiler warnings (`-Wall -Wextra -Wpedantic`).
-- Exercise the change in the app (`build-dev/cnote.exe`, or `build-dev/cnote` elsewhere) when it affects
-  behavior, and say in the PR what you ran and what you saw.
-- **Visual changes need screenshots in the PR:** push them to an orphan branch `<github-login>/<topic>-screenshots`
-  and embed `https://github.com/caayd/cnote/blob/<that branch>/<file>.png?raw=true`.
+- Exercise the change in the app when it affects behavior, headless: `build-dev/cnote.exe --script=steps.txt
+  --capture=out.png [file]` (`build-dev/cnote` elsewhere; in PowerShell append `| Out-Host`). The script clicks,
+  drags, types and captures; see "Headless runs" in `README.md`. Look at the PNGs, and say in the PR what you ran
+  and what you saw.
+- **Visual changes need screenshots in the PR:** use those captures (`--scale=1` unless DPI matters). Push them
+  to an orphan branch `<github-login>/<topic>-screenshots` and embed
+  `https://github.com/caayd/cnote/blob/<that branch>/<file>.png?raw=true`.
 - CI (`.github/workflows/ci.yml`) runs on every PR; check it with `gh pr checks`.
 
 ## Repo map
@@ -80,7 +86,7 @@ follow the layers:
 |---|---|
 | `src/Document.*`, `src/document/HistoryReducer.*` | Model (`cnote_model`): document and history. Standard C++ only, no Qt. |
 | `src/document/`, `src/text/`, `src/render/`, `src/latex/`, `src/settings/`, `src/selection/`, `src/ProjectFile.*`, `src/PdfBackend.cpp` | Services (`cnote_services`): codecs, text layout, page rendering, PDF, MicroTeX, settings. Qt Core/Gui, no widgets. |
-| `src/ui/`, `src/qt/`, `src/shell/`, `src/platform/windows/` | UI (`cnote_ui`): canvas, chrome widgets, dialogs, controller, Windows touchpad adapter. |
+| `src/ui/`, `src/qt/`, `src/shell/`, `src/platform/windows/` | UI (`cnote_ui`): canvas, chrome widgets, dialogs, controller, headless capture driver, Windows touchpad adapter. |
 | `src/main.cpp` | The `cnote` executable. |
 | `tests/` | One executable per area, registered in `CMakeLists.txt`. |
 | `third_party/` | Vendored PDFium SDK, MicroTeX, tinyxml2, fonts, MinGW headers. Don't modify without updating `THIRD-PARTY-NOTICES.md`. |
