@@ -1,0 +1,19 @@
+# headless demo: stroke, quick-size popup, typed text with inline math, title menu, settings
+drag 260 260 760 420
+move 520 340
+key Ctrl+W
+wait 100
+capture cap/pr/1-quick-size-popup.png
+key Escape
+click 1075 17
+click 200 600
+type Typed by a script: $e^{i\pi}+1=0$ done
+wait 100
+capture cap/pr/2-text-and-math.png
+key Escape
+click 30 17
+wait 100
+capture cap/pr/3-title-menu.png
+click 48 213
+wait 300
+capture cap/pr/4-settings-dialog.png
