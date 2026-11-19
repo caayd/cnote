@@ -48,6 +48,7 @@
 #include "platform/AppResourcePaths.h"
 #include "qt/QtDocumentController.h"
 #include "qt/QtMainWindow.h"
+#include "settings/SettingsStoreQt.h"
 #include "shell/AppManager.h"
 #include "shell/CaptureDriver.h"
 
@@ -213,17 +214,6 @@ bool LoadCaptureSteps(const CaptureOptions& options, std::vector<cnote::shell::C
     return false;
 }
 
-// Points the settings store at the scratch directory before any window loads
-// it, so a capture run neither reads nor writes the user's settings.
-void RedirectSettings(const std::filesystem::path& scratch) {
-    const std::string value = cnote::PathToUtf8(scratch / "settings");
-#if defined(Q_OS_WIN)
-    qputenv("APPDATA", QByteArray::fromStdString(value));
-#else
-    qputenv("XDG_CONFIG_HOME", QByteArray::fromStdString(value));
-#endif
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -309,7 +299,10 @@ int main(int argc, char** argv) {
             return 2;
         }
         const std::filesystem::path scratch = cnote::Utf8ToPath(captureScratch->path().toUtf8().toStdString());
-        RedirectSettings(scratch);
+        // Scratch settings before any window loads them: a capture run neither
+        // reads nor writes the user's settings (macOS ignores XDG, so the
+        // store is redirected directly rather than through the environment).
+        cnote::settings::SettingsStoreQt::OverrideSettingsPath(scratch / "settings.ini");
         // The run opens a copy: a script may edit and save, and the user's
         // document must stay untouched.
         if (!startupFile.empty()) {

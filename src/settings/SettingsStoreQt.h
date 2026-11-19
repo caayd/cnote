@@ -125,6 +125,8 @@ struct Settings {
 //            working directory when APPDATA is unset (unchanged legacy rule).
 //   other    QStandardPaths::AppConfigLocation plus settings.ini, once the
 //            application is named "cnote" with no organization component.
+//   override OverrideSettingsPath() replaces both for the whole process (the
+//            headless capture mode's scratch settings).
 //
 // Parse and serialize mirror src/AppSettings.cpp key-for-key.  Persistence goes
 // through QSaveFile, so a failed write/commit leaves the previous destination
@@ -147,6 +149,9 @@ public:
     bool Save(const Settings& settings) const;
 
     static std::filesystem::path ResolveSettingsPath();
+    // Every store constructed afterwards uses `path` instead of the platform
+    // location.  Call before any window loads its settings.
+    static void OverrideSettingsPath(std::filesystem::path path);
 
     // Exposed for the parity harness and tests: parse/serialize the exact text
     // form shared with the legacy Win32 writer.

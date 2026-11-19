@@ -501,7 +501,23 @@ SettingsStoreQt::SettingsStoreQt() : path_(ResolveSettingsPath()) {}
 
 SettingsStoreQt::SettingsStoreQt(std::filesystem::path path) : path_(std::move(path)) {}
 
+namespace {
+
+std::filesystem::path& SettingsPathOverride() {
+    static std::filesystem::path path;
+    return path;
+}
+
+}  // namespace
+
+void SettingsStoreQt::OverrideSettingsPath(std::filesystem::path path) {
+    SettingsPathOverride() = std::move(path);
+}
+
 std::filesystem::path SettingsStoreQt::ResolveSettingsPath() {
+    if (!SettingsPathOverride().empty()) {
+        return SettingsPathOverride();
+    }
 #ifdef _WIN32
     const QString appData = qEnvironmentVariable("APPDATA");
     if (!appData.isEmpty()) {

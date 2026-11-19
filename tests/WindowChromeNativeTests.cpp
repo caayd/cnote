@@ -13,6 +13,7 @@
 // the caption buttons (ShowWindow would show it) and the maximized hit test
 // (IsZoomed).  ResolveWindowChromeHit's maximized branch is covered offscreen.
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -22,11 +23,13 @@
 #include <QPoint>
 #include <QPointF>
 #include <QRect>
+#include <QScreen>
 #include <QTemporaryDir>
 
 #include <windows.h>
 
 #include "qt/QtMainWindow.h"
+#include "settings/SettingsStoreQt.h"
 #include "shell/AppManager.h"
 #include "shell/CaptureDriver.h"
 #include "ui/ToolbarWidget.h"
@@ -175,7 +178,8 @@ int main(int argc, char** argv) {
     QCoreApplication::setApplicationName(QStringLiteral("cnote"));
     // The window loads and may write settings: keep the developer's file out of it.
     QTemporaryDir settings;
-    qputenv("APPDATA", settings.path().toUtf8());
+    cnote::settings::SettingsStoreQt::OverrideSettingsPath(
+        std::filesystem::path(settings.path().toStdWString()) / "settings.ini");
     cnote::qt::QtMainWindow::SetHeadlessModals(true);
 
     cnote::shell::OffscreenWindows offscreen;
@@ -191,9 +195,13 @@ int main(int argc, char** argv) {
         cnote::AppManager manager;
         cnote::qt::QtMainWindow window(manager);
         offscreen.SetPrimaryWindow(&window);
-        window.move(100, 100);
+        // Inside the work area: Windows clamps a window larger than the screen
+        // (as on small CI runner screens), which would cut the caption cluster
+        // off the native window while the widget still lays it out.
+        const QRect available = QGuiApplication::primaryScreen()->availableGeometry();
+        window.move(available.topLeft() + QPoint(20, 20));
         window.show();
-        window.resize(1200, 800);
+        window.resize(std::min(1000, available.width() - 60), std::min(700, available.height() - 60));
         QApplication::processEvents();
 
         NativeWindow native { window, reinterpret_cast<HWND>(window.winId()),
