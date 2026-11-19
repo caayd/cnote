@@ -76,7 +76,9 @@ jobs:
           curl -fsSL -o "$RUNNER_TEMP/pdfium.tgz" \
             "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${PDFIUM_ASSET}"
           expected=$(awk -v asset="$PDFIUM_ASSET" '$1 == asset { print $2 }' .github/dependency-digests.txt)
-          actual=$(sha256sum "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
+          # Hash stdin: given a path with backslashes ($RUNNER_TEMP is D:\a\_temp),
+          # GNU sha256sum escapes the name and prefixes the line with '\'.
+          actual=$(sha256sum < "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
           if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
             echo "PDFium digest mismatch for $PDFIUM_ASSET (expected '$expected', got '$actual')" >&2
             exit 1

@@ -43,6 +43,9 @@ jobs:
           arch: win64_mingw
           tools: tools_mingw1310
           cache: true
+          # aqtinstall 3.3.0 cannot find Qt 6.11's per-compiler Windows
+          # repositories; see ci.yml for the pinned commit.
+          aqtsource: git+https://github.com/miurahr/aqtinstall.git@5a49f2b391ae8ee1d3c0dd87f8b33c1d49a4deb7
 
       - name: Fetch and verify PDFium
         shell: bash
@@ -51,7 +54,8 @@ jobs:
           curl -fsSL -o "$RUNNER_TEMP/pdfium.tgz" \
             "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${PDFIUM_ASSET}"
           expected=$(awk -v asset="$PDFIUM_ASSET" '$1 == asset { print $2 }' .github/dependency-digests.txt)
-          actual=$(sha256sum "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
+          # Hash stdin: GNU sha256sum escapes a backslash path and prefixes '\'.
+          actual=$(sha256sum < "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
           if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
             echo "PDFium digest mismatch for $PDFIUM_ASSET" >&2
             exit 1
