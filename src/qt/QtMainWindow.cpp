@@ -8,7 +8,6 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QCloseEvent>
-#include <QCursor>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QKeyEvent>
@@ -32,6 +31,7 @@
 #include "ui/CanvasWidget.h"
 #include "ui/LayoutQt.h"
 #include "ui/NewPageDialogQt.h"
+#include "ui/PointerPositionQt.h"
 #include "ui/SettingsDialogQt.h"
 #include "ui/SettingsFormatQt.h"
 #include "ui/SidebarWidget.h"
@@ -98,6 +98,30 @@ ui::ToolbarControl HitCodeControl(LRESULT code) {
     }
 }
 #endif
+
+// Brings a modeless dialog forward.  A dialog kept off screen (the capture
+// driver's WA_DontShowOnScreen, shell/CaptureDriver.h) must not ask the OS for
+// activation: Windows would move keyboard focus from the user's foreground
+// application to an invisible window.  The driver activates it inside Qt.
+void ShowModeless(QWidget* dialog) {
+    dialog->show();
+    dialog->raise();
+    if (!dialog->testAttribute(Qt::WA_DontShowOnScreen)) {
+        dialog->activateWindow();
+    }
+}
+
+// The native file dialogs ignore Qt's off-screen attributes and block, so a
+// headless run (CNOTE_HEADLESS, --self-check, --capture/--script) answers them
+// as cancelled.
+QString AskFileName(QWidget* parent, bool save, const QString& caption, const QString& filter) {
+    if (QtMainWindow::HeadlessModals()) {
+        std::fprintf(stderr, "MODAL cnote: %s dialog -> cancelled (headless)\n", caption.toUtf8().constData());
+        return QString();
+    }
+    return save ? QFileDialog::getSaveFileName(parent, caption, QString(), filter)
+                : QFileDialog::getOpenFileName(parent, caption, QString(), filter);
+}
 
 // settings::Tool and ui::Tool mirror each other one for one (settings cannot
 // include the router header); the switch keeps a future addition a compile
@@ -792,7 +816,7 @@ QPointF QtMainWindow::ZoomAnchorPoint() const {
             return anchor;
         }
     }
-    const QPoint cursor = canvas_->mapFromGlobal(QCursor::pos());
+    const QPoint cursor = canvas_->mapFromGlobal(ui::GlobalCursorPos());
     if (canvas_->rect().contains(cursor)) {
         return QPointF(cursor);
     }
@@ -871,7 +895,7 @@ QPointF QtMainWindow::QuickPopupCursorAnchor() const {
     // (exclusive right/bottom edges, like the reference PtInRect-style check)
     // the anchor falls back to the canvas centre 120 px below its top.  Qt
     // works in device-independent pixels, so the offset is used as-is.
-    const QPointF cursor = mapFromGlobal(QCursor::pos());
+    const QPointF cursor = mapFromGlobal(ui::GlobalCursorPos());
     const QRectF canvas = toolbar_ != nullptr ? toolbar_->HostCanvasRect() : QRectF();
     const bool inside = cursor.x() >= canvas.left() && cursor.x() < canvas.right()
         && cursor.y() >= canvas.top() && cursor.y() < canvas.bottom();
@@ -965,9 +989,7 @@ void QtMainWindow::ToggleSettingsDialog() {
         });
     }
     settingsDialog_->refreshFromSettings();
-    settingsDialog_->show();
-    settingsDialog_->raise();
-    settingsDialog_->activateWindow();
+    ShowModeless(settingsDialog_);
 }
 
 void QtMainWindow::ToggleSidebar() {
@@ -1026,9 +1048,7 @@ void QtMainWindow::OpenNewPageSettings() {
     }
     newPageDialog_->setDefaults(controller_.NewPageDefaults(), recentPageColors_);
     newPageDialog_->refreshFromSettings();
-    newPageDialog_->show();
-    newPageDialog_->raise();
-    newPageDialog_->activateWindow();
+    ShowModeless(newPageDialog_);
 }
 
 void QtMainWindow::CopySelection() {
@@ -1179,11 +1199,8 @@ bool QtMainWindow::OpenPath(const std::filesystem::path& path) {
 }
 
 void QtMainWindow::OpenFileDialog() {
-    const QString selected = QFileDialog::getOpenFileName(
-        this,
-        QStringLiteral("Open"),
-        QString(),
-        QStringLiteral("cnote projects and PDFs (*.cnote *.pdf);;All files (*)"));
+    const QString selected = AskFileName(
+        this, false, QStringLiteral("Open"), QStringLiteral("cnote projects and PDFs (*.cnote *.pdf);;All files (*)"));
     if (!selected.isEmpty()) {
         static_cast<void>(OpenPath(std::filesystem::path(selected.toStdString())));
     }
@@ -1260,11 +1277,7 @@ void QtMainWindow::Save() {
 }
 
 bool QtMainWindow::SaveAs() {
-    const QString selected = QFileDialog::getSaveFileName(
-        this,
-        QStringLiteral("Save As"),
-        QString(),
-        QStringLiteral("cnote project (*.cnote)"));
+    const QString selected = AskFileName(this, true, QStringLiteral("Save As"), QStringLiteral("cnote project (*.cnote)"));
     if (selected.isEmpty()) {
         return false;
     }
@@ -1282,11 +1295,7 @@ bool QtMainWindow::SaveAs() {
 
 bool QtMainWindow::ExportPdf(bool embedProject) {
     canvas_->CommitActiveEdit();
-    const QString selected = QFileDialog::getSaveFileName(
-        this,
-        QStringLiteral("Export PDF"),
-        QString(),
-        QStringLiteral("PDF (*.pdf)"));
+    const QString selected = AskFileName(this, true, QStringLiteral("Export PDF"), QStringLiteral("PDF (*.pdf)"));
     if (selected.isEmpty()) {
         return false;
     }
@@ -1751,7 +1760,7 @@ bool QtMainWindow::eventFilter(QObject* watched, QEvent* event) {
         const bool pageKey = (ctrl && (key->key() == Qt::Key_C || key->key() == Qt::Key_X || key->key() == Qt::Key_V))
             || key->key() == Qt::Key_Delete;
         const bool sidebarOwnsKeys = watched == sidebar_
-            || sidebar_->rect().contains(sidebar_->mapFromGlobal(QCursor::pos()));
+            || sidebar_->rect().contains(sidebar_->mapFromGlobal(ui::GlobalCursorPos()));
         if (pageKey && sidebarOwnsKeys) {
             const std::size_t page = controller_.CurrentPageIndex();
             if (event->type() == QEvent::ShortcutOverride) {

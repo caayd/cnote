@@ -2,8 +2,8 @@
 // with 4.5/7.2 for the close and autosave interplay).
 //
 // Drives the real services (QtDocumentController, AppManager, QtMainWindow,
-// SettingsStoreQt) against a temporary directory, HOME/APPDATA-style settings
-// location and project files:
+// SettingsStoreQt) against a temporary directory, a temporary settings file
+// (SettingsStoreQt::OverrideSettingsPath) and project files:
 //
 //   * a successful project save writes the file, clears shared dirty state and
 //     broadcasts exactly one Saved change;
@@ -241,11 +241,7 @@ void RotatedPdfGeometrySurvivesReopen() {
 
 void DefaultPageSizePrecedence() {
     const std::filesystem::path dir = MakeTempDir("page-size");
-#ifdef _WIN32
-    qputenv("APPDATA", dir.string().c_str());
-#else
-    qputenv("XDG_CONFIG_HOME", dir.string().c_str());
-#endif
+    cnote::settings::SettingsStoreQt::OverrideSettingsPath(dir / "settings.ini");
     cnote::qt::QtMainWindow::SetHeadlessModals(true);
     cnote::settings::Settings settings;
     settings.defaultPageSizePreset = 1; // Letter Landscape.
@@ -828,6 +824,9 @@ void CancelledUnsavedPromptKeepsWindowAlive() {
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("cnote"));
+    // Every window here loads settings and records recent files: keep the
+    // developer's real settings file out of it.
+    cnote::settings::SettingsStoreQt::OverrideSettingsPath(MakeTempDir("settings") / "settings.ini");
     if (argc == 2 && std::string_view(argv[1]) == "--rotated-pdf") {
         RotatedPdfGeometrySurvivesReopen();
         return gFailures == 0 ? 0 : 1;

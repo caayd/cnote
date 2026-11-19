@@ -7,7 +7,6 @@
 #include <utility>
 
 #include <QApplication>
-#include <QCursor>
 #include <QEvent>
 #include <QFontMetricsF>
 #include <QKeyEvent>
@@ -20,6 +19,7 @@
 
 #include "ui/ChromeAssetsQt.h"
 #include "ui/ChromeStyleQt.h"
+#include "ui/PointerPositionQt.h"
 
 namespace cnote::ui {
 
@@ -2056,7 +2056,7 @@ void ToolbarWidget::TogglePaletteWheel() {
     if (host == nullptr) {
         return;
     }
-    QPointF anchor = host->mapFromGlobal(QCursor::pos());
+    QPointF anchor = host->mapFromGlobal(GlobalCursorPos());
     if (!ContainsPoint(HostClientRect(), anchor)) {
         const QPointF hostOrigin(mapTo(host, QPoint(0, 0)));
         const QRectF colorRect = ControlRect(ToolbarControl::CurrentColor).translated(hostOrigin);

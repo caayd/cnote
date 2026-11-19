@@ -225,7 +225,9 @@ add_test(NAME session_manager_qt COMMAND cnote_session_manager_tests)
 # delegates all committed-object drawing to cnote_services; the controller owns
 # the shared ProjectSession (document + undo/redo) behind ui::CanvasController.
 # No App/HWND/HDC and no second rendering or text path.
-find_package(Qt6 6.11.2 REQUIRED COMPONENTS Widgets)
+# GuiPrivate: see the capture driver note below.
+set(QT_NO_PRIVATE_MODULE_WARNING ON)
+find_package(Qt6 6.11.2 REQUIRED COMPONENTS Widgets GuiPrivate)
 
 add_library(cnote_ui
     src/ui/CanvasWidget.cpp
@@ -240,10 +242,12 @@ add_library(cnote_ui
     src/ui/InteractionRouter.cpp
     src/ui/PrecisionInputRouter.cpp
     src/ui/PrecisionInputFilterQt.cpp
+    src/ui/PointerPositionQt.cpp
     src/qt/QtDocumentController.cpp
     src/qt/QtDocumentIo.cpp
     src/qt/QtMainWindow.cpp
     src/shell/AppManager.cpp
+    src/shell/CaptureDriver.cpp
     # Settings and new-page dialogs the window owns (modeless, live model).
 )
 set_target_properties(cnote_ui PROPERTIES AUTOMOC ON)
@@ -254,6 +258,10 @@ target_compile_options(cnote_ui PRIVATE
 )
 # cnote_services provides PdfiumBackend plus the portable file-loader service.
 target_link_libraries(cnote_ui PUBLIC cnote_services Qt6::Widgets)
+# The capture driver (src/shell/CaptureDriver.cpp) injects input through
+# QWindowSystemInterface and fixes the screen scale through QHighDpiScaling;
+# both are header-level private Qt API, so no extra Qt library is linked.
+target_link_libraries(cnote_ui PRIVATE Qt6::GuiPrivate)
 
 # QObject classes with signals carry CNOTE_UI_EXPORT: in a shared build a
 # pointer-to-member signal taken outside the DLL (connect(&w, &Widget::sig, ...))
@@ -950,11 +958,11 @@ set_tests_properties(default_page_size_qt PROPERTIES TIMEOUT 30
 # The Windows shell removes the native caption through the window handle
 # (WM_NCCALCSIZE / WM_NCACTIVATE / WM_NCHITTEST, the reference App::HandleMessage
 # path) while keeping the WS_OVERLAPPEDWINDOW style, and the toolbar band carries
-# the app's own minimize/maximize/close cluster.  The native half needs a real
-# desktop; this test covers its platform-neutral arithmetic
-# (ResolveWindowChromeHit), the band/control geometry under the native frame
-# inset, the maximize/restore glyph and band-height transition, the auto-hide
-# band state machine and the caption-button command intents - all offscreen.
+# the app's own minimize/maximize/close cluster.  This test covers the
+# platform-neutral arithmetic (ResolveWindowChromeHit), the band/control geometry
+# under the native frame inset, the maximize/restore glyph and band-height
+# transition, the auto-hide band state machine and the caption-button command
+# intents - all offscreen.  window_chrome_native_qt below drives the native half.
 add_executable(cnote_window_chrome_tests tests/WindowChromeTests.cpp)
 target_include_directories(cnote_window_chrome_tests PRIVATE src)
 target_compile_features(cnote_window_chrome_tests PRIVATE cxx_std_20)
@@ -965,6 +973,42 @@ target_link_libraries(cnote_window_chrome_tests PRIVATE cnote_ui cnote_model Qt6
 add_test(NAME window_chrome_qt COMMAND cnote_window_chrome_tests)
 set_tests_properties(window_chrome_qt PROPERTIES TIMEOUT 120
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
+
+# The native half of the window chrome (Windows only): the real window procedure
+# answers WM_NCCALCSIZE/WM_NCACTIVATE/WM_NCHITTEST and the caption-button press
+# cycle.  The HWND is created on the native platform but kept off screen the way
+# the capture mode does it (Qt::WA_DontShowOnScreen), so no window appears.
+if(WIN32)
+    add_executable(cnote_window_chrome_native_tests tests/WindowChromeNativeTests.cpp)
+    target_compile_options(cnote_window_chrome_native_tests PRIVATE
+        $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+    )
+    target_link_libraries(cnote_window_chrome_native_tests PRIVATE cnote_ui Qt6::Widgets user32)
+    add_test(NAME window_chrome_native_qt COMMAND cnote_window_chrome_native_tests)
+    set_tests_properties(window_chrome_native_qt PROPERTIES TIMEOUT 120
+        ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_plugins}")
+endif()
+
+# Headless capture mode end to end through the real executable: no window ever
+# visible or foreground, scripted input reaching the app, capture size and
+# scale, the startup document left untouched, script errors with line numbers.
+# The executable picks its own platform (native on Windows/macOS, offscreen on
+# Linux), so no QT_QPA_PLATFORM is set here.
+add_executable(cnote_capture_cli_tests tests/CaptureCliTests.cpp)
+target_compile_options(cnote_capture_cli_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_compile_definitions(cnote_capture_cli_tests PRIVATE
+    CNOTE_EXECUTABLE="$<TARGET_FILE:cnote>"
+    CNOTE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tools/fixtures/blank.cnote")
+target_link_libraries(cnote_capture_cli_tests PRIVATE Qt6::Gui)
+if(WIN32)
+    target_link_libraries(cnote_capture_cli_tests PRIVATE user32)
+endif()
+add_dependencies(cnote_capture_cli_tests cnote)
+add_test(NAME capture_cli_qt COMMAND cnote_capture_cli_tests)
+set_tests_properties(capture_cli_qt PROPERTIES TIMEOUT 180
+    ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_plugins}")
 
 # --- Test runtime staging (test hygiene) --------------------------------------
 # A fresh build directory has no Qt, PDFium or MinGW runtime on PATH, so every Qt
@@ -1016,7 +1060,9 @@ if(WIN32)
         cnote_font_fallback_tests
         cnote_xpress_codec_tests
         cnote_persistence_tests
-        cnote_window_chrome_tests)
+        cnote_window_chrome_tests
+        cnote_window_chrome_native_tests
+        cnote_capture_cli_tests)
         if(TARGET ${_cnote_test_target})
             cnote_stage_test_runtime(${_cnote_test_target})
         endif()

@@ -191,12 +191,13 @@ QObject classes in `cnote_ui` that declare signals need `CNOTE_UI_EXPORT`
 
 ## Test
 
-The suite needs no display for the model/codec tests. Every Qt test selects
-its own platform through its CTest `ENVIRONMENT` properties (offscreen
-everywhere except the three Windows tests that need the native platform), so
-a plain `ctest` works after configure - do not force `QT_QPA_PLATFORM`
-globally, because the offscreen plugin's placeholder font metrics break the
-Windows font tests:
+The suite needs no display and never puts a window on screen, so it runs
+unattended next to other work. Every Qt test selects its own platform through
+its CTest `ENVIRONMENT` properties: offscreen everywhere except the Windows
+tests that need the native platform, which either create no window at all or
+keep theirs off screen. A plain `ctest` works after configure - do not force
+`QT_QPA_PLATFORM` globally, because the offscreen plugin's placeholder font
+metrics break the Windows font tests:
 
 ```bash
 # model/codec tests, no display
@@ -208,11 +209,12 @@ ctest --test-dir build-qt -E '^(xpress_codec|session_manager_qt|interaction_rout
 The headless set is `xpress_codec` (pure C++), `session_manager_qt`
 (`QCoreApplication` only), `interaction_router_qt` and
 `precision_input_router_qt` (no Qt application object). On Windows the suite
-has 34 tests; Linux and macOS have 33 because `precision_touchpad_qt` is
-Windows-only. On Windows, `selection_clipboard_qt` (real clipboard bridge),
-`layout_parity_qt` and `font_fallback_qt` (real font metrics) run on the
-native platform; `layout_parity_qt` compares the Qt chrome geometry against
-the frozen reference table captured from the removed Win32 frontend.
+has 36 tests; Linux and macOS have 34 because `precision_touchpad_qt` and
+`window_chrome_native_qt` are Windows-only. On Windows, `selection_clipboard_qt`
+(real clipboard bridge), `layout_parity_qt` and `font_fallback_qt` (real font
+metrics) run on the native platform with a `QGuiApplication` and no window;
+`layout_parity_qt` compares the Qt chrome geometry against the frozen
+reference table captured from the removed Win32 frontend.
 `shortcut_routing_qt` includes a selected rich-text object's Ctrl+C/Ctrl+V
 round trip through the window, preserving Unicode, formatting, dimensions and
 rotation, with undo/redo. `selection_clipboard_qt` also checks mixed-object
@@ -229,8 +231,18 @@ projects, imported-PDF page creation, saved project overrides, and legacy
 project defaults.
 `window_chrome_qt` covers the borderless window chrome offscreen (band
 geometry under the native frame inset, the maximize/restore glyph, the
-auto-hide band state machine and the caption-button intents); its native half
-(`WM_NCCALCSIZE`/`WM_NCHITTEST`) needs a real desktop and is verified there.
+auto-hide band state machine and the caption-button intents).
+`window_chrome_native_qt` drives its native half on Windows through the real
+window procedure of a window kept off screen: `WM_NCCALCSIZE`,
+`WM_NCACTIVATE`, the `WM_NCHITTEST` codes for the caption buttons, band, canvas
+and frame edges, and the caption-button press/cancel/release cycle.
+Maximize/minimize through the buttons and the maximized hit test would need a
+visible window; `window_chrome_qt` covers the maximized arithmetic.
+`capture_cli_qt` runs `cnote --script` end to end (see "Headless runs") and
+asserts that no window of the process becomes visible or takes the
+foreground, that scripted input draws, opens the quick-size popup and the
+title menu, that `--scale` sets the capture's pixel size, that the startup
+document stays unchanged, and that script errors name their line.
 `canvas_geometry_dpr1_qt` and `canvas_geometry_dpr175_qt` run the same binary
 offscreen at `QT_SCALE_FACTOR` 1.0 and 1.75, asserting widget/page mapping,
 committed stroke page coordinates, preview-vs-committed pixels and the
@@ -349,6 +361,78 @@ diagnostics still reach stdout/stderr whenever those handles are redirected
 parent console when one exists without ever allocating a new one.  DPI
 awareness is deliberately not declared in `src/cnote.manifest`: Qt applies its
 default PerMonitorV2 context at startup.
+
+## Headless runs
+
+`--capture` and `--script` run the real application with no window on screen,
+drive it with scripted input and save what it shows as PNG. They are meant for
+agents and unattended checks: a run never shows a window, never takes the
+keyboard focus or the foreground, never moves the user's cursor, and works
+while someone uses the same desktop.
+
+```bash
+./build-dev/cnote.exe --capture=out.png path/to/document.cnote
+./build-dev/cnote.exe --script=steps.txt --size=1200x800 --scale=1.75 path/to/document.pdf
+```
+
+PowerShell does not wait for a GUI-subsystem program (the exit code is then
+meaningless), so pipe it: `.\build-dev\cnote.exe --capture=out.png | Out-Host`.
+
+- `--capture=<png>` saves the window after the script (or right after startup).
+- `--script=<file>` runs one step per line; `capture PATH` steps save
+  intermediate images. A run needs at least one capture.
+- `--size=WxH` sets the window's logical client size (default 1400x960);
+  `--scale=S` fixes the device pixel ratio (default 1) whatever the monitor's
+  own scaling. A capture is `W*S` x `H*S` pixels. The view still follows the
+  primary monitor like the app does - 100% zoom fits the page to the
+  monitor's work-area width in logical pixels - so page scale differs between
+  monitors and scales.
+- The run uses a scratch settings directory (defaults, nothing persisted) and
+  a copy of the startup file, so scripts may edit and save freely: the user's
+  settings and documents are never touched. File dialogs answer "cancel"
+  and message boxes are logged to stderr.
+- Exit codes: 0 done, 2 bad arguments or script (the message names the line),
+  3 the startup file does not open, 4 a capture cannot be written.
+
+Script steps; coordinates are logical pixels in the main window's client
+area, the space of a capture at `--scale=1`:
+
+```text
+# comment
+size W H                          resize the window
+wait MS                           let timers and animations run
+move X Y                          move the pointer (hover)
+click X Y [BUTTON] [MODS]         press and release; BUTTON left|right|middle
+doubleclick X Y [BUTTON] [MODS]
+drag X1 Y1 X2 Y2 [STEPS] [BUTTON] [MODS]   press, STEPS moves (16), release
+wheel X Y NOTCHES [MODS]          positive scrolls up
+key SEQUENCE                      Ctrl+W, Escape, Ctrl+Shift+S, "Ctrl+K, Ctrl+C"
+type TEXT                         the rest of the line, as typed characters
+capture PATH                      the window plus open menus, popups and dialogs
+```
+
+`MODS` is `ctrl`, `shift`, `alt` or `meta` joined with `+`. Example: draw a
+stroke and show the quick-size popup at the pointer.
+
+```text
+drag 300 300 700 500
+move 500 400
+key Ctrl+W
+wait 100
+capture popup.png
+```
+
+How it works (`src/shell/CaptureDriver.h`): on Windows and macOS the app stays
+on the native platform - real fonts, DPI handling and native window handles -
+and every top-level widget gets `Qt::WA_DontShowOnScreen` before it is shown,
+so its native window exists but is never mapped. Linux uses the offscreen
+platform, which has the real fonts there. Input enters through
+`QWindowSystemInterface` like platform input (shortcuts, focus, popups,
+dialogs on top of the window), and UI that anchors to the cursor reads the
+script's pointer (`src/ui/PointerPositionQt.h`). Limits: captures show client
+areas only (a dialog has no native title bar in the image), a click outside an
+open menu closes it without also reaching the window below, copy/paste use
+the real system clipboard, and the macOS path has not been run yet.
 
 ## Release status
 
