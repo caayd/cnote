@@ -84,7 +84,8 @@ jobs:
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/pdfium"
-          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
+          # From stdin: GNU tar reads "D:\..." as a remote host:path archive.
+          tar -xzf - -C "$RUNNER_TEMP/pdfium" < "$RUNNER_TEMP/pdfium.tgz"
           test -f "$RUNNER_TEMP/pdfium/PDFiumConfig.cmake"
           echo "CNOTE_PDFIUM_ROOT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
 

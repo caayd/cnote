@@ -145,8 +145,13 @@ int main(int argc, char** argv) {
     Check(manager.FindOpenSession(std::filesystem::path(upper)) == lookupSession,
         "Windows case-variant path joins the session");
 #else
-    Check(manager.FindOpenSession(scratch / "PROJECT.cnote") == std::shared_ptr<cnote::ProjectSession> {},
-        "POSIX exact spelling does not join a case-variant path");
+    // POSIX compares exact spelling, but a case variant is still the same file
+    // on a case-insensitive filesystem (the macOS default), which joins through
+    // filesystem equivalence.
+    std::error_code caseError;
+    const bool caseInsensitiveFs = std::filesystem::equivalent(projectPath, scratch / "PROJECT.cnote", caseError);
+    Check((manager.FindOpenSession(scratch / "PROJECT.cnote") == lookupSession) == caseInsensitiveFs,
+        "a case-variant path joins the session only when it is the same file");
 #endif
     Check(manager.FindOpenSession(scratch / "other.cnote") == std::shared_ptr<cnote::ProjectSession> {},
         "a different path does not join the session");
