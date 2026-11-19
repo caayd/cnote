@@ -14,7 +14,9 @@ document.
 ### MicroTeX (`third_party/microtex`)
 
 - Revision: vendored from `NanoMichael/MicroTeX` at `0e3707f6`, with the Qt
-  drawing backend restored at `third_party/microtex/src/platform/qt/graphic_qt.cpp`.
+  drawing backend restored at `third_party/microtex/src/platform/qt/graphic_qt.cpp`
+  and adapted for cnote there (marked `cnote:`: device-size glyph rasterisation,
+  grayscale glyph antialiasing).
 - License: MIT (`third_party/microtex/LICENSE`).
 - Shipped: statically linked into the application (no separate artifact), and its
   runtime resource tree ships as `latex-res/` beside the executable
