@@ -1,9 +1,13 @@
-# Build and test every supported desktop platform (migration plan step 7.5).
+# Build and test the shipped desktop platforms (migration plan step 7.5).
 #
-# The jobs run on GitHub-hosted runners (windows-2022, ubuntu-24.04, macos-15
-# arm64, macos-15-intel) with the same command sequences used on the developer
-# machines (Windows x64 MinGW 13.1 from the Qt kit, Linux x64 GCC 13.3), the
-# pinned Qt 6.11.2 and PDFium 148.0.7749.0 SDKs.
+# The jobs run on GitHub-hosted runners (windows-2022, ubuntu-24.04) with the
+# same command sequences used on the developer machines (Windows x64 MinGW 13.1
+# from the Qt kit, Linux x64 GCC 13.3), the pinned Qt 6.11.2 and PDFium
+# 148.0.7749.0 SDKs.
+#
+# Deliberately not covered: macOS (not a release target; its build and bundle
+# are unverified) and the shared-library `dev` configuration, which every
+# change already runs locally (`ctest --preset dev`, AGENTS.md).
 #
 # What each job does:
 #   1. installs Qt 6.11.2 with aqtinstall (the action verifies Qt's own
@@ -21,8 +25,11 @@
 
 name: build-and-test
 
+# Pull requests, plus pushes to main; a push to a PR branch would otherwise run
+# every job twice.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -36,14 +43,10 @@ env:
 
 jobs:
   windows-x64:
-    # BUILD_SHARED_LIBS=ON is the `dev` preset agents and worktrees build with;
-    # OFF is the shipped configuration.  Both must pass.
-    name: Windows x64 (MinGW, shared libs ${{ matrix.shared }})
+    # The shipped configuration: static project libraries (BUILD_SHARED_LIBS
+    # defaults to OFF).
+    name: Windows x64 (MinGW)
     runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        shared: [OFF, ON]
     env:
       PDFIUM_ASSET: pdfium-win-x64.tgz
     steps:
@@ -106,8 +109,7 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER="$CNOTE_CXX_COMPILER" \
             -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
-            -DCNOTE_PDFIUM_ROOT="$CNOTE_PDFIUM_ROOT" \
-            -DBUILD_SHARED_LIBS=${{ matrix.shared }}
+            -DCNOTE_PDFIUM_ROOT="$CNOTE_PDFIUM_ROOT"
 
       - name: Build
         shell: bash
@@ -163,108 +165,6 @@ jobs:
         run: |
           set -euo pipefail
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
-            -DCNOTE_PDFIUM_ROOT="$CNOTE_PDFIUM_ROOT"
-
-      - name: Build
-        run: cmake --build build
-
-      - name: Model and codec tests (no display)
-        run: ctest --test-dir build -R "$HEADLESS_TESTS" --output-on-failure
-
-      - name: Qt tests (platform selected per test)
-        run: ctest --test-dir build -E "$HEADLESS_TESTS" --output-on-failure
-
-  macos-arm64:
-    name: macOS arm64
-    # macos-14 was retired on 2026-11-02; macos-15 is the arm64 image.
-    runs-on: macos-15
-    env:
-      PDFIUM_ASSET: pdfium-mac-arm64.tgz
-      CNOTE_OSX_ARCH: arm64
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Qt
-        timeout-minutes: 15
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: ${{ env.QT_VERSION }}
-          arch: clang_64
-          cache: true
-
-      - name: Fetch and verify PDFium
-        run: |
-          set -euo pipefail
-          curl -fsSL -o "$RUNNER_TEMP/pdfium.tgz" \
-            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${PDFIUM_ASSET}"
-          expected=$(awk -v asset="$PDFIUM_ASSET" '$1 == asset { print $2 }' .github/dependency-digests.txt)
-          actual=$(shasum -a 256 "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
-          if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
-            echo "PDFium digest mismatch for $PDFIUM_ASSET (expected '$expected', got '$actual')" >&2
-            exit 1
-          fi
-          mkdir -p "$RUNNER_TEMP/pdfium"
-          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
-          test -f "$RUNNER_TEMP/pdfium/PDFiumConfig.cmake"
-          echo "CNOTE_PDFIUM_ROOT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
-
-      - name: Configure
-        run: |
-          set -euo pipefail
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_OSX_ARCHITECTURES="$CNOTE_OSX_ARCH" \
-            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
-            -DCNOTE_PDFIUM_ROOT="$CNOTE_PDFIUM_ROOT"
-
-      - name: Build
-        run: cmake --build build
-
-      - name: Model and codec tests (no display)
-        run: ctest --test-dir build -R "$HEADLESS_TESTS" --output-on-failure
-
-      - name: Qt tests (platform selected per test)
-        run: ctest --test-dir build -E "$HEADLESS_TESTS" --output-on-failure
-
-  macos-x64:
-    name: macOS x64
-    # macos-13 is retired; macos-15-intel is the x64 image.
-    runs-on: macos-15-intel
-    env:
-      PDFIUM_ASSET: pdfium-mac-x64.tgz
-      CNOTE_OSX_ARCH: x86_64
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Qt
-        timeout-minutes: 15
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: ${{ env.QT_VERSION }}
-          arch: clang_64
-          cache: true
-
-      - name: Fetch and verify PDFium
-        run: |
-          set -euo pipefail
-          curl -fsSL -o "$RUNNER_TEMP/pdfium.tgz" \
-            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${PDFIUM_ASSET}"
-          expected=$(awk -v asset="$PDFIUM_ASSET" '$1 == asset { print $2 }' .github/dependency-digests.txt)
-          actual=$(shasum -a 256 "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
-          if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
-            echo "PDFium digest mismatch for $PDFIUM_ASSET (expected '$expected', got '$actual')" >&2
-            exit 1
-          fi
-          mkdir -p "$RUNNER_TEMP/pdfium"
-          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
-          test -f "$RUNNER_TEMP/pdfium/PDFiumConfig.cmake"
-          echo "CNOTE_PDFIUM_ROOT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
-
-      - name: Configure
-        run: |
-          set -euo pipefail
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_OSX_ARCHITECTURES="$CNOTE_OSX_ARCH" \
             -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
             -DCNOTE_PDFIUM_ROOT="$CNOTE_PDFIUM_ROOT"
 
