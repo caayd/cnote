@@ -51,19 +51,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL -o "$RUNNER_TEMP/pdfium.tgz" \
+          # POSIX spelling for Git Bash tools, mixed spelling for CMake (see ci.yml).
+          temp=$(cygpath -u "$RUNNER_TEMP")
+          curl -fsSL -o "$temp/pdfium.tgz" \
             "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${PDFIUM_ASSET}"
           expected=$(awk -v asset="$PDFIUM_ASSET" '$1 == asset { print $2 }' .github/dependency-digests.txt)
-          # Hash stdin: GNU sha256sum escapes a backslash path and prefixes '\'.
-          actual=$(sha256sum < "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
+          actual=$(sha256sum "$temp/pdfium.tgz" | awk '{ print $1 }')
           if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
             echo "PDFium digest mismatch for $PDFIUM_ASSET" >&2
             exit 1
           fi
-          mkdir -p "$RUNNER_TEMP/pdfium"
-          # From stdin: GNU tar reads "D:\..." as a remote host:path archive.
-          tar -xzf - -C "$RUNNER_TEMP/pdfium" < "$RUNNER_TEMP/pdfium.tgz"
-          echo "CNOTE_PDFIUM_ROOT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
+          mkdir -p "$temp/pdfium"
+          tar -xzf "$temp/pdfium.tgz" -C "$temp/pdfium"
+          echo "CNOTE_PDFIUM_ROOT=$(cygpath -m "$temp/pdfium")" >> "$GITHUB_ENV"
 
       - name: Resolve MinGW compiler from the Qt kit
         shell: bash
