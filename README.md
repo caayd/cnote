@@ -361,9 +361,9 @@ Not verified, and not claimed as release-ready:
 
 - **macOS build, bundle, signing and notarization** - no macOS machine is
   available; the DMG path is configured only.
-- **Hosted CI runners** - `.github/workflows/` pins Qt 6.11.2 and PDFium
-  148.0.7749.0 and was validated by running its exact command sequences locally,
-  but no GitHub runner has executed it; the macOS jobs are entirely unexecuted.
+- **macOS in CI** - `.github/workflows/ci.yml` runs on GitHub-hosted Windows
+  (static build) and Linux runners on every pull request; macOS is not a
+  release target and has no CI job.
 - **Physical input hardware** - pen/tablet behaviour, pressure, and the Windows
   precision-touchpad adapter on real hardware.
 - **Multi-monitor and mixed-DPI transitions**, IME/accessibility behaviour, and
