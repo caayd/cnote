@@ -257,6 +257,30 @@ if(WIN32)
 
 elseif(APPLE)
     set(_cnote_pdfium_implib "")
+    # The SDK's dylib has the install name "./libpdfium.dylib", so every binary
+    # linked against it looks for PDFium in the process's working directory
+    # (dyld: Library not loaded: ./libpdfium.dylib).  Link a build-tree copy
+    # whose install name is @rpath/libpdfium.dylib instead: build-tree binaries
+    # find it through CMake's build RPATH, and the bundle finds the installed
+    # copy through @executable_path/../Frameworks.  The SDK file is untouched.
+    set(_cnote_pdfium_rpath_copy "${CMAKE_CURRENT_BINARY_DIR}/pdfium-rpath/libpdfium.dylib")
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/pdfium-rpath")
+    file(COPY_FILE "${_cnote_pdfium_runtime}" "${_cnote_pdfium_rpath_copy}" ONLY_IF_DIFFERENT)
+    execute_process(COMMAND install_name_tool -id "@rpath/libpdfium.dylib" "${_cnote_pdfium_rpath_copy}"
+        RESULT_VARIABLE _cnote_pdfium_install_name_result
+        ERROR_VARIABLE _cnote_pdfium_install_name_error)
+    if(NOT _cnote_pdfium_install_name_result EQUAL 0)
+        message(FATAL_ERROR "install_name_tool could not set the PDFium install name: ${_cnote_pdfium_install_name_error}")
+    endif()
+    # Changing the install name invalidates the signature; arm64 macOS refuses
+    # to load unsigned code, so re-sign the copy ad hoc.
+    execute_process(COMMAND codesign --force --sign - "${_cnote_pdfium_rpath_copy}"
+        RESULT_VARIABLE _cnote_pdfium_codesign_result
+        ERROR_VARIABLE _cnote_pdfium_codesign_error)
+    if(NOT _cnote_pdfium_codesign_result EQUAL 0)
+        message(FATAL_ERROR "codesign could not re-sign the PDFium copy: ${_cnote_pdfium_codesign_error}")
+    endif()
+    set(_cnote_pdfium_runtime "${_cnote_pdfium_rpath_copy}")
 else()
     set(_cnote_pdfium_implib "")
 endif()

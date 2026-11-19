@@ -37,28 +37,34 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Qt
+        timeout-minutes: 15
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
           arch: win64_mingw
           tools: tools_mingw1310
           cache: true
+          # aqtinstall 3.3.0 cannot find Qt 6.11's per-compiler Windows
+          # repositories; see ci.yml for the pinned commit.
+          aqtsource: git+https://github.com/miurahr/aqtinstall.git@5a49f2b391ae8ee1d3c0dd87f8b33c1d49a4deb7
 
       - name: Fetch and verify PDFium
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL -o "$RUNNER_TEMP/pdfium.tgz" \
+          # POSIX spelling for Git Bash tools, mixed spelling for CMake (see ci.yml).
+          temp=$(cygpath -u "$RUNNER_TEMP")
+          curl -fsSL -o "$temp/pdfium.tgz" \
             "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${PDFIUM_ASSET}"
           expected=$(awk -v asset="$PDFIUM_ASSET" '$1 == asset { print $2 }' .github/dependency-digests.txt)
-          actual=$(sha256sum "$RUNNER_TEMP/pdfium.tgz" | awk '{ print $1 }')
+          actual=$(sha256sum "$temp/pdfium.tgz" | awk '{ print $1 }')
           if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
             echo "PDFium digest mismatch for $PDFIUM_ASSET" >&2
             exit 1
           fi
-          mkdir -p "$RUNNER_TEMP/pdfium"
-          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
-          echo "CNOTE_PDFIUM_ROOT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
+          mkdir -p "$temp/pdfium"
+          tar -xzf "$temp/pdfium.tgz" -C "$temp/pdfium"
+          echo "CNOTE_PDFIUM_ROOT=$(cygpath -m "$temp/pdfium")" >> "$GITHUB_ENV"
 
       - name: Resolve MinGW compiler from the Qt kit
         shell: bash
@@ -107,6 +113,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Qt
+        timeout-minutes: 15
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}

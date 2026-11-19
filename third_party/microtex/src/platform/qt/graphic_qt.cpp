@@ -351,6 +351,10 @@ void Graphics2D_qt::drawFontText(const QFont& baseFont, const QString& text, flo
   }
   QFont deviceFont = baseFont;
   deviceFont.setPointSizeF(baseFont.pointSizeF() * scale);
+  // cnote: grayscale antialiasing everywhere, so a formula drawn in the opaque
+  // text editor matches the one committed to a transparent page surface (Qt
+  // only uses subpixel/LCD antialiasing on opaque targets).
+  deviceFont.setStyleStrategy(QFont::StyleStrategy(deviceFont.styleStrategy() | QFont::NoSubpixelAntialias));
   const QTransform savedTransform = _painter->transform();
   const QFont savedFont = _painter->font();
   _painter->setFont(deviceFont);

@@ -94,6 +94,11 @@ QFont FontForStyle(const PageTextStyle& style, float displayScale) {
     font.setBold(style.bold);
     font.setItalic(style.italic);
     font.setUnderline(style.underline);
+    // Committed text renders into transparent page surfaces, where Qt always
+    // antialiases in grayscale.  Without this the editor (an opaque widget)
+    // gets subpixel/LCD antialiasing wherever fontconfig enables it, so text
+    // would visibly change colour fringes when an edit is committed.
+    font.setStyleStrategy(QFont::NoSubpixelAntialias);
     return font;
 }
 

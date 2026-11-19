@@ -444,9 +444,12 @@ void PathResolution(const std::filesystem::path& scratch) {
     Check(QCoreApplication::applicationName() == QStringLiteral("cnote"), "application name is set to cnote");
     Check(QCoreApplication::organizationName().isEmpty(), "no organization component");
     const std::string text = resolved.string();
+    Check(text.ends_with("/cnote/settings.ini"), "settings path is <config>/cnote/settings.ini");
+#ifndef __APPLE__
+    // Linux follows XDG; macOS uses ~/Library/Preferences and ignores it.
     Check(text.rfind(scratch.string(), 0) == 0, "settings path is under XDG_CONFIG_HOME");
-    Check(text.ends_with("/cnote/settings.ini"), "settings path is <xdg>/cnote/settings.ini");
-    std::printf("xdg settings path: %s\n", text.c_str());
+#endif
+    std::printf("settings path: %s\n", text.c_str());
 #endif
 }
 

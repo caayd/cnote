@@ -379,11 +379,14 @@ int main(int argc, char** argv) {
             }
             return found;
         };
-        // Lowest ink row across the cluster's first three columns: the left
-        // stem of an upright or italic "n" ends on the baseline.
+        // Lowest ink row across the cluster's left half: the left stem of an
+        // upright or italic "n" ends on the baseline.  Only the left half,
+        // because an italic n's first columns are its entry hook, which sits
+        // high (and crosses the ink threshold with some rasterisers, e.g.
+        // CoreText).
         const auto stemBottom = [&](const QImage& image, const Cluster& cluster) {
             int bottom = -1;
-            for (int x = cluster.left; x <= std::min(cluster.left + 2, cluster.right); ++x) {
+            for (int x = cluster.left; x <= cluster.left + (cluster.right - cluster.left) / 2; ++x) {
                 for (int y = 0; y < image.height(); ++y) {
                     if (inkAt(image, x, y)) {
                         bottom = std::max(bottom, y);
@@ -434,9 +437,10 @@ int main(int argc, char** argv) {
             }
         }
 
-        // A deep formula reserves its depth: the next line (a glyph reaching
-        // the font's full ascent) starts below it.
-        const QImage twoLines = renderLine(u"n $n_{\\frac{n}{\\frac{n}{n}}}$ n\n\u0124");
+        // A deep formula reserves its depth: the next line starts below it.
+        // Probed with a capital H, whose ink stays inside the font's ascent;
+        // accented capitals rise above it in some fonts (Helvetica on macOS).
+        const QImage twoLines = renderLine(u"n $n_{\\frac{n}{\\frac{n}{n}}}$ n\nH");
         const std::vector<Cluster> twoLineClusters = clusters(twoLines);
         int secondLineTop = -1;
         if (!twoLineClusters.empty() && deepBaseline >= 0) {

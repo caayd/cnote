@@ -28,6 +28,7 @@
 #include <vector>
 
 #include <QGuiApplication>
+#include <QStandardPaths>
 #include <QString>
 
 #include "Document.h"
@@ -135,37 +136,36 @@ void CaseOnlyDifferentPath() {
     const std::filesystem::path lower = dir / "notes.cnote";
 
     Check(cnote::ProjectFile::Save(MakeProject(u"upper"), upper), "save Notes.cnote");
-#ifdef _WIN32
-    Check(cnote::AppManager::PathsReferToSameFile(upper, lower),
-        "Windows treats a case-only path difference as the same file");
-#else
-    Check(!cnote::AppManager::PathsReferToSameFile(upper, lower),
-        "Linux treats a case-only path difference as a different file");
-#endif
+    // Whether a case-only difference names the same file is a property of the
+    // filesystem, not the OS: NTFS and default APFS fold case, Linux
+    // filesystems do not.  Same-file detection must follow the filesystem.
+    const bool caseInsensitiveFs = std::filesystem::exists(lower);
+    std::printf("filesystem is case-%s\n", caseInsensitiveFs ? "insensitive" : "sensitive");
+    Check(cnote::AppManager::PathsReferToSameFile(upper, lower) == caseInsensitiveFs,
+        "a case-only path difference is the same file exactly when the filesystem folds case");
 
-#ifdef _WIN32
-    // Windows: both spellings name the same file, so a session must be joined.
     std::error_code error;
-    Check(std::filesystem::equivalent(upper, lower, error) && !error,
-        "Windows reports the two spellings as the same file");
-    const std::optional<cnote::Document> viaLower = cnote::ProjectFile::Load(lower);
-    Check(viaLower.has_value() && ProjectMarker(*viaLower) == u"upper",
-        "Windows opens the lower-case spelling as the same project");
-#else
-    std::error_code error;
-    // The lower-case spelling does not exist yet, so equivalent() reports an
-    // error rather than "same file"; the independent-projects checks below are
-    // what proves the two spellings are different files.
-    Check(!std::filesystem::equivalent(upper, lower, error),
-        "Linux reports the two spellings as different files");
-    // Two projects differing only by case coexist and stay independent.
-    Check(cnote::ProjectFile::Save(MakeProject(u"lower"), lower), "save notes.cnote next to Notes.cnote");
-    const std::optional<cnote::Document> viaLower = cnote::ProjectFile::Load(lower);
-    const std::optional<cnote::Document> viaUpper = cnote::ProjectFile::Load(upper);
-    Check(viaLower.has_value() && viaUpper.has_value(), "both case-differing projects load");
-    Check(ProjectMarker(*viaLower) == u"lower" && ProjectMarker(*viaUpper) == u"upper",
-        "case-differing projects keep their own contents");
-#endif
+    if (caseInsensitiveFs) {
+        // Both spellings name the same file, so a session must be joined.
+        Check(std::filesystem::equivalent(upper, lower, error) && !error,
+            "the filesystem reports the two spellings as the same file");
+        const std::optional<cnote::Document> viaLower = cnote::ProjectFile::Load(lower);
+        Check(viaLower.has_value() && ProjectMarker(*viaLower) == u"upper",
+            "the lower-case spelling opens the same project");
+    } else {
+        // The lower-case spelling does not exist yet, so equivalent() reports an
+        // error rather than "same file"; the independent-projects checks below are
+        // what proves the two spellings are different files.
+        Check(!std::filesystem::equivalent(upper, lower, error),
+            "the filesystem reports the two spellings as different files");
+        // Two projects differing only by case coexist and stay independent.
+        Check(cnote::ProjectFile::Save(MakeProject(u"lower"), lower), "save notes.cnote next to Notes.cnote");
+        const std::optional<cnote::Document> viaLower = cnote::ProjectFile::Load(lower);
+        const std::optional<cnote::Document> viaUpper = cnote::ProjectFile::Load(upper);
+        Check(viaLower.has_value() && viaUpper.has_value(), "both case-differing projects load");
+        Check(ProjectMarker(*viaLower) == u"lower" && ProjectMarker(*viaUpper) == u"upper",
+            "case-differing projects keep their own contents");
+    }
 }
 
 void ExtensionCaseRules() {
@@ -230,6 +230,14 @@ void SettingsLocationRule() {
     } else {
         qputenv("APPDATA", previous);
     }
+#elif defined(__APPLE__)
+    // macOS ignores XDG: settings live in Qt's AppConfigLocation
+    // (~/Library/Preferences/cnote).
+    const std::filesystem::path resolved = cnote::settings::SettingsStoreQt::ResolveSettingsPath();
+    const std::filesystem::path expected =
+        cnote::Utf8ToPath(QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation).toStdString())
+        / "settings.ini";
+    Check(resolved == expected, "macOS resolves AppConfigLocation/settings.ini");
 #else
     const QByteArray previous = qgetenv("XDG_CONFIG_HOME");
     const std::filesystem::path scratch = MakeTempDir("settings-xdg");
