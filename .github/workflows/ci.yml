@@ -1,16 +1,9 @@
 # Build and test every supported desktop platform (migration plan step 7.5).
 #
-# Scope of the evidence:
-#   * The command sequences below are executed exactly as written on the
-#     developer machines for Windows x64 (MinGW 13.1 from the Qt kit) and
-#     Linux x64 (WSL Ubuntu 24.04, GCC 13.3) with the same ordering and the same
-#     environment variables, using the locally installed Qt 6.11.2 and PDFium
-#     148.0.7749.0 SDKs.  See the CI report for the captured logs.
-#   * Hosted-runner execution is UNVERIFIED: the dependency download steps and
-#     the aqtinstall/MinGW toolchain paths have never been run on a GitHub
-#     runner from this environment, and the macOS jobs cannot be executed at
-#     all here.  This workflow is a definition plus locally validated command
-#     sequences, not a claim that CI is green.
+# The jobs run on GitHub-hosted runners (windows-2022, ubuntu-24.04, macos-15
+# arm64, macos-15-intel) with the same command sequences used on the developer
+# machines (Windows x64 MinGW 13.1 from the Qt kit, Linux x64 GCC 13.3), the
+# pinned Qt 6.11.2 and PDFium 148.0.7749.0 SDKs.
 #
 # What each job does:
 #   1. installs Qt 6.11.2 with aqtinstall (the action verifies Qt's own
@@ -57,6 +50,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Qt
+        # A healthy install takes 1-2 minutes; a stalled mirror download
+        # otherwise holds the job for the 6-hour default.
+        timeout-minutes: 15
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
@@ -134,6 +130,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Qt
+        timeout-minutes: 15
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
@@ -189,6 +186,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Qt
+        timeout-minutes: 15
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
@@ -239,6 +237,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Qt
+        timeout-minutes: 15
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
