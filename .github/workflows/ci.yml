@@ -139,11 +139,21 @@ jobs:
           version: ${{ env.QT_VERSION }}
           arch: linux_gcc_64
           cache: true
+          # The action's own dependency step apt-installs ~20 MB of -dev
+          # packages cnote never uses (PulseAudio, every xcb-util, ...); the
+          # runner's Ubuntu mirror often serves them at ~100 kB/s, which took
+          # 3 to 30+ minutes.  The next step installs only what the build and
+          # the offscreen tests need.
+          install-deps: false
 
-      - name: Install platform libraries for the offscreen platform plugin
+      - name: Install build and offscreen-platform libraries
+        timeout-minutes: 10
         run: |
           sudo apt-get update
+          # libgl-dev, libopengl-dev, libegl-dev, libxkbcommon-dev: headers and
+          # link libraries Qt6Gui's CMake package requires (WrapOpenGL, XKB).
           sudo apt-get install -y --no-install-recommends \
+            libgl-dev libopengl-dev libegl-dev libxkbcommon-dev \
             libglib2.0-0 libfontconfig1 libfreetype6 libgl1 libegl1 libxkbcommon0
 
       - name: Fetch and verify PDFium
