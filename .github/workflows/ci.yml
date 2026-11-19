@@ -63,6 +63,11 @@ jobs:
           arch: win64_mingw
           tools: tools_mingw1310
           cache: true
+          # Qt 6.11 moved the Windows packages to per-compiler repositories
+          # (qt6_6112_mingw/); aqtinstall 3.3.0 cannot find them ("Failed to
+          # locate XML data", miurahr/aqtinstall#1007). The fix (#1000) is on
+          # master but unreleased: pin that commit until a release ships it.
+          aqtsource: git+https://github.com/miurahr/aqtinstall.git@5a49f2b391ae8ee1d3c0dd87f8b33c1d49a4deb7
 
       - name: Fetch and verify PDFium
         shell: bash
@@ -171,7 +176,8 @@ jobs:
 
   macos-arm64:
     name: macOS arm64
-    runs-on: macos-14
+    # macos-14 was retired on 2026-11-02; macos-15 is the arm64 image.
+    runs-on: macos-15
     env:
       PDFIUM_ASSET: pdfium-mac-arm64.tgz
       CNOTE_OSX_ARCH: arm64
@@ -220,7 +226,8 @@ jobs:
 
   macos-x64:
     name: macOS x64
-    runs-on: macos-13
+    # macos-13 is retired; macos-15-intel is the x64 image.
+    runs-on: macos-15-intel
     env:
       PDFIUM_ASSET: pdfium-mac-x64.tgz
       CNOTE_OSX_ARCH: x86_64
