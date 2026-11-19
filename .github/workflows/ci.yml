@@ -18,10 +18,11 @@
 #      cnote_core/microtex-GDI targets were removed at cutover);
 #   4. runs the tests that need no display, then every remaining test.  Each
 #      Qt test selects its own platform through its CTest ENVIRONMENT
-#      properties (offscreen everywhere except the three Windows tests that
-#      need the native platform), so no QT_QPA_PLATFORM is set at step level:
-#      forcing offscreen on Windows breaks font_fallback_qt's real font
-#      metrics.
+#      properties (offscreen everywhere except the Windows tests that need
+#      the native platform, which create no window or keep theirs off screen;
+#      capture_cli_qt's cnote picks its own platform), so no QT_QPA_PLATFORM is
+#      set at step level: forcing offscreen on Windows breaks font_fallback_qt's
+#      real font metrics.
 
 name: build-and-test
 
