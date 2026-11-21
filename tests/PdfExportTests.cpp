@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -159,6 +160,20 @@ int main(int argc, char** argv) {
         "export with embedded project");
     Check(backend.ExportPdf(document, dir / "flat.pdf", 1.0f, 0.55f, 3.0f, 2.0f, std::span<const std::uint8_t> {}),
         "export without embedded project");
+
+    // A requested embedded project that the attachment writer cannot store
+    // must fail the export instead of silently producing an attachment-free
+    // PDF that reports success.
+    {
+        const std::uint8_t byte = 0U;
+        const std::span<const std::uint8_t> oversizedProject(
+            &byte, static_cast<std::size_t>(std::numeric_limits<int>::max()));
+        Check(!backend.ExportPdf(document, dir / "oversized-embedded.pdf", 1.0f, 0.55f, 3.0f, 2.0f,
+                oversizedProject),
+            "an embedded project the attachment writer rejects fails the export");
+        Check(!std::filesystem::exists(dir / "oversized-embedded.pdf"),
+            "a failed embedded export writes no destination file");
+    }
 
     auto reopenedEmbedded = cnote::LoadDocumentFile(dir / "embedded.pdf", backend);
     Check(reopenedEmbedded.has_value(), "embedded export reopens");

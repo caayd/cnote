@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 #include "Document.h"
 #include "PdfBackend.h"
@@ -14,12 +15,36 @@ PdfiumBackgroundProvider::PdfiumBackgroundProvider(const PdfiumBackend& backend,
       document_(&document),
       capacity_(std::max<std::size_t>(1U, capacity)) {}
 
+void PdfiumBackgroundProvider::Invalidate() {
+    cache_.clear();
+}
+
+void PdfiumBackgroundProvider::Store(const Key& key, QImage image, EntryStatus status) {
+    cache_.push_back({ key, std::move(image), status });
+    while (cache_.size() > capacity_) {
+        cache_.pop_front();
+    }
+}
+
 QImage PdfiumBackgroundProvider::PageBackground(std::int32_t sourceIndex, std::int32_t pageIndex, float rasterScale) {
     if (document_ == nullptr || sourceIndex < 0 || pageIndex < 0 || rasterScale <= 0.0f) {
         return {};
     }
 
-    const Key key { sourceIndex, pageIndex, static_cast<int>(std::lround(rasterScale * 1000.0f)) };
+    // Validate the current source before trusting the cache: a document may
+    // have been retargeted or had its sources replaced under the same address.
+    const Document::PdfSource* source = document_->PdfSourceAtIndex(sourceIndex);
+    if (source == nullptr || !source->pdfData || source->pdfData->empty()) {
+        return {};
+    }
+
+    const Key key {
+        document_,
+        source->pdfData.get(),
+        sourceIndex,
+        pageIndex,
+        static_cast<int>(std::lround(rasterScale * 1000.0f)),
+    };
     const auto existing = std::find_if(cache_.begin(), cache_.end(), [&](const Entry& entry) {
         return entry.key == key;
     });
@@ -27,25 +52,20 @@ QImage PdfiumBackgroundProvider::PageBackground(std::int32_t sourceIndex, std::i
         Entry entry = std::move(*existing);
         cache_.erase(existing);
         cache_.push_back(std::move(entry));
-        return cache_.back().image;
-    }
-
-    const Document::PdfSource* source = document_->PdfSourceAtIndex(sourceIndex);
-    if (source == nullptr || !source->pdfData || source->pdfData->empty()) {
-        return {};
+        const EntryStatus status = cache_.back().status;
+        return status == EntryStatus::Ready ? cache_.back().image : QImage {};
     }
 
     const auto raster = backend_.RenderPage(source->pdfData, static_cast<std::size_t>(pageIndex), rasterScale);
     if (!raster.has_value() || raster->pixels.empty() || raster->width <= 0 || raster->height <= 0) {
+        ++failedRenderCount_;
+        Store(key, QImage {}, EntryStatus::Failed);
         return {};
     }
 
     ++renderCount_;
     QImage image = WrapBgraImage(raster->pixels.data(), raster->width, raster->height, raster->stride).copy();
-    cache_.push_back({ key, image });
-    while (cache_.size() > capacity_) {
-        cache_.pop_front();
-    }
+    Store(key, image, EntryStatus::Ready);
     return image;
 }
 

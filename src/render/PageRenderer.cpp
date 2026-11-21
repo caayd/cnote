@@ -531,6 +531,13 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     hash = HashValue(hash, page.raster.pixels.size());
     hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(page.raster.pixels.data()));
     hash = HashFloat(hash, page.rotationDegrees);
+    // PDF source identity is part of the painted background: retargeting a
+    // page to another source or source page must invalidate its surface.
+    hash = HashValue(hash, static_cast<std::uint32_t>(page.sourcePdfSourceIndex));
+    hash = HashValue(hash, static_cast<std::uint32_t>(page.sourcePdfPageIndex));
+    if (params.pdfBackground != nullptr) {
+        hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(params.pdfBackground));
+    }
 
     hash = HashValue(hash, page.images.size());
     hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(page.images.data()));
