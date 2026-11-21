@@ -11,6 +11,7 @@
 #include <QTextCharFormat>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <QTextOption>
 #include <QtGui/qtextobject.h>
 
 #include "text/InlineMathQt.h"
@@ -26,6 +27,13 @@ namespace {
 // Points-per-page-unit lives in the header (kPointsPerPageUnit); callers like
 // CanvasWidget convert the pending popup size with the same factor.
 constexpr float kPointsPerPixel = kPointsPerPageUnit;
+
+// Tab stops are page geometry like the font sizes: a fixed distance in page
+// units, scaled with them.  Qt's default is a fixed 80 device-independent
+// pixels whatever the zoom, so a tab measured a different share of the text
+// at every zoom, and the page-unit layout (bounds, wrapping, PDF export)
+// disagreed with the editor and the canvas.
+constexpr qreal kTabStopPageUnits = 80.0;
 
 PageTextStyle DefaultStyleFor(const PageText& text) {
     return {
@@ -147,6 +155,9 @@ PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextSt
 void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, float displayScale, InlineMathMode mathMode) {
     const PageTextStyle defaultStyle = DefaultStyleFor(text);
     document.setDefaultFont(FontForStyle(defaultStyle, displayScale));
+    QTextOption option = document.defaultTextOption();
+    option.setTabStopDistance(kTabStopPageUnits * std::max(0.01f, displayScale));
+    document.setDefaultTextOption(option);
 
     QTextCursor cursor(&document);
     cursor.select(QTextCursor::Document);

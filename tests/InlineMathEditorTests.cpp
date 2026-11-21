@@ -226,6 +226,30 @@ int main(int argc, char** argv) {
         }
     }
 
+    // --- tab stops are page geometry ------------------------------------------
+    // A tab advances the same page distance at every zoom, so the editor's
+    // line is the page-unit layout (bounds, wrapping, PDF export) scaled.
+    // Qt's default tab stop, 80 pixels at any zoom, shrank tabs against the
+    // text when zoomed in.
+    {
+        const cnote::PageText tabbed = MakeText(u"a\tb\tc");
+        const cnote::text::QtTextBounds bounds = cnote::text::MeasurePageTextBoundsQt(tabbed, 600.0f);
+        const double pageWidth = static_cast<double>(bounds.right - bounds.left);
+        for (const float zoom : { 1.0f, 2.1f }) {
+            cnote::ui::InlineMathTextEdit view;
+            view.document()->setDocumentMargin(0.0);
+            QTextOption option;
+            option.setWrapMode(QTextOption::NoWrap);
+            view.document()->setDefaultTextOption(option);
+            view.setLineWrapMode(QTextEdit::NoWrap);
+            view.LoadPageText(tabbed, zoom);
+            const double editorWidth = view.document()->idealWidth() / zoom;
+            Check(std::abs(editorWidth - pageWidth) < 2.0,
+                "tabbed text spans the same page width in the editor at zoom " + std::to_string(zoom) + " (editor "
+                    + std::to_string(editorWidth) + ", page layout " + std::to_string(pageWidth) + ")");
+        }
+    }
+
     cnote::latex::Shutdown();
     std::printf(g_failures == 0 ? "ALL INLINE MATH EDITOR CHECKS PASSED\n" : "%d INLINE MATH EDITOR CHECK(S) FAILED\n", g_failures);
     return g_failures == 0 ? 0 : 1;
