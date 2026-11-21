@@ -506,10 +506,10 @@ void CanvasWidget::ResetStrokeLayer() {
     strokeLayer_ = LiveStrokeLayer {};
 }
 
-bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const CanvasPageView& view) {
+bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const std::vector<Vec2>& points, const CanvasPageView& view) {
     const float devicePixelRatio = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
     const float smoothing = StrokeRenderSmoothing(stroke, controller_.InputSettings().strokeSmoothing);
-    const std::size_t count = stroke.points.size();
+    const std::size_t count = points.size();
     LiveStrokeLayer& layer = strokeLayer_;
 
     // The layer continues only for a pure append: same page, view scale,
@@ -524,8 +524,8 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const CanvasPageView& v
         && std::abs(layer.style.width - stroke.style.width) < 0.0001f
         && std::abs(layer.smoothing - smoothing) < 0.0001f
         && count >= layer.consumedRaw
-        && Vec2Equal(stroke.points.front(), layer.firstPoint)
-        && Vec2Equal(stroke.points[layer.consumedRaw - 1U], layer.consumedLast);
+        && Vec2Equal(points.front(), layer.firstPoint)
+        && Vec2Equal(points[layer.consumedRaw - 1U], layer.consumedLast);
     if (!appendContinues) {
         // Dotted strokes keep the whole-stroke preview: the dash pattern phase
         // is path-global, so compositing per segment would restart the pattern
@@ -541,14 +541,14 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const CanvasPageView& v
         layer.style = stroke.style;
         layer.smoothing = smoothing;
         layer.smoother.Reset(smoothing);
-        layer.smoothed.push_back(stroke.points.front());
-        layer.firstPoint = stroke.points.front();
-        layer.rawLast = stroke.points.front();
-        layer.lastEnd = stroke.points.front();
+        layer.smoothed.push_back(points.front());
+        layer.firstPoint = points.front();
+        layer.rawLast = points.front();
+        layer.lastEnd = points.front();
         layer.consumedRaw = 1;
-        layer.consumedLast = stroke.points.front();
+        layer.consumedLast = points.front();
         Vec2 ignored;
-        static_cast<void>(layer.smoother.Feed(stroke.points.front(), &ignored));
+        static_cast<void>(layer.smoother.Feed(points.front(), &ignored));
     } else if (stroke.style.dotted) {
         return false;
     }
@@ -642,7 +642,7 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const CanvasPageView& v
     };
 
     while (layer.consumedRaw < count) {
-        const Vec2 raw = stroke.points[layer.consumedRaw];
+        const Vec2 raw = points[layer.consumedRaw];
         Vec2 candidate;
         if (layer.smoother.Feed(raw, &candidate)
             && DistanceSquared(candidate, layer.smoothed.back()) >= 0.05f) {
@@ -678,7 +678,8 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const CanvasPageView& v
     return true;
 }
 
-void CanvasWidget::PaintStrokeTail(QPainter& painter, const Stroke& stroke, const CanvasPageView& view) {
+void CanvasWidget::PaintStrokeTail(QPainter& painter, const Stroke& stroke, const std::vector<Vec2>& points,
+    const CanvasPageView& view) {
     const LiveStrokeLayer& layer = strokeLayer_;
     const float scale = view.scale;
     const float penWidth = render::StrokeRenderPenWidth(stroke, scale);
@@ -688,8 +689,8 @@ void CanvasWidget::PaintStrokeTail(QPainter& painter, const Stroke& stroke, cons
     // smoothed[m-1..] plus the raw tail point (emitted or not by the same
     // 0.01 squared-distance clamp BuildSmoothedPoints uses).
     Vec2 tail {};
-    const bool hasTail = !stroke.points.empty()
-        && layer.smoother.TailPoint(stroke.points.back(), layer.smoothed.back(), &tail);
+    const bool hasTail = !points.empty()
+        && layer.smoother.TailPoint(points.back(), layer.smoothed.back(), &tail);
     const std::size_t k = layer.smoothed.size() + (hasTail ? 1U : 0U);
     const Vec2 end = hasTail ? tail : layer.smoothed.back();
 
@@ -1239,7 +1240,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
             if (const Stroke* pending = controller_.PendingStroke(); pending != nullptr) {
                 painter.save();
                 painter.translate(view.rect.topLeft());
-                if (SyncStrokeLayer(*pending, view)) {
+                if (SyncStrokeLayer(*pending, liveStrokePoints_, view)) {
                     // Stabilized ink is composited in the layer raster; only
                     // the provisional tail (two segments at most) is drawn
                     // live, so a paint no longer costs O(stroke points).
@@ -1255,7 +1256,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                             static_cast<qreal>(strokeLayer_.image.width() / dpr),
                             static_cast<qreal>(strokeLayer_.image.height() / dpr)),
                         strokeLayer_.image);
-                    PaintStrokeTail(painter, *pending, view);
+                    PaintStrokeTail(painter, *pending, liveStrokePoints_, view);
                 } else {
                     render::PaintStrokePreview(painter, *pending, RenderParamsFor(view), 1.0f);
                 }
@@ -2625,10 +2626,13 @@ void CanvasWidget::SetPointerCapture(bool captured) {
     }
 }
 
-void CanvasWidget::BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted) {
+void CanvasWidget::BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted, StrokeSampling sampling) {
     ResetStrokeLayer();
-    controller_.BeginStroke(pageIndex, pagePoint);
+    controller_.BeginStroke(pageIndex, pagePoint, sampling);
     controller_.SetPendingStrokeDotted(dotted);
+    liveStabilizer_.Reset(sampling);
+    liveStrokePoints_.clear();
+    liveStabilizer_.Feed(pagePoint, liveStrokePoints_);
     // The press only inks the initial dot: repaint its bounds inflated by the
     // pen half-width and the smoothing lookahead margin.
     const Stroke* begun = controller_.PendingStroke();
@@ -2659,41 +2663,33 @@ void CanvasWidget::SetStrokeDotted(bool dotted) {
 
 void CanvasWidget::AppendStrokePoint(Vec2 pagePoint, bool dotted) {
     const std::size_t pageIndex = controller_.PendingStrokePage();
-    // Dirty region = the appended segment's bounds, extended back over the
-    // smoothing lookahead: the provisional tail (PaintStrokeTail) repaints
-    // from the composited chain's end — up to two raw points behind the
-    // newest one — and the smoothed composite lags the raw tail similarly.
-    // Without the lookahead, last frame's tail pixels outside this segment's
-    // bounds stay stale on screen (fragmented ghost ink).
+    controller_.ExtendStroke(pagePoint);
+    controller_.SetPendingStrokeDotted(dotted);
+    const std::size_t before = liveStrokePoints_.size();
+    liveStabilizer_.Feed(pagePoint, liveStrokePoints_);
+    if (liveStrokePoints_.size() == before || before == 0U) {
+        // A sample the stabilization dropped changes no ink.
+        return;
+    }
+    // Dirty region = the newly stabilized points' bounds, extended back over
+    // the smoothing lookahead: the provisional tail (PaintStrokeTail) repaints
+    // from the composited chain's end — up to two stabilized points behind the
+    // newest one.  Without the lookahead, last frame's tail pixels outside the
+    // new segment's bounds stay stale on screen (fragmented ghost ink).
     // QRectF(point, 0x0) is empty and united() drops empty operands, so the
     // span must accumulate explicit min/max rather than union point rects.
-    float minX = pagePoint.x, minY = pagePoint.y;
-    float maxX = pagePoint.x, maxY = pagePoint.y;
-    const auto extend = [&minX, &minY, &maxX, &maxY](const Vec2& p) {
+    const std::size_t first = before >= 3U ? before - 3U : 0U;
+    float minX = liveStrokePoints_[first].x, minY = liveStrokePoints_[first].y;
+    float maxX = minX, maxY = minY;
+    for (std::size_t index = first + 1U; index < liveStrokePoints_.size(); ++index) {
+        const Vec2 p = liveStrokePoints_[index];
         minX = std::min(minX, p.x);
         minY = std::min(minY, p.y);
         maxX = std::max(maxX, p.x);
         maxY = std::max(maxY, p.y);
-    };
-    if (const Stroke* before = controller_.PendingStroke();
-        before != nullptr && !before->points.empty()) {
-        const std::size_t start = before->points.size() - 1U;
-        const std::size_t stop = start >= 3U ? start - 2U : 0U;
-        for (std::size_t back = start; ; --back) {
-            extend(before->points[back]);
-            if (back == stop) {
-                break;
-            }
-        }
     }
-    controller_.ExtendStroke(pagePoint);
-    controller_.SetPendingStrokeDotted(dotted);
-    float penWidth = 3.0f;
-    if (const Stroke* pending = controller_.PendingStroke();
-        pending != nullptr && !pending->points.empty()) {
-        extend(pending->points.back());
-        penWidth = pending->style.width;
-    }
+    const Stroke* pending = controller_.PendingStroke();
+    const float penWidth = pending != nullptr ? pending->style.width : 3.0f;
     const float margin = penWidth * 0.5f + kStrokeDirtyMarginPixels;
     MarkTransientDirty(PageRegionDirtyRect(pageIndex,
         QRectF(minX, minY, maxX - minX, maxY - minY)
@@ -2704,6 +2700,9 @@ void CanvasWidget::ReplaceStrokePoints(const std::vector<Vec2>& points, bool dot
     const std::size_t pageIndex = controller_.PendingStrokePage();
     ResetStrokeLayer();
     controller_.ReplacePendingStrokePoints(points, dotted);
+    // Exact line/oval geometry renders with the identity sampling.
+    liveStabilizer_.Reset({});
+    liveStrokePoints_ = points;
     const CanvasPageView view = CalculatePageView(pageIndex);
     if (view.valid) {
         update(view.rect.toAlignedRect());

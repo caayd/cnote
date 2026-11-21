@@ -35,9 +35,21 @@ struct StrokeStyle {
     bool dotted = false;
 };
 
+// Pointer stabilization recorded when a stroke is drawn and replayed at render
+// time (BuildStabilizedPoints), so Stroke::points stay the raw samples.  Each
+// sample pulls the last kept point toward itself by 1 - streamline; a pull
+// shorter than `spacing` (page units) is dropped, a longer one is resampled
+// into spacing-sized steps.  The zero value is the identity: strokes from
+// files that stored already-stabilized points, and exact line/oval points.
+struct StrokeSampling {
+    float streamline = 0.0f;
+    float spacing = 0.0f;
+};
+
 struct Stroke {
     StrokeStyle style {};
     float smoothing = 0.55f;
+    StrokeSampling sampling {};
     std::vector<Vec2> points;
 };
 

@@ -384,6 +384,43 @@ int main(int argc, char** argv) {
         CheckNear(mapped.y, 40.0, "map.zeroFrom.y");
     }
 
+    // Render-time stabilization (cnote::BuildStabilizedPoints).
+    {
+        using cnote::Vec2;
+        const auto same = [](const std::vector<Vec2>& a, const std::vector<Vec2>& b) {
+            if (a.size() != b.size()) {
+                return false;
+            }
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                if (!Near(a[i].x, b[i].x, 1e-5) || !Near(a[i].y, b[i].y, 1e-5)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        // Strokes saved before raw points stored stabilized points: the zero
+        // sampling must hand them back untouched, sub-spacing gaps included.
+        const std::vector<Vec2> stored { { 0.0f, 0.0f }, { 0.01f, 0.0f }, { 5.0f, 3.0f } };
+        Check(same(cnote::BuildStabilizedPoints(stored, cnote::StrokeSampling {}), stored),
+            "stabilize.identity: the zero sampling keeps stored points");
+
+        // The reference follow/spacing (App.cpp:1958-1979) at the defaults:
+        // follow 0.7, spacing 1.75.  The 1-unit sample pulls 0.7 and is
+        // dropped; the 4-unit one pulls to 2.8, resampled in ceil(2.8/1.75)=2.
+        const std::vector<Vec2> pulled = cnote::BuildStabilizedPoints(
+            { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 4.0f, 0.0f } }, cnote::StrokeSampling { 0.3f, 1.75f });
+        Check(same(pulled, { { 0.0f, 0.0f }, { 1.4f, 0.0f }, { 2.8f, 0.0f } }),
+            "stabilize.reference: sub-spacing pulls drop, long pulls resample");
+
+        // Without streamline only the spacing applies: a 4-unit gap splits
+        // into four 1-unit steps ending exactly on the sample.
+        const std::vector<Vec2> spaced = cnote::BuildStabilizedPoints(
+            { { 0.0f, 0.0f }, { 0.5f, 0.0f }, { 4.0f, 0.0f } }, cnote::StrokeSampling { 0.0f, 1.0f });
+        Check(same(spaced, { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 2.0f, 0.0f }, { 3.0f, 0.0f }, { 4.0f, 0.0f } }),
+            "stabilize.spacing: drops below the spacing, resamples above it");
+    }
+
     // LaTeX bounds need the engine; kept separate because the frozen values are
     // engine metrics rather than geometry math.
     const cnote::PageLatex latex = MakeLatex();

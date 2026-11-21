@@ -282,8 +282,7 @@ void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRende
         return;
     }
 
-    const float smoothing = StrokeRenderSmoothing(stroke, params.strokeSmoothing);
-    const std::vector<Vec2> points = BuildSmoothedPoints(stroke.points, smoothing);
+    const std::vector<Vec2> points = BuildStrokeRenderPoints(stroke, params.strokeSmoothing);
     const float scale = params.scale;
     const float penWidth = StrokeRenderPenWidth(stroke, scale);
     const QColor color = StrokeColor(stroke, opacity);
@@ -601,6 +600,8 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
         hash = HashFloat(hash, stroke.style.width);
         hash = HashValue(hash, stroke.style.dotted);
         hash = HashFloat(hash, stroke.smoothing);
+        hash = HashFloat(hash, stroke.sampling.streamline);
+        hash = HashFloat(hash, stroke.sampling.spacing);
         hash = HashValue(hash, stroke.points.size());
         hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(stroke.points.data()));
         if (!stroke.points.empty()) {

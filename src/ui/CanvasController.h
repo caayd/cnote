@@ -91,14 +91,15 @@ public:
 
     // Freehand stroke lifecycle. CanvasWidget owns the per-view page scale and
     // segments strokes at page boundaries; it always calls
-    // Begin -> Extend* -> End|Cancel.  Points arrive already sampled and
-    // stabilized by the interaction router and are stored as given.
-    virtual void BeginStroke(std::size_t pageIndex, Vec2 point) = 0;
+    // Begin -> Extend* -> End|Cancel.  Points are raw pointer samples, stored
+    // as given; `sampling` is the stabilization the stroke renders with.
+    virtual void BeginStroke(std::size_t pageIndex, Vec2 point, StrokeSampling sampling) = 0;
     virtual void ExtendStroke(Vec2 point) = 0;
     virtual void EndStroke() = 0;
     virtual void CancelStroke() = 0;
-    // Live stroke modes the interaction router tracks (line/oval replace the
-    // whole pending point list; Space toggles dotted).
+    // Live stroke modes the interaction router tracks (Space toggles dotted;
+    // line/oval replace the whole pending point list with exact geometry,
+    // which renders with the identity sampling).
     virtual void SetPendingStrokeDotted(bool dotted) = 0;
     virtual void ReplacePendingStrokePoints(const std::vector<Vec2>& points, bool dotted) = 0;
 

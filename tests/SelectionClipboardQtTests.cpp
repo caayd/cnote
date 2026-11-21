@@ -1,6 +1,6 @@
 // Self-contained Qt clipboard-bridge test (migration plan step 2.6).
 //
-// Exercises the real OS clipboard through the Qt bridge: the structured CTS9
+// Exercises the real OS clipboard through the Qt bridge: the structured CTSA
 // round trip, flavor priority (structured > image > text), invalid/empty
 // payload handling, and - on Windows - the Qt Windows MIME bridge that exposes
 // the same bytes under the legacy registered format `cnote.selection.v1` in
@@ -181,6 +181,8 @@ bool SameSelection(const SelectionClipboardData& a, const SelectionClipboardData
         const Stroke& right = b.strokes[i];
         if (left.style.color != right.style.color || !SameFloat(left.style.width, right.style.width)
             || left.style.dotted != right.style.dotted || !SameFloat(left.smoothing, right.smoothing)
+            || !SameFloat(left.sampling.streamline, right.sampling.streamline)
+            || !SameFloat(left.sampling.spacing, right.sampling.spacing)
             || left.points.size() != right.points.size()) {
             return false;
         }
@@ -263,6 +265,7 @@ SelectionClipboardData MakeSelection() {
     stroke.style.width = 4.5f;
     stroke.style.dotted = true;
     stroke.smoothing = 0.25f;
+    stroke.sampling = { 0.4f, 1.25f };
     stroke.points = { { 1.5f, 2.5f }, { -3.25f, 8.0f } };
     data.strokes.push_back(stroke);
 

@@ -43,7 +43,9 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
-constexpr std::uint32_t kProjectVersion = 16;
+// 17: strokes store raw pointer samples plus their StrokeSampling; earlier
+// versions stored stabilized points and read back with the identity sampling.
+constexpr std::uint32_t kProjectVersion = 17;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 constexpr std::uint32_t kProjectFlagInheritPageSize = 1U << 1U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
@@ -249,6 +251,8 @@ void AppendStroke(std::vector<std::uint8_t>& output, const Stroke& stroke) {
     AppendValue(output, stroke.style.width);
     AppendValue(output, styleFlags);
     AppendValue(output, stroke.smoothing);
+    AppendValue(output, stroke.sampling.streamline);
+    AppendValue(output, stroke.sampling.spacing);
     const auto pointCount = static_cast<std::uint32_t>(stroke.points.size());
     AppendValue(output, pointCount);
     for (const Vec2& point : stroke.points) {
@@ -268,6 +272,10 @@ bool ReadStroke(ByteReader& reader, std::uint32_t version, Stroke& stroke) {
     }
     stroke.style.dotted = (styleFlags & kStrokeStyleFlagDotted) != 0U;
     if (version >= 10U && !reader.Read(stroke.smoothing)) {
+        return false;
+    }
+    if (version >= 17U
+        && (!reader.Read(stroke.sampling.streamline) || !reader.Read(stroke.sampling.spacing))) {
         return false;
     }
     if (!reader.Read(pointCount) || pointCount > reader.Remaining() / 8U) {
@@ -594,7 +602,7 @@ std::optional<Document> LoadProjectPayload(
         if (!reader.Read(imageCount)) return std::nullopt;
 
         const std::size_t minimumStrokeBytes = 12U + (version >= 9U ? 1U : 0U)
-            + (version >= 10U ? 4U : 0U);
+            + (version >= 10U ? 4U : 0U) + (version >= 17U ? 8U : 0U);
         if (strokeCount > reader.Remaining() / minimumStrokeBytes) return std::nullopt;
         page.strokes.reserve(strokeCount);
         for (std::uint32_t strokeIndex = 0; strokeIndex < strokeCount; ++strokeIndex) {

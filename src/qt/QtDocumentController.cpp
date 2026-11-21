@@ -448,7 +448,7 @@ std::uint64_t QtDocumentController::NextObjectId() const {
 
 // --- strokes ----------------------------------------------------------------
 
-void QtDocumentController::BeginStroke(std::size_t pageIndex, Vec2 point) {
+void QtDocumentController::BeginStroke(std::size_t pageIndex, Vec2 point, StrokeSampling sampling) {
     FinishInteraction();
     pendingStroke_.reset();
     if (PageAt(pageIndex) == nullptr) {
@@ -459,6 +459,7 @@ void QtDocumentController::BeginStroke(std::size_t pageIndex, Vec2 point) {
     pending.pageIndex = pageIndex;
     pending.stroke.style = strokeStyle_;
     pending.stroke.smoothing = input_.strokeSmoothing;
+    pending.stroke.sampling = sampling;
     pending.stroke.points.push_back(point);
     pendingStroke_ = std::move(pending);
     SetCurrentPageIndex(pageIndex);
@@ -1318,9 +1319,14 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         if (index >= page->strokes.size()) {
             continue;
         }
-        for (Vec2& point : page->strokes[index].points) {
+        Stroke& stroke = page->strokes[index];
+        for (Vec2& point : stroke.points) {
             point = ui::MapSelectionTransformPoint(point, transform.from, transform.to, transform.rotateDegrees);
         }
+        // The stabilization replays over the mapped raw points, so its spacing
+        // scales with them (exact for uniform scales and rotations; the
+        // geometric mean approximates a non-uniform resize).
+        stroke.sampling.spacing *= std::sqrt(std::abs(scaleX * scaleY));
         MarkGestureChanged();
     }
     for (const std::size_t index : selection.images) {
@@ -1554,6 +1560,7 @@ void QtDocumentController::ReplacePendingStrokePoints(const std::vector<Vec2>& p
         return;
     }
     pendingStroke_->stroke.points = points;
+    pendingStroke_->stroke.sampling = {};
     pendingStroke_->stroke.style.dotted = dotted;
 }
 

@@ -977,6 +977,50 @@ void SetCurrentPageIndexIsSerialized() {
         "the viewed page is what the project serializes");
 }
 
+// Version 17 stores raw stroke samples plus the StrokeSampling they render
+// with; earlier files stored already-stabilized points, which must read back
+// with the identity sampling so they render exactly as before.
+void StrokeSamplingRoundTripsAndLegacyReadsAsIdentity() {
+    cnote::Document document = cnote::Document::CreateBlank();
+    cnote::Stroke stroke;
+    stroke.sampling = { 0.4f, 1.25f };
+    stroke.points = { { 10.0f, 10.0f }, { 10.5f, 10.25f }, { 30.0f, 12.0f } };
+    document.CurrentPage().strokes.push_back(stroke);
+
+    std::vector<std::uint8_t> bytes = cnote::ProjectFile::Serialize(document);
+    const std::optional<cnote::Document> current = cnote::ProjectFile::LoadFromBytes(bytes, "current.cnote");
+    Check(current.has_value() && current->CurrentPage().strokes.size() == 1U
+            && cnote::StrokeEqual(current->CurrentPage().strokes.front(), stroke),
+        "a stroke keeps its raw points and sampling through save/load");
+
+    // The same file as version 16 wrote it: no sampling floats after the
+    // stroke's smoothing.  The header is magic(8) version(4) encoding(4)
+    // payloadSize(8); this tiny payload is stored raw (encoding 0).
+    std::uint32_t encoding = 0;
+    std::memcpy(&encoding, bytes.data() + 12, sizeof(encoding));
+    std::uint8_t sampling[8] {};
+    std::memcpy(sampling, &stroke.sampling.streamline, 4);
+    std::memcpy(sampling + 4, &stroke.sampling.spacing, 4);
+    const auto found = std::search(bytes.begin(), bytes.end(), std::begin(sampling), std::end(sampling));
+    Check(encoding == 0U && found != bytes.end(), "the raw serialized stroke carries its sampling");
+    if (encoding != 0U || found == bytes.end()) {
+        return;
+    }
+    bytes.erase(found, found + 8);
+    const std::uint32_t legacyVersion = 16;
+    std::memcpy(bytes.data() + 8, &legacyVersion, sizeof(legacyVersion));
+    std::uint64_t payloadSize = 0;
+    std::memcpy(&payloadSize, bytes.data() + 16, sizeof(payloadSize));
+    payloadSize -= 8U;
+    std::memcpy(bytes.data() + 16, &payloadSize, sizeof(payloadSize));
+    const std::optional<cnote::Document> legacy = cnote::ProjectFile::LoadFromBytes(bytes, "legacy.cnote");
+    cnote::Stroke expected = stroke;
+    expected.sampling = {};
+    Check(legacy.has_value() && legacy->CurrentPage().strokes.size() == 1U
+            && cnote::StrokeEqual(legacy->CurrentPage().strokes.front(), expected),
+        "a version-16 stroke reads its stored points with the identity sampling");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1017,6 +1061,7 @@ int main(int argc, char** argv) {
     RemoteCommitCancelsTransientState();
     SaveToRefusesPdfContainer();
     SetCurrentPageIndexIsSerialized();
+    StrokeSamplingRoundTripsAndLegacyReadsAsIdentity();
 
     if (gFailures != 0) {
         std::printf("%d check(s) failed\n", gFailures);

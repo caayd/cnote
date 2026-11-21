@@ -8,6 +8,29 @@ namespace cnote {
 
 // Pure stroke geometry shared by the renderers and the PDF exporters. Kept in
 // a portable TU so the model-side services do not pull in the Qt canvas.
+//
+// A stroke renders from its raw points in two stages: BuildStabilizedPoints
+// replays the pointer stabilization the stroke recorded (Stroke::sampling),
+// then BuildSmoothedPoints applies the 3-tap render smoothing.  The canvas
+// preview runs the same stages incrementally (IncrementalStrokeStabilizer,
+// IncrementalStrokeSmoother) and must stay point-for-point identical.
+
+// Incremental form of BuildStabilizedPoints: feeding the raw points in order
+// appends exactly the points the batch form returns.
+class IncrementalStrokeStabilizer {
+public:
+    void Reset(StrokeSampling sampling);
+    // Feeds one raw point and appends the points it stabilizes to `out`.
+    void Feed(Vec2 raw, std::vector<Vec2>& out);
+
+private:
+    StrokeSampling sampling_ {};
+    bool hasLast_ = false;
+    Vec2 last_ {};
+};
+
+[[nodiscard]] std::vector<Vec2> BuildStabilizedPoints(const std::vector<Vec2>& points, StrokeSampling sampling);
+
 [[nodiscard]] std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float strength);
 
 // Incremental form of BuildSmoothedPoints for a stroke that grows one sample
@@ -37,5 +60,8 @@ private:
 };
 
 [[nodiscard]] float StrokeRenderSmoothing(const Stroke& stroke, float fallbackSmoothing);
+
+// The geometry a stroke renders and hit-tests as: stabilized, then smoothed.
+[[nodiscard]] std::vector<Vec2> BuildStrokeRenderPoints(const Stroke& stroke, float fallbackSmoothing);
 
 }  // namespace cnote

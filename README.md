@@ -218,7 +218,7 @@ reference table captured from the removed Win32 frontend.
 `shortcut_routing_qt` includes a selected rich-text object's Ctrl+C/Ctrl+V
 round trip through the window, preserving Unicode, formatting, dimensions and
 rotation, with undo/redo. `selection_clipboard_qt` also checks mixed-object
-round trips and reading legacy CTS8 data into the current CTS9 format.
+round trips and reading legacy CTS8 data into the current CTSA format.
 `rotated_pdf_persistence_qt` checks unrotated, clockwise and counterclockwise
 PDF-backed pages through native-project and embedded-PDF save/reopen paths,
 including page dimensions and pixel-identical background rendering.

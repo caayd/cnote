@@ -374,6 +374,41 @@ int main(int argc, char** argv) {
         QCoreApplication::processEvents();
         Check(controller.DocumentRef().PageAt(0).strokes.empty(), "page has no stroke after undo at zoom " + std::to_string(zoom));
 
+        // (c2) Freehand ink renders from raw samples through the stroke's
+        // recorded stabilization; the live preview must draw that same
+        // stabilized curve, or the ink jumps when the stroke commits.  Heavy
+        // stabilization makes the stabilized tail lag the pointer by far more
+        // than the pixel tolerance, so a preview drawn from the raw samples
+        // fails here.
+        canvas.Router().SetTuning(ui::InteractionTuning { 0.85f, 0.8f });
+        // The path spans the middle 60% of the visible page width at every zoom.
+        const double span = std::min(static_cast<double>(page.width) * scale, canvas.width() * 0.8);
+        const QPointF wiggleStart = center + QPointF(-0.3 * span, 0.0);
+        SendMouse(canvas, QEvent::MouseButtonPress, wiggleStart, Qt::LeftButton, Qt::LeftButton);
+        QPointF wigglePoint = wiggleStart;
+        for (int step = 1; step <= 40; ++step) {
+            wigglePoint = wiggleStart + QPointF(0.015 * span * step, 0.06 * span * std::sin(step * 0.35));
+            SendMouse(canvas, QEvent::MouseMove, wigglePoint, Qt::NoButton, Qt::LeftButton);
+        }
+        QCoreApplication::processEvents();
+        const QImage freehandPreview = canvas.grab().toImage();
+        SendMouse(canvas, QEvent::MouseButtonRelease, wigglePoint, Qt::LeftButton, Qt::NoButton);
+        QCoreApplication::processEvents();
+        const QImage freehandCommitted = canvas.grab().toImage();
+        canvas.Router().SetTuning(ui::InteractionTuning {});
+
+        const InkBox freehandPreviewBox = RedInk(freehandPreview);
+        const InkBox freehandCommittedBox = RedInk(freehandCommitted);
+        std::printf("FREEHAND zoom=%.2f preview=%s committed=%s\n",
+                    zoom, FormatBox(freehandPreviewBox).c_str(), FormatBox(freehandCommittedBox).c_str());
+        Check(BoxNear(freehandPreviewBox, freehandCommittedBox, static_cast<int>(std::lround(toleranceDevice))),
+              "committed freehand stroke lands on the preview pixels at zoom " + std::to_string(zoom));
+        CheckNear(std::abs(freehandPreviewBox.count - freehandCommittedBox.count) <= std::max(64, freehandPreviewBox.count / 10),
+                  "committed freehand ink area matches the preview at zoom " + std::to_string(zoom),
+                  freehandCommittedBox.count, freehandPreviewBox.count, std::max(64, freehandPreviewBox.count / 10));
+        Check(controller.Undo(), "undo removes the freehand stroke at zoom " + std::to_string(zoom));
+        QCoreApplication::processEvents();
+
         // (d) text edit overlay position vs the committed object's page rect.
         canvas.SetTool(ui::Tool::Text);
         const QPointF textLogical = center;

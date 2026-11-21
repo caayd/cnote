@@ -92,7 +92,8 @@ struct ByteReader {
 
 std::vector<std::uint8_t> EncodeSelectionClipboard(const SelectionClipboardData& data) {
     std::vector<std::uint8_t> bytes;
-    const char magic[] = { 'C', 'T', 'S', '9' };
+    // CTSA ("CTS10"): CTS9 plus each stroke's StrokeSampling.
+    const char magic[] = { 'C', 'T', 'S', 'A' };
     AppendBytes(bytes, magic, sizeof(magic));
     AppendUint32(bytes, static_cast<std::uint32_t>(data.strokes.size()));
     AppendUint32(bytes, static_cast<std::uint32_t>(data.texts.size()));
@@ -111,6 +112,8 @@ std::vector<std::uint8_t> EncodeSelectionClipboard(const SelectionClipboardData&
         AppendFloat(bytes, stroke.style.width);
         AppendUint32(bytes, strokeFlags);
         AppendFloat(bytes, stroke.smoothing);
+        AppendFloat(bytes, stroke.sampling.streamline);
+        AppendFloat(bytes, stroke.sampling.spacing);
         AppendUint32(bytes, static_cast<std::uint32_t>(stroke.points.size()));
         for (const Vec2& point : stroke.points) {
             AppendFloat(bytes, point.x);
@@ -200,17 +203,20 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
     const bool isCts7 = std::memcmp(magic, "CTS7", 4) == 0;
     const bool isCts8 = std::memcmp(magic, "CTS8", 4) == 0;
     const bool isCts9 = std::memcmp(magic, "CTS9", 4) == 0;
-    if (!isCts1 && !isCts2 && !isCts3 && !isCts4 && !isCts5 && !isCts6 && !isCts7 && !isCts8 && !isCts9) {
+    const bool isCtsA = std::memcmp(magic, "CTSA", 4) == 0;
+    if (!isCts1 && !isCts2 && !isCts3 && !isCts4 && !isCts5 && !isCts6 && !isCts7 && !isCts8 && !isCts9 && !isCtsA) {
         return std::nullopt;
     }
 
     const bool hasTextCount = !isCts1;
-    const bool hasTextWidth = isCts3 || isCts4 || isCts5 || isCts6 || isCts7 || isCts8 || isCts9;
-    const bool hasTextHeight = isCts4 || isCts5 || isCts6 || isCts7 || isCts8 || isCts9;
-    const bool hasTextFlags = isCts5 || isCts6 || isCts7 || isCts8 || isCts9;
-    const bool hasStrokeFlags = isCts6 || isCts7 || isCts8 || isCts9;
-    const bool hasStrokeSmoothing = isCts7 || isCts8 || isCts9;
-    const bool hasObjectRotation = isCts9;
+    const bool hasTextWidth = isCts3 || isCts4 || isCts5 || isCts6 || isCts7 || isCts8 || isCts9 || isCtsA;
+    const bool hasTextHeight = isCts4 || isCts5 || isCts6 || isCts7 || isCts8 || isCts9 || isCtsA;
+    const bool hasTextFlags = isCts5 || isCts6 || isCts7 || isCts8 || isCts9 || isCtsA;
+    const bool hasStrokeFlags = isCts6 || isCts7 || isCts8 || isCts9 || isCtsA;
+    const bool hasStrokeSmoothing = isCts7 || isCts8 || isCts9 || isCtsA;
+    const bool hasStrokeSampling = isCtsA;
+    const bool hasObjectRotation = isCts9 || isCtsA;
+    const bool hasStyleSpansAndLatex = isCts8 || isCts9 || isCtsA;
 
     ByteReader reader { bytes, 4U };
     SelectionClipboardData data;
@@ -247,6 +253,9 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
         stroke.style.dotted = (strokeFlags & kStrokeFlagDotted) != 0U;
         if (ok && hasStrokeSmoothing) {
             ok = reader.ReadFloat(stroke.smoothing);
+        }
+        if (ok && hasStrokeSampling) {
+            ok = reader.ReadFloat(stroke.sampling.streamline) && reader.ReadFloat(stroke.sampling.spacing);
         }
         ok = ok && reader.ReadUint32(pointCount);
         if (ok && pointCount > reader.Remaining() / 8U) {
@@ -300,7 +309,7 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
         text.bold = (flags & (1U << 16U)) != 0;
         text.italic = (flags & (1U << 17U)) != 0;
         text.underline = (flags & (1U << 18U)) != 0;
-        if (ok && (isCts8 || isCts9)) {
+        if (ok && hasStyleSpansAndLatex) {
             std::uint32_t spanCount = 0;
             ok = reader.ReadUint32(spanCount) && spanCount <= text.content.size() + 1U;
             for (std::uint32_t spanIndex = 0; ok && spanIndex < spanCount; ++spanIndex) {
@@ -349,7 +358,7 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
         }
     }
 
-    if (ok && (isCts8 || isCts9) && reader.Remaining() >= sizeof(std::uint32_t)) {
+    if (ok && hasStyleSpansAndLatex && reader.Remaining() >= sizeof(std::uint32_t)) {
         std::uint32_t latexCount = 0;
         ok = reader.ReadUint32(latexCount);
         if (ok && latexCount > reader.Remaining() / 16U) {
