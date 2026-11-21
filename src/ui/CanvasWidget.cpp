@@ -1528,14 +1528,11 @@ void CanvasWidget::ShowTextOverlay(const PageText& text) {
         textEditor_->setLineWrapColumnOrWidth(text::TextWrapWidthPx(text, textEditScale_));
     }
     {
+        // Typing continues the style of the text before the caret (the end of
+        // the object), like any editor; an empty object types in its own
+        // style through the block char format LoadPageText applies.
         QSignalBlocker blocker(textEditor_);
         textEditor_->LoadPageText(text, textEditScale_);
-        // Newly typed text takes the cursor's current format, not the document
-        // default: seed it with the object's style so fresh input matches the
-        // committed colour (and the toolbar's format readout).
-        textEditor_->setCurrentCharFormat(text::CharFormatForStyle(
-            { text.fontSize, text.color, text.fontFamily, text.bold, text.italic, text.underline },
-            textEditScale_));
     }
     textEditor_->show();
     textEditor_->raise();
@@ -1889,6 +1886,25 @@ bool CanvasWidget::HandleEditorKey(QObject* watched, QKeyEvent* event) {
 
 bool CanvasWidget::eventFilter(QObject* watched, QEvent* event) {
     if (watched == textEditor_ || watched == latexEditor_) {
+        // Ctrl+B inside an editor never reaches the window (its sidebar
+        // binding): claiming the ShortcutOverride keeps the key with the
+        // editor.  The text editor's press is its bold command; the LaTeX
+        // source box gets the press itself (QPlainTextEdit leaves it inert),
+        // like the reference's edit control.
+        if (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress) {
+            auto* key = static_cast<QKeyEvent*>(event);
+            if (key->key() == Qt::Key_B && key->modifiers() == Qt::ControlModifier) {
+                if (event->type() == QEvent::ShortcutOverride) {
+                    event->accept();
+                    return true;
+                }
+                if (watched == textEditor_) {
+                    emit TextBoldShortcutPressed();
+                    return true;
+                }
+                return false;
+            }
+        }
         if (event->type() == QEvent::KeyPress) {
             if (HandleEditorKey(watched, static_cast<QKeyEvent*>(event))) {
                 return true;

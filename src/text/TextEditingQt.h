@@ -47,7 +47,8 @@ enum class InlineMathMode {
     Rendered,
 };
 
-// Applies the model's default style and every span to the document.  In
+// Applies the model's default style, its page-unit tab stops and every span
+// to the document (sizes and tab stops scaled by displayScale).  In
 // Rendered mode the document must hold BuildTextOffsetMap(text, Rendered)
 // text; each formula placeholder becomes an inline math object styled like
 // the run it sits in.

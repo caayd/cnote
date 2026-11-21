@@ -19,6 +19,9 @@
 #include <QPlainTextEdit>
 #include <QResizeEvent>
 #include <QScreen>
+#include <QTextBlock>
+#include <QTextCursor>
+#include <QTextDocument>
 #include <QTextEdit>
 #include <QVBoxLayout>
 #include <QWindow>
@@ -167,6 +170,75 @@ StrokeStyle StrokeStyleFor(
     return style;
 }
 
+enum class TextToggle {
+    Bold,
+    Italic,
+    Underline,
+};
+
+// Read through the font, like the model capture (StyleForCharFormat).
+bool HasToggle(const QTextCharFormat& format, TextToggle toggle) {
+    const QFont font = format.font();
+    switch (toggle) {
+    case TextToggle::Bold:
+        return font.bold();
+    case TextToggle::Italic:
+        return font.italic();
+    case TextToggle::Underline:
+    default:
+        return font.underline();
+    }
+}
+
+// Whether every selected character - or, without a selection, the typing
+// format - has the toggle on.  Asking only the caret's format answered for
+// the character before the caret, which for a selection made leftwards lies
+// outside it.
+bool SelectionHas(const QTextEdit& editor, TextToggle toggle) {
+    const QTextCursor cursor = editor.textCursor();
+    if (!cursor.hasSelection()) {
+        return HasToggle(editor.currentCharFormat(), toggle);
+    }
+    const int start = cursor.selectionStart();
+    const int end = cursor.selectionEnd();
+    for (QTextBlock block = editor.document()->findBlock(start); block.isValid() && block.position() < end;
+         block = block.next()) {
+        for (QTextBlock::iterator iterator = block.begin(); !iterator.atEnd(); ++iterator) {
+            const QTextFragment fragment = iterator.fragment();
+            if (fragment.position() + fragment.length() <= start || fragment.position() >= end) {
+                continue;
+            }
+            if (!HasToggle(fragment.charFormat(), toggle)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// A toolbar toggle switches the property on for the whole selection unless
+// all of it has it already (then off).  The modifier sets only that property,
+// so the rest of every selected run's style stays as it was.
+QTextCharFormat ToggleModifier(const QTextEdit* editor, TextToggle toggle) {
+    QTextCharFormat modifier;
+    if (editor == nullptr) {
+        return modifier;
+    }
+    const bool on = !SelectionHas(*editor, toggle);
+    switch (toggle) {
+    case TextToggle::Bold:
+        modifier.setFontWeight(on ? QFont::Bold : QFont::Normal);
+        break;
+    case TextToggle::Italic:
+        modifier.setFontItalic(on);
+        break;
+    case TextToggle::Underline:
+        modifier.setFontUnderline(on);
+        break;
+    }
+    return modifier;
+}
+
 PageTextStyle TextStyleFromEditor(const QTextEdit* editor, TextAlignment& alignment) {
     PageTextStyle style {};
     if (editor == nullptr) {
@@ -182,13 +254,17 @@ PageTextStyle TextStyleFromEditor(const QTextEdit* editor, TextAlignment& alignm
     } else {
         alignment = TextAlignment::Left;
     }
-    // fontFamily + the weight flags come from the shared capture mapping (its
-    // page-unit fontSize is overwritten below: the popup shows the editor's
-    // screen point size, same as the legacy size box).
+    // fontFamily comes from the shared capture mapping (its page-unit
+    // fontSize is overwritten below: the popup shows the editor's screen point
+    // size, same as the legacy size box).  The toggles read the whole
+    // selection, the state the next toggle acts on.
     style = text::StyleForCharFormat(format, style, 1.0f);
     if (format.hasProperty(QTextFormat::FontPointSize)) {
         style.fontSize = static_cast<float>(format.fontPointSize());
     }
+    style.bold = SelectionHas(*editor, TextToggle::Bold);
+    style.italic = SelectionHas(*editor, TextToggle::Italic);
+    style.underline = SelectionHas(*editor, TextToggle::Underline);
     return style;
 }
 
@@ -467,31 +543,26 @@ void QtMainWindow::CreateChrome() {
         settingsStore_.Save(settings_);
         UpdateChrome();
     };
-    connect(toolbar_, &ui::ToolbarWidget::TextBoldToggleRequested, this, [this, persistPendingTextStyle]() {
+    const auto toggleTextFormat = [this, persistPendingTextStyle](TextToggle toggle, bool& pending) {
         if (controller_.EditingText()) {
-            ApplyTextFormat([](QTextCharFormat& format) {
-                format.setFontWeight(format.fontWeight() >= QFont::Bold ? QFont::Normal : QFont::Bold);
-            });
+            ApplyTextFormat(ToggleModifier(canvas_->TextEditor(), toggle));
         } else {
-            settings_.textBold = !settings_.textBold;
+            pending = !pending;
         }
         persistPendingTextStyle();
+    };
+    connect(toolbar_, &ui::ToolbarWidget::TextBoldToggleRequested, this, [this, toggleTextFormat]() {
+        toggleTextFormat(TextToggle::Bold, settings_.textBold);
     });
-    connect(toolbar_, &ui::ToolbarWidget::TextItalicToggleRequested, this, [this, persistPendingTextStyle]() {
-        if (controller_.EditingText()) {
-            ApplyTextFormat([](QTextCharFormat& format) { format.setFontItalic(!format.fontItalic()); });
-        } else {
-            settings_.textItalic = !settings_.textItalic;
-        }
-        persistPendingTextStyle();
+    // Ctrl+B in the text editor is the same command (reference TextEditProc).
+    connect(canvas_, &ui::CanvasWidget::TextBoldShortcutPressed, this, [this, toggleTextFormat]() {
+        toggleTextFormat(TextToggle::Bold, settings_.textBold);
     });
-    connect(toolbar_, &ui::ToolbarWidget::TextUnderlineToggleRequested, this, [this, persistPendingTextStyle]() {
-        if (controller_.EditingText()) {
-            ApplyTextFormat([](QTextCharFormat& format) { format.setFontUnderline(!format.fontUnderline()); });
-        } else {
-            settings_.textUnderline = !settings_.textUnderline;
-        }
-        persistPendingTextStyle();
+    connect(toolbar_, &ui::ToolbarWidget::TextItalicToggleRequested, this, [this, toggleTextFormat]() {
+        toggleTextFormat(TextToggle::Italic, settings_.textItalic);
+    });
+    connect(toolbar_, &ui::ToolbarWidget::TextUnderlineToggleRequested, this, [this, toggleTextFormat]() {
+        toggleTextFormat(TextToggle::Underline, settings_.textUnderline);
     });
     connect(toolbar_, &ui::ToolbarWidget::TextAlignCycleRequested, this, [this, persistPendingTextStyle]() {
         QTextEdit* editor = canvas_->TextEditor();
@@ -519,18 +590,18 @@ void QtMainWindow::CreateChrome() {
         if (controller_.EditingText()) {
             const float points = settings_.textSizePresets[index]
                 * std::max(0.01f, canvas_->TextEditScale()) * text::kPointsPerPageUnit;
-            ApplyTextFormat([points](QTextCharFormat& format) {
-                format.setFontPointSize(points);
-            });
+            QTextCharFormat modifier;
+            modifier.setFontPointSize(points);
+            ApplyTextFormat(modifier);
         }
         persistPendingTextStyle();
     });
     connect(toolbar_, &ui::ToolbarWidget::TextFontFamilyChanged, this, [this, persistPendingTextStyle](TextFontFamily family) {
         settings_.textFontFamily = family;
         if (controller_.EditingText()) {
-            ApplyTextFormat([family](QTextCharFormat& format) {
-                format.setFontFamilies({ text::TextFontFamilyName(family) });
-            });
+            QTextCharFormat modifier;
+            modifier.setFontFamilies({ text::TextFontFamilyName(family) });
+            ApplyTextFormat(modifier);
         }
         persistPendingTextStyle();
     });
@@ -591,14 +662,12 @@ void QtMainWindow::CreateChrome() {
     UpdateChromeGeometry();
 }
 
-void QtMainWindow::ApplyTextFormat(const std::function<void(QTextCharFormat&)>& apply) {
+void QtMainWindow::ApplyTextFormat(const QTextCharFormat& modifier) {
     QTextEdit* editor = canvas_->TextEditor();
     if (editor == nullptr || !controller_.EditingText()) {
         return;
     }
-    QTextCharFormat format = editor->currentCharFormat();
-    apply(format);
-    editor->mergeCurrentCharFormat(format);
+    editor->mergeCurrentCharFormat(modifier);
     UpdateChrome();
 }
 
@@ -1790,43 +1859,6 @@ bool QtMainWindow::eventFilter(QObject* watched, QEvent* event) {
             }
         }
     }
-
-    // Reference TextEditProc (MessageLoop.cpp): inside a text edit Ctrl+B is the
-    // editor's bold command, and in a LaTeX edit it does nothing - in both cases
-    // it never reaches the window's sidebar binding.  QTextEdit with
-    // acceptRichText(false) does not claim Ctrl+B itself, so the editor accepts
-    // the ShortcutOverride here and the reference action runs on the key press.
-    // The LaTeX source box is left inert: QPlainTextEdit owns Ctrl+B as its
-    // standard bold key (as the reference's edit control did), so the window
-    // stands down rather than stealing it for the sidebar.
-    const bool inTextEditor = canvas_ != nullptr && watched == canvas_->TextEditor();
-    const bool inLatexEditor = canvas_ != nullptr && watched == canvas_->LatexEditor();
-    if ((inTextEditor || inLatexEditor)
-        && (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress)) {
-        auto* key = static_cast<QKeyEvent*>(event);
-        if (key->key() == Qt::Key_B && key->modifiers() == Qt::ControlModifier) {
-            if (event->type() == QEvent::ShortcutOverride) {
-                // Neither editor claims Ctrl+B themselves, so claim the window
-                // shortcut back for them; otherwise the sidebar binding fires.
-                event->accept();
-                return true;
-            }
-            if (inTextEditor) {
-                ApplyTextFormat([](QTextCharFormat& format) {
-                    format.setFontWeight(format.fontWeight() >= QFont::Bold ? QFont::Normal : QFont::Bold);
-                });
-                // Same last-use-wins rule as the popup toggles.
-                SyncPendingTextStyle();
-                ApplyPendingTextStyle();
-                settingsStore_.Save(settings_);
-                event->accept();
-                return true;
-            }
-            // LaTeX source box: leave the key to the editor (its own standard
-            // bold key), which is what the reference's edit control did.
-            return false;
-        }
-    }
     return QMainWindow::eventFilter(watched, event);
 }
 
@@ -1888,15 +1920,6 @@ void QtMainWindow::UpdateChrome() {
                 settings_.textAlignment,
                 settings_.textSizePreset);
         }
-    }
-    // The overlay editors are created lazily by the canvas; their Ctrl+B
-    // precedence (reference TextEditProc) needs this window as a filter.  Qt
-    // deduplicates repeated installs.
-    if (QTextEdit* textEditor = canvas_ != nullptr ? canvas_->TextEditor() : nullptr; textEditor != nullptr) {
-        textEditor->installEventFilter(this);
-    }
-    if (QPlainTextEdit* latexEditor = canvas_ != nullptr ? canvas_->LatexEditor() : nullptr; latexEditor != nullptr) {
-        latexEditor->installEventFilter(this);
     }
     if (sidebar_ != nullptr) {
         sidebar_->SetDocument(&document, controller_.PdfBackground());

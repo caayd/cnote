@@ -502,10 +502,16 @@ void QuickPopupIsTextFormattingWhileEditing() {
 void EditorKeepsCtrlBWhileEditingText() {
     // Reference precedence (TextEditProc, MessageLoop.cpp): ctrl+B inside a text
     // edit is the editor's bold command, so the sidebar toggle must not steal it.
+    // The edit is the window's first, opened by a Text-tool click: that path
+    // creates the editor after the window last refreshed its chrome, which
+    // left Ctrl+B dead until some later UpdateChrome.
     Harness harness;
-    SelectTool(harness, cnote::settings::Tool::Draw);
-    harness.window->AddTextObject();
+    SelectTool(harness, cnote::settings::Tool::Text);
+    const QPointF center = QRectF(harness.canvas->rect()).center();
+    SendMouse(*harness.canvas, QEvent::MouseButtonPress, center, Qt::LeftButton, Qt::LeftButton);
+    SendMouse(*harness.canvas, QEvent::MouseButtonRelease, center, Qt::LeftButton, Qt::NoButton);
     QApplication::processEvents();
+    Check(harness.canvas->EditOverlayActive(), "a Text-tool click opens the editor");
     const bool sidebarBefore = harness.sidebar->IsOpen();
     const bool boldBefore = harness.canvas->TextEditor() != nullptr
         && harness.canvas->TextEditor()->currentCharFormat().fontWeight() >= QFont::Bold;
@@ -516,7 +522,7 @@ void EditorKeepsCtrlBWhileEditingText() {
     std::printf("editing Ctrl+B -> sidebar %d->%d bold %d->%d\n",
         sidebarBefore ? 1 : 0, sidebarAfter ? 1 : 0, boldBefore ? 1 : 0, boldAfter ? 1 : 0);
     Check(sidebarAfter == sidebarBefore, "Ctrl+B while editing text does not toggle the sidebar");
-    Check(boldAfter != boldBefore, "Ctrl+B while editing text toggles bold (reference TextEditProc)");
+    Check(boldAfter != boldBefore, "Ctrl+B in the first, click-opened edit toggles bold (reference TextEditProc)");
 
     // In the LaTeX editor the reference leaves Ctrl+B inert.
     Harness latex;
@@ -526,6 +532,94 @@ void EditorKeepsCtrlBWhileEditingText() {
     const bool latexSidebarBefore = latex.sidebar->IsOpen();
     latex.Press(Qt::Key_B, Qt::ControlModifier);
     Check(latex.sidebar->IsOpen() == latexSidebarBefore, "Ctrl+B while editing LaTeX is inert");
+}
+
+// The format commands change only their own property, decide a toggle from the
+// whole selection, and typing after reopening continues the text's style.
+// They used to merge the caret's complete format over the selection: bolding
+// text of mixed sizes resized all of it, and for a selection made leftwards
+// the caret's format belonged to the character before the selection.
+void FormatCommandsChangeOnlyTheirProperty() {
+    Harness harness;
+    harness.window->AddTextObject();
+    QApplication::processEvents();
+    QTextEdit* editor = harness.canvas->TextEditor();
+    Check(editor != nullptr, "AddTextObject opens the editor for the format checks");
+    if (editor == nullptr) {
+        return;
+    }
+    editor->setFocus(Qt::OtherFocusReason);
+    for (const char character : std::string("aa bb")) {
+        QTest::keyClick(harness.window->windowHandle(), character);
+    }
+    QApplication::processEvents();
+    const std::size_t pageIndex = harness.window->Controller().EditingPageIndex();
+    const std::size_t textIndex = harness.window->Controller().EditingTextIndex().value_or(0U);
+    const float baseSize = harness.window->Controller().EditingTextObject()->fontSize;
+    const float largeSize = harness.toolbar->Settings().textSizePresets[2];
+
+    const auto styleAt = [&](std::uint32_t offset) {
+        const cnote::PageText text = harness.canvas->CaptureEditedText();
+        for (const cnote::PageTextStyleSpan& span : text.styleSpans) {
+            if (span.start <= offset && offset < span.start + span.length) {
+                return span.style;
+            }
+        }
+        return cnote::PageTextStyle { text.fontSize, text.color, text.fontFamily, text.bold, text.italic, text.underline };
+    };
+
+    // "aa" large, then bold over everything, selected right to left.
+    harness.Press(Qt::Key_Home);
+    harness.Press(Qt::Key_Right, Qt::ShiftModifier);
+    harness.Press(Qt::Key_Right, Qt::ShiftModifier);
+    emit harness.toolbar->TextSizePresetChanged(2U);
+    harness.Press(Qt::Key_End);
+    harness.Press(Qt::Key_Home, Qt::ShiftModifier);
+    emit harness.toolbar->TextBoldToggleRequested();
+    QApplication::processEvents();
+    Check(styleAt(0).bold && styleAt(4).bold, "bold reaches the whole selection made leftwards");
+    Check(std::abs(styleAt(0).fontSize - largeSize) < 0.05f && std::abs(styleAt(4).fontSize - baseSize) < 0.05f,
+        "bolding text of mixed sizes keeps every run's size");
+
+    // Everything bold: the toggle turns it off everywhere, sizes untouched.
+    emit harness.toolbar->TextBoldToggleRequested();
+    QApplication::processEvents();
+    Check(!styleAt(0).bold && !styleAt(4).bold, "the toggle on an all-bold selection removes bold");
+    Check(std::abs(styleAt(0).fontSize - largeSize) < 0.05f, "removing bold keeps the run's size");
+
+    // Italic and a family change over "bb" leave "aa" alone.
+    harness.Press(Qt::Key_End);
+    harness.Press(Qt::Key_Left, Qt::ShiftModifier);
+    harness.Press(Qt::Key_Left, Qt::ShiftModifier);
+    emit harness.toolbar->TextItalicToggleRequested();
+    emit harness.toolbar->TextFontFamilyChanged(cnote::TextFontFamily::Serif);
+    QApplication::processEvents();
+    const cnote::PageTextStyle tail = styleAt(4);
+    Check(tail.italic && tail.fontFamily == cnote::TextFontFamily::Serif && !styleAt(0).italic
+            && styleAt(0).fontFamily != cnote::TextFontFamily::Serif,
+        "italic and family apply to the selection only");
+
+    // Reopened, typing at the end continues the last run's style.
+    harness.canvas->CommitActiveEdit();
+    QApplication::processEvents();
+    Check(harness.window->Controller().BeginTextEdit(pageIndex, textIndex), "the text reopens");
+    harness.canvas->SyncEditOverlay();
+    QApplication::processEvents();
+    harness.canvas->TextEditor()->setFocus(Qt::OtherFocusReason);
+    QTest::keyClick(harness.window->windowHandle(), 'c');
+    QApplication::processEvents();
+    const cnote::PageTextStyle typed = styleAt(5);
+    Check(harness.canvas->CaptureEditedText().content == u"aa bbc" && typed.italic
+            && typed.fontFamily == cnote::TextFontFamily::Serif,
+        "typing after reopening continues the style before the caret");
+    harness.canvas->CommitActiveEdit();
+    QApplication::processEvents();
+
+    // Restore the pending style the format commands persisted.
+    emit harness.toolbar->TextItalicToggleRequested();
+    emit harness.toolbar->TextFontFamilyChanged(cnote::TextFontFamily::ShantellSans);
+    emit harness.toolbar->TextSizePresetChanged(1U);
+    QApplication::processEvents();
 }
 
 // --- 4. every settings-table shortcut fires ----------------------------------
@@ -930,6 +1024,7 @@ int main(int argc, char** argv) {
     QuickActionsFireEverywhere();
     QuickPopupIsTextFormattingWhileEditing();
     PendingTextFormatSeedsNewObjects();
+    FormatCommandsChangeOnlyTheirProperty();
     EditorKeepsCtrlBWhileEditingText();
     SelectionEnablesCopyAndCutImmediately();
     TextObjectsCopyPasteThroughShortcuts();

@@ -154,9 +154,10 @@ private:
     // position themselves; the window only supplies their contract inputs).
     void UpdateChromeGeometry();
     void ApplySettingsToShell();
-    // Applies a mutation to the active text editor's char format (the toolbar's
+    // Merges `modifier` - only the properties it sets - into the active text
+    // editor's selection, or its typing format without one (the toolbar's
     // format commands; no-op unless a text edit is open).
-    void ApplyTextFormat(const std::function<void(QTextCharFormat&)>& apply);
+    void ApplyTextFormat(const QTextCharFormat& modifier);
     // Pending text style (the Ctrl+W popup's pre-placement state): copies the
     // open editor's format into settings_ after a format command so the next
     // text object inherits the last-used style, and pushes settings_ into the

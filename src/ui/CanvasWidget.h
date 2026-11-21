@@ -240,6 +240,11 @@ public:
 
 signals:
     void ViewportChanged();
+    // Ctrl+B pressed in the text editor: the editor's bold command (reference
+    // TextEditProc), which the shell applies like the format popup's toggle.
+    // Raised from the editor's own event filter, installed when the editor is
+    // created, so it works from the first keystroke of the first edit.
+    void TextBoldShortcutPressed();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
