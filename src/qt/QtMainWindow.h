@@ -9,7 +9,9 @@
 
 #include <QMainWindow>
 #include <QPoint>
+#include <QPointer>
 #include <QTextCharFormat>
+#include <QWindow>
 
 #include "qt/QtDocumentController.h"
 #include "settings/SettingsStoreQt.h"
@@ -112,7 +114,6 @@ protected:
     void closeEvent(QCloseEvent* event) override;
     void showEvent(QShowEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
-    void mouseMoveEvent(QMouseEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
     // Windows custom caption (see kUsesCustomCaption): removes the native title
     // bar from the frame and restores the reference's hit testing.
@@ -135,6 +136,11 @@ private:
     // the release still lands on that button; also clears the armed state.
     // Defined on Windows only.
     void CompleteCaptionButtonCycle(ui::ToolbarControl released);
+    // Toolbar auto-hide when the cursor crossed the client boundary (left the
+    // window, or moved between client and non-client): reads the cursor.
+    void UpdateToolbarAutoHideAtBoundary();
+    // An active canvas drag/edit gesture (the reference auto-hide guard list).
+    [[nodiscard]] bool CanvasInteractionActive() const;
     // Caption button under a client-coordinate mouse position (physical
     // pixels, as a mouse MSG lParam carries); mirrors the WM_NCHITTEST band
     // math.  Defined on Windows only.
@@ -247,6 +253,11 @@ private:
     // (the HT*BUTTON codes leave activation to us); completed/cancelled on
     // WM_NCLBUTTONUP / WM_NCMOUSELEAVE.
     ui::ToolbarControl ncButtonArmed_ = ui::ToolbarControl::None;
+    // WM_NCMOUSELEAVE is requested (TrackMouseEvent) until it arrives.
+    bool ncLeaveTracked_ = false;
+    // Native window whose mouse/enter/leave events drive the toolbar
+    // auto-hide; installed on show (the handle exists from then on).
+    QPointer<QWindow> autoHideInputWindow_;
     ui::SettingsDialogQt* settingsDialog_ = nullptr;
     ui::NewPageDialogQt* newPageDialog_ = nullptr;
     QMenu* titleMenu_ = nullptr;

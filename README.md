@@ -87,9 +87,11 @@ reference's clipped toolbar surface.
 
 With **Auto-hide toolbar** enabled in Settings the entire band, window controls
 included, animates away and comes back when the pointer reaches the top edge
-(12 logical pixels normally, 22 while maximized); with the option disabled the
-band is always visible. Linux and macOS keep their native decorations, so the
-band there never draws the in-client window buttons.
+(12 logical pixels normally, 22 while maximized) or enters the window anywhere
+in the band's height; it hides again once the pointer moves below the band or
+leaves the window. A canvas drag leaves it as it is. With the option disabled
+the band is always visible. Linux and macOS keep their native
+decorations, so the band there never draws the in-client window buttons.
 
 ## Default Controls
 
@@ -235,7 +237,9 @@ auto-hide band state machine and the caption-button intents).
 `window_chrome_native_qt` drives its native half on Windows through the real
 window procedure of a window kept off screen: `WM_NCCALCSIZE`,
 `WM_NCACTIVATE`, the `WM_NCHITTEST` codes for the caption buttons, band, canvas
-and frame edges, and the caption-button press/cancel/release cycle.
+and frame edges, the caption-button press/cancel/release cycle, and the
+auto-hide input (entering through the band, leaving through the client area
+or the non-client band, a canvas drag reaching the reveal strip).
 Maximize/minimize through the buttons and the maximized hit test would need a
 visible window; `window_chrome_qt` covers the maximized arithmetic.
 `capture_cli_qt` runs `cnote --script` end to end (see "Headless runs") and

@@ -1163,10 +1163,12 @@ ToolbarWidget::ToolbarWidget(QWidget* parent)
 
     UpdateToolbarGeometry();
 
-    // One application-scoped filter tracks host resize/mouse-move (auto-hide)
-    // and dismisses open overlays on the first click outside them, matching the
-    // reference WM_LBUTTONDOWN overlay order in App::HandlePaletteClick /
-    // HandleQuickSizePopupClick / HandleTextFormatPopupClick.
+    // One application-scoped filter tracks host resizes and dismisses open
+    // overlays on the first click outside them, matching the reference
+    // WM_LBUTTONDOWN overlay order in App::HandlePaletteClick /
+    // HandleQuickSizePopupClick / HandleTextFormatPopupClick.  The auto-hide
+    // cursor input comes from the host window (QtMainWindow), which also knows
+    // whether a canvas interaction is active.
     if (QApplication::instance() != nullptr) {
         QApplication::instance()->installEventFilter(this);
     }
@@ -1621,6 +1623,21 @@ void ToolbarWidget::UpdateAutoHideForCursor(const QPointF& hostPosition, bool in
     }
 }
 
+void ToolbarWidget::UpdateAutoHideAtBoundary(const QPointF& hostPosition, bool interactionActive) {
+    if (!settings_.autoHideToolbar) {
+        return;
+    }
+    const QWidget* host = window();
+    const QSizeF clientSize = host != nullptr ? QSizeF(host->size()) : QSizeF(size());
+    const qt::ToolbarAutoHide decision = qt::ResolveToolbarAutoHideAtBoundary(
+        hostPosition, clientSize, maximized_, interactionActive || AnyOverlayVisible() || zoomEdit_.active);
+    if (decision == qt::ToolbarAutoHide::Reveal) {
+        SetRevealed(true);
+    } else if (decision == qt::ToolbarAutoHide::Hide) {
+        SetRevealed(false);
+    }
+}
+
 void ToolbarWidget::OnRevealTick() {
     const double elapsed = static_cast<double>(revealClock_.elapsed());
     const qreal linear = std::clamp(elapsed / 120.0, 0.0, 1.0);
@@ -1843,7 +1860,6 @@ void ToolbarWidget::mouseMoveEvent(QMouseEvent* event) {
         hovered_ = control;
         update();
     }
-    UpdateAutoHideForCursor(event->position(), false);
 }
 
 void ToolbarWidget::mouseReleaseEvent(QMouseEvent* event) {
@@ -1871,7 +1887,6 @@ void ToolbarWidget::leaveEvent(QEvent* event) {
         pressed_ = ToolbarControl::None;
         update();
     }
-    UpdateAutoHideForCursor(QPointF(-1.0, -1.0), false);
     QWidget::leaveEvent(event);
 }
 
@@ -2342,11 +2357,6 @@ bool ToolbarWidget::eventFilter(QObject* watched, QEvent* event) {
     QWidget* host = window();
     if (host != nullptr && watched == host && event->type() == QEvent::Resize) {
         UpdateToolbarGeometry();
-    }
-
-    if (settings_.autoHideToolbar && host != nullptr && event->type() == QEvent::MouseMove) {
-        auto* mouse = static_cast<QMouseEvent*>(event);
-        UpdateAutoHideForCursor(host->mapFromGlobal(mouse->globalPosition().toPoint()), false);
     }
 
     if (AnyOverlayVisible()) {

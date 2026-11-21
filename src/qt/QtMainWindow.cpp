@@ -1611,6 +1611,13 @@ void QtMainWindow::showEvent(QShowEvent* event) {
             }
         }
     }
+    if (QWindow* handle = windowHandle(); handle != nullptr && handle != autoHideInputWindow_) {
+        if (autoHideInputWindow_ != nullptr) {
+            autoHideInputWindow_->removeEventFilter(this);
+        }
+        autoHideInputWindow_ = handle;
+        handle->installEventFilter(this);
+    }
     UpdateChromeGeometry();
 }
 
@@ -1744,13 +1751,29 @@ bool QtMainWindow::HandleNativeChromeMessage(void* message, qintptr* result) {
         // Defensive: a press armed without capture still completes here.
         CompleteCaptionButtonCycle(HitCodeControl(static_cast<LRESULT>(msg->wParam)));
         return false;
+    case WM_NCMOUSEMOVE:
+        // Ask for WM_NCMOUSELEAVE: the band's caption strip and the frame
+        // edges are non-client, so a cursor leaving the window from there
+        // never produces a client-area leave.
+        if (!ncLeaveTracked_) {
+            TRACKMOUSEEVENT track {};
+            track.cbSize = sizeof(track);
+            track.dwFlags = TME_LEAVE | TME_NONCLIENT;
+            track.hwndTrack = msg->hwnd;
+            ncLeaveTracked_ = TrackMouseEvent(&track) != FALSE;
+        }
+        return false;
     case WM_NCMOUSELEAVE:
         // The pressed visual and any armed press clear when the non-client
         // area loses the cursor.
+        ncLeaveTracked_ = false;
         ncButtonArmed_ = ui::ToolbarControl::None;
         if (toolbar_ != nullptr) {
             toolbar_->SetPressedControl(ui::ToolbarControl::None);
         }
+        // App WM_MOUSELEAVE (MessageLoop.cpp:369-396), for the non-client
+        // band: still inside the band keeps it, anywhere else hides it.
+        UpdateToolbarAutoHideAtBoundary();
         return false;
     default:
         break;
@@ -1843,28 +1866,32 @@ void QtMainWindow::resizeEvent(QResizeEvent* event) {
     UpdateChromeGeometry();
 }
 
-void QtMainWindow::mouseMoveEvent(QMouseEvent* event) {
-    QMainWindow::mouseMoveEvent(event);
+void QtMainWindow::UpdateToolbarAutoHideAtBoundary() {
     if (toolbar_ != nullptr) {
-        toolbar_->UpdateAutoHideForCursor(event->position(), canvas_->ActiveInteraction() != ui::InteractionKind::None);
+        toolbar_->UpdateAutoHideAtBoundary(mapFromGlobal(QPointF(ui::GlobalCursorPos())), CanvasInteractionActive());
     }
 }
 
+bool QtMainWindow::CanvasInteractionActive() const {
+    return canvas_ != nullptr && canvas_->ActiveInteraction() != ui::InteractionKind::None;
+}
+
 bool QtMainWindow::eventFilter(QObject* watched, QEvent* event) {
-    if (watched == canvas_ && toolbar_ != nullptr) {
+    // The window-level input feeds the toolbar auto-hide (App::HandleMessage
+    // WM_MOUSEMOVE / WM_LBUTTONDOWN / WM_MOUSELEAVE, MessageLoop.cpp:193-396):
+    // the QWindow sees every move in client coordinates whichever child is
+    // under the cursor, before that child starts an interaction on a press.
+    if (watched == autoHideInputWindow_ && toolbar_ != nullptr) {
         switch (event->type()) {
             case QEvent::MouseMove:
             case QEvent::MouseButtonPress:
-            case QEvent::MouseButtonRelease: {
-                auto* mouse = static_cast<QMouseEvent*>(event);
-                const bool interactionActive = canvas_->ActiveInteraction() != ui::InteractionKind::None;
-                toolbar_->UpdateAutoHideForCursor(
-                    canvas_->mapTo(this, mouse->position().toPoint()),
-                    interactionActive);
+                toolbar_->UpdateAutoHideForCursor(static_cast<QMouseEvent*>(event)->position(), CanvasInteractionActive());
                 break;
-            }
+            case QEvent::Enter:
+                toolbar_->UpdateAutoHideAtBoundary(static_cast<QEnterEvent*>(event)->position(), CanvasInteractionActive());
+                break;
             case QEvent::Leave:
-                toolbar_->UpdateAutoHideForCursor(QPointF(-1.0, -1.0), false);
+                UpdateToolbarAutoHideAtBoundary();
                 break;
             default:
                 break;

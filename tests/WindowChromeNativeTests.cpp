@@ -1,6 +1,7 @@
 // Windows-only contract test for the native half of the borderless window
-// chrome: QtMainWindow's WM_NCCALCSIZE / WM_NCACTIVATE / WM_NCHITTEST handling
-// and the caption-button press cycle (App::HandleMessage, MessageLoop.cpp:85-154).
+// chrome: QtMainWindow's WM_NCCALCSIZE / WM_NCACTIVATE / WM_NCHITTEST handling,
+// the caption-button press cycle (App::HandleMessage, MessageLoop.cpp:85-154)
+// and the window-level input that drives the toolbar auto-hide.
 //
 // window_chrome_qt covers the platform-neutral arithmetic offscreen; this test
 // drives the real window procedure.  The window is kept off screen the way the
@@ -16,15 +17,20 @@
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
+#include <optional>
 #include <string>
 
 #include <QApplication>
 #include <QByteArray>
+#include <QEnterEvent>
+#include <QMouseEvent>
 #include <QPoint>
 #include <QPointF>
 #include <QRect>
 #include <QScreen>
 #include <QTemporaryDir>
+#include <QWindow>
 
 #include <windows.h>
 
@@ -32,6 +38,7 @@
 #include "settings/SettingsStoreQt.h"
 #include "shell/AppManager.h"
 #include "shell/CaptureDriver.h"
+#include "ui/PointerPositionQt.h"
 #include "ui/ToolbarWidget.h"
 
 namespace {
@@ -171,6 +178,60 @@ void TestCaptionButtonCycle(const NativeWindow& native) {
     Check(!native.window.isVisible(), "press and release on close closes the window");
 }
 
+// Toolbar auto-hide input at the window level: the cursor crossing the client
+// boundary, leaving through the non-client band, and a canvas drag reaching the
+// reveal strip.  `native` is a window whose settings enable auto-hide.
+void TestAutoHideInput(const NativeWindow& native) {
+    cnote::ui::ToolbarWidget& toolbar = *native.toolbar;
+    QWindow* handle = native.window.windowHandle();
+    const qreal midX = native.window.width() / 2.0;
+    const QPointF belowStrip(midX, 20.0);  // in the band area, below the 12-pixel reveal strip
+    const QPointF aboveWindow(midX, -20.0);
+    const QPointF canvas(midX, native.window.height() / 2.0);
+    const auto global = [&](const QPointF& client) { return native.window.mapToGlobal(client); };
+    const auto leaveTo = [&](const QPointF& client) {
+        cnote::ui::SetSyntheticCursorPos(global(client).toPoint());
+        QEvent leave(QEvent::Leave);
+        QCoreApplication::sendEvent(handle, &leave);
+    };
+    const auto ncLeaveTo = [&](const QPointF& client) {
+        cnote::ui::SetSyntheticCursorPos(global(client).toPoint());
+        SendMessageW(native.hwnd, WM_NCMOUSELEAVE, 0, 0);
+    };
+    const auto mouse = [&](QEvent::Type type, const QPointF& client, Qt::MouseButton button, Qt::MouseButtons buttons) {
+        QMouseEvent event(type, client, global(client), button, buttons, Qt::NoModifier);
+        QCoreApplication::sendEvent(handle, &event);
+    };
+
+    Check(toolbar.AutoHideEnabled() && !toolbar.Revealed(), "an auto-hide window starts with the band hidden");
+
+    // Qt turns the first client move after entering into an Enter event only,
+    // so entering through the band must reveal on its own.
+    QEnterEvent enter(belowStrip, belowStrip, global(belowStrip));
+    QCoreApplication::sendEvent(handle, &enter);
+    Check(toolbar.Revealed(), "entering the window inside the band area reveals the band");
+
+    leaveTo(aboveWindow);
+    Check(!toolbar.Revealed(), "leaving the client area for outside the window hides the band");
+
+    Check(native.HitTestClient(QPointF(midX, 4.0)) == HTTOP && toolbar.Revealed(),
+        "the top frame strip reveals the band");
+    ncLeaveTo(belowStrip);
+    Check(toolbar.Revealed(), "a non-client leave that stays inside the band keeps it");
+    ncLeaveTo(aboveWindow);
+    Check(!toolbar.Revealed(), "leaving the window from the non-client band hides it");
+
+    // A stroke dragged into the reveal strip must not flash the band.
+    mouse(QEvent::MouseButtonPress, canvas, Qt::LeftButton, Qt::LeftButton);
+    mouse(QEvent::MouseMove, QPointF(midX, 5.0), Qt::NoButton, Qt::LeftButton);
+    Check(!toolbar.Revealed(), "a canvas drag into the reveal strip keeps the band hidden");
+    mouse(QEvent::MouseButtonRelease, QPointF(midX, 5.0), Qt::LeftButton, Qt::NoButton);
+    mouse(QEvent::MouseMove, QPointF(midX, 5.0), Qt::NoButton, Qt::NoButton);
+    Check(toolbar.Revealed(), "the reveal strip works again once the drag ends");
+
+    cnote::ui::SetSyntheticCursorPos(std::nullopt);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -191,7 +252,7 @@ int main(int argc, char** argv) {
         GetWindowThreadProcessId(GetForegroundWindow(), &owner);
         return owner == GetCurrentProcessId();
     };
-    {
+    const auto withWindow = [&](const std::function<void(const NativeWindow&)>& body) {
         cnote::AppManager manager;
         cnote::qt::QtMainWindow window(manager);
         offscreen.SetPrimaryWindow(&window);
@@ -209,13 +270,25 @@ int main(int argc, char** argv) {
         Check(native.toolbar != nullptr, "the window has its toolbar band");
         if (native.toolbar != nullptr) {
             Check(IsWindowVisible(native.hwnd) == FALSE, "the native window exists but is not visible");
-            TestNonClientArea(native);
-            TestHitCodes(native);
-            TestCaptionButtonCycle(native);
+            body(native);
             Check(IsWindowVisible(native.hwnd) == FALSE, "the native window never became visible");
             Check(!ownsForeground(), "the window never took the foreground");
         }
+    };
+    withWindow([](const NativeWindow& native) {
+        TestNonClientArea(native);
+        TestHitCodes(native);
+        TestCaptionButtonCycle(native);
+    });
+    // Auto-hide comes from the saved settings, applied as the window is built,
+    // exactly as on a launch.
+    {
+        const cnote::settings::SettingsStoreQt store;
+        cnote::settings::Settings saved = store.Load();
+        saved.autoHideToolbar = true;
+        Check(store.Save(saved), "the auto-hide setting is saved");
     }
+    withWindow(TestAutoHideInput);
     Check(!ownsForeground(), "the process does not own the foreground window");
 
     std::printf(gFailures == 0 ? "ALL NATIVE WINDOW CHROME CHECKS PASSED\n" : "%d NATIVE WINDOW CHROME CHECK(S) FAILED\n",

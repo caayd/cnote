@@ -538,4 +538,13 @@ ToolbarAutoHide ResolveToolbarAutoHide(qreal cursorY, bool maximized, bool revea
     return ToolbarAutoHide::None;
 }
 
+ToolbarAutoHide ResolveToolbarAutoHideAtBoundary(const QPointF& cursor, const QSizeF& clientSize, bool maximized, bool interactionActive) {
+    if (interactionActive) {
+        return ToolbarAutoHide::None;
+    }
+    const bool inBand = cursor.x() >= 0.0 && cursor.x() < clientSize.width()
+        && cursor.y() >= 0.0 && cursor.y() < ToolbarHeight(maximized);
+    return inBand ? ToolbarAutoHide::Reveal : ToolbarAutoHide::Hide;
+}
+
 }  // namespace cnote::appui::qt
