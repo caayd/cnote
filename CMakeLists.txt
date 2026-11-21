@@ -240,6 +240,7 @@ add_library(cnote_ui
     src/ui/SettingsDialogQt.cpp
     src/ui/NewPageDialogQt.cpp
     src/ui/InteractionRouter.cpp
+    src/ui/EraserTrail.cpp
     src/ui/PrecisionInputRouter.cpp
     src/ui/PrecisionInputFilterQt.cpp
     src/ui/PointerPositionQt.cpp
@@ -862,6 +863,18 @@ target_link_libraries(cnote_interaction_router_tests PRIVATE cnote_ui)
 add_test(NAME interaction_router_qt COMMAND cnote_interaction_router_tests)
 set_tests_properties(interaction_router_qt PROPERTIES TIMEOUT 120)
 
+# --- Eraser trail ------------------------------------------------------------
+# The erase drag's fading trail geometry (ui::EraserTrail): head, taper,
+# decay and cleanup over explicit timestamps.  Plain computation, no window.
+add_executable(cnote_eraser_trail_tests tests/EraserTrailTests.cpp)
+target_compile_features(cnote_eraser_trail_tests PRIVATE cxx_std_20)
+target_compile_options(cnote_eraser_trail_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_eraser_trail_tests PRIVATE cnote_ui)
+add_test(NAME eraser_trail COMMAND cnote_eraser_trail_tests)
+set_tests_properties(eraser_trail PROPERTIES TIMEOUT 60)
+
 
 # --- Portable selection math (plan steps 5.2/5.3) ----------------------------
 # src/selection/Geometry.cpp is bound to App/POINT/RECT and cannot be linked
@@ -1068,6 +1081,7 @@ if(WIN32)
         cnote_precision_touchpad_tests
         cnote_chrome_tests
         cnote_interaction_router_tests
+        cnote_eraser_trail_tests
         cnote_selection_math_tests
         cnote_portability_tests
         cnote_font_fallback_tests

@@ -23,6 +23,7 @@
 #include "render/PageRenderer.h"
 #include "settings/SettingsStoreQt.h"
 #include "ui/CanvasController.h"
+#include "ui/EraserTrail.h"
 #include "ui/InteractionRouter.h"
 #include "ui/InlineMathTextEdit.h"
 #include "ui/PrecisionInputSink.h"
@@ -527,6 +528,18 @@ private:
     };
     SelectionGesture selection_;
     std::vector<ObjectRef> pendingErase_;
+    // The erase drag's fading trail (widget logical coordinates), animated by
+    // eraserTrailTimer_ until it has decayed; eraserTrailRect_ is the region
+    // last painted with it, repainted on the next frame to clear old pixels.
+    EraserTrail eraserTrail_ {};
+    QElapsedTimer eraserTrailClock_ {};
+    QTimer* eraserTrailTimer_ = nullptr;
+    QRect eraserTrailRect_ {};
+    // After the router handled a pointer sample at `position` (nullopt for a
+    // cancel): starts, extends or releases the trail with the erase
+    // interaction, then repaints/animates what changed.
+    void TrackEraserTrail(std::optional<QPointF> position);
+    void RefreshEraserTrail();
 
     // Transform gesture session: the handle being dragged, the selection
     // bounds captured at BeginTransform and the logical press position

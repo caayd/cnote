@@ -201,15 +201,15 @@ metrics break the Windows font tests:
 
 ```bash
 # model/codec tests, no display
-ctest --test-dir build-qt -R '^(xpress_codec|session_manager_qt|interaction_router_qt|precision_input_router_qt)$' --output-on-failure
+ctest --test-dir build-qt -R '^(xpress_codec|session_manager_qt|interaction_router_qt|eraser_trail|precision_input_router_qt)$' --output-on-failure
 # everything else (offscreen, or the native platform where a test requires it)
-ctest --test-dir build-qt -E '^(xpress_codec|session_manager_qt|interaction_router_qt|precision_input_router_qt)$' --output-on-failure
+ctest --test-dir build-qt -E '^(xpress_codec|session_manager_qt|interaction_router_qt|eraser_trail|precision_input_router_qt)$' --output-on-failure
 ```
 
 The headless set is `xpress_codec` (pure C++), `session_manager_qt`
-(`QCoreApplication` only), `interaction_router_qt` and
+(`QCoreApplication` only), `interaction_router_qt`, `eraser_trail` and
 `precision_input_router_qt` (no Qt application object). On Windows the suite
-has 36 tests; Linux and macOS have 34 because `precision_touchpad_qt` and
+has 38 tests; Linux and macOS have 36 because `precision_touchpad_qt` and
 `window_chrome_native_qt` are Windows-only. On Windows, `selection_clipboard_qt`
 (real clipboard bridge), `layout_parity_qt` and `font_fallback_qt` (real font
 metrics) run on the native platform with a `QGuiApplication` and no window;

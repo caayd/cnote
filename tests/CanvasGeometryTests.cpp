@@ -614,6 +614,43 @@ int main(int argc, char** argv) {
     Check(controller.Undo(), "undo removes the pending-erase probe stroke");
     QCoreApplication::processEvents();
 
+    // (f2) Eraser trail: an erase drag leaves a translucent gray comet behind
+    // the pointer (Excalidraw's EraserTrail) that fades out after release and
+    // leaves no pixels behind.
+    canvas.SetTool(ui::Tool::Erase);
+    {
+        const QPointF center(canvas.rect().center());
+        const double dpr = canvas.devicePixelRatioF();
+        const QRect area = QRectF((center + QPointF(-130.0, -40.0)) * dpr, (center + QPointF(130.0, 40.0)) * dpr)
+            .toAlignedRect();
+        // 20% black over the white page is a neutral light gray.
+        const auto trailPixels = [&area](const QImage& image) {
+            int count = 0;
+            const QRect clipped = area.intersected(image.rect());
+            for (int y = clipped.top(); y <= clipped.bottom(); ++y) {
+                for (int x = clipped.left(); x <= clipped.right(); ++x) {
+                    const QRgb pixel = image.pixel(x, y);
+                    const int r = qRed(pixel);
+                    count += (r >= 170 && r <= 235 && std::abs(r - qGreen(pixel)) < 6 && std::abs(r - qBlue(pixel)) < 6) ? 1 : 0;
+                }
+            }
+            return count;
+        };
+        Check(trailPixels(canvas.grab().toImage()) == 0, "no eraser trail before erasing");
+        SendMouse(canvas, QEvent::MouseButtonPress, center + QPointF(-100.0, 0.0), Qt::LeftButton, Qt::LeftButton);
+        for (int step = 1; step <= 20; ++step) {
+            SendMouse(canvas, QEvent::MouseMove, center + QPointF(-100.0 + (10.0 * step), 0.0), Qt::NoButton, Qt::LeftButton);
+        }
+        const int duringDrag = trailPixels(canvas.grab().toImage());
+        SendMouse(canvas, QEvent::MouseButtonRelease, center + QPointF(100.0, 0.0), Qt::LeftButton, Qt::NoButton);
+        Pump(350);
+        const int afterRelease = trailPixels(canvas.grab().toImage());
+        std::printf("ERASER-TRAIL during=%d after=%d\n", duringDrag, afterRelease);
+        Check(duringDrag > 100, "an erase drag paints its trail");
+        Check(afterRelease == 0, "the eraser trail fades out after release");
+    }
+    canvas.SetTool(ui::Tool::Draw);
+
     // (g) Move-gesture rendering: dragging a selection must not re-rasterize
     // the page per pointer sample.  The gesture paints the committed raster,
     // a once-per-gesture patch over the vacated region and the dragged objects
