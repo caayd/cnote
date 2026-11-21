@@ -243,6 +243,9 @@ asserts that no window of the process becomes visible or takes the
 foreground, that scripted input draws, opens the quick-size popup and the
 title menu, that `--scale` sets the capture's pixel size, that the startup
 document stays unchanged, and that script errors name their line.
+`headless_failures_qt` asserts that a headless run's crash (invalid memory
+access, `abort`, `qFatal`, uncaught exception) and Qt warnings come back on
+stderr with the documented exit code, without a window or a dialog.
 `canvas_geometry_dpr1_qt` and `canvas_geometry_dpr175_qt` run the same binary
 offscreen at `QT_SCALE_FACTOR` 1.0 and 1.75, asserting widget/page mapping,
 committed stroke page coordinates, preview-vs-committed pixels and the
@@ -391,8 +394,13 @@ meaningless), so pipe it: `.\build-dev\cnote.exe --capture=out.png | Out-Host`.
   a copy of the startup file, so scripts may edit and save freely: the user's
   settings and documents are never touched. File dialogs answer "cancel"
   and message boxes are logged to stderr.
+- Failures are reported to the caller, never on the desktop: Qt warnings go
+  to stderr, and a crash prints `capture: crashed: <reason>` and exits with
+  code 5 instead of opening a crash-reporter, runtime or system error dialog
+  (`src/shell/HeadlessFailures.h`; `--self-check` runs the same way).
 - Exit codes: 0 done, 2 bad arguments or script (the message names the line),
-  3 the startup file does not open, 4 a capture cannot be written.
+  3 the startup file does not open, 4 a capture cannot be written, 5 the run
+  crashed.
 
 Script steps; coordinates are logical pixels in the main window's client
 area, the space of a capture at `--scale=1`:
