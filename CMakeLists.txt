@@ -248,6 +248,7 @@ add_library(cnote_ui
     src/qt/QtMainWindow.cpp
     src/shell/AppManager.cpp
     src/shell/CaptureDriver.cpp
+    src/shell/HeadlessFailures.cpp
     # Settings and new-page dialogs the window owns (modeless, live model).
 )
 set_target_properties(cnote_ui PROPERTIES AUTOMOC ON)
@@ -1010,6 +1011,17 @@ add_test(NAME capture_cli_qt COMMAND cnote_capture_cli_tests)
 set_tests_properties(capture_cli_qt PROPERTIES TIMEOUT 180
     ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_plugins}")
 
+# Headless runs report crashes, aborts and Qt messages on stderr with an exit
+# code instead of a dialog or sound on the desktop (shell/HeadlessFailures.h).
+# The test runs itself as the failing child.
+add_executable(cnote_headless_failures_tests tests/HeadlessFailuresTests.cpp)
+target_link_libraries(cnote_headless_failures_tests PRIVATE cnote_ui)
+if(WIN32)
+    target_link_libraries(cnote_headless_failures_tests PRIVATE user32)
+endif()
+add_test(NAME headless_failures_qt COMMAND cnote_headless_failures_tests)
+set_tests_properties(headless_failures_qt PROPERTIES TIMEOUT 180)
+
 # --- Test runtime staging (test hygiene) --------------------------------------
 # A fresh build directory has no Qt, PDFium or MinGW runtime on PATH, so every Qt
 # test executable gets the DLLs it needs next to it.  Without this the suite
@@ -1062,7 +1074,8 @@ if(WIN32)
         cnote_persistence_tests
         cnote_window_chrome_tests
         cnote_window_chrome_native_tests
-        cnote_capture_cli_tests)
+        cnote_capture_cli_tests
+        cnote_headless_failures_tests)
         if(TARGET ${_cnote_test_target})
             cnote_stage_test_runtime(${_cnote_test_target})
         endif()

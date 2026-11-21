@@ -17,7 +17,9 @@
 // script, and the window is saved as PNG.  `--size=WxH` (default 1400x960) and
 // `--scale=S` (device pixel ratio, default 1) set the capture's pixel size.
 // The run uses a scratch settings directory and a copy of the startup file,
-// so it never changes the user's settings or documents.
+// so it never changes the user's settings or documents.  Headless runs
+// (capture and --self-check) report crashes and Qt messages on stderr instead
+// of the desktop (shell/HeadlessFailures.h).
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -51,6 +53,7 @@
 #include "settings/SettingsStoreQt.h"
 #include "shell/AppManager.h"
 #include "shell/CaptureDriver.h"
+#include "shell/HeadlessFailures.h"
 
 namespace {
 
@@ -157,15 +160,19 @@ struct CaptureOptions {
     bool sizeOrScaleGiven = false;
 };
 
-// Runs before QApplication exists, because the flag decides the platform.
-bool RequestsCapture(int argc, char** argv) {
+// These run before QApplication exists: the capture flag decides the
+// platform, and either flag decides where failures are reported.
+bool HasArgument(int argc, char** argv, std::string_view prefix) {
     for (int index = 1; index < argc; ++index) {
-        const std::string_view argument(argv[index]);
-        if (argument.rfind("--capture=", 0) == 0 || argument.rfind("--script=", 0) == 0) {
+        if (std::string_view(argv[index]).rfind(prefix, 0) == 0) {
             return true;
         }
     }
     return false;
+}
+
+bool RequestsCapture(int argc, char** argv) {
+    return HasArgument(argc, argv, "--capture=") || HasArgument(argc, argv, "--script=");
 }
 
 bool ParseSize(const QString& text, QSize* size) {
@@ -221,6 +228,9 @@ int main(int argc, char** argv) {
     AdoptParentConsole();
 #endif
     const bool capture = RequestsCapture(argc, argv);
+    if (capture || HasArgument(argc, argv, "--self-check")) {
+        cnote::shell::RouteHeadlessFailuresToStderr(capture ? "capture" : "self-check");
+    }
 #if !defined(Q_OS_WIN) && !defined(Q_OS_MACOS)
     // Linux has its real fonts on the offscreen platform, and an agent's
     // machine may have no display at all.
