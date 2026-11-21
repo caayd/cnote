@@ -88,6 +88,25 @@ void AppendCap(InkOutline& outline, Vec2 center, float radius, Vec2 from, Vec2 t
     AppendFan(outline, center, radius, start, passes ? positive : positive - kTwoPi, tolerance);
 }
 
+// The triangle from a vertex to one segment's tangent points there.  When the
+// radius tapers at a different rate on each side of the vertex, the two
+// segments' end edges sit at different offsets along the centerline and leave
+// a sliver between them (and between a cap and its segment); these triangles
+// fill it.  Their outer edge is the segment's own end edge, so nothing new
+// lands on the ink's boundary.
+void AppendHub(InkOutline& outline, Vec2 center, float radius, Vec2 w1, Vec2 w2) {
+    const Vec2 a { center.x + (radius * w1.x), center.y + (radius * w1.y) };
+    const Vec2 b { center.x + (radius * w2.x), center.y + (radius * w2.y) };
+    if (std::abs(Cross(Vec2 { a.x - center.x, a.y - center.y }, Vec2 { b.x - center.x, b.y - center.y })) < 1e-6f) {
+        return;
+    }
+    const std::size_t begin = outline.vertices.size();
+    outline.vertices.push_back(center);
+    outline.vertices.push_back(a);
+    outline.vertices.push_back(b);
+    ClosePolygon(outline, begin);
+}
+
 struct Segment {
     Vec2 u {};
     Vec2 w1 {};   // outward normal of the tangent on the +90 degree side
@@ -183,19 +202,21 @@ void AppendInkOutline(InkOutline& outline, const InkCenterline& centerline, floa
     const Segment& first = segments.front();
     if (first.tangent) {
         AppendCap(outline, points.front(), radii.front(), first.w1, first.w2, Vec2 { -first.u.x, -first.u.y }, tolerance);
+        AppendHub(outline, points.front(), radii.front(), first.w1, first.w2);
     } else {
         AppendDisc(outline, points.front(), radii.front(), tolerance);
     }
     const Segment& last = segments.back();
     if (last.tangent) {
         AppendCap(outline, points.back(), radii.back(), last.w2, last.w1, last.u, tolerance);
+        AppendHub(outline, points.back(), radii.back(), last.w1, last.w2);
     } else {
         AppendDisc(outline, points.back(), radii.back(), tolerance);
     }
 
-    // Joins: where the outline turns outward between two segments, the pie
-    // slice between their tangents closes the gap.  Inner sides overlap
-    // inside the ink and need nothing.
+    // Joins: hub triangles close the sliver between the two segments' end
+    // edges, and where the outline turns outward the pie slice between their
+    // tangents closes the gap.  Inner sides overlap inside the ink.
     for (std::size_t i = 1; i + 1U < count; ++i) {
         const Segment& before = segments[i - 1U];
         const Segment& after = segments[i];
@@ -204,6 +225,8 @@ void AppendInkOutline(InkOutline& outline, const InkCenterline& centerline, floa
             AppendDisc(outline, points[i], radii[i], tolerance);
             continue;
         }
+        AppendHub(outline, points[i], radii[i], before.w1, before.w2);
+        AppendHub(outline, points[i], radii[i], after.w1, after.w2);
         if (Cross(before.w1, after.w1) < 0.0f) {
             const float from = std::atan2(before.w1.y, before.w1.x);
             AppendFan(outline, points[i], radii[i], from,

@@ -318,6 +318,24 @@ int main(int argc, char** argv) {
         const int heavy = thicknessAt(2 * 225);
         Check(light > 0 && heavy > light * 2,
             "pressure widens the ink (light=" + std::to_string(light) + " heavy=" + std::to_string(heavy) + ")");
+
+        // Where the width changes at a varying rate, neighbouring segments'
+        // end edges sit at different offsets; the ink must still be solid
+        // along its centerline (no light seams between the pieces).
+        cnote::Stroke wave;
+        wave.style = pen.style;
+        wave.style.width = 24.0f;
+        wave.smoothing = 0.0f;
+        for (int i = 0; i <= 100; ++i) {
+            wave.points.push_back({ 50.0f + (2.0f * static_cast<float>(i)), 100.0f });
+            wave.pressures.push_back(0.5f + (0.45f * std::sin(static_cast<float>(i) * 0.3f)));
+        }
+        const QImage waveSurface = renderInk(wave);
+        int lightest = 0;
+        for (int x = 2 * 52; x <= 2 * 248; ++x) {
+            lightest = std::max(lightest, qGray(waveSurface.pixel(x, 2 * 100)));
+        }
+        Check(lightest < 40, "pressure ink is solid along its centerline (lightest=" + std::to_string(lightest) + ")");
     }
 
     // --- committed text is pixel-identical to the live editor ---------------
