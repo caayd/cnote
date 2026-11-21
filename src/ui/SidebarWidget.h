@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -11,6 +12,7 @@
 
 #include "cnote_ui_export.h"
 #include "ui/LayoutQt.h"
+#include "ui/ToolbarWidget.h"  // InlineEdit, shared with the toolbar zoom editor
 
 namespace cnote {
 class Document;
@@ -20,6 +22,7 @@ namespace cnote::render {
 class PdfBackgroundProvider;
 }
 
+class QFocusEvent;
 class QVariantAnimation;
 
 namespace cnote::ui {
@@ -64,9 +67,22 @@ public:
     [[nodiscard]] std::size_t CurrentPage() const { return currentPage_; }
 
     // --- open/close (150 ms slide) ---------------------------------------
+    // One explicit slide phase instead of a bool plus implicit animation
+    // endpoints: Opening/Closing are the only transient states.
+    enum class SlideState {
+        Closed,
+        Opening,
+        Open,
+        Closing,
+    };
+
     void SetOpen(bool open);
-    [[nodiscard]] bool IsOpen() const { return open_; }
+    [[nodiscard]] bool IsOpen() const {
+        return slideState_ == SlideState::Opening || slideState_ == SlideState::Open;
+    }
+    [[nodiscard]] SlideState State() const { return slideState_; }
     [[nodiscard]] qreal SlideProgress() const { return slideProgress_; }
+    [[nodiscard]] qreal SlideTarget() const { return slideTarget_; }
     // IsPdfSidebarVisible: pages exist and the panel is open or still sliding.
     [[nodiscard]] bool SidebarVisible() const;
 
@@ -80,6 +96,7 @@ public:
 
     // --- scrolling --------------------------------------------------------
     [[nodiscard]] int ScrollY() const { return scrollY_; }
+    [[nodiscard]] int ScrollTarget() const { return scrollTarget_; }
     [[nodiscard]] int MaxScroll() const;
     // Programmatic scroll; `animated` uses the reference 90 ms smooth-scroll
     // duration with elapsed-time easing.
@@ -95,7 +112,7 @@ public:
     [[nodiscard]] bool HasThumbnail(std::size_t index) const;
     [[nodiscard]] std::size_t RenderedThumbnailCount() const;
     [[nodiscard]] std::size_t VisibleThumbnailCount() const;
-    [[nodiscard]] bool PageJumpEditing() const { return pageJumpEditing_; }
+    [[nodiscard]] bool PageJumpEditing() const { return pageJump_.active; }
     [[nodiscard]] QString PageIndicatorLabel() const;
 
     // Reference page-jump input (App.cpp:2840 PageIndicatorLabel,
@@ -124,6 +141,7 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
     bool event(QEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void focusOutEvent(QFocusEvent* event) override;
 
 private:
     void UpdateGeometry();
@@ -140,9 +158,14 @@ private:
     const Document* document_ = nullptr;
     render::PdfBackgroundProvider* pdfBackground_ = nullptr;
     std::size_t currentPage_ = 0;
+    std::size_t documentPageCount_ = 0;
 
-    bool open_ = false;
+    SlideState slideState_ = SlideState::Closed;
     qreal slideProgress_ = 0.0;
+    qreal slideTarget_ = 0.0;
+    // Suppresses the `finished` handler while an old run is being stopped, so
+    // stopping can never publish a terminal state (only a natural end can).
+    bool slideStopping_ = false;
     QVariantAnimation* slideAnimation_ = nullptr;
 
     QRect hostClientRect_ {};
@@ -150,21 +173,30 @@ private:
     bool maximized_ = false;
 
     int scrollY_ = 0;
+    int scrollTarget_ = 0;
     qreal wheelRemainder_ = 0.0;
     QVariantAnimation* scrollAnimation_ = nullptr;
 
-    bool pageJumpEditing_ = false;
-    QString pageJumpText_ {};
+    InlineEdit pageJump_ {};
 
+    // Everything a cached thumbnail depends on.  `document` is the identity,
+    // `pageEpoch` the content revision, and the pixel size the raster the
+    // entry was composed for; one predicate decides validity for both the
+    // paint path and HasThumbnail.
+    struct ThumbnailKey {
+        const Document* document = nullptr;
+        std::uint64_t pageEpoch = 0;
+        int width = 0;
+        int height = 0;
+
+        [[nodiscard]] bool IsValid() const noexcept {
+            return document != nullptr && width > 0 && height > 0;
+        }
+        friend bool operator==(const ThumbnailKey&, const ThumbnailKey&) = default;
+    };
     struct Thumbnail {
         QImage image {};
-        int width = 0;
-        // Document::PageEpoch the image was rendered for; a mismatch lazily
-        // re-renders this entry only, so a commit on one page no longer
-        // re-rasterizes every visible thumbnail on the next paint.
-        std::uint64_t pageEpoch = 0;
-        int height = 0;
-        bool valid = false;
+        ThumbnailKey key {};
     };
     std::vector<Thumbnail> thumbnails_ {};
 };

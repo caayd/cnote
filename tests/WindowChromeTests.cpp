@@ -377,6 +377,7 @@ void TestAutoHideBandStateMachine() {
     toolbar.SetAutoHideEnabled(true);
     CheckNear(toolbar.VisibleToolbarHeight(), 0.0, 0.001, "enabling auto-hide hides the band");
     Check(!toolbar.Revealed(), "enabling auto-hide leaves the band hidden");
+    Check(toolbar.Phase() == cnote::ui::RevealPhase::Hidden, "enabling auto-hide snaps to the Hidden phase");
     Check(toolbar.pos().y() < 0, "hidden band is parked above the host");
     CheckNear(toolbar.ToolbarOffsetY(), -36.0, 0.001, "hidden band offset is -(band + 2)");
     // The whole band, caption cluster included, is off the host: the window
@@ -390,10 +391,32 @@ void TestAutoHideBandStateMachine() {
     Check(WaitFor([&]() { return toolbar.VisibleToolbarHeight() > 0.0 && toolbar.ToolbarOffsetY() == 0.0; }, 1000),
         "top-edge hover reveals the band");
     Check(toolbar.Revealed(), "revealed state is reported");
+    Check(toolbar.Phase() == cnote::ui::RevealPhase::Shown, "a settled reveal reports the Shown phase");
+    CheckNear(toolbar.VisibleToolbarHeight(), 34.0, 0.001, "the shown band's visible height matches its paint");
+    CheckNear(toolbar.RevealProgress(), 1.0, 0.001, "the shown phase has full progress");
 
     // A cursor over the canvas hides it again.
     toolbar.UpdateAutoHideForCursor(QPointF(700.0, 600.0), false);
     Check(WaitFor([&]() { return toolbar.VisibleToolbarHeight() == 0.0; }, 1000), "leaving the band hides it again");
+    // The band reports zero height once the eased progress drops under its
+    // 0.001 threshold, a frame or two before the slide ends and the phase
+    // settles, so wait for the settled phase itself.
+    Check(WaitFor([&]() { return toolbar.Phase() == cnote::ui::RevealPhase::Hidden; }, 1000),
+        "the settled hide reports the Hidden phase");
+
+    // Retargeting mid-slide keeps the exposed state and settles without a
+    // stuck Hiding/Showing phase.
+    toolbar.SetRevealed(true);
+    Check(WaitFor([&]() { return toolbar.RevealProgress() >= 0.02; }, 1000), "the reveal starts moving");
+    toolbar.SetRevealed(false);
+    toolbar.SetRevealed(true);
+    Check(toolbar.Revealed(), "a retargeted reveal still reports revealed");
+    Check(WaitFor([&]() {
+        return toolbar.Phase() == cnote::ui::RevealPhase::Shown && toolbar.RevealProgress() >= 0.999;
+    }, 2000), "the retargeted reveal settles in the Shown phase");
+    toolbar.UpdateAutoHideForCursor(QPointF(700.0, 600.0), false);
+    Check(WaitFor([&]() { return toolbar.Phase() == cnote::ui::RevealPhase::Hidden; }, 2000),
+        "the retargeted hide settles in the Hidden phase");
 
     // The reference guard list keeps the band up while an inline editor owns it.
     toolbar.BeginZoomEdit();
