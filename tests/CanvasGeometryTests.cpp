@@ -734,6 +734,28 @@ int main(int argc, char** argv) {
         controller.SetInputSettings(input);
     }
 
+    // (k) EditOverlayActive follows the controller, not the canvas cache: a
+    // controller-side cancel makes the canvas report inactive immediately and
+    // SyncEditOverlay hides the now-stale editor.
+    {
+        canvas.SetTool(ui::Tool::Text);
+        const QPointF at(canvas.rect().center());
+        SendMouse(canvas, QEvent::MouseButtonPress, at, Qt::LeftButton, Qt::LeftButton);
+        SendMouse(canvas, QEvent::MouseButtonRelease, at, Qt::LeftButton, Qt::NoButton);
+        QCoreApplication::processEvents();
+        Check(canvas.EditOverlayActive(), "edit overlay reports active while the controller edits");
+        Check(controller.EditingTextIndex().has_value(), "the controller owns the live text edit");
+
+        controller.CancelTextEdit();
+        Check(!canvas.EditOverlayActive(), "EditOverlayActive follows the controller, not the cached key");
+        canvas.SyncEditOverlay();
+        Check(canvas.TextEditor() == nullptr || !canvas.TextEditor()->isVisible(),
+              "SyncEditOverlay hides an editor the controller no longer owns");
+        Check(controller.DocumentRef().PageAt(0).texts.empty(), "a cancelled text creation removes its placeholder");
+        canvas.NotifyDocumentChanged();
+        QCoreApplication::processEvents();
+    }
+
     // (i) Precision touchpad routing over overlay chrome.  The sidebar is a
     // child of the main window layered on top of the canvas, so a cursor over
     // it is still "inside the canvas rect"; the Win32 pointer-frame hook used

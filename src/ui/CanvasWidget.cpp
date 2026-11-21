@@ -12,6 +12,7 @@
 #include <QImage>
 #include <QKeyEvent>
 #include <QListView>
+#include <QModelIndex>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
@@ -128,10 +129,10 @@ void CanvasWidget::SetZoom(float zoom, std::optional<QPointF> anchor) {
     BeginZoomSession(focus);
     zoom_ = clamped;
 
-    if (zoomAnchorValid_) {
-        const QPointF anchored = PageToScreen(zoomAnchorPageIndex_, zoomAnchorPage_);
-        panX_ += static_cast<float>(zoomAnchorCursor_.x() - anchored.x());
-        panY_ += static_cast<float>(zoomAnchorCursor_.y() - anchored.y());
+    if (zoomSession_.has_value() && zoomSession_->anchorValid) {
+        const QPointF anchored = PageToScreen(zoomSession_->anchorPageIndex, zoomSession_->anchorPage);
+        panX_ += static_cast<float>(zoomSession_->anchorCursor.x() - anchored.x());
+        panY_ += static_cast<float>(zoomSession_->anchorCursor.y() - anchored.y());
     }
     ClampViewportPan();
     NotifyViewportChanged();
@@ -164,8 +165,7 @@ void CanvasWidget::ResetView() {
     // tick.
     StopSmoothScroll();
     zoomSettleTimer_->stop();
-    zoomSessionActive_ = false;
-    zoomAnchorValid_ = false;
+    zoomSession_.reset();
     zoom_ = 1.0f;
     panX_ = 0.0f;
     panY_ = 0.0f;
@@ -173,8 +173,7 @@ void CanvasWidget::ResetView() {
 }
 
 void CanvasWidget::BeginZoomSession(const QPointF& anchor) {
-    zoomSessionActive_ = true;
-    zoomAnchorValid_ = false;
+    zoomSession_ = ZoomSession {};
     // Reference App::ResolveZoomAnchorPage (Viewport.cpp:437-458): the anchor
     // page is the *nearest* page, not only a direct hit, so a cursor in the
     // margin or an open wheel's centre still anchors the zoom.
@@ -196,20 +195,19 @@ void CanvasWidget::BeginZoomSession(const QPointF& anchor) {
         }
     }
     if (best.has_value()) {
-        zoomAnchorValid_ = true;
-        zoomAnchorPageIndex_ = best->pageIndex;
-        zoomAnchorPage_ = ScreenToPage(*best, anchor, false);
-        zoomAnchorCursor_ = anchor;
+        zoomSession_->anchorValid = true;
+        zoomSession_->anchorPageIndex = best->pageIndex;
+        zoomSession_->anchorPage = ScreenToPage(*best, anchor, false);
+        zoomSession_->anchorCursor = anchor;
     }
     zoomSettleTimer_->start();
 }
 
 void CanvasWidget::EndZoomSession() {
-    if (!zoomSessionActive_) {
+    if (!zoomSession_.has_value()) {
         return;
     }
-    zoomSessionActive_ = false;
-    zoomAnchorValid_ = false;
+    zoomSession_.reset();
     update();
 }
 
@@ -907,7 +905,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 
         // Reference culling: a page is considered when it is within the paint
         // bounds plus 20 px (0 while a zoom session previews a snapshot).
-        const qreal padding = zoomSessionActive_ ? 0.0 : 20.0;
+        const qreal padding = zoomSession_.has_value() ? 0.0 : 20.0;
         if (view.rect.bottom() < clip.top() - padding || view.rect.top() > clip.bottom() + padding) {
             continue;
         }
@@ -970,7 +968,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                 surface = NewestSurface(view.pageIndex);
             }
         } else if (!pageHasPendingErase) {
-            if (zoomSessionActive_ && !liveStrokeOnPage) {
+            if (zoomSession_.has_value() && !liveStrokeOnPage) {
                 surface = FindSurface(view.pageIndex, view.scale, cachedDevicePixelRatio_);
                 if (surface == nullptr) {
                     // Zoom snapshot: reuse the newest raster (drawn scaled) until the
@@ -1267,8 +1265,8 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 
         // Live LaTeX preview while the source box is open.
         if (latexEditor_ != nullptr && latexEditor_->isVisible()
-            && overlayPageIndex_.has_value() && *overlayPageIndex_ == view.pageIndex
-            && overlayLatexIndex_.has_value()) {
+            && editOverlay_.has_value() && editOverlay_->page == view.pageIndex
+            && editOverlay_->kind == EditOverlayKey::Kind::Latex) {
             if (const PageLatex* object = controller_.EditingLatexObject(); object != nullptr) {
                 const PageLatex preview = LiveLatexPreview(*object);
                 if (const latex::FormulaHandle formula = latex::Parse(preview); formula != nullptr) {
@@ -1340,7 +1338,9 @@ void CanvasWidget::CancelStroke() {
 // --- editing overlay -------------------------------------------------------
 
 bool CanvasWidget::EditOverlayActive() const {
-    return overlayTextIndex_.has_value() || overlayLatexIndex_.has_value();
+    // The controller owns edit state; the cached key is only a placement hint,
+    // so it must never decide whether an edit is live.
+    return controller_.EditingTextIndex().has_value() || controller_.EditingLatexIndex().has_value();
 }
 
 bool CanvasWidget::BeginEditAt(const QPointF& logical) {
@@ -1359,10 +1359,7 @@ bool CanvasWidget::BeginEditAt(const QPointF& logical) {
         if (pagePoint.x >= object.x && pagePoint.x <= object.x + metrics.width
             && pagePoint.y >= object.y && pagePoint.y <= object.y + metrics.height) {
             if (controller_.BeginLatexEdit(hit->pageIndex, index)) {
-                overlayPageIndex_ = hit->pageIndex;
-                overlayTextIndex_.reset();
-                overlayLatexIndex_ = index;
-                ShowLatexOverlay(object);
+                SyncEditOverlay();
                 return true;
             }
         }
@@ -1373,10 +1370,7 @@ bool CanvasWidget::BeginEditAt(const QPointF& logical) {
         if (pagePoint.x >= bounds.left && pagePoint.x <= bounds.right
             && pagePoint.y >= bounds.top && pagePoint.y <= bounds.bottom) {
             if (controller_.BeginTextEdit(hit->pageIndex, index)) {
-                overlayPageIndex_ = hit->pageIndex;
-                overlayLatexIndex_.reset();
-                overlayTextIndex_ = index;
-                ShowTextOverlay(object);
+                SyncEditOverlay();
                 return true;
             }
         }
@@ -1396,26 +1390,30 @@ bool CanvasWidget::EditOverlayOwnsPoint(const QPointF& logical) const {
 
 void CanvasWidget::SyncEditOverlay() {
     if (controller_.EditingTextIndex().has_value() && controller_.EditingTextObject() != nullptr) {
-        if (overlayTextIndex_ == controller_.EditingTextIndex()
-            && overlayPageIndex_ == controller_.EditingPageIndex()
+        const EditOverlayKey key {
+            EditOverlayKey::Kind::Text,
+            controller_.EditingPageIndex(),
+            *controller_.EditingTextIndex(),
+        };
+        if (editOverlay_.has_value() && *editOverlay_ == key
             && textEditor_ != nullptr && textEditor_->isVisible()) {
             return;
         }
-        overlayPageIndex_ = controller_.EditingPageIndex();
-        overlayTextIndex_ = controller_.EditingTextIndex();
-        overlayLatexIndex_.reset();
+        editOverlay_ = key;
         ShowTextOverlay(*controller_.EditingTextObject());
         return;
     }
     if (controller_.EditingLatexIndex().has_value() && controller_.EditingLatexObject() != nullptr) {
-        if (overlayLatexIndex_ == controller_.EditingLatexIndex()
-            && overlayPageIndex_ == controller_.EditingPageIndex()
+        const EditOverlayKey key {
+            EditOverlayKey::Kind::Latex,
+            controller_.EditingPageIndex(),
+            *controller_.EditingLatexIndex(),
+        };
+        if (editOverlay_.has_value() && *editOverlay_ == key
             && latexEditor_ != nullptr && latexEditor_->isVisible()) {
             return;
         }
-        overlayPageIndex_ = controller_.EditingPageIndex();
-        overlayLatexIndex_ = controller_.EditingLatexIndex();
-        overlayTextIndex_.reset();
+        editOverlay_ = key;
         ShowLatexOverlay(*controller_.EditingLatexObject());
         return;
     }
@@ -1502,8 +1500,8 @@ void CanvasWidget::EnsureLatexEditor() {
 
 void CanvasWidget::ShowTextOverlay(const PageText& text) {
     EnsureTextEditor();
-    const CanvasPageView view = overlayPageIndex_.has_value()
-        ? CalculatePageView(*overlayPageIndex_)
+    const CanvasPageView view = editOverlay_.has_value()
+        ? CalculatePageView(editOverlay_->page)
         : CanvasPageView {};
     textEditScale_ = view.valid ? view.scale : 1.0f;
     textEditor_->document()->setDocumentMargin(0.0);
@@ -1563,10 +1561,15 @@ void CanvasWidget::ShowLatexOverlay(const PageLatex& object) {
 }
 
 void CanvasWidget::HideOverlays() {
-    overlayPageIndex_.reset();
-    overlayTextIndex_.reset();
-    overlayLatexIndex_.reset();
+    editOverlay_.reset();
+    textEditScale_ = 1.0f;
+    latexPreviewMetrics_ = latex::FormulaMetrics {};
+    latexSuggestions_.clear();
+    if (latexPopupModel_ != nullptr) {
+        latexPopupModel_->setStringList({});
+    }
     if (latexPopup_ != nullptr) {
+        latexPopup_->setCurrentIndex(QModelIndex());
         latexPopup_->hide();
     }
     if (textEditor_ != nullptr) {
@@ -1579,14 +1582,14 @@ void CanvasWidget::HideOverlays() {
 }
 
 void CanvasWidget::PositionOverlays() {
-    if (!overlayPageIndex_.has_value()) {
+    if (!editOverlay_.has_value()) {
         return;
     }
     const Document& document = controller_.DocumentRef();
-    if (*overlayPageIndex_ >= document.PageCount()) {
+    if (editOverlay_->page >= document.PageCount()) {
         return;
     }
-    const CanvasPageView view = CalculatePageView(*overlayPageIndex_);
+    const CanvasPageView view = CalculatePageView(editOverlay_->page);
     if (!view.valid || view.scale <= 0.0f) {
         return;
     }
@@ -1930,19 +1933,9 @@ void CanvasWidget::mousePressEvent(QMouseEvent* event) {
 void CanvasWidget::mouseMoveEvent(QMouseEvent* event) {
     lastPointerPosition_ = event->position();
     HandlePointerMove(SampleFromEvent(*event));
-    // MessageLoop.cpp:665-680: Move/Select show an I-beam over PDF text. Only
-    // while no interaction is live; a drag keeps its own cursor.
-    const bool wantPdfTextCursor = !pointerCaptured_
-        && (tool_ == Tool::Move || tool_ == Tool::Select)
-        && PageWithPdfTextAt(event->position()).has_value();
-    if (wantPdfTextCursor != pdfTextHoverActive_) {
-        pdfTextHoverActive_ = wantPdfTextCursor;
-        if (pdfTextHoverActive_) {
-            setCursor(Qt::IBeamCursor);
-        } else {
-            ApplyCursor();
-        }
-    }
+    // One cursor source: the live interaction/tool plus the PDF-text hover at
+    // the position just sampled (MessageLoop.cpp:665-680).
+    RefreshCursor();
     event->accept();
 }
 
@@ -2039,12 +2032,12 @@ void CanvasWidget::HandlePointerRelease(const PointerSample& sample) {
 }
 
 void CanvasWidget::HandlePointerCancel(CancelReason reason) {
-    // Idempotent: the router commits the partial *pointer* interaction exactly
-    // once and releases capture (legacy FinishDocumentInteraction).  Active
+    // Idempotent: the router abandons the live *pointer* interaction without
+    // committing it (Escape / lost grab) and releases capture.  Active
     // text/LaTeX edits are not cancelled here: they own their own focus, and a
     // canvas focus change must not discard typed content (Escape cancels).
     static_cast<void>(reason);
-    router_->FinishInteraction();
+    router_->CancelInteraction();
     update();
 }
 
@@ -2256,11 +2249,6 @@ std::optional<SelectionHit> CanvasWidget::HitTestSelectionObject(const QPointF& 
 }
 
 std::optional<TransformRequest> CanvasWidget::HitTestSelectionHandle(const QPointF& logical) const {
-    // The press point is cached for BeginTransform, which the router calls
-    // immediately after this probe and which needs the interaction's origin to
-    // measure a rotation from.
-    lastHandleProbeLogical_ = logical;
-
     const std::optional<CanvasPageView> view = HitTestPageView(logical);
     if (!view.has_value() || !view->valid) {
         return std::nullopt;
@@ -2394,8 +2382,7 @@ void CanvasWidget::SetCursor(CursorKind cursor) {
 void CanvasWidget::SetTool(Tool tool) {
     tool_ = tool;
     router_->SetTool(tool);
-    pdfTextHoverActive_ = false;
-    SetCursor(InteractionRouter::CursorForTool(tool));
+    RefreshCursor();
 }
 
 void CanvasWidget::SetDrawCursorSettings(settings::DrawCursorKind kind, float logicalPixels, std::uint32_t argbColor) {
@@ -2567,13 +2554,32 @@ void CanvasWidget::ApplyCursor() {
     setCursor(drawCursor_.has_value() ? *drawCursor_ : QCursor(Qt::CrossCursor));
 }
 
-void CanvasWidget::enterEvent(QEnterEvent* event) {
+void CanvasWidget::RefreshCursor() {
+    if (ActiveInteraction() == InteractionKind::Pan) {
+        // An in-flight pan owns the cursor even if the pointer left the page.
+        cursorKind_ = CursorKind::ClosedHand;
+    } else if (ActiveInteraction() == InteractionKind::None
+        && (tool_ == Tool::Move || tool_ == Tool::Select)
+        && PageWithPdfTextAt(lastPointerPosition_).has_value()) {
+        // MessageLoop.cpp:665-680: Move/Select show an I-beam over PDF text.
+        // A live drag keeps its own interaction cursor.
+        cursorKind_ = CursorKind::Text;
+    } else {
+        cursorKind_ = InteractionRouter::CursorForTool(tool_);
+    }
     ApplyCursor();
+}
+
+void CanvasWidget::enterEvent(QEnterEvent* event) {
+    RefreshCursor();
     QWidget::enterEvent(event);
 }
 
 void CanvasWidget::leaveEvent(QEvent* event) {
-    ApplyCursor();
+    // The pointer is gone, so the PDF-text hover cannot apply until the next
+    // move re-samples it.
+    lastPointerPosition_ = QPointF(-1.0e9, -1.0e9);
+    RefreshCursor();
     QWidget::leaveEvent(event);
 }
 
@@ -2791,23 +2797,32 @@ void CanvasWidget::UpdateSelectionOverlay(
     const QPointF& anchor, const QPointF& current, bool lasso, const std::vector<QPointF>& lassoPoints) {
     // Repaint where the marquee was plus where it is now.
     const QRect before = OverlayDirtyRect();
-    selectionOverlayActive_ = true;
-    selectionAnchor_ = anchor;
-    selectionCurrent_ = current;
-    selectionOverlayLasso_ = lasso;
-    lassoPoints_ = lassoPoints;
     // A lasso anchored on PDF text drags a text selection instead of a marquee
     // (Selection.cpp:7237-7241 suppresses the overlay and App paints the
     // covered characters). The probe runs once: the anchor never moves.
-    if (!pdfTextDragPage_.has_value()) {
-        if (lasso) {
-            pdfTextDragPage_ = PageWithPdfTextAt(anchor);
-        } else {
-            pdfTextDragPage_.reset();
+    if (lasso) {
+        if (!selection_.pdfPage.has_value() && selection_.mode != SelectionGesture::Mode::PdfText) {
+            selection_.pdfPage = PageWithPdfTextAt(anchor);
         }
+        selection_.mode = selection_.pdfPage.has_value()
+            ? SelectionGesture::Mode::PdfText
+            : SelectionGesture::Mode::Lasso;
+    } else {
+        selection_.pdfPage.reset();
+        selection_.mode = SelectionGesture::Mode::Box;
     }
+    selection_.anchor = anchor;
+    selection_.current = current;
+    selection_.lassoPoints = lassoPoints;
     const QRect after = OverlayDirtyRect();
     MarkTransientDirty(before.isEmpty() ? after : (after.isEmpty() ? before : before.united(after)));
+}
+
+void CanvasWidget::CancelSelectionOverlay() {
+    // Drop the live marquee/lasso/pdf drag without committing it.
+    const QRect dirty = OverlayDirtyRect();
+    selection_ = SelectionGesture {};
+    MarkTransientDirty(dirty);
 }
 
 void CanvasWidget::CommitSelection(
@@ -2815,12 +2830,19 @@ void CanvasWidget::CommitSelection(
     // Repaint where the marquee/overlay was; the new selection frame's region
     // is painted through update() below.
     MarkTransientDirty(OverlayDirtyRect());
-    selectionOverlayActive_ = false;
+    // The gesture is the single source of truth: committing consumes it.
+    SelectionGesture gesture = std::move(selection_);
+    selection_ = SelectionGesture {};
+    // Direct callers that did not publish an overlay fall back to the hook
+    // arguments; the router always goes through UpdateSelectionOverlay.
+    const QPointF commitAnchor = gesture.Active() ? gesture.anchor : anchor;
+    const QPointF commitCurrent = gesture.Active() ? gesture.current : current;
+    const bool commitLasso = gesture.Active()
+        ? gesture.mode == SelectionGesture::Mode::Lasso || gesture.mode == SelectionGesture::Mode::PdfText
+        : lasso;
+    const std::optional<std::size_t> pdfDragPage = gesture.pdfPage;
 
-    const std::optional<std::size_t> pdfDragPage = pdfTextDragPage_;
-    pdfTextDragPage_.reset();
-
-    const std::optional<CanvasPageView> view = HitTestPageView(anchor);
+    const std::optional<CanvasPageView> view = HitTestPageView(commitAnchor);
     if (!view.has_value()) {
         controller_.ClearSelection();
         update();
@@ -2829,8 +2851,8 @@ void CanvasWidget::CommitSelection(
 
     const Document& document = controller_.DocumentRef();
     const Page& page = document.PageAt(view->pageIndex);
-    const Vec2 anchorPage = ScreenToPage(*view, anchor, false);
-    const Vec2 currentPage = ScreenToPage(*view, current, false);
+    const Vec2 anchorPage = ScreenToPage(*view, commitAnchor, false);
+    const Vec2 currentPage = ScreenToPage(*view, commitCurrent, false);
 
     // Selection.cpp:1373-1431: a lasso (or click) anchored on PDF text selects
     // the character range spanned by the drag instead of hitting objects; the
@@ -2886,10 +2908,10 @@ void CanvasWidget::CommitSelection(
                 selection.latexes.push_back(index);
             }
         }
-    } else if (lasso && !boxOverride) {
+    } else if (commitLasso && !boxOverride) {
         std::vector<Vec2> polygon;
-        polygon.reserve(lassoPoints_.size());
-        for (const QPointF& point : lassoPoints_) {
+        polygon.reserve(gesture.lassoPoints.size());
+        for (const QPointF& point : gesture.lassoPoints) {
             polygon.push_back(ScreenToPage(*view, point, false));
         }
         if (polygon.size() >= 3U) {
@@ -2996,31 +3018,42 @@ void CanvasWidget::CommitMoveSelection() {
 }
 
 
-void CanvasWidget::BeginTransform(const TransformRequest& request) {
+void CanvasWidget::CancelMoveSelection() {
+    if (controller_.GesturePageIndex().has_value()) {
+        controller_.CancelPageGesture();
+    }
+    EndGestureOverlay();
+    update();
+}
+
+bool CanvasWidget::BeginTransform(const TransformRequest& request) {
+    if (transformSession_.has_value()) {
+        return false;
+    }
     const std::optional<SelectionBounds> from = SelectionBoundsForPage(request.pageIndex);
     if (!from.has_value()) {
-        return;
+        return false;
     }
-    transformFrom_ = *from;
-    transformHandle_ = request.handle;
-    transformPressLogical_ = lastHandleProbeLogical_;
+    transformSession_ = TransformSession { request.handle, *from, request.pressLogical };
     // Same one-transaction-per-gesture machinery as the selection move: the
     // controller snapshots the page and CommitTransform records one
     // ReplacePages action.
     controller_.BeginPageGesture(request.pageIndex);
     BeginGestureOverlay(request.pageIndex, true);
+    return true;
 }
 
 void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers modifiers) {
     const std::optional<std::size_t> pageIndex = controller_.GesturePageIndex();
-    if (!pageIndex.has_value() || !transformHandle_.has_value()) {
+    if (!pageIndex.has_value() || !transformSession_.has_value()) {
         return;
     }
     const CanvasPageView view = CalculatePageView(*pageIndex);
     if (!view.valid || view.scale <= 0.0f) {
         return;
     }
-    const TransformHandle handle = *transformHandle_;
+    const TransformSession& session = *transformSession_;
+    const TransformHandle handle = session.handle;
     if (handle == TransformHandle::Move) {
         // Moving is its own interaction (BeginMoveSelection).
         return;
@@ -3028,17 +3061,17 @@ void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers
 
     const Vec2 pagePoint = ScreenToPage(view, logical, false);
     SelectionTransform transform;
-    transform.from = transformFrom_;
-    transform.to = transformFrom_;
+    transform.from = session.from;
+    transform.to = session.from;
 
     const bool shiftPressed = modifiers.testFlag(Qt::ShiftModifier);
     transform.scaleTextFont = shiftPressed;
     if (handle == TransformHandle::Rotate) {
         const Vec2 center {
-            (transformFrom_.left + transformFrom_.right) * 0.5f,
-            (transformFrom_.top + transformFrom_.bottom) * 0.5f,
+            (session.from.left + session.from.right) * 0.5f,
+            (session.from.top + session.from.bottom) * 0.5f,
         };
-        const Vec2 press = ScreenToPage(view, transformPressLogical_, false);
+        const Vec2 press = ScreenToPage(view, session.pressLogical, false);
         const float pointerAngle = std::atan2(pagePoint.y - center.y, pagePoint.x - center.x);
         const float pressAngle = std::atan2(press.y - center.y, press.x - center.x);
         transform.rotateDegrees = (pointerAngle - pressAngle) * (180.0f / kPi);
@@ -3092,9 +3125,9 @@ void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers
             // handles derive the perpendicular extent from the dragged one,
             // centered on the original frame.
             const float initialWidth = std::max(kMinSelectionExtent,
-                transformFrom_.right - transformFrom_.left);
+                session.from.right - session.from.left);
             const float initialHeight = std::max(kMinSelectionExtent,
-                transformFrom_.bottom - transformFrom_.top);
+                session.from.bottom - session.from.top);
             const float aspect = initialWidth / initialHeight;
             const bool corner = (movesLeft || movesRight) && (movesTop || movesBottom);
             if (corner) {
@@ -3122,7 +3155,7 @@ void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers
                 } else {
                     transform.to.right = transform.to.left + newWidth;
                 }
-                const float centerY = (transformFrom_.top + transformFrom_.bottom) * 0.5f;
+                const float centerY = (session.from.top + session.from.bottom) * 0.5f;
                 transform.to.top = centerY - (newHeight * 0.5f);
                 transform.to.bottom = centerY + (newHeight * 0.5f);
             } else {
@@ -3134,7 +3167,7 @@ void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers
                 } else {
                     transform.to.bottom = transform.to.top + newHeight;
                 }
-                const float centerX = (transformFrom_.left + transformFrom_.right) * 0.5f;
+                const float centerX = (session.from.left + session.from.right) * 0.5f;
                 transform.to.left = centerX - (newWidth * 0.5f);
                 transform.to.right = centerX + (newWidth * 0.5f);
             }
@@ -3149,11 +3182,23 @@ void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers
 }
 
 void CanvasWidget::CommitTransform() {
+    if (!transformSession_.has_value()) {
+        // Nothing was started; committing must not commit an unrelated page
+        // gesture.
+        return;
+    }
     controller_.CommitPageGesture();
     EndGestureOverlay();
-    transformHandle_.reset();
-    transformFrom_ = SelectionBounds {};
-    transformPressLogical_ = QPointF();
+    transformSession_.reset();
+    update();
+}
+
+void CanvasWidget::CancelTransform() {
+    if (controller_.GesturePageIndex().has_value()) {
+        controller_.CancelPageGesture();
+    }
+    EndGestureOverlay();
+    transformSession_.reset();
     update();
 }
 
@@ -3256,12 +3301,12 @@ void CanvasWidget::StartSmoothScroll(const QPointF& delta) {
     // scrollStart_ on every notch, so each new notch discarded the unfinished
     // tail of the in-flight animation (a fast flick lost distance and the
     // velocity restarted from zero every notch, which read as stutter).
-    if (!scrolling_) {
-        scrollTarget_ = QPointF(panX_, panY_);
-        scrollClock_.start();
-        scrolling_ = true;
+    if (!smoothScroll_.has_value()) {
+        smoothScroll_.emplace();
+        smoothScroll_->target = QPointF(panX_, panY_);
+        smoothScroll_->clock.start();
     }
-    scrollTarget_ += delta;
+    smoothScroll_->target += delta;
     if (scrollTimer_ == nullptr) {
         scrollTimer_ = new QTimer(this);
         scrollTimer_->setTimerType(Qt::PreciseTimer);
@@ -3272,14 +3317,14 @@ void CanvasWidget::StartSmoothScroll(const QPointF& delta) {
 }
 
 void CanvasWidget::StopSmoothScroll() {
-    scrolling_ = false;
+    smoothScroll_.reset();
     if (scrollTimer_ != nullptr) {
         scrollTimer_->stop();
     }
 }
 
 void CanvasWidget::UpdateSmoothScroll() {
-    if (!scrolling_) {
+    if (!smoothScroll_.has_value()) {
         return;
     }
     // Exponential chase: pan approaches the accumulated target by a fixed
@@ -3287,13 +3332,13 @@ void CanvasWidget::UpdateSmoothScroll() {
     // continuous across notches (no restart), scales with the backlog (a fast
     // flick moves fast), and is independent of the tick rate.
     constexpr double kScrollChaseMs = 30.0;
-    const double dt = static_cast<double>(scrollClock_.restart());
+    const double dt = static_cast<double>(smoothScroll_->clock.restart());
     const double step = 1.0 - std::exp(-dt / kScrollChaseMs);
-    const double dx = scrollTarget_.x() - panX_;
-    const double dy = scrollTarget_.y() - panY_;
+    const double dx = smoothScroll_->target.x() - panX_;
+    const double dy = smoothScroll_->target.y() - panY_;
     if (std::abs(dx) < 0.5 && std::abs(dy) < 0.5) {
-        panX_ = static_cast<float>(scrollTarget_.x());
-        panY_ = static_cast<float>(scrollTarget_.y());
+        panX_ = static_cast<float>(smoothScroll_->target.x());
+        panY_ = static_cast<float>(smoothScroll_->target.y());
         ClampViewportPan();
         NotifyViewportChanged();
         StopSmoothScroll();
@@ -3309,7 +3354,6 @@ void CanvasWidget::UpdateSmoothScroll() {
         // unreachable (e.g. a flick past the document edge), so the chase
         // would never converge.  Drop the backlog and stop.  A sub-4 ms tick
         // moves too little to measure and keeps chasing instead.
-        scrollTarget_ = QPointF(panX_, panY_);
         StopSmoothScroll();
         return;
     }
@@ -3447,25 +3491,25 @@ QRectF CanvasWidget::PendingErasePageRegion(std::size_t pageIndex) const {
 }
 
 QRect CanvasWidget::OverlayDirtyRect() const {
-    if (!selectionOverlayActive_) {
+    if (!selection_.Active()) {
         return {};
     }
     // A PDF text drag paints character highlights over the whole page under
     // the anchor instead of a marquee.
-    if (pdfTextDragPage_.has_value()) {
-        const CanvasPageView view = CalculatePageView(*pdfTextDragPage_);
+    if (selection_.mode == SelectionGesture::Mode::PdfText && selection_.pdfPage.has_value()) {
+        const CanvasPageView view = CalculatePageView(*selection_.pdfPage);
         return view.valid ? view.rect.toAlignedRect().intersected(rect()) : rect();
     }
-    if (selectionOverlayLasso_ && !lassoPoints_.empty()) {
+    if (selection_.mode == SelectionGesture::Mode::Lasso && !selection_.lassoPoints.empty()) {
         // QRectF(point, QSizeF(0,0)) is empty, and united() returns the
         // non-empty operand when either side is empty — so unioning
         // point-sized rects collapses the bounds to the LAST point instead
         // of spanning them all.  Track explicit min/max instead.
-        float minX = lassoPoints_.front().x();
-        float minY = lassoPoints_.front().y();
-        float maxX = lassoPoints_.front().x();
-        float maxY = lassoPoints_.front().y();
-        for (const QPointF& point : lassoPoints_) {
+        float minX = selection_.lassoPoints.front().x();
+        float minY = selection_.lassoPoints.front().y();
+        float maxX = selection_.lassoPoints.front().x();
+        float maxY = selection_.lassoPoints.front().y();
+        for (const QPointF& point : selection_.lassoPoints) {
             minX = std::min<float>(minX, point.x());
             minY = std::min<float>(minY, point.y());
             maxX = std::max<float>(maxX, point.x());
@@ -3474,7 +3518,7 @@ QRect CanvasWidget::OverlayDirtyRect() const {
         return QRectF(minX, minY, maxX - minX, maxY - minY)
             .adjusted(-2.0, -2.0, 2.0, 2.0).toAlignedRect().intersected(rect());
     }
-    return QRectF(selectionAnchor_, selectionCurrent_).normalized()
+    return QRectF(selection_.anchor, selection_.current).normalized()
         .adjusted(-2.0, -2.0, 2.0, 2.0).toAlignedRect().intersected(rect());
 }
 
@@ -3612,8 +3656,8 @@ void CanvasWidget::PaintSelectionOverlay(QPainter& painter) {
         }
         const PageSelection& selection = controller_.SelectionFor(view.pageIndex);
         const bool hasCommitted = !selection.pdfText.empty();
-        const bool showLive = selectionOverlayActive_ && pdfTextDragPage_.has_value()
-            && *pdfTextDragPage_ == view.pageIndex;
+        const bool showLive = selection_.mode == SelectionGesture::Mode::PdfText
+            && selection_.pdfPage.has_value() && *selection_.pdfPage == view.pageIndex;
         if (!hasCommitted && !showLive) {
             continue;
         }
@@ -3646,13 +3690,13 @@ void CanvasWidget::PaintSelectionOverlay(QPainter& painter) {
             continue;
         }
         const std::vector<PdfTextCharBox>* boxes = controller_.PdfTextCharBoxesFor(view.pageIndex);
-        const std::optional<CanvasPageView> currentView = HitTestPageView(selectionCurrent_);
+        const std::optional<CanvasPageView> currentView = HitTestPageView(selection_.current);
         if (boxes == nullptr || boxes->empty()
             || !currentView.has_value() || currentView->pageIndex != view.pageIndex) {
             continue;
         }
-        const Vec2 anchorPage = ScreenToPage(view, selectionAnchor_, false);
-        const Vec2 currentPage = ScreenToPage(*currentView, selectionCurrent_, false);
+        const Vec2 anchorPage = ScreenToPage(view, selection_.anchor, false);
+        const Vec2 currentPage = ScreenToPage(*currentView, selection_.current, false);
         const std::size_t firstIndex = std::min(
             NearestPdfTextIndex(*boxes, anchorPage), NearestPdfTextIndex(*boxes, currentPage));
         const std::size_t lastIndex = std::max(
@@ -3664,19 +3708,20 @@ void CanvasWidget::PaintSelectionOverlay(QPainter& painter) {
 
     // Live marquee / lasso. A pdf text drag suppresses it entirely (the char
     // boxes above are the feedback).
-    if (selectionOverlayActive_ && !pdfTextDragPage_.has_value()) {
-        painter.setPen(QPen(QColor(59, 130, 246), 1.0, selectionOverlayLasso_ ? Qt::SolidLine : Qt::DashLine));
+    if (selection_.Active() && selection_.mode != SelectionGesture::Mode::PdfText) {
+        const bool lasso = selection_.mode == SelectionGesture::Mode::Lasso;
+        painter.setPen(QPen(QColor(59, 130, 246), 1.0, lasso ? Qt::SolidLine : Qt::DashLine));
         painter.setBrush(QColor(59, 130, 246, 40));
-        if (selectionOverlayLasso_ && lassoPoints_.size() >= 2U) {
+        if (lasso && selection_.lassoPoints.size() >= 2U) {
             QPainterPath path;
-            path.moveTo(lassoPoints_.front());
-            for (std::size_t index = 1; index < lassoPoints_.size(); ++index) {
-                path.lineTo(lassoPoints_[index]);
+            path.moveTo(selection_.lassoPoints.front());
+            for (std::size_t index = 1; index < selection_.lassoPoints.size(); ++index) {
+                path.lineTo(selection_.lassoPoints[index]);
             }
             path.closeSubpath();
             painter.drawPath(path);
-        } else if (!selectionOverlayLasso_) {
-            painter.drawRect(QRectF(selectionAnchor_, selectionCurrent_).normalized());
+        } else if (!lasso) {
+            painter.drawRect(QRectF(selection_.anchor, selection_.current).normalized());
         }
     }
     painter.restore();

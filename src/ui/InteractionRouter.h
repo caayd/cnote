@@ -117,7 +117,6 @@ enum class InteractionKind {
     MoveSelection,
     Transform,
     PendingTextClick,
-    ZoomWindow,
 };
 
 enum class CancelReason {
@@ -168,6 +167,10 @@ struct TransformRequest {
     std::size_t pageIndex = 0;
     std::size_t objectIndex = 0;
     TransformHandle handle = TransformHandle::Move;
+    // The press point in widget coordinates: rotation measures the pointer's
+    // start angle from it.  Carried in the request so BeginTransform needs no
+    // probe-time side channel.
+    QPointF pressLogical {};
 };
 
 // App::BeginMoveSelection object hit test outcome (Selection.cpp:1453-1620):
@@ -260,6 +263,8 @@ public:
     // --- selection --------------------------------------------------------
     virtual void ClearSelection() = 0;
     virtual void UpdateSelectionOverlay(const QPointF& anchor, const QPointF& current, bool lasso, const std::vector<QPointF>& lassoPoints) = 0;
+    // Drops the live marquee/lasso/pdf-text overlay without committing it.
+    virtual void CancelSelectionOverlay() = 0;
     // One call per completed selection gesture (App::EndSelection,
     // Selection.cpp:1268); `boxOverride` marks the click-selection path
     // (Selection.cpp:1581) and `click` the 18-px click radius (Selection.cpp:1269).
@@ -271,11 +276,19 @@ public:
     virtual void BeginCloneMoveSelection(std::size_t pageIndex) = 0;
     virtual void UpdateMoveSelection(const QPointF& logicalDelta) = 0;
     virtual void CommitMoveSelection() = 0;
+    // Abandons an in-flight move: restores the page snapshot the gesture
+    // began with and drops the drag overlay.
+    virtual void CancelMoveSelection() = 0;
 
     // --- transforms -------------------------------------------------------
-    virtual void BeginTransform(const TransformRequest& request) = 0;
+    // Starts the one-transaction gesture and stores the transform session.
+    // Returns false when no session could start (no selection bounds), in
+    // which case the router does not enter Transform.
+    virtual bool BeginTransform(const TransformRequest& request) = 0;
     virtual void UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers modifiers) = 0;
     virtual void CommitTransform() = 0;
+    // Abandons an in-flight transform, restoring the page snapshot.
+    virtual void CancelTransform() = 0;
 
     // --- erase ------------------------------------------------------------
     // Pending marks are shown at kPendingEraseOpacity; the whole drag becomes
@@ -319,11 +332,15 @@ public:
     // capture.  Idempotent, so repeated focus-loss/deactivation/cancellation
     // notifications finish exactly once.
     void FinishInteraction();
+    // Abandons the live interaction without committing it: a stroke is
+    // discarded, pending erase marks are cleared, page gestures are rolled
+    // back and marquee/lasso overlays are hidden.  Idempotent.
+    void CancelInteraction();
 
     [[nodiscard]] bool IsInteractionActive() const;
-    [[nodiscard]] InteractionKind ActiveInteraction() const { return active_; }
-    [[nodiscard]] bool PanFromMiddleButton() const { return panFromMiddleButton_; }
-    [[nodiscard]] const std::vector<ObjectRef>& PendingErase() const { return pendingErase_; }
+    [[nodiscard]] InteractionKind ActiveInteraction() const { return state_.kind; }
+    [[nodiscard]] bool PanFromMiddleButton() const { return state_.pan.fromMiddleButton; }
+    [[nodiscard]] const std::vector<ObjectRef>& PendingErase() const { return state_.erase.pending; }
 
     // Pure ports of the legacy stroke helpers, exposed for the tests and for
     // the canvas preview: App.cpp:1997 (SnapLineEndpoint), App.cpp:2013
@@ -350,13 +367,64 @@ private:
     void BeginStroke(const QPointF& logical);
     bool ApplyStrokePoint(const QPointF& logical);
     void EndStroke();
+    // Starts one stroke segment on `hit`, resetting the host preview.  The
+    // interaction stays Stroke; a page crossing commits the previous segment
+    // and starts this one without releasing capture.
+    void StartStrokeSegment(const PageHit& hit, Vec2 pagePoint, bool dotted);
     void BeginPan(const QPointF& logical, bool fromMiddleButton);
     void UpdatePan(const QPointF& logical);
     void EndPan();
     void BeginTextTool(const QPointF& logical);
     void BeginLatexTool(const QPointF& logical);
     void UpdateCapture();
-    void SetActive(InteractionKind kind);
+    // The only transition back to None: forgets every payload, so no ending
+    // path can leave another kind's data behind.
+    void ResetInteraction();
+
+    // The router owns exactly one interaction value.  Only the payload for
+    // state_.kind is meaningful; ResetInteraction clears them all.
+    struct InteractionState {
+        struct PanData {
+            bool fromMiddleButton = false;
+            QPointF lastPosition {};
+        };
+        struct StrokeData {
+            std::optional<PageHit> page;
+            std::vector<Vec2> points;    // active points (line/oval modes replace them)
+            std::vector<Vec2> freehandPoints;  // unfiltered freehand accumulation (App.cpp:4497)
+            bool dotted = false;
+        };
+        struct EraseData {
+            std::vector<ObjectRef> pending;
+            // App.cpp:5713-5799 EraseAt's lastErasePageIndex_/lastErasePagePoint_:
+            // the segment start for the next sample, reset when the cursor
+            // leaves the page.
+            std::optional<std::size_t> lastPageIndex;
+            Vec2 lastPagePoint {};
+        };
+        struct SelectData {
+            QPointF anchor {};
+            QPointF current {};
+            std::vector<QPointF> lassoPoints;
+            bool boxOverride = false;
+        };
+        struct MoveData {
+            QPointF lastPosition {};
+        };
+        struct PendingTextClickData {
+            std::optional<std::size_t> pageIndex;
+            std::optional<std::size_t> textIndex;
+            QPointF position {};
+        };
+
+        InteractionKind kind = InteractionKind::None;
+        PanData pan;
+        StrokeData stroke;
+        EraseData erase;
+        SelectData select;
+        MoveData move;
+        PendingTextClickData pendingTextClick;
+    };
 
     InteractionHost& host_;
     InteractionTuning tuning_;
@@ -364,34 +432,7 @@ private:
     SelectionMode selectionMode_ = SelectionMode::Lasso;
     InteractionModifiers modifiers_;
 
-    InteractionKind active_ = InteractionKind::None;
-
-    bool panFromMiddleButton_ = false;
-    QPointF panLastPosition_;
-
-    std::optional<PageHit> strokePage_;
-    std::vector<Vec2> strokePoints_;    // active points (line/oval modes replace them)
-    std::vector<Vec2> freehandPoints_;  // unfiltered freehand accumulation (App.cpp:4497)
-    bool strokeDotted_ = false;
-
-    std::vector<ObjectRef> pendingErase_;
-    // App.cpp:5713-5799 EraseAt's lastErasePageIndex_/lastErasePagePoint_: the
-    // segment start for the next sample, reset when the cursor leaves the page.
-    std::optional<std::size_t> eraseLastPageIndex_;
-    Vec2 eraseLastPagePoint_ {};
-
-    QPointF selectionAnchor_;
-    QPointF selectionCurrent_;
-    std::vector<QPointF> selectionLassoPoints_;
-    bool selectionBoxOverride_ = false;
-
-    std::optional<std::size_t> movePageIndex_;
-    QPointF moveLastPosition_;
-
-    std::optional<std::size_t> pendingTextClickPage_;
-    std::optional<std::size_t> pendingTextClickIndex_;
-    QPointF pendingTextClickPosition_;
-
+    InteractionState state_;
     bool pointerCaptured_ = false;
 };
 
