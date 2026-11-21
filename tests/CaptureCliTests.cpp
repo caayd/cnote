@@ -10,7 +10,11 @@
 //     opens the title menu and Escape closes it (popup mode on hidden windows);
 //   * captures have the requested logical size times --scale;
 //   * the startup document is never modified, even by a script that edits and
-//     saves it;
+//     saves it, and the same parsed path is copied and opened;
+//   * unknown startup options are rejected, not ignored;
+//   * a step after a click runs only once that click returns, and a drag leaves
+//     no mouse grab behind;
+//   * Finish stops the run instead of starting another step;
 //   * script errors fail fast with the line number.
 //
 // Every wait is bounded, so a regression can never hang the suite.
@@ -26,6 +30,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QImage>
 #include <QProcess>
 #include <QRect>
@@ -222,6 +227,105 @@ void ScriptErrorsNameTheLine(const QDir& work) {
     Check(run.output.contains(QStringLiteral("line 2")), "the error names the failing line");
 }
 
+// One parse supplies both paths: the file copied into the scratch directory and
+// the file the window opens.  A non-ASCII name only survives when both come
+// from the same parsed path.
+void StartupPathIsParsedOnce(const QDir& work) {
+    const QString document = work.filePath(QStringLiteral("café notes.cnote"));
+    QFile::remove(document);
+    Check(QFile::copy(QStringLiteral(CNOTE_FIXTURE), document), "copy the fixture to a non-ASCII path");
+    const QByteArray documentHash = FileHash(document);
+
+    WriteText(work.filePath(QStringLiteral("single-parse.txt")),
+        "drag 420 300 580 300\n"
+        "capture opened.png\n"
+        "key Ctrl+S\n");
+
+    const RunResult run = RunCnote(
+        { QStringLiteral("--script=single-parse.txt"), QStringLiteral("--size=1000x700"), document }, work.path());
+    std::printf("%s", run.output.toLocal8Bit().constData());
+    Check(run.exitCode == 0, "a non-ASCII startup path is copied and opened from one parse");
+    Check(QFileInfo::exists(work.filePath(QStringLiteral("opened.png"))), "the capture step ran");
+    Check(FileHash(document) == documentHash, "Ctrl+S saved the scratch copy, not the parsed startup path");
+}
+
+void UnknownStartupFlagsAreRejected(const QDir& work) {
+    const RunResult run = RunCnote({ QStringLiteral("--not-a-cnote-option") }, work.path());
+    Check(run.exitCode == 2, "an unknown startup option exits 2");
+    Check(run.output.contains(QStringLiteral("unknown option --not-a-cnote-option")),
+        "the error names the unknown option");
+}
+
+// The click opens the title menu; the next step is scheduled only after the
+// click returns, and suspension does not mean "wait until the popup closes", so
+// the later Escape still closes it.
+void StepsAfterAClickWaitForTheClick(const QDir& work) {
+    WriteText(work.filePath(QStringLiteral("scheduling.txt")),
+        "capture scheduling-before.png\n"
+        "click 30 17\n"
+        "wait 50\n"
+        "capture scheduling-menu.png\n"
+        "key Escape\n"
+        "wait 50\n"
+        "capture scheduling-closed.png\n");
+
+    const RunResult run = RunCnote(
+        { QStringLiteral("--script=scheduling.txt"), QStringLiteral("--size=1000x700") }, work.path());
+    std::printf("%s", run.output.toLocal8Bit().constData());
+    Check(run.exitCode == 0, "steps after a click that opens a menu still run");
+
+    const QImage before(work.filePath(QStringLiteral("scheduling-before.png")));
+    const QImage menu(work.filePath(QStringLiteral("scheduling-menu.png")));
+    const QImage closed(work.filePath(QStringLiteral("scheduling-closed.png")));
+    if (before.size() != QSize(1000, 700) || menu.size() != before.size() || closed.size() != before.size()) {
+        Check(false, "the scheduling captures are 1000x700");
+        return;
+    }
+    const QRect menuBox(20, 90, 150, 100);
+    Check(BoxChanged(before, menu, menuBox), "the step after the click sees the menu the click opened");
+    Check(!BoxChanged(before, closed, menuBox), "the later Escape closes that menu");
+}
+
+// The drag's release clears the implicit grab (the same clear Finish performs
+// for a script that stops mid-gesture).  A stale grab would route the next
+// click to the canvas, so the title menu would never open.
+void DragReleasesTheMouseGrab(const QDir& work) {
+    WriteText(work.filePath(QStringLiteral("grab.txt")),
+        "capture grab-before.png\n"
+        "drag 420 300 580 300\n"
+        "click 30 17\n"
+        "wait 50\n"
+        "capture grab-menu.png\n");
+
+    const RunResult run = RunCnote(
+        { QStringLiteral("--script=grab.txt"), QStringLiteral("--size=1000x700") }, work.path());
+    std::printf("%s", run.output.toLocal8Bit().constData());
+    Check(run.exitCode == 0, "a click after a drag still reaches the title bar");
+
+    const QImage before(work.filePath(QStringLiteral("grab-before.png")));
+    const QImage menu(work.filePath(QStringLiteral("grab-menu.png")));
+    if (before.size() != QSize(1000, 700) || menu.size() != before.size()) {
+        Check(false, "the grab captures are 1000x700");
+        return;
+    }
+    Check(BoxChanged(before, menu, QRect(20, 90, 150, 100)),
+        "the drag released its grab, so the next click opened the title menu");
+}
+
+// Finish is reported once and never runs another step.  A directory where the
+// capture file should go makes the first step fail.
+void FinishStopsTheRun(const QDir& work) {
+    Check(work.mkdir(QStringLiteral("blocked.png")), "create a directory where the capture would go");
+    WriteText(work.filePath(QStringLiteral("finish.txt")),
+        "capture blocked.png\n"
+        "capture unreachable.png\n");
+
+    const RunResult run = RunCnote({ QStringLiteral("--script=finish.txt") }, work.path());
+    Check(run.exitCode == 4, "a capture that cannot be written exits 4");
+    Check(!QFileInfo::exists(work.filePath(QStringLiteral("unreachable.png"))),
+        "Finish never runs another step");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -236,6 +340,11 @@ int main(int argc, char** argv) {
     ScriptedSessionStaysOffScreen(work);
     ScaleKeepsLogicalCoordinates(work);
     ScriptErrorsNameTheLine(work);
+    StartupPathIsParsedOnce(work);
+    UnknownStartupFlagsAreRejected(work);
+    StepsAfterAClickWaitForTheClick(work);
+    DragReleasesTheMouseGrab(work);
+    FinishStopsTheRun(work);
 
     std::printf(gFailures == 0 ? "ALL CAPTURE CLI CHECKS PASSED\n" : "%d CAPTURE CLI CHECK(S) FAILED\n", gFailures);
     return gFailures == 0 ? 0 : 1;

@@ -127,6 +127,17 @@ bool IsPopup(const QWidget* widget) {
     return type == Qt::Popup || type == Qt::ToolTip;
 }
 
+// Whether any menu/popup is on screen.  Used to mark a click that suspended the
+// event loop: the continuation waits until that loop returns.
+bool PopupOpen() {
+    for (QWidget* widget : QApplication::topLevelWidgets()) {
+        if (widget->isVisible() && IsPopup(widget)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 bool ParseCaptureScript(std::string_view text, std::vector<CaptureStep>* steps, std::string* error) {
@@ -359,14 +370,59 @@ QImage GrabComposite(QWidget& window) {
     return image;
 }
 
+QWidget* CaptureDriver::MouseState::Press(Qt::MouseButton button, QWidget* target, QWidget* window) {
+    // The first press establishes the implicit grab.  If the widget that held
+    // an earlier button has since died, fall back to the main window and record
+    // it, so a held button always has a live grab.
+    if (buttons == Qt::NoButton || grab == nullptr) {
+        grab = target != nullptr ? target : window;
+    }
+    if (grab == nullptr) {
+        buttons = Qt::NoButton;
+        return nullptr;
+    }
+    buttons |= button;
+    return grab;
+}
+
+QWidget* CaptureDriver::MouseState::Release(Qt::MouseButton button, QWidget* window) {
+    // A release goes to the widget that took the press, even when the pointer
+    // has moved away.  If that widget is gone, the main window is the
+    // deterministic fallback.
+    if (grab == nullptr) {
+        grab = window;
+    }
+    QWidget* const target = grab;
+    buttons &= ~Qt::MouseButtons(button);
+    if (buttons == Qt::NoButton) {
+        grab = nullptr;
+    }
+    if (target == nullptr) {
+        // No live widget: there is nowhere to deliver, so record the idle
+        // state instead of keeping a button without a grab.
+        buttons = Qt::NoButton;
+    }
+    return target;
+}
+
+void CaptureDriver::MouseState::Finish() {
+    buttons = Qt::NoButton;
+    grab = nullptr;
+}
+
 CaptureDriver::CaptureDriver(QWidget& window, std::vector<CaptureStep> steps, std::function<void(int)> finished)
     : window_(&window), steps_(std::move(steps)), finished_(std::move(finished)) {}
 
 CaptureDriver::~CaptureDriver() {
+    mouse_.Finish();
     ui::SetSyntheticCursorPos(std::nullopt);
 }
 
 void CaptureDriver::Start() {
+    if (phase_ != RunPhase::Idle) {
+        return;
+    }
+    phase_ = RunPhase::Running;
     QWindow* handle = window_->windowHandle();
     // The pointer starts outside the window until a step moves it.
     ui::SetSyntheticCursorPos(window_->geometry().topLeft() - QPoint(1, 1));
@@ -375,26 +431,60 @@ void CaptureDriver::Start() {
 }
 
 void CaptureDriver::RunNext() {
+    if (phase_ != RunPhase::Running) {
+        return;
+    }
+    if (executing_) {
+        // A nested event loop (a menu's exec) is delivering events from inside
+        // a step; the step's caller schedules the continuation once Execute
+        // returns, so nothing runs here.
+        return;
+    }
     if (window_ == nullptr) {
         std::fprintf(stderr, "capture: the window was destroyed before the script finished\n");
         Finish(4);
         return;
     }
-    if (done_ || next_ >= steps_.size()) {
+    if (next_ >= steps_.size()) {
         Finish(0);
         return;
     }
     const CaptureStep& step = steps_[next_++];
-    // Scheduled before the step runs: a step that opens a nested event loop
-    // (QMenu::exec) keeps the script going from inside that loop.
-    const int delay = step.kind == CaptureStepKind::Wait ? step.milliseconds : 0;
-    QTimer::singleShot(delay, this, &CaptureDriver::RunNext);
-    if (!Execute(step)) {
-        Finish(4);
+    executing_ = true;
+    const ExecuteResult result = Execute(step);
+    executing_ = false;
+    if (phase_ != RunPhase::Running) {
+        return;
     }
+    if (window_ == nullptr) {
+        std::fprintf(stderr, "capture: the window was destroyed while a step ran\n");
+        Finish(4);
+        return;
+    }
+    if (!result.ok) {
+        Finish(4);
+        return;
+    }
+    ScheduleNext(step, result.suspendsEventLoop);
 }
 
-bool CaptureDriver::Execute(const CaptureStep& step) {
+void CaptureDriver::ScheduleNext(const CaptureStep& step, bool suspendsEventLoop) {
+    // Scheduled after Execute returned: a step that entered a nested event loop
+    // has already left it, so later steps cannot run inside that loop.  A click
+    // that left a menu/popup open queues the continuation instead of invoking
+    // it directly, letting the popup finish showing before the next step.
+    if (suspendsEventLoop) {
+        QMetaObject::invokeMethod(this, [this]() { RunNext(); }, Qt::QueuedConnection);
+        return;
+    }
+    const int delay = step.kind == CaptureStepKind::Wait ? step.milliseconds : 0;
+    QTimer::singleShot(delay, this, &CaptureDriver::RunNext);
+}
+
+CaptureDriver::ExecuteResult CaptureDriver::Execute(const CaptureStep& step) {
+    if (window_ == nullptr) {
+        return { false, false };
+    }
     switch (step.kind) {
         case CaptureStepKind::Size:
             window_->resize(step.size);
@@ -402,12 +492,12 @@ bool CaptureDriver::Execute(const CaptureStep& step) {
                 std::fprintf(stderr, "capture: line %d: window is %dx%d, not the requested %dx%d (screen limit)\n",
                     step.line, window_->width(), window_->height(), step.size.width(), step.size.height());
             }
-            return true;
+            return {};
         case CaptureStepKind::Wait:
-            return true;
+            return {};
         case CaptureStepKind::Move:
             SendMouse(QEvent::MouseMove, step.from, Qt::NoButton, step.modifiers);
-            return true;
+            return {};
         case CaptureStepKind::Click:
         case CaptureStepKind::DoubleClick: {
             const int clicks = step.kind == CaptureStepKind::Click ? 1 : 2;
@@ -416,7 +506,12 @@ bool CaptureDriver::Execute(const CaptureStep& step) {
                 SendMouse(QEvent::MouseButtonPress, step.from, step.button, step.modifiers);
                 SendMouse(QEvent::MouseButtonRelease, step.from, step.button, step.modifiers);
             }
-            return true;
+            // A click that opened a menu/popup may have entered its nested
+            // event loop (right-button context menus exec); by the time it
+            // returns the loop is over.  A left click that leaves a popup open
+            // marks the step too, so the next step is queued behind the show.
+            const bool suspends = step.button == Qt::RightButton || PopupOpen();
+            return { true, suspends };
         }
         case CaptureStepKind::Drag:
             SendMouse(QEvent::MouseMove, step.from, Qt::NoButton, step.modifiers);
@@ -426,17 +521,22 @@ bool CaptureDriver::Execute(const CaptureStep& step) {
                 SendMouse(QEvent::MouseMove, step.from + (step.to - step.from) * t, Qt::NoButton, step.modifiers);
             }
             SendMouse(QEvent::MouseButtonRelease, step.to, step.button, step.modifiers);
-            return true;
+            return {};
         case CaptureStepKind::Wheel: {
             SendMouse(QEvent::MouseMove, step.from, Qt::NoButton, step.modifiers);
+            if (window_ == nullptr) {
+                return { false, false };
+            }
             const QPointF global = Global(step.from);
             QWidget* target = WindowAt(global);
-            QWindow* handle = target->windowHandle();
-            QWindowSystemInterface::handleWheelEvent(handle,
-                QHighDpi::toNativeLocalPosition(global - target->geometry().topLeft(), handle),
-                QHighDpi::toNativeGlobalPosition(global, handle), QPoint(), QPoint(0, step.notches * 120), step.modifiers);
-            QWindowSystemInterface::flushWindowSystemEvents();
-            return true;
+            if (target != nullptr) {
+                QWindow* handle = target->windowHandle();
+                QWindowSystemInterface::handleWheelEvent(handle,
+                    QHighDpi::toNativeLocalPosition(global - target->geometry().topLeft(), handle),
+                    QHighDpi::toNativeGlobalPosition(global, handle), QPoint(), QPoint(0, step.notches * 120), step.modifiers);
+                QWindowSystemInterface::flushWindowSystemEvents();
+            }
+            return {};
         }
         case CaptureStepKind::Key: {
             const QKeySequence sequence = QKeySequence::fromString(step.text, QKeySequence::PortableText);
@@ -445,7 +545,7 @@ bool CaptureDriver::Execute(const CaptureStep& step) {
                 const int key = static_cast<int>(combination.key());
                 SendKey(key, combination.keyboardModifiers(), KeyText(key, combination.keyboardModifiers()));
             }
-            return true;
+            return {};
         }
         case CaptureStepKind::Type: {
             const QList<uint> codePoints = step.text.toUcs4();
@@ -455,7 +555,7 @@ bool CaptureDriver::Execute(const CaptureStep& step) {
                 const int key = codePoint < 0x10000U ? static_cast<int>(QChar(static_cast<char16_t>(codePoint)).toUpper().unicode()) : 0;
                 SendKey(key, upper ? Qt::ShiftModifier : Qt::NoModifier, text);
             }
-            return true;
+            return {};
         }
         case CaptureStepKind::Capture: {
             const QImage image = GrabComposite(*window_);
@@ -466,27 +566,34 @@ bool CaptureDriver::Execute(const CaptureStep& step) {
             const QString path = QString::fromStdString(PathToUtf8(step.path));
             if (image.isNull() || !image.save(path, "PNG")) {
                 std::fprintf(stderr, "capture: line %d: cannot write %s\n", step.line, PathToUtf8(step.path).c_str());
-                return false;
+                return { false, false };
             }
             std::printf("capture: wrote %s (%dx%d px, scale %.2f)\n", PathToUtf8(step.path).c_str(),
                 image.width(), image.height(), image.devicePixelRatio());
             std::fflush(stdout);
-            return true;
+            return {};
         }
     }
-    return true;
+    return {};
 }
 
 QPointF CaptureDriver::Global(const QPointF& position) const {
     return position + window_->geometry().topLeft();
 }
 
-QWidget* CaptureDriver::WindowAt(const QPointF& global) const {
-    // While buttons are down the pressed window keeps the pointer (the
-    // platform's implicit grab).  An open popup needs no lookup: Qt forwards
-    // every pointer event to it.
-    if (pressed_ != nullptr) {
-        return pressed_;
+QWidget* CaptureDriver::WindowAt(const QPointF& global) {
+    // While buttons are down the recorded grab keeps the pointer (the
+    // platform's implicit grab).  If the pressed widget died, fall back to the
+    // main window and record it, so the release still has a destination.  An
+    // open popup needs no lookup: Qt forwards every pointer event to it.
+    if (mouse_.buttons != Qt::NoButton) {
+        if (mouse_.grab == nullptr) {
+            mouse_.grab = window_;
+        }
+        if (mouse_.grab == nullptr) {
+            mouse_.Finish();
+        }
+        return mouse_.grab;
     }
     if (QApplication::activePopupWidget() == nullptr) {
         for (QWidget* widget : QApplication::topLevelWidgets()) {
@@ -501,47 +608,60 @@ QWidget* CaptureDriver::WindowAt(const QPointF& global) const {
 
 void CaptureDriver::SendMouse(QEvent::Type type, const QPointF& position, Qt::MouseButton button,
                               Qt::KeyboardModifiers modifiers) {
+    if (window_ == nullptr) {
+        return;
+    }
     const QPointF global = Global(position);
     QWidget* target = WindowAt(global);
+    bool firstPress = false;
     if (type == QEvent::MouseButtonPress) {
-        if (buttons_ == Qt::NoButton) {
-            pressed_ = target;
-            // Pressing in an inactive window activates it, as a window manager does.
-            if (QApplication::activePopupWidget() == nullptr && QGuiApplication::focusWindow() != target->windowHandle()) {
-                QWindowSystemInterface::handleFocusWindowChanged<Sync>(target->windowHandle(), Qt::ActiveWindowFocusReason);
-            }
-        }
-        buttons_ |= button;
+        firstPress = mouse_.buttons == Qt::NoButton;
+        target = mouse_.Press(button, target, window_);
     } else if (type == QEvent::MouseButtonRelease) {
-        buttons_ &= ~Qt::MouseButtons(button);
+        target = mouse_.Release(button, window_);
+    }
+    if (target == nullptr) {
+        return;
+    }
+    if (firstPress && QApplication::activePopupWidget() == nullptr
+        && QGuiApplication::focusWindow() != target->windowHandle()) {
+        // Pressing in an inactive window activates it, as a window manager does.
+        QWindowSystemInterface::handleFocusWindowChanged<Sync>(target->windowHandle(), Qt::ActiveWindowFocusReason);
     }
     ui::SetSyntheticCursorPos(global.toPoint());
     // Platform input arrives in native (device) pixels; Qt scales it back.
     QWindow* handle = target->windowHandle();
     QWindowSystemInterface::handleMouseEvent<Sync>(handle,
         QHighDpi::toNativeLocalPosition(global - target->geometry().topLeft(), handle),
-        QHighDpi::toNativeGlobalPosition(global, handle), buttons_, button, type, modifiers);
-    if (buttons_ == Qt::NoButton) {
-        pressed_ = nullptr;
-    }
+        QHighDpi::toNativeGlobalPosition(global, handle), mouse_.buttons, button, type, modifiers);
 }
 
 void CaptureDriver::SendKey(int key, Qt::KeyboardModifiers modifiers, const QString& text) {
-    QWindow* target = KeyTarget();
-    QWindowSystemInterface::handleKeyEvent<Sync>(target, QEvent::KeyPress, key, modifiers, text);
-    QWindowSystemInterface::handleKeyEvent<Sync>(KeyTarget(), QEvent::KeyRelease, key, modifiers, text);
+    if (QWindow* target = KeyTarget(); target != nullptr) {
+        QWindowSystemInterface::handleKeyEvent<Sync>(target, QEvent::KeyPress, key, modifiers, text);
+    }
+    if (QWindow* target = KeyTarget(); target != nullptr) {
+        QWindowSystemInterface::handleKeyEvent<Sync>(target, QEvent::KeyRelease, key, modifiers, text);
+    }
 }
 
 QWindow* CaptureDriver::KeyTarget() const {
     QWindow* focus = QGuiApplication::focusWindow();
-    return focus != nullptr ? focus : window_->windowHandle();
+    if (focus != nullptr) {
+        return focus;
+    }
+    return window_ != nullptr ? window_->windowHandle() : nullptr;
 }
 
 void CaptureDriver::Finish(int exitCode) {
-    if (done_) {
+    if (phase_ == RunPhase::Finished) {
         return;
     }
-    done_ = true;
+    // The run is over: no later step may start, and a script that stopped while
+    // a button was down (a destroyed window, a failed capture) leaves neither a
+    // pressed button nor a grab behind.
+    phase_ = RunPhase::Finished;
+    mouse_.Finish();
     if (finished_) {
         finished_(exitCode);
     }
