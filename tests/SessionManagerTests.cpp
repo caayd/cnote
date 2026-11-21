@@ -3,7 +3,8 @@
 // Uses stub views (no windows) to prove: one autosave timer per shared session,
 // owner reassignment on close, postponement during an active interaction, dirty
 // cleared only on a successful save, the same-file lookup rule, extension
-// case-insensitivity, and the last-view-close decision.
+// case-insensitivity, the last-view-close decision, and the document kind each
+// factory and load path reports.
 
 #include <cstdio>
 #include <filesystem>
@@ -17,6 +18,7 @@
 #include <QTimer>
 
 #include "Document.h"
+#include "ProjectFile.h"
 #include "ProjectSession.h"
 #include "shell/AppManager.h"
 
@@ -165,6 +167,27 @@ int main(int argc, char** argv) {
     Check(cnote::AppManager::IsAutoSaveEligible(eligible), "autosave eligibility is case-insensitive");
     eligible.SetFilePath("saved.pdf");
     Check(!cnote::AppManager::IsAutoSaveEligible(eligible), "PDF documents are not autosave eligible");
+
+    // --- document kind ------------------------------------------------------
+    // Save/close policy keys off the kind, so the factories and the two load
+    // paths must classify every document they hand out.
+    Check(cnote::Document::CreateBlank().Kind() == cnote::DocumentKind::Blank,
+        "a blank document reports the blank kind");
+    const cnote::Document editable = cnote::Document::CreateEditable(
+        std::filesystem::path("kind.cnote"), { cnote::Page {} }, 0, cnote::Document::PageDefaults {});
+    Check(editable.Kind() == cnote::DocumentKind::Project, "an editable document is a project");
+    const cnote::Document pdfContainer = cnote::Document::CreatePdfDocument(
+        std::filesystem::path("kind.pdf"), nullptr, { cnote::Page {} }, 0, cnote::Document::PageDefaults {});
+    Check(pdfContainer.Kind() == cnote::DocumentKind::PdfContainer,
+        "a PDF container reports the PDF kind");
+    const std::vector<std::uint8_t> kindBytes =
+        cnote::ProjectFile::Serialize(cnote::Document::CreateBlank());
+    const auto projectLoad = cnote::ProjectFile::LoadFromBytes(kindBytes, scratch / "kind.cnote");
+    Check(projectLoad.has_value() && projectLoad->Kind() == cnote::DocumentKind::Project,
+        "a project decoded from a .cnote path is a project");
+    const auto embeddedLoad = cnote::ProjectFile::LoadFromBytes(kindBytes, scratch / "kind.pdf");
+    Check(embeddedLoad.has_value() && embeddedLoad->Kind() == cnote::DocumentKind::EmbeddedProject,
+        "a project decoded from a PDF path is an embedded project");
 
     std::filesystem::remove_all(scratch, error);
     std::printf(g_failures == 0 ? "ALL SESSION MANAGER CHECKS PASSED\n" : "%d SESSION MANAGER CHECK(S) FAILED\n", g_failures);

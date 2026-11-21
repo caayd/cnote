@@ -662,7 +662,15 @@ std::optional<Document> LoadProjectPayload(
         savedPages.push_back(std::move(page));
     }
 
-    return Document::CreateProjectDocument(filePath, std::move(pdfSources), std::move(savedPages), currentPageIndex, pageDefaults);
+    // A project decoded from a PDF path is the attachment recovered from that
+    // PDF (LoadDocumentFile); a standalone .cnote is a plain project.  The
+    // kind drives save/close policy, so it is decided here where the load
+    // path is known, never re-derived from the extension later.
+    const DocumentKind kind = HasExtension(filePath, u".pdf")
+        ? DocumentKind::EmbeddedProject
+        : DocumentKind::Project;
+    return Document::CreateProjectDocument(
+        filePath, std::move(pdfSources), std::move(savedPages), currentPageIndex, pageDefaults, kind);
 }
 
 std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {

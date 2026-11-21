@@ -113,6 +113,20 @@ struct RasterImage {
 
 struct Page;
 
+// What the document is: the save/close policy keys off this instead of
+// re-deriving the flavour from the file extension.  A PDF-backed document's
+// FilePath is the PDF itself, so a project save must never overwrite it.
+enum class DocumentKind : std::uint8_t {
+    // CreateBlank: an untitled project that has no destination yet.
+    Blank = 0,
+    // A .cnote project, created empty or loaded from a .cnote file.
+    Project,
+    // A PDF opened directly; pages are the PDF's pages.
+    PdfContainer,
+    // A project recovered from a PDF attachment; its path is that PDF.
+    EmbeddedProject,
+};
+
 [[nodiscard]] bool RasterImageEqual(const RasterImage& a, const RasterImage& b);
 [[nodiscard]] RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderScale, std::uint32_t argb);
 [[nodiscard]] bool Vec2Equal(const Vec2& a, const Vec2& b);
@@ -195,8 +209,12 @@ public:
         std::vector<PdfSource> pdfSources,
         std::vector<Page> pages,
         std::size_t currentPageIndex,
-        PageDefaults pageDefaults);
+        PageDefaults pageDefaults,
+        // A project decoded from a PDF attachment reports EmbeddedProject.
+        DocumentKind kind = DocumentKind::Project);
 
+    [[nodiscard]] DocumentKind Kind() const noexcept;
+    void SetKind(DocumentKind kind) noexcept;
     [[nodiscard]] const std::filesystem::path& FilePath() const noexcept;
     [[nodiscard]] const std::shared_ptr<std::vector<std::uint8_t>>& PdfData() const noexcept;
     [[nodiscard]] bool HasPdfData() const noexcept;
@@ -246,6 +264,7 @@ private:
     static std::uint64_t NextPageEpoch() noexcept;
     std::size_t currentPageIndex_ = 0;
     PageDefaults newPageDefaults_ {};
+    DocumentKind kind_ = DocumentKind::Blank;
 };
 
 }  // namespace cnote

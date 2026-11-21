@@ -188,6 +188,10 @@ private:
     [[nodiscard]] bool EditorOwnsKeyboard() const;
     void RefreshShortcutBindings();
     void RefreshRecentMenu();
+    // Replacement/close policy for the attached session: a dirty session is
+    // saved, explicitly discarded or retained instead of being dropped
+    // silently. Returns false when the caller must not proceed.
+    [[nodiscard]] bool RetainCurrentSession();
     void RecordRecentPath(const std::filesystem::path& path);
     void OpenRecentPath(const std::filesystem::path& path);
     void CreateChrome();

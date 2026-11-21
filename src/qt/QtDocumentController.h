@@ -70,11 +70,16 @@ public:
     [[nodiscard]] std::uint64_t SavedChangeCount() const { return savedChangeCount_; }
     [[nodiscard]] bool HasSavedPath() const;
     [[nodiscard]] const std::filesystem::path& FilePath() const;
+    // True when the document's current path is a real project destination.  A
+    // PDF container (or a project recovered from one) has the PDF as its path,
+    // so an in-place save would overwrite it and must go through Save As.
+    [[nodiscard]] bool CanSaveInPlace() const;
 
-    // The canvas supplies the overlay content.  When a pending edit is
-    // superseded from inside this controller - undo/redo, starting a stroke, or
-    // creating/opening another object - the FinishInteraction() override below
-    // captures the live text/LaTeX through this source.
+    // The canvas supplies the overlay content.  When an edit is ended from
+    // inside this controller - undo/redo, a session replacement or close, or a
+    // remote commit (which cancels instead) - the live text/LaTeX is captured
+    // through this source; without one the edit is cancelled, never committed
+    // with an empty value.
     void SetEditContentSource(ui::EditContentSource* source) { editContent_ = source; }
 
     // --- selection and object-gesture surface (ui::CanvasController) --------
@@ -90,7 +95,9 @@ public:
     void BeginPageGesture(std::size_t pageIndex) override;
     void CommitPageGesture() override;
     void CancelPageGesture() override;
-    [[nodiscard]] std::optional<std::size_t> GesturePageIndex() const override { return gesturePage_; }
+    [[nodiscard]] std::optional<std::size_t> GesturePageIndex() const override {
+        return gesture_.has_value() ? std::optional<std::size_t>(gesture_->pageIndex) : std::nullopt;
+    }
     [[nodiscard]] Page* GesturePage();
     void MoveSelectionBy(std::size_t pageIndex, Vec2 delta) override;
     // Alt-drag move: duplicates the selected objects on `pageIndex` in place
@@ -195,15 +202,21 @@ public:
     [[nodiscard]] bool BeginTextEdit(std::size_t pageIndex, std::size_t textIndex);
     [[nodiscard]] bool BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex);
 
-    [[nodiscard]] bool EditingText() const { return editingTextIndex_.has_value(); }
-    [[nodiscard]] bool EditingLatex() const { return editingLatexIndex_.has_value(); }
+    [[nodiscard]] bool EditingText() const {
+        return edit_.has_value() && edit_->kind == EditSession::Kind::Text;
+    }
+    [[nodiscard]] bool EditingLatex() const {
+        return edit_.has_value() && edit_->kind == EditSession::Kind::LaTeX;
+    }
     // Object snapshot taken when the edit began; the overlay fills itself from
-    // it and converts back through cnote::text helpers on commit.
+    // it and converts back through cnote::text helpers on commit.  The object
+    // itself is always located by id (see EditSession), never by a stored
+    // index: a page insert or another view's commit can move it.
     [[nodiscard]] const PageText* EditingTextObject() const;
     [[nodiscard]] const PageLatex* EditingLatexObject() const;
     [[nodiscard]] std::size_t EditingPageIndex() const;
-    [[nodiscard]] std::optional<std::size_t> EditingTextIndex() const { return editingTextIndex_; }
-    [[nodiscard]] std::optional<std::size_t> EditingLatexIndex() const { return editingLatexIndex_; }
+    [[nodiscard]] std::optional<std::size_t> EditingTextIndex() const;
+    [[nodiscard]] std::optional<std::size_t> EditingLatexIndex() const;
 
     // Commits the edited object; the caller passes the overlay's converted
     // content and spans. Nothing is recorded when the object is unchanged.
@@ -225,6 +238,50 @@ signals:
     void SelectionChanged();
 
 private:
+    // One live text/LaTeX edit.  The object is addressed by id - the same rule
+    // cnote::ApplyHistoryAction uses - never by a stored index: a page insert,
+    // a page rotation or a remote commit can move it, and committing through a
+    // stale index would rename or erase the wrong object.  The `*Before`
+    // snapshot is the undo base and what the overlay is filled with; `creates`
+    // marks the placeholder AddTextObject/AddLatexObject pushed before editing,
+    // which an empty commit removes without history.
+    struct EditSession {
+        enum class Kind { Text, LaTeX };
+        Kind kind = Kind::Text;
+        std::size_t pageIndex = 0;
+        std::uint64_t objectId = 0;
+        bool creates = false;
+        PageText textBefore {};
+        PageLatex latexBefore {};
+    };
+
+    // One in-progress page gesture: the page snapshot a commit records as a
+    // ReplacePages action, plus the per-gesture bounds cache for
+    // MoveSelectionBy (each selected object's bounds are measured once and
+    // then translated by the applied delta, so a move event costs O(1) per
+    // object instead of re-measuring strokes/text/LaTeX on every sample).
+    struct PageGesture {
+        struct MoveBounds {
+            bool built = false;
+            std::vector<ui::SelectionBounds> strokes;
+            std::vector<ui::SelectionBounds> images;
+            std::vector<ui::SelectionBounds> texts;
+            std::vector<ui::SelectionBounds> latexes;
+        };
+        std::size_t pageIndex = 0;
+        Page before {};
+        bool changed = false;
+        MoveBounds moveBounds {};
+    };
+
+    // The stroke being drawn and the page it belongs to, as one value so the
+    // page can never outlive (or diverge from) the stroke.  The name is not
+    // `PendingStroke`: that is the CanvasController accessor.
+    struct PendingStrokeState {
+        std::size_t pageIndex = 0;
+        Stroke stroke {};
+    };
+
     void NotifySessionChanged(bool originating);
     // Committed vs Saved change broadcast (plan 6.6: commit before broadcasting
     // Saved); a failed save broadcasts nothing.
@@ -233,6 +290,26 @@ private:
     [[nodiscard]] std::uint64_t NextObjectId() const;
     [[nodiscard]] Page* PageAt(std::size_t pageIndex);
     [[nodiscard]] const Page* PageAt(std::size_t pageIndex) const;
+    // Ends every transient interaction before the shared document changes under
+    // it.  `commitOpenEdit` finishes a live edit with the overlay's captured
+    // content (a remote commit passes false: its snapshot and object may
+    // already be stale, so it must be dropped, never written back).
+    // `restoreGesture` puts an in-progress gesture's page snapshot back (local
+    // abort); a remote commit drops it without restoring, because the snapshot
+    // predates the other view's committed change.
+    void AbortTransientState(bool commitOpenEdit = true, bool restoreGesture = true);
+    // Commits (or, without an edit-content source, cancels) the live edit.
+    void FinishOpenEdit();
+    // Shared commit tail: dirty, one revision bump, the viewed page and one
+    // broadcast.
+    void NoteCommitted(std::size_t pageIndex);
+    // Pushes `action`, drops the redo stack and runs the shared tail.
+    void RecordCommit(HistoryAction action, std::size_t pageIndex);
+    void MarkGestureChanged() {
+        if (gesture_.has_value()) {
+            gesture_->changed = true;
+        }
+    }
 
     AppManager& manager_;
     std::shared_ptr<ProjectSession> session_;
@@ -246,25 +323,11 @@ private:
     std::size_t currentPage_ = 0;
 
     ui::EditContentSource* editContent_ = nullptr;
-    std::optional<std::size_t> pendingStrokePage_ {};
-    std::optional<Stroke> pendingStroke_ {};
+    std::optional<PendingStrokeState> pendingStroke_ {};
+    std::optional<EditSession> edit_;
+    std::optional<PageGesture> gesture_;
 
     std::map<std::size_t, ui::PageSelection> selection_;
-    std::optional<std::size_t> gesturePage_ {};
-    Page gestureBefore_ {};
-    bool gestureChanged_ = false;
-    // Per-gesture bounds cache for MoveSelectionBy: each selected object's
-    // bounds are measured once and then translated by the applied (clamped)
-    // delta, so a move event costs O(1) per object instead of re-measuring
-    // stroke points / text layout / LaTeX metrics on every pointer sample.
-    struct MoveBounds {
-        bool built = false;
-        std::vector<ui::SelectionBounds> strokes;
-        std::vector<ui::SelectionBounds> images;
-        std::vector<ui::SelectionBounds> texts;
-        std::vector<ui::SelectionBounds> latexes;
-    };
-    MoveBounds moveBounds_ {};
 
     // Extracted PDF character boxes per source page, keyed by (source bytes,
     // source page index). Extraction loads the whole PDF text page through
@@ -287,17 +350,6 @@ private:
     };
     mutable std::map<PdfTextCacheKey, std::vector<PdfTextCharBox>> pdfTextCache_;
     std::uint64_t savedChangeCount_ = 0;
-
-    // Text edit state: the object snapshot the overlay was filled from.
-    std::optional<std::size_t> editingTextPage_ {};
-    std::optional<std::size_t> editingTextIndex_ {};
-    PageText editingTextBefore_ {};
-    bool editingTextCreates_ = false;
-
-    std::optional<std::size_t> editingLatexPage_ {};
-    std::optional<std::size_t> editingLatexIndex_ {};
-    PageLatex editingLatexBefore_ {};
-    bool editingLatexCreates_ = false;
 };
 
 }  // namespace cnote::qt

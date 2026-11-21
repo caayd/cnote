@@ -98,6 +98,27 @@ void AppendStrokePointWithResampling(Stroke& stroke, Vec2 point, float spacing) 
     }
 }
 
+// Same object-location rule as cnote::ApplyHistoryAction: an edit addresses its
+// object by id, so a page insert, a rotation or a remote commit that moved the
+// object can never make the commit write to whatever now sits at an old index.
+std::optional<std::size_t> FindTextIndexById(const Page& page, std::uint64_t textId) {
+    for (std::size_t index = 0; index < page.texts.size(); ++index) {
+        if (page.texts[index].id == textId) {
+            return index;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::size_t> FindLatexIndexById(const Page& page, std::uint64_t latexId) {
+    for (std::size_t index = 0; index < page.latexes.size(); ++index) {
+        if (page.latexes[index].id == latexId) {
+            return index;
+        }
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 QtDocumentController::QtDocumentController(AppManager& manager, QObject* parent)
@@ -112,15 +133,18 @@ QtDocumentController::~QtDocumentController() {
 // --- session ---------------------------------------------------------------
 
 void QtDocumentController::AttachSession(std::shared_ptr<ProjectSession> session) {
-    CancelStroke();
-    CancelTextEdit();
-    CancelLatexEdit();
+    AbortTransientState();
     manager_.UnregisterView(this);
     session_ = std::move(session);
     if (session_ != nullptr) {
         manager_.RegisterView(this, this, session_);
     }
     currentPage_ = 0;
+    if (session_ != nullptr) {
+        // The session owns the viewed page (it is what ProjectFile serializes);
+        // a view joining an existing session must not silently look at page 0.
+        SetCurrentPageIndex(session_->document.CurrentPageIndex());
+    }
     RebuildPdfBackground();
     emit SessionChanged();
     emit EditStateChanged();
@@ -157,7 +181,7 @@ void QtDocumentController::SetDefaultPageSize(float width, float height) {
 }
 
 void QtDocumentController::DetachForClose() {
-    CancelStroke();
+    AbortTransientState();
     manager_.UnregisterView(this);
 }
 
@@ -170,6 +194,30 @@ void QtDocumentController::ReattachForShow() {
 bool QtDocumentController::SaveTo(const std::filesystem::path& path, std::string* error) {
     if (session_ == nullptr || path.empty()) {
         return false;
+    }
+
+    // A PDF-backed document's path is the PDF file.  Without this check the
+    // first save wrote project bytes over the user's PDF (and the same for a
+    // project recovered from a PDF attachment).  Saving to another destination
+    // is legitimate - that is what Save As is for - and turns the document
+    // into a project.
+    const bool pdfBacked = !CanSaveInPlace();
+    if (pdfBacked) {
+        bool samePdfDestination = path == session_->document.FilePath();
+        if (!samePdfDestination && !session_->document.FilePath().empty()) {
+            // A relative FilePath (a command-line open) and the dialog's
+            // absolute destination are the same file: compare the resolved
+            // paths, not their spelling.
+            std::error_code equivalentError;
+            samePdfDestination = std::filesystem::equivalent(
+                path, session_->document.FilePath(), equivalentError);
+        }
+        if (samePdfDestination) {
+            if (error != nullptr) {
+                *error = "cannot overwrite a PDF document: " + PathToUtf8(path) + " (use Save As)";
+            }
+            return false;
+        }
     }
 
     // Serialize once and commit through QSaveFile (plan 6.6): a failure must
@@ -196,6 +244,10 @@ bool QtDocumentController::SaveTo(const std::filesystem::path& path, std::string
     }
 
     session_->document.SetFilePath(path);
+    // The destination is a cnote project file now, so the document is one:
+    // a PDF-backed document turns into a project (an in-place save is safe
+    // from here on), and the save/close policy stops routing through Save As.
+    session_->document.SetKind(DocumentKind::Project);
     session_->dirty = false;
     manager_.NotifySessionSaved(session_);
     BroadcastChange(ProjectChange::Kind::Saved);
@@ -268,6 +320,14 @@ bool QtDocumentController::HasSavedPath() const {
     return session_ != nullptr && !session_->document.FilePath().empty();
 }
 
+bool QtDocumentController::CanSaveInPlace() const {
+    if (session_ == nullptr) {
+        return false;
+    }
+    const DocumentKind kind = session_->document.Kind();
+    return kind != DocumentKind::PdfContainer && kind != DocumentKind::EmbeddedProject;
+}
+
 const std::filesystem::path& QtDocumentController::FilePath() const {
     static const std::filesystem::path kEmpty {};
     return session_ != nullptr ? session_->document.FilePath() : kEmpty;
@@ -302,18 +362,59 @@ void QtDocumentController::NotifySessionChanged(bool originating) {
 // --- SessionView ------------------------------------------------------------
 
 bool QtDocumentController::IsInteractionActive() const {
-    return pendingStroke_.has_value() || EditingText() || EditingLatex();
+    return pendingStroke_.has_value() || edit_.has_value() || gesture_.has_value();
+}
+
+void QtDocumentController::AbortTransientState(bool commitOpenEdit, bool restoreGesture) {
+    // A half-drawn stroke is a preview, never a commit: undo/redo, a session
+    // switch or a remote change ends it without writing to history.
+    CancelStroke();
+    if (gesture_.has_value()) {
+        // The gesture snapshot was taken before this point in time.  Restore it
+        // first, then finish the edit: a commit that landed before the restore
+        // would be silently rolled back by the page snapshot.
+        if (restoreGesture) {
+            CancelPageGesture();
+        } else {
+            // The snapshot predates the other view's committed change: putting
+            // it back would erase that change.  Just forget the gesture.
+            gesture_.reset();
+        }
+    }
+    if (commitOpenEdit) {
+        FinishOpenEdit();
+    } else {
+        CancelTextEdit();
+        CancelLatexEdit();
+    }
+}
+
+void QtDocumentController::FinishOpenEdit() {
+    if (!edit_.has_value()) {
+        return;
+    }
+    // No source means no captured overlay content.  Committing an empty value
+    // here is exactly the data-loss bug this session state exists to stop, so
+    // cancel instead.
+    if (editContent_ == nullptr) {
+        CancelTextEdit();
+        CancelLatexEdit();
+        return;
+    }
+    if (edit_->kind == EditSession::Kind::Text) {
+        CommitTextEdit(editContent_->CaptureEditedText());
+    } else {
+        CommitLatexEdit(editContent_->CaptureEditedLatexSource());
+    }
 }
 
 void QtDocumentController::FinishInteraction() {
     if (pendingStroke_.has_value()) {
         EndStroke();
     }
-    if (EditingText()) {
-        CommitTextEdit(editContent_ != nullptr ? editContent_->CaptureEditedText() : PageText {});
-    }
-    if (EditingLatex()) {
-        CommitLatexEdit(editContent_ != nullptr ? editContent_->CaptureEditedLatexSource() : QString());
+    FinishOpenEdit();
+    if (gesture_.has_value()) {
+        CommitPageGesture();
     }
 }
 
@@ -322,17 +423,45 @@ void QtDocumentController::OnSessionChanged(const ProjectChange& change, bool or
         return;
     }
     if (change.kind == ProjectChange::Kind::Committed) {
-        // Another view committed: drop the pending preview and refresh caches.
-        pendingStroke_.reset();
-        pendingStrokePage_.reset();
+        // Another view committed: any edit or gesture here points at a snapshot
+        // (and, for the edit, an object) of a page this view no longer has the
+        // last word on.  Drop it without writing anything back; never commit by
+        // an index the other view may have shifted.
+        AbortTransientState(false, false);
     }
     emit SessionChanged();
 }
 
 void QtDocumentController::SetCurrentPageIndex(std::size_t index) {
-    if (session_ != nullptr && index < session_->document.PageCount()) {
-        currentPage_ = index;
+    if (session_ == nullptr || index >= session_->document.PageCount()) {
+        return;
     }
+    // The controller's page and the document's page are one state: the document
+    // is what ProjectFile serializes, so a viewed-page change must reach it.
+    session_->document.SetCurrentPageIndex(index);
+    currentPage_ = index;
+}
+
+void QtDocumentController::NoteCommitted(std::size_t pageIndex) {
+    if (session_ == nullptr) {
+        return;
+    }
+    session_->dirty = true;
+    ++session_->revision;
+    const std::size_t pageCount = session_->document.PageCount();
+    if (pageCount > 0U) {
+        SetCurrentPageIndex(std::min(pageIndex, pageCount - 1U));
+    }
+    NotifySessionChanged(true);
+}
+
+void QtDocumentController::RecordCommit(HistoryAction action, std::size_t pageIndex) {
+    if (session_ == nullptr) {
+        return;
+    }
+    session_->undoActions.push_back(std::move(action));
+    session_->redoActions.clear();
+    NoteCommitted(pageIndex);
 }
 
 const Document& QtDocumentController::DocumentRef() const {
@@ -376,18 +505,17 @@ void QtDocumentController::BeginStroke(std::size_t pageIndex, Vec2 point, float 
     (void)pageScale;
     FinishInteraction();
     pendingStroke_.reset();
-    pendingStrokePage_.reset();
     if (PageAt(pageIndex) == nullptr) {
         return;
     }
 
-    Stroke stroke;
-    stroke.style = strokeStyle_;
-    stroke.smoothing = input_.strokeSmoothing;
-    stroke.points.push_back(point);
-    pendingStroke_ = std::move(stroke);
-    pendingStrokePage_ = pageIndex;
-    currentPage_ = pageIndex;
+    PendingStrokeState pending;
+    pending.pageIndex = pageIndex;
+    pending.stroke.style = strokeStyle_;
+    pending.stroke.smoothing = input_.strokeSmoothing;
+    pending.stroke.points.push_back(point);
+    pendingStroke_ = std::move(pending);
+    SetCurrentPageIndex(pageIndex);
 }
 
 void QtDocumentController::ExtendStroke(Vec2 point, float pageScale) {
@@ -395,63 +523,54 @@ void QtDocumentController::ExtendStroke(Vec2 point, float pageScale) {
         return;
     }
 
+    Stroke& stroke = pendingStroke_->stroke;
     const float spacing = InputSpacingPageUnits(input_.inputSpacing, pageScale);
     Vec2 filtered = point;
-    if (!pendingStroke_->points.empty()) {
+    if (!stroke.points.empty()) {
         const float followAmount = std::clamp(1.0f - input_.inputSmoothing, 0.05f, 0.95f);
-        filtered = Lerp(pendingStroke_->points.back(), point, followAmount);
-        if (Distance(filtered, pendingStroke_->points.back()) < spacing) {
+        filtered = Lerp(stroke.points.back(), point, followAmount);
+        if (Distance(filtered, stroke.points.back()) < spacing) {
             return;
         }
     }
-    AppendStrokePointWithResampling(*pendingStroke_, filtered, spacing);
+    AppendStrokePointWithResampling(stroke, filtered, spacing);
 }
 
 void QtDocumentController::EndStroke() {
-    if (!pendingStroke_.has_value() || !pendingStrokePage_.has_value() || session_ == nullptr) {
+    if (!pendingStroke_.has_value() || session_ == nullptr) {
         CancelStroke();
         return;
     }
 
-    Stroke finished = std::move(*pendingStroke_);
-    const std::size_t pageIndex = *pendingStrokePage_;
+    PendingStrokeState finished = std::move(*pendingStroke_);
     pendingStroke_.reset();
-    pendingStrokePage_.reset();
-
-    Page* page = PageAt(pageIndex);
-    if (page == nullptr || finished.points.empty()) {
+    Page* page = PageAt(finished.pageIndex);
+    if (page == nullptr || finished.stroke.points.empty()) {
         return;
     }
 
     // Same commit shape as the reference (App::EndStroke): append, push an
-    // AddStroke action with its insert index, clear the redo stack, bump the
-    // revision once and broadcast once.
-    session_->document.TouchPage(pageIndex);
+    // AddStroke action with its insert index, then the shared commit tail.
+    session_->document.TouchPage(finished.pageIndex);
     HistoryAction action {};
     action.type = HistoryActionType::AddStroke;
-    action.stroke = finished;
     action.index = page->strokes.size();
-    action.pageIndex = pageIndex;
-    page->strokes.push_back(std::move(finished));
-    session_->undoActions.push_back(std::move(action));
-    session_->redoActions.clear();
-    session_->dirty = true;
-    ++session_->revision;
-    currentPage_ = pageIndex;
-    NotifySessionChanged(true);
+    action.pageIndex = finished.pageIndex;
+    action.stroke = std::move(finished.stroke);
+    page->strokes.push_back(action.stroke);
+    RecordCommit(std::move(action), finished.pageIndex);
 }
 
 void QtDocumentController::CancelStroke() {
     pendingStroke_.reset();
-    pendingStrokePage_.reset();
 }
 
 const Stroke* QtDocumentController::PendingStroke() const {
-    return pendingStroke_.has_value() ? &*pendingStroke_ : nullptr;
+    return pendingStroke_.has_value() ? &pendingStroke_->stroke : nullptr;
 }
 
 std::size_t QtDocumentController::PendingStrokePage() const {
-    return pendingStrokePage_.value_or(0U);
+    return pendingStroke_.has_value() ? pendingStroke_->pageIndex : 0U;
 }
 
 // --- history ----------------------------------------------------------------
@@ -465,10 +584,13 @@ bool QtDocumentController::CanRedo() const {
 }
 
 bool QtDocumentController::Undo() {
+    // The edit is a transient preview: finish it first (committing captured
+    // overlay content when a source exists, cancelling otherwise) so the undo
+    // below is a history step and never an empty commit that erased the object.
+    AbortTransientState();
     if (session_ == nullptr || session_->undoActions.empty()) {
         return false;
     }
-    FinishInteraction();
 
     HistoryAction action = std::move(session_->undoActions.back());
     session_->undoActions.pop_back();
@@ -477,19 +599,17 @@ bool QtDocumentController::Undo() {
         return false;
     }
 
+    const std::size_t pageIndex = action.pageIndex;
     session_->redoActions.push_back(std::move(action));
-    session_->dirty = true;
-    ++session_->revision;
-    currentPage_ = std::min(action.pageIndex, session_->document.PageCount() > 0 ? session_->document.PageCount() - 1U : 0U);
-    NotifySessionChanged(true);
+    NoteCommitted(pageIndex);
     return true;
 }
 
 bool QtDocumentController::Redo() {
+    AbortTransientState();
     if (session_ == nullptr || session_->redoActions.empty()) {
         return false;
     }
-    FinishInteraction();
 
     HistoryAction action = std::move(session_->redoActions.back());
     session_->redoActions.pop_back();
@@ -498,22 +618,20 @@ bool QtDocumentController::Redo() {
         return false;
     }
 
+    const std::size_t pageIndex = action.pageIndex;
     session_->undoActions.push_back(std::move(action));
-    session_->dirty = true;
-    ++session_->revision;
-    currentPage_ = std::min(action.pageIndex, session_->document.PageCount() > 0 ? session_->document.PageCount() - 1U : 0U);
-    NotifySessionChanged(true);
+    NoteCommitted(pageIndex);
     return true;
 }
 
 // --- object creation and text editing ---------------------------------------
 
 std::size_t QtDocumentController::AddTextObject(std::size_t pageIndex, Vec2 topLeft, float fontSize) {
+    AbortTransientState();
     Page* page = PageAt(pageIndex);
     if (page == nullptr) {
         return 0U;
     }
-    FinishInteraction();
 
     PageText text;
     text.id = NextObjectId();
@@ -536,17 +654,17 @@ std::size_t QtDocumentController::AddTextObject(std::size_t pageIndex, Vec2 topL
     page->texts.push_back(text);
     const std::size_t index = page->texts.size() - 1U;
     if (BeginTextEdit(pageIndex, index)) {
-        editingTextCreates_ = true;
+        edit_->creates = true;
     }
     return index;
 }
 
 std::size_t QtDocumentController::AddLatexObject(std::size_t pageIndex, Vec2 topLeft, float fontSize) {
+    AbortTransientState();
     Page* page = PageAt(pageIndex);
     if (page == nullptr) {
         return 0U;
     }
-    FinishInteraction();
 
     PageLatex latex;
     latex.id = NextObjectId();
@@ -558,90 +676,104 @@ std::size_t QtDocumentController::AddLatexObject(std::size_t pageIndex, Vec2 top
     page->latexes.push_back(latex);
     const std::size_t index = page->latexes.size() - 1U;
     if (BeginLatexEdit(pageIndex, index)) {
-        editingLatexCreates_ = true;
+        edit_->creates = true;
     }
     return index;
 }
 
 bool QtDocumentController::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) {
-    FinishInteraction();
+    AbortTransientState();
     Page* page = PageAt(pageIndex);
     if (page == nullptr || textIndex >= page->texts.size()) {
         return false;
     }
 
-    editingTextBefore_ = page->texts[textIndex];
-    editingTextPage_ = pageIndex;
-    editingTextIndex_ = textIndex;
-    editingTextCreates_ = false;
-    currentPage_ = pageIndex;
+    EditSession edit;
+    edit.kind = EditSession::Kind::Text;
+    edit.pageIndex = pageIndex;
+    edit.objectId = page->texts[textIndex].id;
+    edit.textBefore = page->texts[textIndex];
+    edit_ = std::move(edit);
+    SetCurrentPageIndex(pageIndex);
     emit EditStateChanged();
     return true;
 }
 
 const PageText* QtDocumentController::EditingTextObject() const {
-    if (!editingTextIndex_.has_value()) {
+    if (!EditingText()) {
         return nullptr;
     }
-    return &editingTextBefore_;
+    return &edit_->textBefore;
 }
 
 bool QtDocumentController::BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex) {
-    FinishInteraction();
+    AbortTransientState();
     Page* page = PageAt(pageIndex);
     if (page == nullptr || latexIndex >= page->latexes.size()) {
         return false;
     }
 
-    editingLatexBefore_ = page->latexes[latexIndex];
-    editingLatexPage_ = pageIndex;
-    editingLatexIndex_ = latexIndex;
-    editingLatexCreates_ = false;
-    currentPage_ = pageIndex;
+    EditSession edit;
+    edit.kind = EditSession::Kind::LaTeX;
+    edit.pageIndex = pageIndex;
+    edit.objectId = page->latexes[latexIndex].id;
+    edit.latexBefore = page->latexes[latexIndex];
+    edit_ = std::move(edit);
+    SetCurrentPageIndex(pageIndex);
     emit EditStateChanged();
     return true;
 }
 
 const PageLatex* QtDocumentController::EditingLatexObject() const {
-    if (!editingLatexPage_.has_value() || !editingLatexIndex_.has_value()) {
+    if (!EditingLatex()) {
         return nullptr;
     }
-    const Page* page = PageAt(*editingLatexPage_);
-    if (page == nullptr || *editingLatexIndex_ >= page->latexes.size()) {
-        return nullptr;
-    }
-    return &page->latexes[*editingLatexIndex_];
+    return &edit_->latexBefore;
 }
 
 std::size_t QtDocumentController::EditingPageIndex() const {
-    if (editingTextPage_.has_value()) {
-        return *editingTextPage_;
+    return edit_.has_value() ? edit_->pageIndex : currentPage_;
+}
+
+std::optional<std::size_t> QtDocumentController::EditingTextIndex() const {
+    if (!EditingText()) {
+        return std::nullopt;
     }
-    if (editingLatexPage_.has_value()) {
-        return *editingLatexPage_;
+    const Page* page = PageAt(edit_->pageIndex);
+    if (page == nullptr) {
+        return std::nullopt;
     }
-    return currentPage_;
+    return FindTextIndexById(*page, edit_->objectId);
+}
+
+std::optional<std::size_t> QtDocumentController::EditingLatexIndex() const {
+    if (!EditingLatex()) {
+        return std::nullopt;
+    }
+    const Page* page = PageAt(edit_->pageIndex);
+    if (page == nullptr) {
+        return std::nullopt;
+    }
+    return FindLatexIndexById(*page, edit_->objectId);
 }
 
 void QtDocumentController::CommitTextEdit(PageText edited) {
-    if (!editingTextPage_.has_value() || !editingTextIndex_.has_value() || session_ == nullptr) {
+    if (!EditingText() || session_ == nullptr) {
         CancelTextEdit();
         return;
     }
 
-    const std::size_t pageIndex = *editingTextPage_;
-    const std::size_t textIndex = *editingTextIndex_;
-    const PageText before = editingTextBefore_;
-    const bool creates = editingTextCreates_;
-    editingTextPage_.reset();
-    editingTextIndex_.reset();
-    editingTextCreates_ = false;
+    const EditSession session = std::move(*edit_);
+    edit_.reset();
 
-    Page* page = PageAt(pageIndex);
-    if (page == nullptr || textIndex >= page->texts.size()) {
+    Page* page = PageAt(session.pageIndex);
+    const std::optional<std::size_t> located =
+        page != nullptr ? FindTextIndexById(*page, session.objectId) : std::nullopt;
+    if (page == nullptr || !located.has_value()) {
         emit EditStateChanged();
         return;
     }
+    const std::size_t textIndex = *located;
 
     // The overlay owns the model's identity and position; only content and spans
     // come from the edit.
@@ -655,140 +787,135 @@ void QtDocumentController::CommitTextEdit(PageText edited) {
     HistoryAction action {};
     bool changed = false;
     if (edited.content.empty()) {
-        session_->document.TouchPage(pageIndex);
+        session_->document.TouchPage(session.pageIndex);
         page->texts.erase(page->texts.begin() + static_cast<std::ptrdiff_t>(textIndex));
-        if (!creates) {
+        if (!session.creates) {
             action.type = HistoryActionType::RemoveText;
-            action.pageIndex = pageIndex;
+            action.pageIndex = session.pageIndex;
             action.index = textIndex;
-            action.text = before;
+            action.text = session.textBefore;
             changed = true;
         }
     } else {
         edited = text::NormalizeCommittedText(edited);
-        session_->document.TouchPage(pageIndex);
+        session_->document.TouchPage(session.pageIndex);
         page->texts[textIndex] = edited;
-        if (creates) {
+        if (session.creates) {
             action.type = HistoryActionType::AddText;
-            action.pageIndex = pageIndex;
+            action.pageIndex = session.pageIndex;
             action.index = textIndex;
             action.text = edited;
             changed = true;
-        } else if (!PageTextEqual(before, edited)) {
+        } else if (!PageTextEqual(session.textBefore, edited)) {
             action.type = HistoryActionType::UpdateText;
-            action.pageIndex = pageIndex;
+            action.pageIndex = session.pageIndex;
             action.index = textIndex;
-            action.text = before;
+            action.text = session.textBefore;
             action.replacementText = edited;
             changed = true;
         }
     }
 
     if (changed) {
-        session_->undoActions.push_back(std::move(action));
-        session_->redoActions.clear();
-        session_->dirty = true;
-        ++session_->revision;
-        NotifySessionChanged(true);
+        RecordCommit(std::move(action), session.pageIndex);
     }
     emit EditStateChanged();
 }
 
 void QtDocumentController::CancelTextEdit() {
-    if (!editingTextIndex_.has_value()) {
+    if (!EditingText()) {
         return;
     }
+    const EditSession session = std::move(*edit_);
+    edit_.reset();
     // A cancelled creation removes its placeholder again (the reference erases
     // an object created by the cancelled edit); nothing was recorded in history.
-    if (editingTextCreates_ && editingTextPage_.has_value() && editingTextIndex_.has_value()) {
-        if (Page* page = PageAt(*editingTextPage_); page != nullptr && *editingTextIndex_ < page->texts.size()) {
-            session_->document.TouchPage(*editingTextPage_);
-            page->texts.erase(page->texts.begin() + static_cast<std::ptrdiff_t>(*editingTextIndex_));
+    if (session.creates && session_ != nullptr) {
+        Page* page = PageAt(session.pageIndex);
+        const std::optional<std::size_t> located =
+            page != nullptr ? FindTextIndexById(*page, session.objectId) : std::nullopt;
+        if (located.has_value()) {
+            session_->document.TouchPage(session.pageIndex);
+            page->texts.erase(page->texts.begin() + static_cast<std::ptrdiff_t>(*located));
         }
     }
-    editingTextPage_.reset();
-    editingTextIndex_.reset();
-    editingTextCreates_ = false;
     emit EditStateChanged();
 }
 
 void QtDocumentController::CommitLatexEdit(const QString& source) {
-    if (!editingLatexPage_.has_value() || !editingLatexIndex_.has_value() || session_ == nullptr) {
+    if (!EditingLatex() || session_ == nullptr) {
         CancelLatexEdit();
         return;
     }
 
-    const std::size_t pageIndex = *editingLatexPage_;
-    const std::size_t latexIndex = *editingLatexIndex_;
-    const PageLatex before = editingLatexBefore_;
-    const bool creates = editingLatexCreates_;
-    editingLatexPage_.reset();
-    editingLatexIndex_.reset();
-    editingLatexCreates_ = false;
+    const EditSession session = std::move(*edit_);
+    edit_.reset();
 
-    Page* page = PageAt(pageIndex);
-    if (page == nullptr || latexIndex >= page->latexes.size()) {
+    Page* page = PageAt(session.pageIndex);
+    const std::optional<std::size_t> located =
+        page != nullptr ? FindLatexIndexById(*page, session.objectId) : std::nullopt;
+    if (page == nullptr || !located.has_value()) {
         emit EditStateChanged();
         return;
     }
+    const std::size_t latexIndex = *located;
 
     PageLatex edited = page->latexes[latexIndex];
+    edited.id = session.latexBefore.id;
     edited.content = source.toStdU16String();
 
     HistoryAction action {};
     bool changed = false;
     if (edited.content.empty()) {
-        session_->document.TouchPage(pageIndex);
+        session_->document.TouchPage(session.pageIndex);
         page->latexes.erase(page->latexes.begin() + static_cast<std::ptrdiff_t>(latexIndex));
-        if (!creates) {
+        if (!session.creates) {
             action.type = HistoryActionType::RemoveLatex;
-            action.pageIndex = pageIndex;
+            action.pageIndex = session.pageIndex;
             action.index = latexIndex;
-            action.latex = before;
+            action.latex = session.latexBefore;
             changed = true;
         }
     } else {
-        session_->document.TouchPage(pageIndex);
+        session_->document.TouchPage(session.pageIndex);
         page->latexes[latexIndex] = edited;
-        if (creates) {
+        if (session.creates) {
             action.type = HistoryActionType::AddLatex;
-            action.pageIndex = pageIndex;
+            action.pageIndex = session.pageIndex;
             action.index = latexIndex;
             action.latex = edited;
             changed = true;
-        } else if (!PageLatexEqual(before, edited)) {
+        } else if (!PageLatexEqual(session.latexBefore, edited)) {
             action.type = HistoryActionType::UpdateLatex;
-            action.pageIndex = pageIndex;
+            action.pageIndex = session.pageIndex;
             action.index = latexIndex;
-            action.latex = before;
+            action.latex = session.latexBefore;
             action.replacementLatex = edited;
             changed = true;
         }
     }
 
     if (changed) {
-        session_->undoActions.push_back(std::move(action));
-        session_->redoActions.clear();
-        session_->dirty = true;
-        ++session_->revision;
-        NotifySessionChanged(true);
+        RecordCommit(std::move(action), session.pageIndex);
     }
     emit EditStateChanged();
 }
 
 void QtDocumentController::CancelLatexEdit() {
-    if (!editingLatexIndex_.has_value()) {
+    if (!EditingLatex()) {
         return;
     }
-    if (editingLatexCreates_ && editingLatexPage_.has_value() && editingLatexIndex_.has_value()) {
-        if (Page* page = PageAt(*editingLatexPage_); page != nullptr && *editingLatexIndex_ < page->latexes.size()) {
-            session_->document.TouchPage(*editingLatexPage_);
-            page->latexes.erase(page->latexes.begin() + static_cast<std::ptrdiff_t>(*editingLatexIndex_));
+    const EditSession session = std::move(*edit_);
+    edit_.reset();
+    if (session.creates && session_ != nullptr) {
+        Page* page = PageAt(session.pageIndex);
+        const std::optional<std::size_t> located =
+            page != nullptr ? FindLatexIndexById(*page, session.objectId) : std::nullopt;
+        if (located.has_value()) {
+            session_->document.TouchPage(session.pageIndex);
+            page->latexes.erase(page->latexes.begin() + static_cast<std::ptrdiff_t>(*located));
         }
     }
-    editingLatexPage_.reset();
-    editingLatexIndex_.reset();
-    editingLatexCreates_ = false;
     emit EditStateChanged();
 }
 
@@ -848,10 +975,10 @@ void QtDocumentController::BeginPageGesture(std::size_t pageIndex) {
     if (page == nullptr) {
         return;
     }
-    gesturePage_ = pageIndex;
-    gestureBefore_ = *page;
-    gestureChanged_ = false;
-    moveBounds_.built = false;
+    PageGesture gesture;
+    gesture.pageIndex = pageIndex;
+    gesture.before = *page;
+    gesture_ = std::move(gesture);
 }
 
 const std::vector<PdfTextCharBox>* QtDocumentController::PdfTextCharBoxesFor(std::size_t pageIndex) const {
@@ -954,19 +1081,17 @@ QString QtDocumentController::SelectedPdfText() const {
 
 
 Page* QtDocumentController::GesturePage() {
-    return gesturePage_.has_value() ? PageAt(*gesturePage_) : nullptr;
+    return gesture_.has_value() ? PageAt(gesture_->pageIndex) : nullptr;
 }
 
 void QtDocumentController::CommitPageGesture() {
-    if (!gesturePage_.has_value()) {
+    if (!gesture_.has_value()) {
         return;
     }
-    const std::size_t pageIndex = *gesturePage_;
-    Page before = gestureBefore_;
-    gesturePage_.reset();
-    gestureBefore_ = Page {};
-    const bool changed = gestureChanged_;
-    gestureChanged_ = false;
+    const std::size_t pageIndex = gesture_->pageIndex;
+    Page before = std::move(gesture_->before);
+    const bool changed = gesture_->changed;
+    gesture_.reset();
 
     Page* page = PageAt(pageIndex);
     if (!changed || page == nullptr || session_ == nullptr || PageEqual(before, *page)) {
@@ -983,23 +1108,18 @@ void QtDocumentController::CommitPageGesture() {
     action.pageIndices = { pageIndex };
     action.pages = { std::move(before) };
     action.replacementPages = { *page };
-    session_->undoActions.push_back(std::move(action));
-    session_->redoActions.clear();
-    session_->dirty = true;
-    ++session_->revision;
-    NotifySessionChanged(true);
+    // Keep the viewed page: a gesture on a non-current page must not steal the
+    // focus the way a sidebar page operation does.
+    RecordCommit(std::move(action), currentPage_);
 }
 
 void QtDocumentController::CancelPageGesture() {
-    if (!gesturePage_.has_value()) {
-        gestureChanged_ = false;
+    if (!gesture_.has_value()) {
         return;
     }
-    const std::size_t pageIndex = *gesturePage_;
-    Page before = std::move(gestureBefore_);
-    gesturePage_.reset();
-    gestureBefore_ = Page {};
-    gestureChanged_ = false;
+    const std::size_t pageIndex = gesture_->pageIndex;
+    Page before = std::move(gesture_->before);
+    gesture_.reset();
     if (Page* page = PageAt(pageIndex); page != nullptr) {
         *page = std::move(before);
     }
@@ -1010,24 +1130,26 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
     if (page == nullptr || (delta.x == 0.0f && delta.y == 0.0f)) {
         return;
     }
+    PageGesture& gesture = *gesture_;
+    PageGesture::MoveBounds& moveBounds = gesture.moveBounds;
     const ui::PageSelection& selection = SelectionFor(pageIndex);
 
     // First move of the gesture measures every selected object's bounds once;
     // later samples reuse them and translate by the applied delta.  Without
     // this each pointer event re-scans every selected stroke's points and
     // re-runs text/LaTeX measurement just to clamp the delta.
-    if (!moveBounds_.built) {
-        moveBounds_.strokes.clear();
-        moveBounds_.images.clear();
-        moveBounds_.texts.clear();
-        moveBounds_.latexes.clear();
+    if (!moveBounds.built) {
+        moveBounds.strokes.clear();
+        moveBounds.images.clear();
+        moveBounds.texts.clear();
+        moveBounds.latexes.clear();
         for (const std::size_t index : selection.strokes) {
             ui::SelectionBounds bounds {};
             if (index < page->strokes.size()) {
                 bounds.valid = ui::StrokeBounds(
                     page->strokes[index], &bounds.left, &bounds.top, &bounds.right, &bounds.bottom);
             }
-            moveBounds_.strokes.push_back(bounds);
+            moveBounds.strokes.push_back(bounds);
         }
         for (const std::size_t index : selection.images) {
             ui::SelectionBounds bounds {};
@@ -1043,7 +1165,7 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
                     bounds.bottom = std::max(bounds.bottom, corner.y);
                 }
             }
-            moveBounds_.images.push_back(bounds);
+            moveBounds.images.push_back(bounds);
         }
         for (const std::size_t index : selection.texts) {
             ui::SelectionBounds bounds {};
@@ -1063,7 +1185,7 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
                     bounds.bottom = std::max(bounds.bottom, corner.y);
                 }
             }
-            moveBounds_.texts.push_back(bounds);
+            moveBounds.texts.push_back(bounds);
         }
         for (const std::size_t index : selection.latexes) {
             ui::SelectionBounds bounds {};
@@ -1083,9 +1205,9 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
                     bounds.bottom = std::max(bounds.bottom, corner.y);
                 }
             }
-            moveBounds_.latexes.push_back(bounds);
+            moveBounds.latexes.push_back(bounds);
         }
-        moveBounds_.built = true;
+        moveBounds.built = true;
     }
 
     // Clamps `delta` against the cached bounds and keeps them current by
@@ -1109,58 +1231,58 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
 
     for (std::size_t slot = 0; slot < selection.strokes.size(); ++slot) {
         const std::size_t index = selection.strokes[slot];
-        if (index >= page->strokes.size() || slot >= moveBounds_.strokes.size()) {
+        if (index >= page->strokes.size() || slot >= moveBounds.strokes.size()) {
             continue;
         }
-        const Vec2 clamped = clampedDelta(slot, moveBounds_.strokes, delta);
+        const Vec2 clamped = clampedDelta(slot, moveBounds.strokes, delta);
         if (clamped.x == 0.0f && clamped.y == 0.0f) {
             continue;
         }
         ui::TranslateStrokePoints(page->strokes[index], clamped);
-        advance(moveBounds_.strokes[slot], clamped);
-        gestureChanged_ = true;
+        advance(moveBounds.strokes[slot], clamped);
+        MarkGestureChanged();
     }
     for (std::size_t slot = 0; slot < selection.images.size(); ++slot) {
         const std::size_t index = selection.images[slot];
-        if (index >= page->images.size() || slot >= moveBounds_.images.size()) {
+        if (index >= page->images.size() || slot >= moveBounds.images.size()) {
             continue;
         }
-        const Vec2 clamped = clampedDelta(slot, moveBounds_.images, delta);
+        const Vec2 clamped = clampedDelta(slot, moveBounds.images, delta);
         if (clamped.x == 0.0f && clamped.y == 0.0f) {
             continue;
         }
         page->images[index].x += clamped.x;
         page->images[index].y += clamped.y;
-        advance(moveBounds_.images[slot], clamped);
-        gestureChanged_ = true;
+        advance(moveBounds.images[slot], clamped);
+        MarkGestureChanged();
     }
     for (std::size_t slot = 0; slot < selection.texts.size(); ++slot) {
         const std::size_t index = selection.texts[slot];
-        if (index >= page->texts.size() || slot >= moveBounds_.texts.size()) {
+        if (index >= page->texts.size() || slot >= moveBounds.texts.size()) {
             continue;
         }
-        const Vec2 clamped = clampedDelta(slot, moveBounds_.texts, delta);
+        const Vec2 clamped = clampedDelta(slot, moveBounds.texts, delta);
         if (clamped.x == 0.0f && clamped.y == 0.0f) {
             continue;
         }
         page->texts[index].x += clamped.x;
         page->texts[index].y += clamped.y;
-        advance(moveBounds_.texts[slot], clamped);
-        gestureChanged_ = true;
+        advance(moveBounds.texts[slot], clamped);
+        MarkGestureChanged();
     }
     for (std::size_t slot = 0; slot < selection.latexes.size(); ++slot) {
         const std::size_t index = selection.latexes[slot];
-        if (index >= page->latexes.size() || slot >= moveBounds_.latexes.size()) {
+        if (index >= page->latexes.size() || slot >= moveBounds.latexes.size()) {
             continue;
         }
-        const Vec2 clamped = clampedDelta(slot, moveBounds_.latexes, delta);
+        const Vec2 clamped = clampedDelta(slot, moveBounds.latexes, delta);
         if (clamped.x == 0.0f && clamped.y == 0.0f) {
             continue;
         }
         page->latexes[index].x += clamped.x;
         page->latexes[index].y += clamped.y;
-        advance(moveBounds_.latexes[slot], clamped);
-        gestureChanged_ = true;
+        advance(moveBounds.latexes[slot], clamped);
+        MarkGestureChanged();
     }
 }
 
@@ -1213,7 +1335,7 @@ bool QtDocumentController::CloneSelection(std::size_t pageIndex) {
     selection_[pageIndex] = std::move(clones);
     // The clone is a change even if the pointer never moves afterwards, so
     // CommitPageGesture must not compare-and-skip it.
-    gestureChanged_ = true;
+    MarkGestureChanged();
     return true;
 }
 
@@ -1230,23 +1352,23 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
     // run, which dominated the gesture on dense pages.
     const ui::PageSelection& selection = SelectionFor(pageIndex);
     for (const std::size_t index : selection.strokes) {
-        if (index < page->strokes.size() && index < gestureBefore_.strokes.size()) {
-            page->strokes[index] = gestureBefore_.strokes[index];
+        if (index < page->strokes.size() && index < gesture_->before.strokes.size()) {
+            page->strokes[index] = gesture_->before.strokes[index];
         }
     }
     for (const std::size_t index : selection.images) {
-        if (index < page->images.size() && index < gestureBefore_.images.size()) {
-            page->images[index] = gestureBefore_.images[index];
+        if (index < page->images.size() && index < gesture_->before.images.size()) {
+            page->images[index] = gesture_->before.images[index];
         }
     }
     for (const std::size_t index : selection.texts) {
-        if (index < page->texts.size() && index < gestureBefore_.texts.size()) {
-            page->texts[index] = gestureBefore_.texts[index];
+        if (index < page->texts.size() && index < gesture_->before.texts.size()) {
+            page->texts[index] = gesture_->before.texts[index];
         }
     }
     for (const std::size_t index : selection.latexes) {
-        if (index < page->latexes.size() && index < gestureBefore_.latexes.size()) {
-            page->latexes[index] = gestureBefore_.latexes[index];
+        if (index < page->latexes.size() && index < gesture_->before.latexes.size()) {
+            page->latexes[index] = gesture_->before.latexes[index];
         }
     }
 
@@ -1264,7 +1386,7 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         for (Vec2& point : page->strokes[index].points) {
             point = ui::MapSelectionTransformPoint(point, transform.from, transform.to, transform.rotateDegrees);
         }
-        gestureChanged_ = true;
+        MarkGestureChanged();
     }
     for (const std::size_t index : selection.images) {
         if (index >= page->images.size()) {
@@ -1281,7 +1403,7 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         image.x = mappedCenter.x - (image.width * 0.5f);
         image.y = mappedCenter.y - (image.height * 0.5f);
         image.rotationDegrees += transform.rotateDegrees;
-        gestureChanged_ = true;
+        MarkGestureChanged();
     }
     for (const std::size_t index : selection.texts) {
         if (index >= page->texts.size()) {
@@ -1324,7 +1446,7 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
                     text.height = std::max(1.0f, text.height * textScale);
                 }
             }
-            gestureChanged_ = true;
+            MarkGestureChanged();
             continue;
         }
 
@@ -1350,7 +1472,7 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         if (heightChanged) {
             text.height = std::max(1.0f, mappedBottomRight.y - mappedTopLeft.y);
         }
-        gestureChanged_ = true;
+        MarkGestureChanged();
     }
     for (const std::size_t index : selection.latexes) {
         if (index >= page->latexes.size()) {
@@ -1375,7 +1497,7 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
             object.y += mapped.y - bounds.top;
         }
         object.fontSize *= scaleY;
-        gestureChanged_ = true;
+        MarkGestureChanged();
     }
 }
 
@@ -1432,7 +1554,7 @@ void QtDocumentController::CommitErase(std::size_t pageIndex, const std::vector<
     drop(remaining.texts, texts);
     SelectObjects(pageIndex, std::move(remaining));
 
-    gestureChanged_ = true;
+    MarkGestureChanged();
     CommitPageGesture();
 }
 bool QtDocumentController::RecolorSelection(std::uint32_t color) {
@@ -1453,7 +1575,7 @@ bool QtDocumentController::RecolorSelection(std::uint32_t color) {
         for (const std::size_t index : selection.strokes) {
             if (index < page->strokes.size() && page->strokes[index].style.color != color) {
                 page->strokes[index].style.color = color;
-                gestureChanged_ = true;
+                MarkGestureChanged();
             }
         }
         for (const std::size_t index : selection.texts) {
@@ -1463,22 +1585,22 @@ bool QtDocumentController::RecolorSelection(std::uint32_t color) {
             PageText& text = page->texts[index];
             if (text.color != color) {
                 text.color = color;
-                gestureChanged_ = true;
+                MarkGestureChanged();
             }
             for (PageTextStyleSpan& span : text.styleSpans) {
                 if (span.style.color != color) {
                     span.style.color = color;
-                    gestureChanged_ = true;
+                    MarkGestureChanged();
                 }
             }
         }
         for (const std::size_t index : selection.latexes) {
             if (index < page->latexes.size() && page->latexes[index].color != color) {
                 page->latexes[index].color = color;
-                gestureChanged_ = true;
+                MarkGestureChanged();
             }
         }
-        recolored = recolored || gestureChanged_;
+        recolored = recolored || (gesture_.has_value() && gesture_->changed);
         CommitPageGesture();
     }
     return recolored;
@@ -1488,7 +1610,7 @@ bool QtDocumentController::RecolorSelection(std::uint32_t color) {
 
 void QtDocumentController::SetPendingStrokeDotted(bool dotted) {
     if (pendingStroke_.has_value()) {
-        pendingStroke_->style.dotted = dotted;
+        pendingStroke_->stroke.style.dotted = dotted;
     }
 }
 
@@ -1496,8 +1618,8 @@ void QtDocumentController::ReplacePendingStrokePoints(const std::vector<Vec2>& p
     if (!pendingStroke_.has_value()) {
         return;
     }
-    pendingStroke_->points = points;
-    pendingStroke_->style.dotted = dotted;
+    pendingStroke_->stroke.points = points;
+    pendingStroke_->stroke.style.dotted = dotted;
 }
 
 // --- page operations --------------------------------------------------------
@@ -1535,7 +1657,6 @@ std::size_t QtDocumentController::InsertPages(std::size_t index, std::size_t cou
     for (std::size_t offset = 0; offset < pages.size(); ++offset) {
         document.InsertPage(insertIndex + offset, pages[offset]);
     }
-    document.SetCurrentPageIndex(insertIndex);
 
     // Selection indices are per-page positions: every selection at or after
     // the insertion point shifts by the inserted count.
@@ -1550,12 +1671,7 @@ std::size_t QtDocumentController::InsertPages(std::size_t index, std::size_t cou
     action.type = HistoryActionType::AddPages;
     action.pages = std::move(pages);
     action.index = insertIndex;
-    session_->undoActions.push_back(std::move(action));
-    session_->redoActions.clear();
-    session_->dirty = true;
-    ++session_->revision;
-    currentPage_ = insertIndex;
-    NotifySessionChanged(true);
+    RecordCommit(std::move(action), insertIndex);
     return insertIndex;
 }
 
@@ -1601,13 +1717,9 @@ bool QtDocumentController::RemovePage(std::size_t index) {
     action.type = HistoryActionType::RemovePages;
     action.pages = { removed };
     action.index = index;
-    session_->undoActions.push_back(std::move(action));
-    session_->redoActions.clear();
-    session_->dirty = true;
-    ++session_->revision;
-    currentPage_ = document.CurrentPageIndex();
+    const std::size_t focusIndex = document.CurrentPageIndex();
     emit SelectionChanged();
-    NotifySessionChanged(true);
+    RecordCommit(std::move(action), focusIndex);
     return true;
 }
 
@@ -1620,7 +1732,6 @@ bool QtDocumentController::PastePage(std::size_t index) {
 
     const Page pasted = *manager_.ClipboardPage();
     document.InsertPage(insertIndex, pasted);
-    document.SetCurrentPageIndex(insertIndex);
 
     // Same per-page index shift as InsertPages.
     if (!selection_.empty()) {
@@ -1635,12 +1746,7 @@ bool QtDocumentController::PastePage(std::size_t index) {
     action.type = HistoryActionType::AddPages;
     action.pages = { pasted };
     action.index = insertIndex;
-    session_->undoActions.push_back(std::move(action));
-    session_->redoActions.clear();
-    session_->dirty = true;
-    ++session_->revision;
-    currentPage_ = insertIndex;
-    NotifySessionChanged(true);
+    RecordCommit(std::move(action), insertIndex);
     return true;
 }
 
@@ -1692,11 +1798,7 @@ bool QtDocumentController::RotatePage(std::size_t pageIndex, int quarterTurns) {
     action.pageIndices = { pageIndex };
     action.pages = { std::move(before) };
     action.replacementPages = { page };
-    session_->undoActions.push_back(std::move(action));
-    session_->redoActions.clear();
-    session_->dirty = true;
-    ++session_->revision;
-    NotifySessionChanged(true);
+    RecordCommit(std::move(action), currentPage_);
     return true;
 }
 
@@ -1763,11 +1865,7 @@ void QtDocumentController::ApplyNewPageDraft(const ui::NewPageDraft& draft, ui::
     action.pageIndices = indices;
     action.pages = std::move(before);
     action.replacementPages = std::move(after);
-    session_->undoActions.push_back(std::move(action));
-    session_->redoActions.clear();
-    session_->dirty = true;
-    ++session_->revision;
-    NotifySessionChanged(true);
+    RecordCommit(std::move(action), currentPage_);
 }
 
 void QtDocumentController::SetNewPageDefaults(const ui::NewPageDefaults& defaults) {
@@ -1790,11 +1888,7 @@ void QtDocumentController::SetNewPageDefaults(const ui::NewPageDefaults& default
         return;
     }
     document.SetNewPageDefaults(pageDefaults);
-    if (session_ != nullptr) {
-        session_->dirty = true;
-        ++session_->revision;
-        NotifySessionChanged(true);
-    }
+    NoteCommitted(currentPage_);
 }
 
 ui::NewPageDefaults QtDocumentController::NewPageDefaults() const {
@@ -1942,13 +2036,9 @@ bool QtDocumentController::RemoveSelection() {
     action.pageIndices = indices;
     action.pages = std::move(before);
     action.replacementPages = std::move(after);
-    session_->undoActions.push_back(std::move(action));
-    session_->redoActions.clear();
-    session_->dirty = true;
-    ++session_->revision;
     selection_.clear();
     emit SelectionChanged();
-    NotifySessionChanged(true);
+    RecordCommit(std::move(action), currentPage_);
     return true;
 }
 
@@ -2015,16 +2105,11 @@ bool QtDocumentController::PastePayload(
     action.pageIndices = { pageIndex };
     action.pages = { before };
     action.replacementPages = { page };
-    session_->undoActions.push_back(std::move(action));
-    session_->redoActions.clear();
-    session_->dirty = true;
-    ++session_->revision;
 
     selection_.clear();
     selection_[pageIndex] = std::move(pasted);
-    currentPage_ = pageIndex;
     emit SelectionChanged();
-    NotifySessionChanged(true);
+    RecordCommit(std::move(action), pageIndex);
     return true;
 }
 

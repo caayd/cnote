@@ -17,7 +17,13 @@
 //     .cnote/.pdf, deduplicated (per platform), ordered newest-first and capped;
 //   * closing the last dirty view auto-saves a saved project, keeps the window
 //     open and dirty when that save fails, and a cancelled unsaved-changes
-//     prompt keeps the window alive.
+//     prompt keeps the window alive;
+//   * an edit session commits the captured overlay content (and cancels, never
+//     erases, without a content source), undo during an edit keeps the object,
+//     and a remote commit cancels a stale edit/gesture;
+//   * SaveTo refuses to overwrite a PDF container (and the save policy routes
+//     PDF-backed documents through Save As), and the viewed page a controller
+//     sets is what ProjectFile serializes.
 //
 // What cannot be produced here: a genuine disk-full or interrupted-write
 // failure.  Those are covered by the code-path guarantee (the destination is
@@ -819,6 +825,158 @@ void CancelledUnsavedPromptKeepsWindowAlive() {
     }
 }
 
+// --- edit session, save policy and viewed-page persistence --------------------
+
+// Stub overlay content: the controller captures through EditContentSource when
+// a manager-driven finish ends an edit.
+class StubEditContentSource final : public cnote::ui::EditContentSource {
+public:
+    cnote::PageText text {};
+    QString latex {};
+
+    [[nodiscard]] cnote::PageText CaptureEditedText() const override { return text; }
+    [[nodiscard]] QString CaptureEditedLatexSource() const override { return latex; }
+};
+
+cnote::PageText MakeText(std::uint64_t id, std::u16string_view content) {
+    cnote::PageText text {};
+    text.id = id;
+    text.x = 10.0f;
+    text.y = 20.0f;
+    text.width = 120.0f;
+    text.height = 30.0f;
+    text.content = std::u16string(content);
+    return text;
+}
+
+void EditSessionCommitsAndUndoKeepsTheObject() {
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    const std::shared_ptr<cnote::ProjectSession> session = controller.Session();
+    session->document.CurrentPage().texts.push_back(MakeText(7, u"original"));
+
+    StubEditContentSource source;
+    controller.SetEditContentSource(&source);
+
+    // Manager-driven finish: the open editor's content must be committed, not
+    // the old empty fallback (which erased the object).
+    Check(controller.BeginTextEdit(0, 0), "begin editing the existing text");
+    Check(controller.IsInteractionActive(), "an open edit is an active interaction");
+    source.text = *controller.EditingTextObject();
+    source.text.content = u"typed";
+    controller.FinishInteraction();
+    Check(!controller.EditingText(), "finishing closes the edit session");
+    Check(!controller.IsInteractionActive(), "finishing leaves no transient state");
+    Check(session->document.CurrentPage().texts.size() == 1U
+            && session->document.CurrentPage().texts.front().content == u"typed",
+        "a controller-initiated finish preserves the typed content");
+    Check(session->undoActions.size() == 1U
+            && session->undoActions.back().type == cnote::HistoryActionType::UpdateText,
+        "the finished edit is one UpdateText history step");
+
+    // Undo during an edit must keep the object: the old path committed an empty
+    // PageText before undoing, which erased it without a history step.
+    Check(controller.BeginTextEdit(0, 0), "reopen the text for undo");
+    source.text = *controller.EditingTextObject();
+    Check(controller.Undo(), "undo during an edit applies the history step");
+    Check(session->document.CurrentPage().texts.size() == 1U,
+        "undo during an edit does not delete the object");
+    Check(session->document.CurrentPage().texts.front().content == u"original",
+        "undo during an edit reverts the committed text");
+
+    // Without a content source the edit is cancelled, never committed empty.
+    controller.SetEditContentSource(nullptr);
+    Check(controller.BeginTextEdit(0, 0), "reopen the text without a content source");
+    controller.FinishInteraction();
+    Check(!controller.EditingText() && session->document.CurrentPage().texts.size() == 1U
+            && session->document.CurrentPage().texts.front().content == u"original",
+        "finishing without a content source cancels instead of erasing");
+}
+
+void RemoteCommitCancelsTransientState() {
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController first(manager);
+    cnote::qt::QtDocumentController second(manager);
+    auto session = std::make_shared<cnote::ProjectSession>();
+    first.AttachSession(session);
+    second.AttachSession(session);
+    session->document.CurrentPage().texts.push_back(MakeText(9, u"keep"));
+
+    StubEditContentSource source;
+    source.text = MakeText(9, u"stale");
+    first.SetEditContentSource(&source);
+    Check(first.BeginTextEdit(0, 0), "the first view starts editing");
+    first.BeginPageGesture(0);
+
+    // A commit from the other view must drop the first view's transient state
+    // without writing its (now stale) edit back by index.
+    Check(second.InsertPages(0, 1, cnote::ui::NewPageDraft { 200.0f, 300.0f, 0xFFFFFFFFU, {} }) == 0U,
+        "the second view commits a page insert");
+    Check(!first.EditingText(), "a remote commit cancels the stale edit");
+    Check(!first.GesturePageIndex().has_value(), "a remote commit cancels the stale gesture");
+    Check(first.DocumentRef().PageCount() == 2U, "the remote commit's page insert is kept");
+    Check(first.DocumentRef().PageAt(1).texts.size() == 1U
+            && first.DocumentRef().PageAt(1).texts.front().content == u"keep",
+        "the stale edit was never committed by index");
+}
+
+void SaveToRefusesPdfContainer() {
+    const std::filesystem::path dir = MakeTempDir("pdf-save");
+    const std::filesystem::path pdfPath = dir / "background.pdf";
+    {
+        QPdfWriter writer(QString::fromStdString(pdfPath.string()));
+        writer.setResolution(72);
+        writer.setPageSize(QPageSize(QSizeF(300, 500), QPageSize::Point));
+        QPainter painter(&writer);
+        painter.fillRect(QRect(0, 0, 300, 500), Qt::white);
+    }
+
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    std::string error;
+    Check(controller.OpenFile(pdfPath, &error), "open a PDF container: " + error);
+    Check(controller.DocumentRef().Kind() == cnote::DocumentKind::PdfContainer,
+        "an opened PDF is a PDF container");
+    const std::string before = ReadFile(pdfPath);
+    error.clear();
+    Check(!controller.SaveTo(pdfPath, &error), "saving a PDF container over the PDF is refused");
+    Check(!error.empty(), "the refused PDF save reports an error");
+    Check(ReadFile(pdfPath) == before, "the PDF is byte-identical after the refused save");
+    Check(controller.DocumentRef().FilePath() == pdfPath, "the refused save keeps the PDF path");
+    Check(controller.DocumentRef().Kind() == cnote::DocumentKind::PdfContainer,
+        "the refused save keeps the PDF kind");
+
+    const std::filesystem::path projectPath = dir / "annotations.cnote";
+    error.clear();
+    Check(controller.SaveTo(projectPath, &error), "saving the PDF document as a project works");
+    Check(controller.DocumentRef().Kind() == cnote::DocumentKind::Project,
+        "the project save turns the document into a project");
+    Check(cnote::ProjectFile::Load(projectPath).has_value(), "the saved project reloads");
+    error.clear();
+    Check(controller.SaveTo(projectPath, &error), "a later in-place project save succeeds");
+}
+
+void SetCurrentPageIndexIsSerialized() {
+    const std::filesystem::path dir = MakeTempDir("viewed-page");
+    const std::filesystem::path target = dir / "pages.cnote";
+
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    controller.InsertPages(1, 2, cnote::ui::NewPageDraft { 200.0f, 300.0f, 0xFFFFFFFFU, {} });
+    Check(controller.DocumentRef().PageCount() == 3U, "two pages were appended");
+    controller.SetCurrentPageIndex(2);
+    Check(controller.CurrentPageIndex() == 2U && controller.DocumentRef().CurrentPageIndex() == 2U,
+        "the viewed page reaches the document");
+
+    std::string error;
+    Check(controller.SaveTo(target, &error), "save the viewed page: " + error);
+    const std::optional<cnote::Document> reloaded = cnote::ProjectFile::Load(target);
+    Check(reloaded.has_value() && reloaded->CurrentPageIndex() == 2U,
+        "the viewed page is what the project serializes");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -854,6 +1012,11 @@ int main(int argc, char** argv) {
     FailedCloseSaveKeepsWindowAlive();
     SuccessfulCloseSavesAndCloses();
     CancelledUnsavedPromptKeepsWindowAlive();
+
+    EditSessionCommitsAndUndoKeepsTheObject();
+    RemoteCommitCancelsTransientState();
+    SaveToRefusesPdfContainer();
+    SetCurrentPageIndexIsSerialized();
 
     if (gFailures != 0) {
         std::printf("%d check(s) failed\n", gFailures);
