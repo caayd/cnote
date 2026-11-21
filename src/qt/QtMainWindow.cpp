@@ -742,8 +742,6 @@ void QtMainWindow::ApplySettingsToShell() {
         newPageDialog_->syncDraftFromDefaults();
     }
     ui::CanvasInputSettings input {};
-    input.inputSpacing = settings_.inputSpacing;
-    input.inputSmoothing = settings_.inputSmoothing;
     input.strokeSmoothing = settings_.strokeSmoothing;
     input.dashLength = settings_.dashLength;
     input.dashGap = settings_.dashGap;

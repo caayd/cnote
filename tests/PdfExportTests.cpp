@@ -100,13 +100,14 @@ cnote::Document BuildSyntheticDocument() {
     page.raster.height = 200;
     page.raster.stride = 200 * 4;
     page.raster.scale = 1.0f;
-    page.raster.pixels.assign(static_cast<std::size_t>(page.raster.stride) * 200U, 0);
-    for (std::size_t index = 0; index < page.raster.pixels.size(); index += 4U) {
-        page.raster.pixels[index + 0U] = 0xCCU;  // B
-        page.raster.pixels[index + 1U] = 0x66U;  // G
-        page.raster.pixels[index + 2U] = 0x33U;  // R
-        page.raster.pixels[index + 3U] = 0xFFU;  // A
+    std::vector<std::uint8_t> background(static_cast<std::size_t>(page.raster.stride) * 200U, 0);
+    for (std::size_t index = 0; index < background.size(); index += 4U) {
+        background[index + 0U] = 0xCCU;  // B
+        background[index + 1U] = 0x66U;  // G
+        background[index + 2U] = 0x33U;  // R
+        background[index + 3U] = 0xFFU;  // A
     }
+    page.raster.pixels = cnote::PixelBuffer(std::move(background));
 
     cnote::PageText text {};
     text.id = 1;
@@ -209,7 +210,7 @@ int main(int argc, char** argv) {
     if (overlay.has_value()) {
         std::size_t transparent = 0;
         for (std::size_t index = 3; index < overlay->pixels.size(); index += 4U) {
-            if (overlay->pixels[index] == 0) {
+            if (overlay->pixels.data()[index] == 0) {
                 ++transparent;
             }
         }

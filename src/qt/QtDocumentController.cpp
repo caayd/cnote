@@ -21,13 +21,6 @@ namespace cnote::qt {
 
 namespace {
 
-// Reference App helpers (src/App.cpp:1958-2055): pointer samples are filtered
-// towards the raw pointer, deduplicated by a screen-relative spacing and long
-// segments are resampled so rendering keeps the same curve.
-constexpr float kMinScreenSpacing = 1.75f;
-constexpr float kMaxScreenSpacing = 3.0f;
-constexpr int kMaxInterpolatedPoints = 64;
-
 // Upper bound on extracted PDF char-box pages kept per view; extraction is
 // per-pointer-event work in the reference, cached here instead.
 constexpr std::size_t kPdfTextCacheCapacity = 64;
@@ -51,52 +44,6 @@ constexpr std::size_t kPdfBackgroundCapacity = 8;
 
 // Reference App::ExportPdf fallback scale for pages without a raster.
 constexpr float kPdfExportRenderScale = 4.0f;
-
-float DistanceSquared(Vec2 a, Vec2 b) {
-    const float dx = a.x - b.x;
-    const float dy = a.y - b.y;
-    return (dx * dx) + (dy * dy);
-}
-
-float Distance(Vec2 a, Vec2 b) {
-    return std::sqrt(DistanceSquared(a, b));
-}
-
-Vec2 Lerp(Vec2 from, Vec2 to, float amount) {
-    return Vec2 {
-        from.x + ((to.x - from.x) * amount),
-        from.y + ((to.y - from.y) * amount),
-    };
-}
-
-float InputSpacingPageUnits(float pageSpacing, float pageScale) {
-    const float scale = std::max(0.1f, pageScale);
-    const float screenSpacing = std::clamp(
-        std::max(0.05f, pageSpacing) * scale, kMinScreenSpacing, kMaxScreenSpacing);
-    return screenSpacing / scale;
-}
-
-void AppendStrokePointWithResampling(Stroke& stroke, Vec2 point, float spacing) {
-    if (stroke.points.empty()) {
-        stroke.points.push_back(point);
-        return;
-    }
-
-    const float minSpacing = std::max(0.05f, spacing);
-    const Vec2 from = stroke.points.back();
-    const float distance = Distance(from, point);
-    if (distance < minSpacing) {
-        return;
-    }
-
-    const int segmentCount = std::min(
-        kMaxInterpolatedPoints + 1,
-        std::max(1, static_cast<int>(std::ceil(distance / minSpacing))));
-    for (int segment = 1; segment <= segmentCount; ++segment) {
-        const float t = static_cast<float>(segment) / static_cast<float>(segmentCount);
-        stroke.points.push_back(Lerp(from, point, t));
-    }
-}
 
 // Same object-location rule as cnote::ApplyHistoryAction: an edit addresses its
 // object by id, so a page insert, a rotation or a remote commit that moved the
@@ -501,8 +448,7 @@ std::uint64_t QtDocumentController::NextObjectId() const {
 
 // --- strokes ----------------------------------------------------------------
 
-void QtDocumentController::BeginStroke(std::size_t pageIndex, Vec2 point, float pageScale) {
-    (void)pageScale;
+void QtDocumentController::BeginStroke(std::size_t pageIndex, Vec2 point) {
     FinishInteraction();
     pendingStroke_.reset();
     if (PageAt(pageIndex) == nullptr) {
@@ -518,22 +464,11 @@ void QtDocumentController::BeginStroke(std::size_t pageIndex, Vec2 point, float 
     SetCurrentPageIndex(pageIndex);
 }
 
-void QtDocumentController::ExtendStroke(Vec2 point, float pageScale) {
+void QtDocumentController::ExtendStroke(Vec2 point) {
     if (!pendingStroke_.has_value()) {
         return;
     }
-
-    Stroke& stroke = pendingStroke_->stroke;
-    const float spacing = InputSpacingPageUnits(input_.inputSpacing, pageScale);
-    Vec2 filtered = point;
-    if (!stroke.points.empty()) {
-        const float followAmount = std::clamp(1.0f - input_.inputSmoothing, 0.05f, 0.95f);
-        filtered = Lerp(stroke.points.back(), point, followAmount);
-        if (Distance(filtered, stroke.points.back()) < spacing) {
-            return;
-        }
-    }
-    AppendStrokePointWithResampling(stroke, filtered, spacing);
+    pendingStroke_->stroke.points.push_back(point);
 }
 
 void QtDocumentController::EndStroke() {

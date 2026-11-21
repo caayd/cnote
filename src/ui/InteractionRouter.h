@@ -190,8 +190,9 @@ inline constexpr float kPendingEraseOpacity = 0.5f;     // App.cpp:172
 inline constexpr int kWheelScrollLines = 3;             // MessageLoop.cpp:54 fallback
 inline constexpr int kWheelScrollUnitPixels = 18;       // MessageLoop.cpp:57
 
-// Stroke sampling tuning, read from the application settings in the legacy app
-// (CanvasController.h CanvasInputSettings defaults).
+// Stroke sampling tuning (settings input_spacing / input_smoothing).  The
+// router is the only place pointer samples are stabilized and resampled; the
+// controller stores the points it emits verbatim.
 struct InteractionTuning {
     float inputSpacing = 0.85f;
     float inputSmoothing = 0.3f;

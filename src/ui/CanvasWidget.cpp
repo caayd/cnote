@@ -2626,9 +2626,8 @@ void CanvasWidget::SetPointerCapture(bool captured) {
 }
 
 void CanvasWidget::BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted) {
-    const CanvasPageView view = CalculatePageView(pageIndex);
     ResetStrokeLayer();
-    controller_.BeginStroke(pageIndex, pagePoint, view.scale);
+    controller_.BeginStroke(pageIndex, pagePoint);
     controller_.SetPendingStrokeDotted(dotted);
     // The press only inks the initial dot: repaint its bounds inflated by the
     // pen half-width and the smoothing lookahead margin.
@@ -2660,7 +2659,6 @@ void CanvasWidget::SetStrokeDotted(bool dotted) {
 
 void CanvasWidget::AppendStrokePoint(Vec2 pagePoint, bool dotted) {
     const std::size_t pageIndex = controller_.PendingStrokePage();
-    const CanvasPageView view = CalculatePageView(pageIndex);
     // Dirty region = the appended segment's bounds, extended back over the
     // smoothing lookahead: the provisional tail (PaintStrokeTail) repaints
     // from the composited chain's end — up to two raw points behind the
@@ -2688,7 +2686,7 @@ void CanvasWidget::AppendStrokePoint(Vec2 pagePoint, bool dotted) {
             }
         }
     }
-    controller_.ExtendStroke(pagePoint, view.scale);
+    controller_.ExtendStroke(pagePoint);
     controller_.SetPendingStrokeDotted(dotted);
     float penWidth = 3.0f;
     if (const Stroke* pending = controller_.PendingStroke();

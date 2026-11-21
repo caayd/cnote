@@ -41,6 +41,28 @@ struct Stroke {
     std::vector<Vec2> points;
 };
 
+// Immutable straight-alpha BGRA bytes, shared by every copy of the object that
+// owns them.  Pages are copied whole for undo snapshots, gesture "before"
+// pages and the clipboard; sharing keeps those copies O(objects) instead of
+// O(pixels).  Writers fill a vector and hand it over.
+class PixelBuffer {
+public:
+    PixelBuffer() = default;
+    explicit PixelBuffer(std::vector<std::uint8_t> bytes);
+
+    [[nodiscard]] bool empty() const noexcept { return bytes_ == nullptr; }
+    [[nodiscard]] std::size_t size() const noexcept { return bytes_ != nullptr ? bytes_->size() : 0U; }
+    [[nodiscard]] const std::uint8_t* data() const noexcept { return bytes_ != nullptr ? bytes_->data() : nullptr; }
+    [[nodiscard]] const std::vector<std::uint8_t>& bytes() const noexcept;
+
+    // Equal when both share one buffer or hold the same bytes.
+    friend bool operator==(const PixelBuffer& a, const PixelBuffer& b) noexcept;
+
+private:
+    // Null for an empty buffer, so `empty()` is a pointer test.
+    std::shared_ptr<const std::vector<std::uint8_t>> bytes_;
+};
+
 struct PageImage {
     float x = 0.0f;
     float y = 0.0f;
@@ -50,7 +72,7 @@ struct PageImage {
     int pixelWidth = 0;
     int pixelHeight = 0;
     int stride = 0;
-    std::vector<std::uint8_t> pixels;
+    PixelBuffer pixels;
 };
 
 struct PageTextStyle {
@@ -108,7 +130,7 @@ struct RasterImage {
     int height = 0;
     int stride = 0;
     float scale = 0.0f;
-    std::vector<std::uint8_t> pixels;
+    PixelBuffer pixels;
 };
 
 struct Page;

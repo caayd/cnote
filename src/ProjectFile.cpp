@@ -295,7 +295,7 @@ void AppendImage(std::vector<std::uint8_t>& output, const PageImage& image) {
     AppendValue(output, static_cast<std::int32_t>(image.pixelWidth));
     AppendValue(output, static_cast<std::int32_t>(image.pixelHeight));
     AppendValue(output, static_cast<std::int32_t>(image.stride));
-    AppendBlob(output, image.pixels);
+    AppendBlob(output, image.pixels.bytes());
 }
 
 bool ReadImage(ByteReader& reader, PageImage& image) {
@@ -305,7 +305,12 @@ bool ReadImage(ByteReader& reader, PageImage& image) {
         return false;
     }
 
-    return reader.ReadBlob(image.pixels);
+    std::vector<std::uint8_t> pixels;
+    if (!reader.ReadBlob(pixels)) {
+        return false;
+    }
+    image.pixels = PixelBuffer(std::move(pixels));
+    return true;
 }
 
 void AppendText(std::vector<std::uint8_t>& output, const PageText& text) {
@@ -460,13 +465,18 @@ void AppendRaster(std::vector<std::uint8_t>& output, const RasterImage& raster) 
     AppendValue(output, static_cast<std::int32_t>(raster.height));
     AppendValue(output, static_cast<std::int32_t>(raster.stride));
     AppendValue(output, raster.scale);
-    AppendBlob(output, raster.pixels);
+    AppendBlob(output, raster.pixels.bytes());
 }
 
 bool ReadRaster(ByteReader& reader, RasterImage& raster) {
     if (!reader.Read(raster.width) || !reader.Read(raster.height)
         || !reader.Read(raster.stride) || !reader.Read(raster.scale)) return false;
-    return reader.ReadBlob(raster.pixels);
+    std::vector<std::uint8_t> pixels;
+    if (!reader.ReadBlob(pixels)) {
+        return false;
+    }
+    raster.pixels = PixelBuffer(std::move(pixels));
+    return true;
 }
 
 std::optional<Document> LoadProjectPayload(

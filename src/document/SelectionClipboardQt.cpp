@@ -200,12 +200,12 @@ PageImage PageImageFromQImage(const QImage& source) {
     image.pixelWidth = converted.width();
     image.pixelHeight = converted.height();
     image.stride = converted.width() * 4;
-    image.pixels.resize(
+    std::vector<std::uint8_t> pixels(
         static_cast<std::size_t>(image.stride) * static_cast<std::size_t>(image.pixelHeight));
     for (int y = 0; y < image.pixelHeight; ++y) {
         const auto* sourceRow = reinterpret_cast<const QRgb*>(converted.constScanLine(y));
         std::uint8_t* destinationRow =
-            image.pixels.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(image.stride);
+            pixels.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(image.stride);
         for (int x = 0; x < image.pixelWidth; ++x) {
             std::uint8_t* pixel = destinationRow + static_cast<std::size_t>(x) * 4U;
             pixel[0] = static_cast<std::uint8_t>(qBlue(sourceRow[x]));
@@ -214,6 +214,7 @@ PageImage PageImageFromQImage(const QImage& source) {
             pixel[3] = static_cast<std::uint8_t>(qAlpha(sourceRow[x]));
         }
     }
+    image.pixels = PixelBuffer(std::move(pixels));
     return image;
 }
 
