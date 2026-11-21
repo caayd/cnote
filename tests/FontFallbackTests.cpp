@@ -11,7 +11,9 @@
 // box.  The measured metrics are printed so the Windows/Linux difference can be
 // reviewed against the plan's allowance.
 
+#include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -23,6 +25,7 @@
 #include <QStringList>
 
 #include "Document.h"
+#include "latex/LatexEngine.h"
 #include "text/TextEditingQt.h"
 #include "text/TextLayoutQt.h"
 
@@ -192,6 +195,39 @@ void CheckWrappingAndDeterminism() {
         "identical input and width produce an identical layout");
 }
 
+// Text layouts embed inline-formula geometry, so the process-global cache must
+// not serve a layout built in another engine lifetime.  This test needs no
+// resource root: a failed Initialize and Shutdown both advance the generation.
+void CheckLayoutCacheTracksEngineGeneration() {
+    cnote::PageText text = BuildStyledText();
+    text.width = 260.0f;
+    constexpr float pageWidth = 260.0f;
+
+    const std::uint64_t missesBefore = cnote::text::TextLayoutCacheMisses();
+    const cnote::text::QtTextLayout first = cnote::text::LayoutPageTextQt(text, pageWidth);
+    Check(cnote::text::TextLayoutCacheMisses() == missesBefore + 1U, "a fresh paragraph layout is a cache miss");
+    const cnote::text::QtTextLayout cached = cnote::text::LayoutPageTextQt(text, pageWidth);
+    Check(cnote::text::TextLayoutCacheMisses() == missesBefore + 1U
+            && cached.lines.size() == first.lines.size(),
+        "an unchanged layout is served from the cache");
+
+    const std::uint64_t generation = cnote::latex::EngineGeneration();
+    Check(!cnote::latex::Initialize(std::filesystem::path("cnote-missing-latex-res-root")),
+        "a missing resource root fails initialization");
+    Check(cnote::latex::EngineGeneration() > generation, "a failed initialization advances the engine generation");
+    Check(cnote::text::LayoutPageTextQt(text, pageWidth).lines.size() == first.lines.size()
+            && cnote::text::TextLayoutCacheMisses() == missesBefore + 2U,
+        "a failed initialization invalidates layouts built before it");
+
+    const std::uint64_t generationBeforeShutdown = cnote::latex::EngineGeneration();
+    cnote::latex::Shutdown();
+    Check(!cnote::latex::IsInitialized(), "Shutdown leaves the engine uninitialized");
+    Check(cnote::latex::EngineGeneration() > generationBeforeShutdown, "Shutdown advances the engine generation");
+    Check(cnote::text::LayoutPageTextQt(text, pageWidth).lines.size() == first.lines.size()
+            && cnote::text::TextLayoutCacheMisses() == missesBefore + 3U,
+        "Shutdown invalidates layouts built before it");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -200,6 +236,7 @@ int main(int argc, char** argv) {
     CheckFamilyResolution();
     CheckLayoutKeepsEverything();
     CheckWrappingAndDeterminism();
+    CheckLayoutCacheTracksEngineGeneration();
 
     if (gFailures != 0) {
         std::printf("%d check(s) failed\n", gFailures);

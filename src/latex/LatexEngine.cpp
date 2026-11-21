@@ -1,11 +1,12 @@
 #include "latex/LatexEngine.h"
 
 #include <algorithm>
-#include <bit>
 #include <cwctype>
 #include <deque>
+#include <exception>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 #include <QString>
 
@@ -26,14 +27,26 @@ struct Formula {
 namespace {
 
 constexpr std::size_t kMaxCachedFormulae = 128;
+constexpr const char* kResourceMarker = ".clatexmath-res_root";
+
+// Explicit lifecycle: Ready is the only state in which Parse may run. A
+// failed Initialize is sticky until the next Initialize (which may succeed),
+// so callers can never mistake "not ready yet" for "parsed to nothing".
+enum class EngineState { Uninitialized, Ready, Failed };
 
 struct CacheEntry {
-    std::uint64_t key = 0;
+    std::wstring source;
+    float fontSize = 0.0f;
+    bool display = false;
+    std::uint64_t generation = 0;
     FormulaHandle formula;
 };
 
 std::deque<CacheEntry> g_cache;
-bool g_initialized = false;
+EngineState g_state = EngineState::Uninitialized;
+// Advanced on every Initialize attempt and every Shutdown. Caches include it
+// so output produced by another engine lifetime is never reused.
+std::uint64_t g_generation = 0;
 
 // MicroTeX's parser is code-unit oriented: each model UTF-16 unit maps to one
 // wchar. Never reinterpret surrogate units as scalar values. QString::fromUtf16
@@ -42,19 +55,25 @@ std::wstring WideFromUtf16(std::u16string_view value) {
     return QString::fromUtf16(value.data(), static_cast<qsizetype>(value.size())).toStdWString();
 }
 
-void HashValue(std::uint64_t& hash, std::uint64_t value) {
-    hash ^= value;
-    hash *= 1099511628211ULL;
+bool Matches(const CacheEntry& entry, const std::wstring& source, float fontSize, bool display) {
+    return entry.generation == g_generation
+        && entry.display == display
+        && entry.fontSize == fontSize
+        && entry.source == source;
 }
 
-std::uint64_t FormulaKey(const std::wstring& source, float fontSize, bool display) {
-    std::uint64_t hash = 14695981039346656037ULL;
-    for (const wchar_t ch : source) {
-        HashValue(hash, static_cast<std::uint16_t>(ch));
+// The resource root is a directory carrying MicroTeX's marker file. Checking
+// it before tex::LaTeX::init prevents a silent "initialized" state on a tree
+// MicroTeX could not use.
+bool HasResourceRoot(const std::filesystem::path& resRoot) {
+    if (resRoot.empty()) {
+        return false;
     }
-    HashValue(hash, std::bit_cast<std::uint32_t>(fontSize));
-    HashValue(hash, display ? 1ULL : 0ULL);
-    return hash;
+    std::error_code error;
+    if (!std::filesystem::is_directory(resRoot, error) || error) {
+        return false;
+    }
+    return std::filesystem::exists(resRoot / kResourceMarker, error) && !error;
 }
 
 FormulaMetrics ReadMetrics(const tex::TeXRender& render) {
@@ -133,36 +152,50 @@ bool HasEmptyFractionArgument(const std::wstring& source) {
 }  // namespace
 
 bool Initialize(const std::filesystem::path& resRoot) {
-    if (g_initialized) {
-        return true;
+    // Every attempt starts a new engine lifetime: cached formulae and layouts
+    // keyed to the previous generation must not survive it.
+    g_cache.clear();
+    ++g_generation;
+
+    if (!HasResourceRoot(resRoot)) {
+        g_state = EngineState::Failed;
+        return false;
     }
     // tex::LaTeX::init takes a UTF-8 path and locates the resource tree through
     // the `.clatexmath-res_root` marker inside that directory. u8string() is the
     // portable wide/native-to-UTF-8 conversion on every supported platform.
     const std::u8string utf8 = resRoot.u8string();
-    if (utf8.empty()) {
+    try {
+        tex::LaTeX::init(std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size()));
+    } catch (const std::exception&) {
+        g_state = EngineState::Failed;
         return false;
     }
-    tex::LaTeX::init(std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size()));
-    g_initialized = true;
+    g_state = EngineState::Ready;
     return true;
 }
 
 void Shutdown() {
-    if (!g_initialized) {
-        return;
-    }
     g_cache.clear();
-    tex::LaTeX::release();
-    g_initialized = false;
+    ++g_generation;
+    // MicroTeX's LaTeX::release() frees its formatter but leaves the static
+    // pointers non-null, so the next LaTeX::init() skips initialization and
+    // parse() dereferences freed memory. Keep the backend for the process
+    // instead; Shutdown only makes it unavailable and invalidates every cache
+    // keyed to its generation.
+    g_state = EngineState::Uninitialized;
 }
 
 bool IsInitialized() {
-    return g_initialized;
+    return g_state == EngineState::Ready;
+}
+
+std::uint64_t EngineGeneration() {
+    return g_generation;
 }
 
 FormulaHandle Parse(std::u16string_view source, float fontSize, bool display) {
-    if (!g_initialized
+    if (g_state != EngineState::Ready
         || source.empty()
         || fontSize <= 0.0f) {
         return nullptr;
@@ -172,15 +205,14 @@ FormulaHandle Parse(std::u16string_view source, float fontSize, bool display) {
         || HasEmptyFractionArgument(wideSource)) {
         return nullptr;
     }
-    const std::uint64_t key = FormulaKey(wideSource, fontSize, display);
     const auto existing = std::find_if(g_cache.begin(), g_cache.end(), [&](const CacheEntry& entry) {
-        return entry.key == key;
+        return Matches(entry, wideSource, fontSize, display);
     });
     if (existing != g_cache.end()) {
-        FormulaHandle formula = existing->formula;
+        CacheEntry entry = std::move(*existing);
         g_cache.erase(existing);
-        g_cache.push_back({ key, formula });
-        return formula;
+        g_cache.push_back(std::move(entry));
+        return g_cache.back().formula;
     }
 
     std::wstring effective = wideSource;
@@ -205,7 +237,7 @@ FormulaHandle Parse(std::u16string_view source, float fontSize, bool display) {
     formula->render = std::move(render);
     formula->metrics = ReadMetrics(*formula->render);
 
-    g_cache.push_back({ key, formula });
+    g_cache.push_back({ std::move(wideSource), fontSize, display, g_generation, formula });
     if (g_cache.size() > kMaxCachedFormulae) {
         g_cache.pop_front();
     }

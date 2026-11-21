@@ -3,6 +3,7 @@
 // Exercises the UTF-16 <-> QTextDocument offset mapping, style conversion,
 // commit normalization and LaTeX editing decisions with the plan's real cases.
 
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -201,13 +202,42 @@ int main(int argc, char** argv) {
     Check(cnote::text::LatexSuggestionActionForKey(Qt::Key_Escape) == cnote::text::LatexSuggestionKeyAction::Dismiss,
         "Escape dismisses the suggestion");
 
+    // --- LaTeX engine state: failures are explicit and recoverable ----------
+    const std::filesystem::path resRoot(CNOTE_LATEX_RES_ROOT);
+    const std::filesystem::path missingResRoot =
+        resRoot.parent_path() / "cnote-missing-latex-res-root";
+    Check(!cnote::latex::Initialize(missingResRoot), "a missing resource root fails initialization");
+    Check(!cnote::latex::IsInitialized(), "a failed Initialize leaves the engine uninitialized");
+    Check(cnote::latex::Parse(u"x^2", 28.0f, true) == nullptr,
+        "Parse returns null while initialization has failed");
+
+    // A layout built while the engine is down must not survive recovery.
+    cnote::PageText cacheProbe {};
+    cacheProbe.fontSize = 20.0f;
+    cacheProbe.width = 180.0f;
+    cacheProbe.content = u"layout cache $\\frac{a}{b}$";
+    const std::uint64_t missesBeforeRecovery = cnote::text::TextLayoutCacheMisses();
+    const cnote::text::QtTextLayout beforeRecovery = cnote::text::LayoutPageTextQt(cacheProbe, 200.0f);
+    Check(cnote::text::TextLayoutCacheMisses() == missesBeforeRecovery + 1U,
+        "a layout built while the engine is down is a cache miss");
+    Check(cnote::text::LayoutPageTextQt(cacheProbe, 200.0f).lines.size() == beforeRecovery.lines.size()
+            && cnote::text::TextLayoutCacheMisses() == missesBeforeRecovery + 1U,
+        "the down-engine layout is cached for that generation");
+
+    const std::uint64_t failedGeneration = cnote::latex::EngineGeneration();
+    Check(cnote::latex::Initialize(resRoot), "latex engine initializes for the parse checks");
+    Check(cnote::latex::IsInitialized(), "a successful Initialize makes the engine ready");
+    Check(cnote::latex::EngineGeneration() > failedGeneration,
+        "initialization advances the engine generation");
+    static_cast<void>(cnote::text::LayoutPageTextQt(cacheProbe, 200.0f));
+    Check(cnote::text::TextLayoutCacheMisses() == missesBeforeRecovery + 2U,
+        "initialization invalidates layouts built while the engine was down");
+
     // --- LaTeX engine: empty math groups must not crash ---------------------
     // MicroTeX's MathAtom dereferenced a null base for empty math groups, so
     // the live preview crashed the whole app on "$", whitespace-only source
     // or "$ $" mid-typing.  These must all parse to a (possibly empty)
     // formula instead of aborting.
-    Check(cnote::latex::Initialize(std::filesystem::path(CNOTE_LATEX_RES_ROOT)),
-        "latex engine initializes for the parse checks");
     if (cnote::latex::IsInitialized()) {
         for (const char16_t* source : { u"$", u" ", u"$ $", u"\\[$\\]", u"  $  " }) {
             Check(cnote::latex::Parse(std::u16string_view(source), 28.0f, true) != nullptr,
@@ -215,6 +245,16 @@ int main(int argc, char** argv) {
         }
         Check(cnote::latex::Parse(u"\\frac{1}{2}", 28.0f, true) != nullptr,
             "a real formula still parses");
+
+        // The cache stores the source itself: two different sources with the
+        // same size settings are separate entries, never aliases of one hash.
+        const cnote::latex::FormulaHandle shortFormula = cnote::latex::Parse(u"x", 28.0f, true);
+        const cnote::latex::FormulaHandle longFormula = cnote::latex::Parse(u"xxxxxxxxxxxx", 28.0f, true);
+        Check(shortFormula != nullptr && longFormula != nullptr && shortFormula != longFormula
+                && cnote::latex::Measure(longFormula).width > cnote::latex::Measure(shortFormula).width,
+            "different sources with identical size settings have separate cache entries");
+        Check(cnote::latex::Parse(u"x", 28.0f, true) == shortFormula,
+            "an identical formula is served from the cache");
 
         // --- documents with formula placeholders read back to the model -----
         cnote::PageText mathText {};
@@ -271,6 +311,39 @@ int main(int argc, char** argv) {
             Check(spansMatch(cnote::text::CapturePageTextFormatting(mathDocument, mathText, scale), normalizedMath.styleSpans),
                 "mixed document spans capture back unchanged" + at);
         }
+        // --- re-initialization and shutdown invalidate both caches ----------
+        const std::uint64_t generationBeforeReinitialize = cnote::latex::EngineGeneration();
+        Check(cnote::latex::Initialize(resRoot), "re-initializing a ready engine succeeds");
+        Check(cnote::latex::EngineGeneration() > generationBeforeReinitialize,
+            "re-initialization advances the engine generation");
+        const cnote::latex::FormulaHandle afterReinitialize = cnote::latex::Parse(u"x", 28.0f, true);
+        Check(afterReinitialize != nullptr && afterReinitialize != shortFormula,
+            "re-initialization clears the formula cache");
+        const std::uint64_t missesBeforeReinitialize = cnote::text::TextLayoutCacheMisses();
+        static_cast<void>(cnote::text::LayoutPageTextQt(cacheProbe, 200.0f));
+        Check(cnote::text::TextLayoutCacheMisses() == missesBeforeReinitialize + 1U,
+            "re-initialization invalidates cached layouts");
+
+        const std::uint64_t generationBeforeShutdown = cnote::latex::EngineGeneration();
+        cnote::latex::Shutdown();
+        Check(!cnote::latex::IsInitialized(), "Shutdown returns the engine to uninitialized");
+        Check(cnote::latex::EngineGeneration() > generationBeforeShutdown,
+            "Shutdown advances the engine generation");
+        Check(cnote::latex::Parse(u"x", 28.0f, true) == nullptr, "Parse returns null after Shutdown");
+        const std::uint64_t missesAfterShutdown = cnote::text::TextLayoutCacheMisses();
+        static_cast<void>(cnote::text::LayoutPageTextQt(cacheProbe, 200.0f));
+        Check(cnote::text::TextLayoutCacheMisses() == missesAfterShutdown + 1U,
+            "Shutdown invalidates cached layouts");
+
+        // --- recovery renders the formula in a freshly laid-out document ----
+        Check(cnote::latex::Initialize(resRoot), "the engine recovers after Shutdown");
+        const cnote::latex::FormulaHandle recovered = cnote::latex::Parse(u"x", 28.0f, true);
+        Check(recovered != nullptr, "a formula parses after recovery");
+        const std::uint64_t missesBeforeRecoveredLayout = cnote::text::TextLayoutCacheMisses();
+        const cnote::text::QtTextLayout recoveredLayout = cnote::text::LayoutPageTextQt(cacheProbe, 200.0f);
+        Check(cnote::text::TextLayoutCacheMisses() == missesBeforeRecoveredLayout + 1U,
+            "a recovered layout is recomputed");
+        Check(!recoveredLayout.lines.empty(), "the recovered layout keeps its content");
         cnote::latex::Shutdown();
     }
 

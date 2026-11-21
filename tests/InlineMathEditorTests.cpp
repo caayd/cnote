@@ -6,6 +6,7 @@
 // expanding, copy exports `$...$` source, prices stay text, and toolbar
 // styling reaches rendered formulas.
 
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -74,10 +75,15 @@ void Type(cnote::ui::InlineMathTextEdit& editor, const QString& text) {
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
-    if (!cnote::latex::Initialize(std::filesystem::path(CNOTE_LATEX_RES_ROOT))) {
-        std::printf("FAIL: latex engine did not initialize\n");
-        return 1;
-    }
+
+    // --- a failed engine is explicit, and recovery rebuilds the layout ------
+    const std::filesystem::path resRoot(CNOTE_LATEX_RES_ROOT);
+    const std::filesystem::path missingResRoot =
+        resRoot.parent_path() / "cnote-missing-latex-res-root";
+    Check(!cnote::latex::Initialize(missingResRoot), "a missing resource root fails initialization");
+    Check(!cnote::latex::IsInitialized(), "a failed Initialize leaves the engine uninitialized");
+    Check(cnote::latex::Parse(u"x^2", 20.0f, false) == nullptr,
+        "no formula parses while initialization failed");
 
     cnote::ui::InlineMathTextEdit editor;
     editor.setAcceptRichText(false);
@@ -86,9 +92,23 @@ int main(int argc, char** argv) {
     editor.setFocus();
     QApplication::processEvents();
 
+    // With the engine down the source stays visible; no formula-less object
+    // layout is installed that a later engine lifetime could reuse.
+    editor.LoadPageText(MakeText(u"Area $x^2$ end"), 1.0f);
+    Check(RenderedCount(editor) == 0U, "formulas stay source while the engine is uninitialized");
+    Check(Content(editor) == u"Area $x^2$ end",
+        "the down-engine source survives, got " + Quote(Content(editor)));
+
+    const std::uint64_t generationBeforeRecovery = cnote::latex::EngineGeneration();
+    Check(cnote::latex::Initialize(resRoot),
+        "latex engine initializes after a failed attempt");
+    Check(cnote::latex::IsInitialized(), "the engine is ready after recovery");
+    Check(cnote::latex::EngineGeneration() > generationBeforeRecovery,
+        "recovery advances the engine generation");
+
     // --- loading renders formulas away from the caret ------------------------
     editor.LoadPageText(MakeText(u"Area $x^2$ end"), 1.0f);
-    Check(RenderedCount(editor) == 1U, "a loaded formula away from the caret renders");
+    Check(RenderedCount(editor) == 1U, "a formula parsed after recovery renders in the layout");
     Check(Content(editor) == u"Area $x^2$ end", "capture returns the stored source, got " + Quote(Content(editor)));
 
     // --- typing: the formula being written stays source until left -----------
