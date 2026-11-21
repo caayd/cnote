@@ -9,7 +9,6 @@
 #include <QPoint>
 #include <QPointF>
 #include <QString>
-#include <QThread>
 
 #include <cmath>
 #include <cstdio>
@@ -136,35 +135,48 @@ void ConsumeAndSuppressDuplicates() {
     cnote::ui::PrecisionInputRouter router(sink);
     router.SetNativeAdapterAvailable(true);
 
+    // A consumed frame with no live gesture has no duplicate to suppress: the
+    // trailing POINTERUP must never drop real wheel input.
+    router.NoteNativeFrameConsumed();
+    Check(!router.ShouldDropWheelDuplicate(), "a consumed frame without a live gesture suppresses nothing");
+    Check(!router.SuppressingDuplicates(), "suppression is not reported outside a gesture");
+
+    // The native adapter owns the canvas gesture; Qt's copies of the same
+    // physical input are consumed without ever reaching the sink twice.
+    router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::Begin));
+    Check(sink.Count("begin") == 1U, "native touchpad begin reaches the canvas once");
     router.NoteNativeFrameConsumed();
     Check(router.ShouldDropWheelDuplicate(), "a consumed native frame drops the Qt duplicate wheel");
-    Check(router.SuppressingDuplicates(), "suppression is reported while the gesture runs");
+    Check(router.SuppressingDuplicates(), "suppression is reported while the gesture is live");
 
-    // Qt's copies of the gesture the adapter owns are consumed without ever
-    // reaching the canvas: the adapter's own frames already panned/zoomed for
-    // them, so applying them would move the viewport twice for one physical
-    // gesture.
-    Check(router.HandleNativeGestureBegin(QPoint(20, 20)), "native gesture begin is consumed");
-    Check(sink.calls.empty(), "a gesture duplicated from a consumed native frame never reaches the canvas");
-    router.NoteNativeFrameConsumed();
-    Check(router.ShouldDropWheelDuplicate(), "duplicate suppression persists during the gesture");
+    Check(router.HandleNativeGestureBegin(QPoint(20, 20)), "the duplicate native begin is consumed");
+    Check(sink.Count("begin") == 1U, "the duplicate begin never emits a second BeginPrecisionGesture");
     Check(router.HandleNativeGesturePan(QPointF(30.0, -20.0), QPoint(20, 20)), "the duplicate native pan is consumed");
-    Check(router.HandleNativeGestureEnd(), "native gesture end is consumed");
-    Check(!router.ShouldDropWheelDuplicate(), "suppression ends with the gesture");
-    Check(sink.Count("pan") == 0U && sink.Count("zoom") == 0U && sink.Count("begin") == 0U && sink.Count("end") == 0U,
-        "no duplicate pan, zoom or gesture lifecycle reaches the canvas");
-
-    // A native frame consumed after the gesture ended (the trailing
-    // POINTERUP) re-arms suppression only briefly: it must expire instead of
-    // dropping real wheel events until the next gesture happens to clear it.
+    Check(sink.Count("pan") == 0U, "the duplicate pan never reaches the canvas");
     router.NoteNativeFrameConsumed();
-    Check(router.ShouldDropWheelDuplicate(), "a trailing consumed frame suppresses immediate duplicates");
-    QThread::msleep(static_cast<unsigned long>(cnote::ui::PrecisionInputRouter::kDuplicateSuppressionWindowMs) + 50UL);
-    Check(!router.ShouldDropWheelDuplicate(), "stale suppression expires after the duplicate window");
+    Check(router.HandleNativeGestureEnd(), "the duplicate native end is consumed");
+    Check(router.GestureActive() && router.Source() == cnote::ui::PrecisionInputRouter::GestureSource::NativeTouchpad,
+        "Qt's duplicate end does not finish the native touchpad gesture");
+    Check(!router.ShouldDropWheelDuplicate(), "the duplicate end clears suppression");
+    router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::End));
+    Check(sink.Count("end") == 1U, "the native touchpad end finishes the sink gesture once");
+    Check(!router.GestureActive(), "the touchpad gesture is idle again");
+
+    // Immediately after the gesture ended, wheel events must pass through:
+    // even a consumed trailing frame does not re-arm suppression without a
+    // live gesture.
+    router.NoteNativeFrameConsumed();
+    Check(!router.ShouldDropWheelDuplicate(), "wheel events pass immediately after the gesture ends");
+    Check(!router.SuppressingDuplicates(), "no suppression outlives the gesture");
+
+    // A genuine begin arriving while idle is not treated as a duplicate.
+    Check(router.HandleNativeGestureBegin(QPoint(20, 20)), "a genuine begin starts a new gesture");
+    Check(sink.Count("begin") == 2U, "the genuine begin reaches the canvas");
+    Check(router.HandleNativeGestureEnd(), "the genuine gesture ends");
 
     // Cancel clears suppression and inertia too.
     sink.calls.clear();
-    static_cast<void>(router.HandleNativeGestureBegin(QPoint(20, 20)));
+    router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::Begin));
     router.NoteNativeFrameConsumed();
     router.SetInertiaActive(true);
     router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::Cancel));
@@ -173,13 +185,15 @@ void ConsumeAndSuppressDuplicates() {
     Check(sink.Count("end") == 1U, "cancel finishes the sink gesture once");
     Check(!router.GestureActive(), "cancel ends the gesture");
 
-    // Inertia ending with no live gesture clears suppression too, so the
-    // first real wheel event after a flick is never dropped.
+    // Inertia ending clears suppression so the first real wheel event after a
+    // flick is never dropped.
+    router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::Begin));
     router.NoteNativeFrameConsumed();
     router.SetInertiaActive(true);
-    Check(router.ShouldDropWheelDuplicate(), "inertia frames keep suppressing duplicates");
+    Check(router.ShouldDropWheelDuplicate(), "inertia frames keep suppressing duplicates while the gesture is live");
     router.SetInertiaActive(false);
     Check(!router.ShouldDropWheelDuplicate(), "inertia end clears suppression");
+    router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::Cancel));
 }
 
 // 4. Inertia start/stop and inertia panning after the manipulation ends.
@@ -229,7 +243,54 @@ void InertiaLifecycle() {
     Check(sink.calls.empty(), "stray frames outside a gesture are ignored");
 }
 
-// 5. Thresholds, cursor anchoring and the native pinch accumulation.
+// 5. Touch owns its own lifecycle: native begin/update cannot steal it and a
+//    TouchCancel leaves the router clean for the next gesture.
+void TouchLifecycleIsolation() {
+    FakeSink sink;
+    cnote::ui::PrecisionInputRouter router(sink);
+    router.SetNativeAdapterAvailable(true);
+
+    const cnote::ui::PrecisionInputRouter::TouchMetrics start { QPointF(300.0, 300.0), 100.0 };
+    Check(router.HandleTouchBegin(start), "touch gesture begins on the canvas");
+    Check(router.Source() == cnote::ui::PrecisionInputRouter::GestureSource::Touch, "touch owns the gesture");
+    Check(sink.Count("begin") == 1U, "touch begin reaches the canvas once");
+
+    // A native gesture begin while touch is live is not a second gesture and
+    // must not emit BeginPrecisionGesture again.
+    Check(!router.HandleNativeGestureBegin(QPoint(400, 300)), "native begin during touch is rejected");
+    Check(sink.Count("begin") == 1U, "the rejected native begin emits no second BeginPrecisionGesture");
+    Check(router.Source() == cnote::ui::PrecisionInputRouter::GestureSource::Touch, "touch keeps ownership");
+
+    // A native touchpad frame must not finish or hijack the Qt touch gesture.
+    router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::Update, QPoint(400, 300)));
+    Check(router.GestureActive() && router.Source() == cnote::ui::PrecisionInputRouter::GestureSource::Touch,
+        "a touchpad update cannot hijack a touch gesture");
+    router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::End, QPoint(400, 300)));
+    Check(router.Source() == cnote::ui::PrecisionInputRouter::GestureSource::Touch,
+        "a touchpad end cannot finish a touch gesture");
+
+    // TouchCancel is an End: the router goes fully idle and the next begin is
+    // accepted rather than stuck behind touchActive_.
+    Check(router.HandleTouchCancel(), "touch cancel is consumed");
+    Check(router.Phase() == cnote::ui::PrecisionInputRouter::GesturePhase::Idle, "touch cancel leaves the router idle");
+    Check(router.Source() == cnote::ui::PrecisionInputRouter::GestureSource::None, "touch cancel clears the source");
+    Check(!router.HandleTouchCancel(), "a cancel with no touch gesture is not consumed");
+
+    Check(router.HandleTouchBegin(start), "the next touch begin after cancel is accepted");
+    Check(sink.Count("begin") == 2U, "the next touch begin starts exactly one canvas gesture");
+    Check(router.HandleTouchEnd(), "the next touch gesture ends");
+
+    // Native End and Cancel must not finish a native-gesture-owned gesture.
+    Check(router.HandleNativeGestureBegin(QPoint(500, 400)), "native gesture begins after the touch path is idle");
+    Check(sink.Count("begin") == 3U, "the native begin starts one canvas gesture");
+    router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::End));
+    Check(router.GestureActive() && router.Source() == cnote::ui::PrecisionInputRouter::GestureSource::NativeGesture,
+        "a touchpad end cannot finish a Qt native gesture");
+    Check(router.HandleNativeGestureEnd(), "the native gesture still ends through its own path");
+    Check(!router.GestureActive(), "the native gesture ends cleanly");
+}
+
+// 6. Thresholds, cursor anchoring and the native pinch accumulation.
 void ThresholdsAndAnchoring() {
     FakeSink sink;
     cnote::ui::PrecisionInputRouter router(sink);
@@ -270,9 +331,11 @@ void ThresholdsAndAnchoring() {
 
     // Two-finger touch pinch/pan through the router.
     sink.calls.clear();
-    Check(router.HandleTouchBegin(QPoint(300, 300)), "touch gesture begins on the canvas");
-    Check(router.HandleTouchUpdate(QPoint(310, 300), 1.5), "touch gesture update is consumed");
-    Check(sink.Count("zoom") == 1U && sink.calls.back().a == 1.5, "touch pinch applies the cumulative scale");
+    Check(router.HandleTouchBegin(cnote::ui::PrecisionInputRouter::TouchMetrics { QPointF(300.0, 300.0), 100.0 }),
+        "touch gesture begins on the canvas");
+    Check(router.HandleTouchUpdate(cnote::ui::PrecisionInputRouter::TouchMetrics { QPointF(310.0, 300.0), 150.0 }),
+        "touch gesture update is consumed");
+    Check(sink.Count("zoom") == 1U && sink.calls.back().a == 1.5, "touch pinch derives the cumulative scale from the start distance");
     qreal panX = 0.0;
     for (const Call& call : sink.calls) {
         if (call.kind == "pan") {
@@ -291,6 +354,7 @@ int main() {
     RoutingExcludesSidebar();
     ConsumeAndSuppressDuplicates();
     InertiaLifecycle();
+    TouchLifecycleIsolation();
     ThresholdsAndAnchoring();
 
     std::printf(g_failures == 0 ? "ALL PRECISION ROUTER CHECKS PASSED\n" : "%d PRECISION ROUTER CHECK(S) FAILED\n", g_failures);

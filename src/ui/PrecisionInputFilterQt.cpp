@@ -60,10 +60,18 @@ bool PrecisionInputFilterQt::eventFilter(QObject*, QEvent* event) {
     }
     case QEvent::TouchBegin:
     case QEvent::TouchUpdate:
-    case QEvent::TouchEnd: {
+    case QEvent::TouchEnd:
+    case QEvent::TouchCancel: {
         auto* touch = static_cast<QTouchEvent*>(event);
         if (event->type() == QEvent::TouchEnd) {
             if (!router_->HandleTouchEnd()) {
+                return false;
+            }
+            event->accept();
+            return true;
+        }
+        if (event->type() == QEvent::TouchCancel) {
+            if (!router_->HandleTouchCancel()) {
                 return false;
             }
             event->accept();
@@ -80,14 +88,9 @@ bool PrecisionInputFilterQt::eventFilter(QObject*, QEvent* event) {
             positions.push_back(point.globalPosition());
         }
         const PrecisionInputRouter::TouchMetrics metrics = PrecisionInputRouter::ComputeTouchMetrics(positions);
-        bool handled = false;
-        if (event->type() == QEvent::TouchBegin) {
-            touchStartDistance_ = metrics.distance;
-            handled = router_->HandleTouchBegin(metrics.centroid.toPoint());
-        } else {
-            const qreal scale = touchStartDistance_ > 0.0 ? metrics.distance / touchStartDistance_ : 1.0;
-            handled = router_->HandleTouchUpdate(metrics.centroid.toPoint(), scale);
-        }
+        const bool handled = event->type() == QEvent::TouchBegin
+            ? router_->HandleTouchBegin(metrics)
+            : router_->HandleTouchUpdate(metrics);
         if (handled) {
             event->accept();
             return true;

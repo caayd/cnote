@@ -10,11 +10,14 @@
 
 #include <QApplication>
 #include <QEvent>
+#include <QInputDevice>
 #include <QMouseEvent>
 #include <QNativeGestureEvent>
 #include <QPoint>
 #include <QPointF>
+#include <QPointingDevice>
 #include <QString>
+#include <QTouchEvent>
 #include <QWheelEvent>
 #include <QWidget>
 
@@ -127,6 +130,28 @@ void SendNativeGesture(
     QApplication::sendEvent(&canvas, &event);
 }
 
+const QPointingDevice* TestTouchDevice() {
+    // QTouchEvent warns (and backends may ignore) a non-touch device; the
+    // primary pointing device is a mouse in headless runs.
+    static const QPointingDevice* device = new QPointingDevice(
+        QStringLiteral("cnote-test-touch"),
+        0x7F000001,
+        QInputDevice::DeviceType::TouchScreen,
+        QPointingDevice::PointerType::Finger,
+        QInputDevice::Capabilities(QInputDevice::Capability::Position),
+        2,
+        0);
+    return device;
+}
+
+void SendTouch(TestCanvas& canvas, QEvent::Type type, const QPointF& first, const QPointF& second) {
+    QList<QEventPoint> points;
+    points.push_back(QEventPoint(0, QEventPoint::Pressed, first, first));
+    points.push_back(QEventPoint(1, QEventPoint::Pressed, second, second));
+    QTouchEvent event(type, TestTouchDevice(), Qt::NoModifier, points);
+    QApplication::sendEvent(&canvas, &event);
+}
+
 // 1. Ordinary input is unchanged with the filter installed.
 void PlainInputUnchanged() {
     TestCanvas plain;
@@ -162,19 +187,37 @@ void DuplicateSuppression() {
     filter.router().SetNativeAdapterAvailable(true);
     filter.router().NoteNativeFrameConsumed();
     SendWheel(canvas, QPoint(3, 3), QPoint());
-    Check(canvas.wheelEvents == 1, "the duplicate wheel event of a consumed native frame is dropped");
+    Check(canvas.wheelEvents == 2, "a consumed frame without a live gesture passes the wheel through");
 
-    // The gesture ends: suppression stops and wheels flow again.
-    static_cast<void>(filter.router().HandleNativeGestureBegin(QPoint(400, 300)));
-    static_cast<void>(filter.router().HandleNativeGestureEnd());
+    cnote::ui::TouchpadGestureSample begin;
+    begin.phase = cnote::ui::TouchpadGestureSample::Phase::Begin;
+    begin.screenAnchor = QPoint(400, 300);
+    filter.router().HandleTouchpadSample(begin);
+    Check(canvas.beginCount == 1, "the native touchpad gesture owns the canvas");
+
+    filter.router().NoteNativeFrameConsumed();
     SendWheel(canvas, QPoint(3, 3), QPoint());
-    Check(canvas.wheelEvents == 2, "wheel passes again after the gesture ends");
+    Check(canvas.wheelEvents == 2, "the duplicate wheel event of a consumed native frame is dropped");
+
+    cnote::ui::TouchpadGestureSample end;
+    end.phase = cnote::ui::TouchpadGestureSample::Phase::End;
+    end.screenAnchor = QPoint(400, 300);
+    filter.router().HandleTouchpadSample(end);
+    Check(canvas.endCount == 1, "the native touchpad gesture ends");
+
+    // The gesture ended: real wheel events must pass through immediately, even
+    // when the trailing frame was consumed.
+    SendWheel(canvas, QPoint(3, 3), QPoint());
+    Check(canvas.wheelEvents == 3, "wheel passes immediately after the gesture ends");
+    filter.router().NoteNativeFrameConsumed();
+    SendWheel(canvas, QPoint(3, 3), QPoint());
+    Check(canvas.wheelEvents == 4, "a trailing consumed frame does not suppress wheels after the gesture");
 
     // Unavailable adapter: no duplicate can exist, so nothing is suppressed.
     filter.router().SetNativeAdapterAvailable(false);
     filter.router().NoteNativeFrameConsumed();
     SendWheel(canvas, QPoint(3, 3), QPoint());
-    Check(canvas.wheelEvents == 3, "fallback path never suppresses wheel events");
+    Check(canvas.wheelEvents == 5, "fallback path never suppresses wheel events");
 }
 
 // 3. Native pinch/pan reaches the sink, cursor-anchored, and ends cleanly.
@@ -203,7 +246,41 @@ void NativePinchAndPan() {
     Check(canvas.nativeGestureEvents == 1, "non-pinch native gestures pass through to the widget");
 }
 
-// 4. Gestures routed to the sidebar stay with the widget.
+// 4. Qt touch: TouchCancel ends the gesture and the next TouchBegin is
+//    accepted; the filter itself carries no touch distance state.
+void TouchCancelResetsGesture() {
+    TestCanvas canvas;
+    canvas.setAttribute(Qt::WA_AcceptTouchEvents);
+    cnote::ui::PrecisionInputFilterQt filter(canvas);
+    canvas.installEventFilter(&filter);
+
+    SendTouch(canvas, QEvent::TouchBegin, QPointF(100, 100), QPointF(200, 100));
+    Check(canvas.beginCount == 1, "two-finger touch begins on the canvas");
+
+    // A native begin while touch owns the gesture is rejected without a second
+    // BeginPrecisionGesture.
+    SendNativeGesture(canvas, Qt::BeginNativeGesture);
+    Check(canvas.beginCount == 1, "native begin during touch emits no second BeginPrecisionGesture");
+
+    SendTouch(canvas, QEvent::TouchUpdate, QPointF(100, 100), QPointF(300, 100));
+    Check(canvas.zoomCount == 1 && std::abs(canvas.lastZoomScale - 2.0) < 1e-9,
+        "touch pinch scale is derived from the router's snapshotted start distance");
+    Check(canvas.panCount == 1 && canvas.lastPanDelta == QPointF(50.0, 0.0),
+        "touch pan follows the centroid delta");
+
+    SendTouch(canvas, QEvent::TouchCancel, QPointF(100, 100), QPointF(300, 100));
+    Check(filter.router().Phase() == cnote::ui::PrecisionInputRouter::GesturePhase::Idle,
+        "TouchCancel leaves the router idle");
+    Check(canvas.endCount == 1, "TouchCancel finishes the canvas gesture");
+
+    // The next begin is accepted instead of being stuck behind touchActive_.
+    SendTouch(canvas, QEvent::TouchBegin, QPointF(100, 100), QPointF(200, 100));
+    Check(canvas.beginCount == 2, "the next TouchBegin after cancel is accepted");
+    SendTouch(canvas, QEvent::TouchEnd, QPointF(100, 100), QPointF(200, 100));
+    Check(canvas.endCount == 2, "the next touch gesture ends exactly once");
+}
+
+// 5. Gestures routed to the sidebar stay with the widget.
 void SidebarGesturePassesThrough() {
     TestCanvas canvas;
     canvas.route = cnote::ui::PrecisionInputRoute::PassThrough;
@@ -228,6 +305,7 @@ int main(int argc, char** argv) {
     PlainInputUnchanged();
     DuplicateSuppression();
     NativePinchAndPan();
+    TouchCancelResetsGesture();
     SidebarGesturePassesThrough();
 
     std::printf(g_failures == 0 ? "ALL PRECISION FILTER CHECKS PASSED\n" : "%d PRECISION FILTER CHECK(S) FAILED\n", g_failures);

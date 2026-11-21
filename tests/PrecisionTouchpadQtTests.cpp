@@ -128,6 +128,15 @@ void InstallLifecycle() {
         cnote::ui::PrecisionInputRouter& router = touchpad.Router();
         router.SetNativeAdapterAvailable(true);
 
+        // The native adapter only emits Cancel out of a started manipulation; a
+        // cancel frame with no begin must not reach the sink at all.
+        const int beginsBeforeCancel = sink.beginCount;
+        const int endsBeforeCancel = sink.endCount;
+        touchpad.ApplyTouchpadSample(MakeSample(cnote::ui::TouchpadGestureSample::Phase::Cancel));
+        Check(sink.beginCount == beginsBeforeCancel && sink.endCount == endsBeforeCancel,
+            "a cancel without a begin emits neither Begin nor End");
+        Check(!router.GestureActive() && !router.InertiaActive(), "a stray cancel leaves the router idle");
+
         touchpad.ApplyTouchpadSample(MakeSample(cnote::ui::TouchpadGestureSample::Phase::Begin));
         Check(sink.beginCount == 1, "touchpad begin reaches the sink");
 

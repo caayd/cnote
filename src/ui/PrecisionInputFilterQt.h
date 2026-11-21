@@ -1,7 +1,6 @@
 #pragma once
 
 #include <QObject>
-#include <QPointF>
 
 #include <optional>
 
@@ -50,7 +49,6 @@ private:
     // is not assignable, so it is constructed in place.
     std::optional<PrecisionInputRouter> ownedRouter_ {};
     PrecisionInputRouter* router_ = nullptr;
-    qreal touchStartDistance_ = 0.0;
 };
 
 }  // namespace cnote::ui
