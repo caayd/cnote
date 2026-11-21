@@ -140,20 +140,21 @@ void RoundTripActions() {
     std::printf("%-14s %-14s %-16s %s\n", "action", "legacy record", "portable text", "round trip");
     for (const cnote::settings::ShortcutDefinition& definition : cnote::settings::ShortcutDefinitions()) {
         const char* name = cnote::settings::ShortcutActionConfigName(definition.action);
-        const auto sequence = cnote::settings::KeySequenceFromLegacyRecord(definition.defaultRecord);
-        Check(sequence.has_value(), std::string(name) + " default record converts");
-        if (!sequence.has_value()) {
+        const cnote::settings::BindingParse parsedDefinition =
+            cnote::settings::ParseLegacyKeyRecord(definition.defaultRecord);
+        Check(!parsedDefinition.IsUnusable(), std::string(name) + " default record converts");
+        if (parsedDefinition.IsUnusable()) {
             continue;
         }
-        if (definition.defaultRecord.key == 0U) {
-            Check(sequence->isEmpty(), std::string(name) + " unbound default is an empty sequence");
+        if (parsedDefinition.IsUnbound()) {
+            Check(parsedDefinition.sequence.isEmpty(), std::string(name) + " unbound default is an empty sequence");
             std::printf("%-14s %-14s %-16s %s\n", name, "(unbound)", "", "unbound");
             continue;
         }
 
-        const std::string portable = Portable(*sequence);
-        const auto reparsed = cnote::settings::FromPortableText(portable);
-        const bool roundTrips = reparsed.has_value() && *reparsed == *sequence;
+        const std::string portable = Portable(parsedDefinition.sequence);
+        const cnote::settings::BindingParse reparsed = cnote::settings::ParsePortableText(portable);
+        const bool roundTrips = reparsed.IsBound() && reparsed.sequence == parsedDefinition.sequence;
         Check(roundTrips, std::string(name) + " portable text round trip");
         std::printf(
             "%-14s %-14s %-16s %s\n",
@@ -191,14 +192,14 @@ void RoundTripVirtualKeyTable() {
                 (modifiers & 2U) != 0U,
                 false,
             };
-            const auto sequence = cnote::settings::KeySequenceFromLegacyRecord(record);
-            if (!sequence.has_value()) {
+            const cnote::settings::BindingParse parsedRecord = cnote::settings::ParseLegacyKeyRecord(record);
+            if (!parsedRecord.IsBound()) {
                 Check(false, "VK " + std::to_string(key) + " has no Qt key");
                 continue;
             }
-            const std::string portable = Portable(*sequence);
-            const auto reparsed = cnote::settings::FromPortableText(portable);
-            Check(reparsed.has_value() && *reparsed == *sequence,
+            const std::string portable = Portable(parsedRecord.sequence);
+            const cnote::settings::BindingParse reparsed = cnote::settings::ParsePortableText(portable);
+            Check(reparsed.IsBound() && reparsed.sequence == parsedRecord.sequence,
                 "VK " + std::to_string(key) + " record " + RecordText(record) + " portable '" + portable + "' round trip");
             ++roundTrips;
         }
@@ -211,9 +212,71 @@ void RoundTripVirtualKeyTable() {
     for (const unsigned int key : kUnmapped) {
         Check(cnote::settings::QtKeyFromVirtualKey(key) == 0, "VK " + std::to_string(key) + " is unmapped");
         Check(
-            !cnote::settings::KeySequenceFromLegacyRecord({ key, true, false, false }).has_value(),
+            cnote::settings::ParseLegacyKeyRecord({ key, true, false, false }).IsUnusable(),
             "VK " + std::to_string(key) + " record is rejected, not bound");
     }
+}
+
+// 2b. Legacy, portable and empty inputs produce three distinct outcomes.
+void BindingOutcomeKinds() {
+    namespace s = cnote::settings;
+
+    const s::BindingParse legacyBound = s::ParseLegacyKeyRecord({ 'K', true, false, false });
+    Check(legacyBound.IsBound() && legacyBound.sequence == QKeySequence(Qt::CTRL | Qt::Key_K),
+        "legacy record with a known key is Bound");
+    const s::BindingParse legacyUnbound = s::ParseLegacyKeyRecord({ 0, false, false, false });
+    Check(legacyUnbound.IsUnbound() && legacyUnbound.sequence.isEmpty(),
+        "legacy key 0 is Unbound with an empty sequence");
+    const s::BindingParse legacyUnusable = s::ParseLegacyKeyRecord({ 0x10, true, false, false });
+    Check(legacyUnusable.IsUnusable(), "legacy modifier-only key is Unusable");
+
+    const s::BindingParse portableBound = s::ParsePortableText("Ctrl+Shift+K");
+    Check(portableBound.IsBound() && portableBound.sequence == QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_K),
+        "portable text with a known chord is Bound");
+    const s::BindingParse portableUnbound = s::ParsePortableText("");
+    Check(portableUnbound.IsUnbound() && portableUnbound.sequence.isEmpty(),
+        "empty portable text is Unbound");
+    Check(s::ParsePortableText("   ").IsUnbound(), "whitespace-only portable text is Unbound");
+    const s::BindingParse portableUnusable = s::ParsePortableText("NotAKey");
+    Check(portableUnusable.IsUnusable(), "unrecognised portable text is Unusable");
+}
+
+// 2c. ParseText never leaves two actions bound to the same chord.
+void DuplicateBindingsAreUnbound() {
+    namespace s = cnote::settings;
+
+    const s::Settings portable = s::SettingsStoreQt::ParseText(
+        "shortcut_format=qt-portable-v1\n"
+        "shortcut.Undo=Ctrl+S\n"
+        "shortcut.Save=Ctrl+S\n"
+        "shortcut.Copy=Ctrl+Shift+C\n"
+        "shortcut.Cut=Ctrl+Shift+C\n");
+    Check(Binding(portable, s::ShortcutAction::Undo)->sequence.isEmpty(),
+        "a later duplicate unbinds the earlier portable binding");
+    Check(Binding(portable, s::ShortcutAction::Save)->sequence == QKeySequence(Qt::CTRL | Qt::Key_S),
+        "the later portable binding wins");
+    Check(Binding(portable, s::ShortcutAction::Copy)->sequence.isEmpty(),
+        "duplicate portable bindings leave only one action bound");
+    Check(Binding(portable, s::ShortcutAction::Cut)->sequence == QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C),
+        "the last duplicate keeps the chord");
+
+    std::vector<QKeySequence> seen;
+    for (const s::ShortcutBinding& entry : portable.shortcuts) {
+        if (entry.sequence.isEmpty()) {
+            continue;
+        }
+        Check(std::find(seen.begin(), seen.end(), entry.sequence) == seen.end(),
+            "parsed shortcut set contains no duplicate chord");
+        seen.push_back(entry.sequence);
+    }
+
+    const s::Settings legacy = s::SettingsStoreQt::ParseText(
+        "shortcut.Undo=90,1,0,0\n"
+        "shortcut.Save=90,1,0,0\n");
+    Check(Binding(legacy, s::ShortcutAction::Undo)->sequence.isEmpty(),
+        "a later duplicate unbinds the earlier legacy binding");
+    Check(Binding(legacy, s::ShortcutAction::Save)->sequence == QKeySequence(Qt::CTRL | Qt::Key_Z),
+        "the later legacy binding keeps the chord");
 }
 
 // 3. Malformed / partial / unknown records keep the action default.
@@ -400,6 +463,13 @@ void ParsesRealPayload(const std::filesystem::path& scratch) {
         "serializer writes only known keys");
     CheckSameSettings(cnote::settings::SettingsStoreQt::ParseText(serialized), settings, "serialize/parse round trip");
 
+    // Alpha in the palette text survives parse and serialize unchanged.
+    const cnote::settings::Settings alphaPalette = cnote::settings::SettingsStoreQt::ParseText("palette=80112233\n");
+    Check(alphaPalette.palette == std::vector<std::uint32_t>({ 0x80112233U }),
+        "palette parse keeps the alpha byte");
+    Check(cnote::settings::SettingsStoreQt::Serialize(alphaPalette).find("palette=80112233\n") != std::string::npos,
+        "serializer emits the same eight-digit ARGB palette value");
+
     // Legacy default palette migrates to the current default.
     const cnote::settings::Settings migrated = cnote::settings::SettingsStoreQt::ParseText(
         "palette=FF1F2937,FF2563EB,FFDC2626,FF059669,FFF59E0B\n");
@@ -520,6 +590,8 @@ int main(int argc, char** argv) {
     const std::filesystem::path scratch = ScratchDirectory("tests");
     RoundTripActions();
     RoundTripVirtualKeyTable();
+    BindingOutcomeKinds();
+    DuplicateBindingsAreUnbound();
     MalformedRecordsKeepDefaults();
     ParsesRealPayload(scratch);
     PathResolution(scratch);

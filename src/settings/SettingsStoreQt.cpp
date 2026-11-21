@@ -414,6 +414,32 @@ ShortcutBinding* FindBinding(std::array<ShortcutBinding, kShortcutActionCount>& 
     return nullptr;
 }
 
+// Stores one parsed record, keeping the set unambiguous: a bound chord clears
+// every other action already using it, mirroring the dialog's capture mode.
+// `Unbound` clears only the target action and `Unusable` leaves it untouched.
+void ApplyParsedBinding(Settings& values, ShortcutAction action, const BindingParse& parsed) {
+    ShortcutBinding* binding = FindBinding(values.shortcuts, action);
+    if (binding == nullptr) {
+        return;
+    }
+
+    switch (parsed.kind) {
+    case BindingParse::Kind::Unusable:
+        return;
+    case BindingParse::Kind::Unbound:
+        binding->sequence = QKeySequence {};
+        return;
+    case BindingParse::Kind::Bound:
+        for (ShortcutBinding& other : values.shortcuts) {
+            if (other.action != action && other.sequence == parsed.sequence) {
+                other.sequence = QKeySequence {};
+            }
+        }
+        binding->sequence = parsed.sequence;
+        return;
+    }
+}
+
 }  // namespace
 
 float SnapBrushSize(float size) {
@@ -881,44 +907,34 @@ Settings SettingsStoreQt::ParseText(std::string_view text) {
                 continue;
             }
 
-            ShortcutBinding* binding = FindBinding(settings.shortcuts, *action);
-            if (binding == nullptr) {
-                continue;
-            }
-
+            BindingParse parsed;
             if (portableShortcuts) {
-                if (value.empty()) {
-                    binding->sequence = QKeySequence {};
+                parsed = ParsePortableText(value);
+            } else {
+                const std::vector<std::string_view> parts = SplitAscii(value, ',');
+                if (parts.size() != 4U) {
                     continue;
                 }
-                if (const auto parsed = FromPortableText(value); parsed.has_value()) {
-                    binding->sequence = *parsed;
+
+                const auto parsedKey = ParseUnsignedInt(parts[0]);
+                const auto parsedCtrl = ParseUnsignedInt(parts[1]);
+                const auto parsedShift = ParseUnsignedInt(parts[2]);
+                const auto parsedAlt = ParseUnsignedInt(parts[3]);
+                if (!parsedKey.has_value() || !parsedCtrl.has_value() || !parsedShift.has_value()
+                    || !parsedAlt.has_value()) {
+                    continue;
                 }
-                continue;
+
+                const LegacyKeyRecord record {
+                    *parsedKey,
+                    *parsedCtrl != 0U,
+                    *parsedShift != 0U,
+                    *parsedAlt != 0U,
+                };
+                parsed = ParseLegacyKeyRecord(record);
             }
 
-            const std::vector<std::string_view> parts = SplitAscii(value, ',');
-            if (parts.size() != 4U) {
-                continue;
-            }
-
-            const auto parsedKey = ParseUnsignedInt(parts[0]);
-            const auto parsedCtrl = ParseUnsignedInt(parts[1]);
-            const auto parsedShift = ParseUnsignedInt(parts[2]);
-            const auto parsedAlt = ParseUnsignedInt(parts[3]);
-            if (!parsedKey.has_value() || !parsedCtrl.has_value() || !parsedShift.has_value() || !parsedAlt.has_value()) {
-                continue;
-            }
-
-            const LegacyKeyRecord record {
-                *parsedKey,
-                *parsedCtrl != 0U,
-                *parsedShift != 0U,
-                *parsedAlt != 0U,
-            };
-            if (const auto sequence = KeySequenceFromLegacyRecord(record); sequence.has_value()) {
-                binding->sequence = *sequence;
-            }
+            ApplyParsedBinding(settings, *action, parsed);
             continue;
         }
     }

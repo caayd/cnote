@@ -26,6 +26,7 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -99,6 +100,16 @@ cnote::settings::Settings MakeSettings(std::vector<std::uint32_t> palette) {
     settings.palette = std::move(palette);
     return settings;
 }
+
+class KeyPressCounter : public QWidget {
+public:
+    void keyPressEvent(QKeyEvent* event) override {
+        ++count;
+        QWidget::keyPressEvent(event);
+    }
+
+    int count = 0;
+};
 
 // 1. The legacy control inventory, with the legacy ranges.
 void ControlInventory(const std::filesystem::path& scratch) {
@@ -229,6 +240,18 @@ void PaletteOperations(const std::filesystem::path& scratch) {
     lightness->setValue(50);
     Check(settings.palette[settings.paletteIndex] == cnote::ui::HslToColor(0.0f, 1.0f, 0.5f),
         "HSL sliders produce the legacy HSL colour");
+
+    // Hex edit, entry label and persisted palette all keep an 8-digit ARGB value.
+    hexEdit->setText(QStringLiteral("#80123456"));
+    hexEdit->editingFinished();
+    Check(settings.palette[settings.paletteIndex] == 0x80123456U, "hex edit preserves alpha");
+    Check(hexEdit->text() == QStringLiteral("#80123456"), "hex editor shows the ARGB form");
+    auto* alphaItem = paletteList->item(static_cast<int>(settings.paletteIndex));
+    Check(alphaItem != nullptr && alphaItem->text().contains(QStringLiteral("#80123456")),
+        "palette entry label preserves alpha");
+    const s::Settings alphaReloaded = s::SettingsStoreQt(path).Load();
+    Check(alphaReloaded.palette.size() == 1U && alphaReloaded.palette[0] == 0x80123456U,
+        "alpha survives a palette edit round trip");
 
     // Named palettes: save, case-insensitive replace, apply, delete.
     auto* nameEdit = Find<QLineEdit>(dialog, "savedPaletteNameEdit");
@@ -417,6 +440,44 @@ void ShortcutCaptureOperations(const std::filesystem::path& scratch) {
 
     const s::Settings reloaded = store.Load();
     Check(reloaded.shortcuts[0].sequence == settings.shortcuts[0].sequence, "captured bindings persisted");
+
+    // Hiding or closing while armed drops the app-wide filter instead of
+    // swallowing the next key pressed in another window.
+    const QKeySequence moveDefault = binding(s::ShortcutAction::ToolMove);
+    dialog.show();
+    dialog.beginShortcutCapture(s::ShortcutAction::ToolMove);
+    Check(dialog.capturingShortcut(), "capture is armed while the dialog is visible");
+    dialog.hide();
+    Check(!dialog.capturingShortcut(), "hiding the dialog cancels capture");
+    KeyPressCounter hiddenCounter;
+    hiddenCounter.show();
+    QKeyEvent hiddenKey(QEvent::KeyPress, Qt::Key_J, Qt::NoModifier);
+    QApplication::sendEvent(&hiddenCounter, &hiddenKey);
+    Check(hiddenCounter.count == 1, "a hidden dialog no longer swallows keys");
+    Check(binding(s::ShortcutAction::ToolMove) == moveDefault, "the hidden key does not bind");
+
+    dialog.show();
+    dialog.beginShortcutCapture(s::ShortcutAction::ToolMove);
+    dialog.close();
+    Check(!dialog.capturingShortcut(), "closing the dialog cancels capture");
+    KeyPressCounter closedCounter;
+    closedCounter.show();
+    QKeyEvent closedKey(QEvent::KeyPress, Qt::Key_J, Qt::NoModifier);
+    QApplication::sendEvent(&closedCounter, &closedKey);
+    Check(closedCounter.count == 1, "a closed dialog no longer swallows keys");
+    Check(binding(s::ShortcutAction::ToolMove) == moveDefault, "the closed key does not bind");
+
+    {
+        cnote::ui::SettingsDialogQt doomed(settings, store, nullptr);
+        doomed.show();
+        doomed.beginShortcutCapture(s::ShortcutAction::ToolMove);
+    }
+    KeyPressCounter destroyedCounter;
+    destroyedCounter.show();
+    QKeyEvent destroyedKey(QEvent::KeyPress, Qt::Key_J, Qt::NoModifier);
+    QApplication::sendEvent(&destroyedCounter, &destroyedKey);
+    Check(destroyedCounter.count == 1, "destroying an armed dialog detaches the app filter");
+    Check(binding(s::ShortcutAction::ToolMove) == moveDefault, "destruction does not bind the key");
 }
 
 // 5. Refresh-on-open (external changes are re-read) and modeless ownership.
@@ -472,7 +533,7 @@ void RefreshAndOwnership(const std::filesystem::path& scratch) {
     Check(store.Load().inputSpacing == appliedSpacing, "closing keeps the persisted value");
 }
 
-// 6. A failed persist reports failure, keeps the file and keeps the applied value.
+// 6. A failed persist reports failure, keeps the file and leaves live settings unchanged.
 void FailedPersist(const std::filesystem::path& scratch) {
     namespace s = cnote::settings;
     const std::filesystem::path dest = scratch / "readonly" / "settings.ini";
@@ -496,12 +557,17 @@ void FailedPersist(const std::filesystem::path& scratch) {
     Check(!error, "make the destination directory read-only");
 #endif
 
-    Find<QSlider>(dialog, "spacingSlider")->setValue(300);
-    Check(settings.inputSpacing == 3.0f, "failed persist still applies the value in memory");
+    const float beforeSpacing = settings.inputSpacing;
+    auto* spacing = Find<QSlider>(dialog, "spacingSlider");
+    spacing->setValue(300);
+    Check(settings.inputSpacing == beforeSpacing, "failed persist leaves the live settings unchanged");
+    Check(spacing->value() == static_cast<int>(std::lround(beforeSpacing * 100.0f)),
+        "failed persist restores the control to the live value");
     Check(!dialog.lastSaveSucceeded(), "failed persist reports failure");
     Check(saveFailures == 1, "failed persist emits settingsSaveFailed once");
     Check(!dialog.lastSaveError().isEmpty(), "failed persist reports a reason");
     Check(ReadFile(dest) == previous, "failed persist leaves the previous file intact");
+    Check(store.Load().inputSpacing == beforeSpacing, "failed persist leaves the stored value unchanged");
 
 #ifdef _WIN32
     std::filesystem::permissions(dest, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, error);

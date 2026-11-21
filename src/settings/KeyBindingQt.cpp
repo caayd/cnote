@@ -285,14 +285,14 @@ int QtKeyFromVirtualKey(unsigned int virtualKey) {
     }
 }
 
-std::optional<QKeySequence> KeySequenceFromLegacyRecord(const LegacyKeyRecord& record) {
+BindingParse ParseLegacyKeyRecord(const LegacyKeyRecord& record) {
     if (record.key == 0) {
-        return QKeySequence {};
+        return { BindingParse::Kind::Unbound, QKeySequence {} };
     }
 
     const int key = QtKeyFromVirtualKey(record.key);
     if (key == 0) {
-        return std::nullopt;
+        return { BindingParse::Kind::Unusable, QKeySequence {} };
     }
 
     int combination = key;
@@ -308,37 +308,42 @@ std::optional<QKeySequence> KeySequenceFromLegacyRecord(const LegacyKeyRecord& r
 
     const QKeySequence sequence(combination);
     if (sequence.isEmpty()) {
-        return std::nullopt;
+        return { BindingParse::Kind::Unusable, QKeySequence {} };
     }
-    return sequence;
+    return { BindingParse::Kind::Bound, sequence };
 }
 
 QKeySequence DefaultKeySequence(ShortcutAction action) {
     const ShortcutDefinition* definition = FindShortcutDefinition(action);
-    if (definition == nullptr || definition->defaultRecord.key == 0) {
+    if (definition == nullptr) {
         return QKeySequence {};
     }
-    return KeySequenceFromLegacyRecord(definition->defaultRecord).value_or(QKeySequence {});
+    const BindingParse parsed = ParseLegacyKeyRecord(definition->defaultRecord);
+    return parsed.IsBound() ? parsed.sequence : QKeySequence {};
 }
 
 QString ToPortableText(const QKeySequence& sequence) {
     return sequence.toString(QKeySequence::PortableText);
 }
 
-std::optional<QKeySequence> FromPortableText(std::string_view text) {
+BindingParse ParsePortableText(std::string_view text) {
     const QString encoded = QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size()));
+    if (encoded.trimmed().isEmpty()) {
+        return { BindingParse::Kind::Unbound, QKeySequence {} };
+    }
+
     const QKeySequence sequence = QKeySequence::fromString(encoded, QKeySequence::PortableText);
     if (sequence.count() == 0) {
-        return std::nullopt;
+        return { BindingParse::Kind::Unusable, QKeySequence {} };
     }
     // Qt parses an unrecognised key name to a Qt::Key_unknown chord instead of
     // failing; treat that as malformed so the caller keeps the default.
     for (int chord = 0; chord < sequence.count(); ++chord) {
         if (sequence[chord].key() == Qt::Key_unknown) {
-            return std::nullopt;
+            return { BindingParse::Kind::Unusable, QKeySequence {} };
         }
     }
-    return sequence;
+    return { BindingParse::Kind::Bound, sequence };
 }
 
 }  // namespace cnote::settings

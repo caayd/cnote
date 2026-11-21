@@ -2,6 +2,7 @@
 
 #include <QDialog>
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -11,6 +12,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QHideEvent;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -24,9 +26,9 @@ namespace cnote::ui {
 // background colour (default swatches, previous colours, hex, HSL), stroke
 // colour profile, the remap toggle and the Apply to Current / Apply to All /
 // Apply to Future Pages / Reset Defaults / Append Pages actions.  Nothing is
-// applied until an apply button is pressed; the draft is live but local, and
-// closing the dialog discards it (re-synced from the applied defaults on the
-// next open, which is the legacy refresh behaviour).
+// applied until an apply button is pressed; the draft is live while the dialog
+// is open, and hiding it discards the draft (re-synced from the applied
+// defaults on hide and on the next open, which is the legacy refresh behaviour).
 //
 // The dialog owns the applied "future pages" state and the recent-colour list
 // (legacy App::newPageSettings_) and emits applyRequested() with the draft and
@@ -69,8 +71,12 @@ signals:
 
 protected:
     void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
 private:
+    // Sentinel for the "Current Palette" combo row in paletteIndices_.
+    static constexpr std::size_t kCurrentPaletteRow = static_cast<std::size_t>(-1);
+
     void buildUi();
     void refreshDraftControls();
     void refreshDefaultSwatches();
@@ -91,6 +97,10 @@ private:
     NewPageDefaults defaults_ {};
     std::vector<std::uint32_t> recentColors_ {};
     NewPageDraft draft_ {};
+    // Combo base row -> savedPalettes index; row 0 is kCurrentPaletteRow.
+    // Built once per refresh so the combo text and the applied profile use the
+    // same filter (empty saved palettes are not offered).
+    std::vector<std::size_t> paletteIndices_ {};
 
     QLineEdit* widthEdit_ = nullptr;
     QLineEdit* heightEdit_ = nullptr;

@@ -191,6 +191,37 @@ void DraftEdits() {
     Check(dialog.draft().backgroundColor == 0xFF0A0B0CU, "recent swatch sets the background colour");
 }
 
+// 2b. Empty saved palettes are not offered and cannot shift the applied one.
+void EmptySavedPalettesDoNotShiftProfiles() {
+    namespace s = cnote::settings;
+    s::Settings settings;
+    settings.palette = { 0xFF000000U };
+    settings.savedPalettes.push_back({ u"Empty", {} });
+    settings.savedPalettes.push_back({ u"Cool", { 0xFF111111U, 0xFF222222U } });
+    cnote::ui::NewPageDialogQt dialog(settings, nullptr);
+
+    auto* combo = Find<QComboBox>(dialog, "paletteProfileCombo");
+    auto* label = Find<QLabel>(dialog, "paletteProfileLabel");
+    Check(combo->count() == 2, "the combo offers Current Palette plus only non-empty saved palettes");
+    Check(combo->itemText(1) == QStringLiteral("Cool"), "the surviving palette keeps its name");
+
+    combo->activated(1);
+    Check(dialog.draft().paletteProfile == settings.savedPalettes[1].colors,
+        "combo row N maps to the same filtered saved palette");
+    Check(label->text() == QStringLiteral("Cool"), "the draft label names the filtered palette");
+
+    cnote::ui::NewPageDraft matchedDraft = dialog.draft();
+    matchedDraft.paletteProfile = settings.savedPalettes[1].colors;
+    dialog.setDraft(matchedDraft);
+    Check(combo->currentIndex() == 1, "a saved profile selects its filtered combo row");
+
+    dialog.show();
+    combo->activated(1);
+    Check(dialog.draft().paletteProfile == settings.savedPalettes[1].colors,
+        "the filtered mapping survives refresh-on-open");
+    dialog.hide();
+}
+
 // 3. Apply scopes, clamping into the defaults, recent-colour bookkeeping.
 void ApplySemantics() {
     namespace s = cnote::settings;
@@ -301,7 +332,10 @@ void ResetAndRefresh() {
     Find<QLineEdit>(dialog, "widthEdit")->setText(QStringLiteral("777"));
     Check(dialog.draft().width == 777.0f, "draft edit is live before closing");
     dialog.show();
+    Find<QLineEdit>(dialog, "widthEdit")->setText(QStringLiteral("777"));
+    Check(dialog.draft().width == 777.0f, "draft edit is live while open");
     dialog.hide();
+    Check(dialog.draft().width == 300.0f, "hiding discards the live draft");
     dialog.reject();
     Check(requests == 0, "closing without applying does not apply anything");
     Check(dialog.defaults().width == 300.0f, "closing does not change the applied defaults");
@@ -448,6 +482,7 @@ int main(int argc, char** argv) {
 
     ControlInventory();
     DraftEdits();
+    EmptySavedPalettesDoNotShiftProfiles();
     ApplySemantics();
     ResetAndRefresh();
     PageApplicationPolicy();

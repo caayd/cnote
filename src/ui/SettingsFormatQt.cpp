@@ -58,7 +58,7 @@ QString DimensionPresetLabelFor(float width, float height) {
 
 QString FormatHexColor(std::uint32_t color) {
     char buffer[16] = {};
-    std::snprintf(buffer, sizeof(buffer), "#%06X", color & 0xFFFFFFU);
+    std::snprintf(buffer, sizeof(buffer), "#%08X", color);
     return ToQString(buffer);
 }
 
@@ -186,26 +186,49 @@ QString FormatPixelLabel(const QString& prefix, float value) {
     return QStringLiteral("%1: %2 px").arg(prefix).arg(static_cast<double>(value), 0, 'f', 0);
 }
 
-QString FormatAutoSaveLabel(unsigned int seconds) {
+std::optional<unsigned int> DecodeAutoSaveInterval(unsigned int seconds) {
     if (seconds == 0U) {
-        return QStringLiteral("Auto Save: Off");
+        return std::nullopt;
     }
-    if (seconds < 60U) {
-        return QStringLiteral("Auto Save: %1 sec").arg(seconds);
-    }
-    if (seconds % 60U == 0U) {
-        const unsigned int minutes = seconds / 60U;
-        return QStringLiteral("Auto Save: %1 %2").arg(minutes).arg(minutes == 1U ? QStringLiteral("min") : QStringLiteral("mins"));
-    }
-    return QStringLiteral("Auto Save: %1 sec").arg(seconds);
+    return seconds;
 }
 
-QString FormatZoomPresetValue(float zoom) {
+unsigned int EncodeAutoSaveInterval(std::optional<unsigned int> seconds) {
+    return seconds.value_or(0U);
+}
+
+std::optional<float> DecodeZoomPreset(float zoom) {
     if (zoom <= 0.0f) {
+        return std::nullopt;
+    }
+    return zoom;
+}
+
+float EncodeZoomPreset(std::optional<float> zoom) {
+    return zoom.value_or(0.0f);
+}
+
+QString FormatAutoSaveLabel(std::optional<unsigned int> seconds) {
+    if (!seconds.has_value()) {
+        return QStringLiteral("Auto Save: Off");
+    }
+    const unsigned int value = *seconds;
+    if (value < 60U) {
+        return QStringLiteral("Auto Save: %1 sec").arg(value);
+    }
+    if (value % 60U == 0U) {
+        const unsigned int minutes = value / 60U;
+        return QStringLiteral("Auto Save: %1 %2").arg(minutes).arg(minutes == 1U ? QStringLiteral("min") : QStringLiteral("mins"));
+    }
+    return QStringLiteral("Auto Save: %1 sec").arg(value);
+}
+
+QString FormatZoomPresetValue(std::optional<float> zoom) {
+    if (!zoom.has_value()) {
         return QString();
     }
 
-    const float percent = zoom * 100.0f;
+    const float percent = *zoom * 100.0f;
     QString value;
     if (std::abs(percent - std::round(percent)) < 0.05f) {
         value = QString::number(static_cast<int>(std::lround(percent)));
@@ -224,9 +247,7 @@ QString FormatZoomPresetValue(float zoom) {
 }
 
 QString FormatPaletteEntry(std::size_t index, std::uint32_t color) {
-    char buffer[32] = {};
-    std::snprintf(buffer, sizeof(buffer), "%zu. #%06X", index + 1U, color & 0xFFFFFFU);
-    return ToQString(buffer);
+    return QStringLiteral("%1. %2").arg(static_cast<qulonglong>(index) + 1U).arg(FormatHexColor(color));
 }
 
 QString FormatDimensionValue(float value) {

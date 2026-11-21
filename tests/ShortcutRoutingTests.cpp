@@ -836,6 +836,45 @@ void RemappedBindingIsHonoured() {
     std::filesystem::remove(path, error);
 }
 
+// 5b. A hand-edited file with two actions on the same chord loads as one
+// unambiguous runtime binding (the later line wins), not two live shortcuts.
+void DuplicateFileBindingsStayUnambiguous() {
+    const std::filesystem::path path = cnote::settings::SettingsStoreQt::ResolveSettingsPath();
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    {
+        const std::string text =
+            "palette=FF000000\n"
+            "shortcut.ToolDraw=90,1,0,0\n"
+            "shortcut.Redo=90,1,0,0\n";
+        FILE* file = std::fopen(path.string().c_str(), "wb");
+        if (file != nullptr) {
+            std::fwrite(text.data(), 1, text.size(), file);
+            std::fclose(file);
+        }
+    }
+
+    {
+        Harness harness;
+        const QKeySequence chord(Qt::CTRL | Qt::Key_Z);
+        QAction* matched = nullptr;
+        int matches = 0;
+        for (QAction* action : harness.window->findChildren<QAction*>()) {
+            if (action->shortcut() == chord) {
+                matched = action;
+                ++matches;
+            }
+        }
+        std::printf("duplicate file chord Ctrl+Z -> %d action(s), last text='%s'\n",
+            matches, matched != nullptr ? matched->text().toUtf8().constData() : "<none>");
+        Check(matches == 1, "a duplicate settings chord is bound to exactly one action");
+        Check(matched != nullptr && matched->text() == QStringLiteral("Redo"),
+            "the later duplicate record is the surviving binding");
+    }
+
+    std::filesystem::remove(path, error);
+}
+
 // Points the settings store at a scratch directory before any window loads it,
 // so the test never reads or writes the developer's real settings file.
 void RedirectSettingsStore() {
@@ -937,6 +976,7 @@ int main(int argc, char** argv) {
     SettingsTableShortcutsAreBoundAndFire();
     UndoRedoFireWhenApplicable();
     RemappedBindingIsHonoured();
+    DuplicateFileBindingsStayUnambiguous();
 
     if (gFailures != 0) {
         std::printf("%d shortcut-routing check(s) failed\n", gFailures);

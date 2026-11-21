@@ -73,11 +73,31 @@ std::optional<ShortcutAction> ParseShortcutActionConfigName(std::string_view nam
 // equivalent.  A VK number is never cast to Qt::Key.
 int QtKeyFromVirtualKey(unsigned int virtualKey);
 
+// Result of parsing either stored shortcut representation.  Keeping the three
+// outcomes apart is the point: `Bound` carries a usable chord, `Unbound` is the
+// legacy key-zero/empty-text marker, and `Unusable` means malformed input that
+// must leave the action's current binding alone.  A default-constructed value
+// is `Unusable`.
+struct BindingParse {
+    enum class Kind {
+        Bound,
+        Unbound,
+        Unusable,
+    };
+
+    Kind kind = Kind::Unusable;
+    QKeySequence sequence {};
+
+    [[nodiscard]] bool IsBound() const { return kind == Kind::Bound; }
+    [[nodiscard]] bool IsUnbound() const { return kind == Kind::Unbound; }
+    [[nodiscard]] bool IsUnusable() const { return kind == Kind::Unusable; }
+};
+
 // Converts a stored legacy record into its runtime binding.  `key == 0` is the
-// legacy "unbound" marker and yields an empty sequence; an unknown virtual key
-// yields nullopt so the caller keeps the action's current default instead of
+// legacy "unbound" marker and yields `Unbound`; an unknown virtual key yields
+// `Unusable` so the caller keeps the action's current default instead of
 // binding a wrong key.
-std::optional<QKeySequence> KeySequenceFromLegacyRecord(const LegacyKeyRecord& record);
+BindingParse ParseLegacyKeyRecord(const LegacyKeyRecord& record);
 
 QKeySequence DefaultKeySequence(ShortcutAction action);
 
@@ -86,6 +106,6 @@ inline constexpr std::string_view kShortcutFormatValue = "qt-portable-v1";
 
 // `QKeySequence::PortableText` conversion used for both directions.
 QString ToPortableText(const QKeySequence& sequence);
-std::optional<QKeySequence> FromPortableText(std::string_view text);
+BindingParse ParsePortableText(std::string_view text);
 
 }  // namespace cnote::settings
