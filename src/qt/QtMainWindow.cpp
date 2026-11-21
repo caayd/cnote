@@ -209,6 +209,10 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
     contentLayout_->setSpacing(0);
     canvas_ = new ui::CanvasWidget(controller_, content_);
     canvas_->setMouseTracking(true);
+    // The canvas is the live overlay content: controller-initiated commits
+    // (Undo/Redo, a remote commit, session replacement) capture the typed text
+    // through it instead of committing an empty value.
+    controller_.SetEditContentSource(canvas_);
     contentLayout_->addWidget(canvas_);
     setCentralWidget(content_);
 
@@ -239,7 +243,16 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
         }
         UpdateChrome();
     });
-    connect(&controller_, &QtDocumentController::EditStateChanged, this, [this]() { UpdateChrome(); });
+    connect(&controller_, &QtDocumentController::EditStateChanged, this, [this]() {
+        // An edit that ended outside the canvas (Undo/Redo, a remote commit,
+        // session replacement) leaves its overlay editor behind; sync hides
+        // it.  At begin the canvas opens the overlay itself, so only the end
+        // needs the nudge.
+        if (!controller_.EditingText() && !controller_.EditingLatex()) {
+            canvas_->SyncEditOverlay();
+        }
+        UpdateChrome();
+    });
 
     canvas_->installEventFilter(this);
     controller_.NewBlankDocument();
@@ -398,6 +411,16 @@ void QtMainWindow::CreateChrome() {
     toolbar_->SetActiveTool(activeTool_);
     toolbar_->SetMaximized(IsWindowMaximized());
     connect(toolbar_, &ui::ToolbarWidget::CommandTriggered, this, [this](ui::ToolbarCommand command) {
+        // Toolbar controls bypass QAction enablement: apply the same editor
+        // precedence here that UpdateChrome puts on the window actions, so a
+        // window/menu command cannot fire while a text/LaTeX editor owns the
+        // keyboard.  Undo/Redo are the exception - they end the edit first
+        // (committing its captured content) and then act on the document.
+        if (EditorOwnsKeyboard()
+            && command != ui::ToolbarCommand::Undo
+            && command != ui::ToolbarCommand::Redo) {
+            return;
+        }
         switch (command) {
             case ui::ToolbarCommand::Undo: Undo(); break;
             case ui::ToolbarCommand::Redo: Redo(); break;
@@ -409,6 +432,11 @@ void QtMainWindow::CreateChrome() {
         }
     });
     connect(toolbar_, &ui::ToolbarWidget::ToolSelected, this, [this](settings::Tool tool) {
+        // The tool shortcuts stand down while an editor owns the keyboard; the
+        // toolbar buttons must not route around that gate.
+        if (EditorOwnsKeyboard()) {
+            return;
+        }
         SetActiveTool(tool);
     });
     connect(toolbar_, &ui::ToolbarWidget::ColorSelected, this, [this](std::size_t index) {
@@ -1151,8 +1179,10 @@ void QtMainWindow::PasteSelection() {
 QtMainWindow::~QtMainWindow() = default;
 
 bool QtMainWindow::OpenPath(const std::filesystem::path& path) {
-    canvas_->CancelStroke();
-    canvas_->CancelActiveEdit();
+    // Finish the live overlay first: its typed content is committed, never
+    // discarded, and the document is settled before a replacement can happen.
+    controller_.FinishInteraction();
+    canvas_->SyncEditOverlay();
     const auto recordIfOpened = [this](bool opened, const std::filesystem::path& openedPath) {
         if (opened) {
             RecordRecentPath(openedPath);
@@ -1162,6 +1192,12 @@ bool QtMainWindow::OpenPath(const std::filesystem::path& path) {
 
     // Same-file joins: reuse the shared session instead of decoding twice.
     if (const std::shared_ptr<ProjectSession> existing = manager_.FindOpenSession(path); existing != nullptr) {
+        // Re-joining this view's own session replaces nothing; joining another
+        // session discards this view's attachment, so unsaved work must be
+        // retained first.
+        if (existing != controller_.Session() && !RetainCurrentSession()) {
+            return false;
+        }
         controller_.AttachSession(existing);
         canvas_->SetPdfBackgroundProvider(controller_.PdfBackground());
         canvas_->ResetView();  // reference open: zoom 1.0 with panY_ 0
@@ -1172,6 +1208,10 @@ bool QtMainWindow::OpenPath(const std::filesystem::path& path) {
         }
         UpdateChrome();
         return recordIfOpened(true, path);
+    }
+
+    if (!RetainCurrentSession()) {
+        return false;
     }
 
     std::string error;
@@ -1207,8 +1247,11 @@ void QtMainWindow::OpenFileDialog() {
 }
 
 void QtMainWindow::NewDocument() {
-    canvas_->CancelStroke();
-    canvas_->CancelActiveEdit();
+    controller_.FinishInteraction();
+    canvas_->SyncEditOverlay();
+    if (!RetainCurrentSession()) {
+        return;
+    }
     controller_.NewBlankDocument();
     canvas_->SetPdfBackgroundProvider(controller_.PdfBackground());
     if (newPageDialog_ != nullptr) {
@@ -1224,8 +1267,10 @@ void QtMainWindow::OpenNewWindow() {
     // independent window on a fresh untitled session.  Qt owns the lifetime:
     // WA_DeleteOnClose frees the window and its controller unregisters the
     // view, and quitOnLastWindowClosed ends the app when the last one goes.
-    canvas_->CancelStroke();
-    canvas_->CancelActiveEdit();
+    // The current window stays open: finish its live edit into the model (never
+    // discard typed content) before handing focus to the new window.
+    controller_.FinishInteraction();
+    canvas_->SyncEditOverlay();
     auto* window = new QtMainWindow(manager_);
     window->setAttribute(Qt::WA_DeleteOnClose);
     window->resize(size());
@@ -1237,8 +1282,8 @@ void QtMainWindow::OpenNewView() {
     // the same ProjectSession, so edits propagate live through the manager's
     // view registry.  The new view inherits the current page, zoom, pan and
     // sidebar state (Startup.cpp:56-66).
-    canvas_->CancelStroke();
-    canvas_->CancelActiveEdit();
+    controller_.FinishInteraction();
+    canvas_->SyncEditOverlay();
     const std::shared_ptr<ProjectSession> session = controller_.Session();
     auto* window = new QtMainWindow(manager_);
     window->setAttribute(Qt::WA_DeleteOnClose);
@@ -1263,7 +1308,9 @@ void QtMainWindow::OpenNewView() {
 }
 
 void QtMainWindow::Save() {
-    if (controller_.HasSavedPath()) {
+    // A PDF-backed document's FilePath is the PDF: an in-place save would
+    // overwrite it, so it always goes through Save As.
+    if (controller_.CanSaveInPlace() && controller_.HasSavedPath()) {
         std::string error;
         if (!controller_.SaveTo(controller_.FilePath(), &error)) {
             ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
@@ -1310,19 +1357,22 @@ bool QtMainWindow::ExportPdf(bool embedProject) {
 }
 
 void QtMainWindow::Undo() {
-    canvas_->CancelStroke();
+    // Undo stays reachable from the toolbar while an editor owns the keyboard.
+    // The controller commits the captured overlay content first (never an empty
+    // commit that erased the object) and then applies the history step.
     if (controller_.Undo()) {
         canvas_->NotifyDocumentChanged();
-        UpdateChrome();
     }
+    canvas_->SyncEditOverlay();
+    UpdateChrome();
 }
 
 void QtMainWindow::Redo() {
-    canvas_->CancelStroke();
     if (controller_.Redo()) {
         canvas_->NotifyDocumentChanged();
-        UpdateChrome();
     }
+    canvas_->SyncEditOverlay();
+    UpdateChrome();
 }
 
 void QtMainWindow::FitToWindow() {
@@ -1366,66 +1416,13 @@ void QtMainWindow::AddLatexObject() {
 }
 
 void QtMainWindow::closeEvent(QCloseEvent* event) {
-    canvas_->CancelStroke();
-    if (canvas_->EditOverlayActive()) {
-        canvas_->CommitActiveEdit();
-    }
-
-    if (controller_.Dirty()) {
-        const std::shared_ptr<ProjectSession>& session = controller_.Session();
-        const std::size_t viewCount = manager_.ViewsForSession(session).size();
-        const bool lastView = viewCount <= 1U;
-
-        std::string error;
-        if (!lastView) {
-            // Closing one view of a shared session neither writes the project
-            // nor asks anything: the other views keep the unsaved changes.
-        } else if (controller_.HasSavedPath()) {
-            // Plan 4.5: the last view auto-saves an already-saved project.
-            if (!controller_.SaveTo(controller_.FilePath(), &error)) {
-                ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
-                event->ignore();
-                return;
-            }
-        } else {
-            // Reference WM_CLOSE -> ConfirmCloseWithUnsavedChanges
-            // (MessageLoop.cpp:1083): Save / Don't Save / Cancel, and cancelling
-            // keeps this window (and the process) alive.  Applies to untitled
-            // projects and to closing one view while others stay open.
-            CloseDecision decision = CloseDecision::Cancel;
-            if (closeDecision_) {
-                decision = closeDecision_();
-            } else if (HeadlessModals()) {
-                std::fprintf(stderr, "MODAL cnote: Save this cnote? -> Discard (headless)\n");
-                decision = CloseDecision::Discard;
-            } else {
-                const QMessageBox::StandardButton choice = QMessageBox::warning(
-                    this,
-                    QStringLiteral("cnote"),
-                    QStringLiteral("Save this cnote?"),
-                    QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
-                    QMessageBox::Save);
-                decision = choice == QMessageBox::Save
-                    ? CloseDecision::Save
-                    : (choice == QMessageBox::Discard ? CloseDecision::Discard : CloseDecision::Cancel);
-            }
-            if (decision == CloseDecision::Cancel) {
-                event->ignore();
-                return;
-            }
-            if (decision == CloseDecision::Save) {
-                const bool saved = controller_.HasSavedPath()
-                    ? controller_.SaveTo(controller_.FilePath(), &error)
-                    : SaveAs();
-                if (!saved) {
-                    if (!error.empty()) {
-                        ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
-                    }
-                    event->ignore();
-                    return;
-                }
-            }
-        }
+    // Settle the live edit/stroke before the close decision and any write: the
+    // captured overlay content must reach the model first.
+    controller_.FinishInteraction();
+    canvas_->SyncEditOverlay();
+    if (!RetainCurrentSession()) {
+        event->ignore();
+        return;
     }
 
     QMainWindow::closeEvent(event);
@@ -1433,6 +1430,66 @@ void QtMainWindow::closeEvent(QCloseEvent* event) {
         // The window may be shown again; re-registering on show restores it.
         controller_.DetachForClose();
     }
+}
+
+bool QtMainWindow::RetainCurrentSession() {
+    if (!controller_.Dirty()) {
+        return true;
+    }
+    const std::shared_ptr<ProjectSession>& session = controller_.Session();
+    // A shared session survives this view being replaced or closed; its other
+    // views keep the unsaved work and its history.
+    if (session == nullptr || manager_.ViewsForSession(session).size() > 1U) {
+        return true;
+    }
+
+    std::string error;
+    if (controller_.CanSaveInPlace() && controller_.HasSavedPath()) {
+        // Plan 4.5: the last view of a saved project saves in place; a failed
+        // save keeps the current document.
+        if (!controller_.SaveTo(controller_.FilePath(), &error)) {
+            ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
+            return false;
+        }
+        return true;
+    }
+
+    // Reference WM_CLOSE -> ConfirmCloseWithUnsavedChanges
+    // (MessageLoop.cpp:1083): Save / Don't Save / Cancel.  Also the save
+    // prompt for a PDF-backed document, whose path must never be overwritten.
+    CloseDecision decision = CloseDecision::Cancel;
+    if (closeDecision_) {
+        decision = closeDecision_();
+    } else if (HeadlessModals()) {
+        std::fprintf(stderr, "MODAL cnote: Save this cnote? -> Discard (headless)\n");
+        decision = CloseDecision::Discard;
+    } else {
+        const QMessageBox::StandardButton choice = QMessageBox::warning(
+            this,
+            QStringLiteral("cnote"),
+            QStringLiteral("Save this cnote?"),
+            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+            QMessageBox::Save);
+        decision = choice == QMessageBox::Save
+            ? CloseDecision::Save
+            : (choice == QMessageBox::Discard ? CloseDecision::Discard : CloseDecision::Cancel);
+    }
+    if (decision == CloseDecision::Cancel) {
+        return false;
+    }
+    if (decision == CloseDecision::Discard) {
+        return true;
+    }
+    const bool saved = (controller_.CanSaveInPlace() && controller_.HasSavedPath())
+        ? controller_.SaveTo(controller_.FilePath(), &error)
+        : SaveAs();
+    if (!saved) {
+        if (!error.empty()) {
+            ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
+        }
+        return false;
+    }
+    return true;
 }
 
 void QtMainWindow::SetCloseDecisionProvider(std::function<CloseDecision()> provider) {
@@ -1860,7 +1917,12 @@ void QtMainWindow::UpdateChrome() {
         cutAction_->setEnabled(hasSelection);
     }
     if (toolbar_ != nullptr) {
-        toolbar_->SetUndoRedoEnabled(controller_.CanUndo(), controller_.CanRedo());
+        // While an edit owns the keyboard its content is still uncommitted: the
+        // button must stay reachable so the click commits that content (and
+        // then undoes), instead of looking dead and losing the edit.
+        toolbar_->SetUndoRedoEnabled(
+            controller_.CanUndo() || editorOwnsKeyboard,
+            controller_.CanRedo() || editorOwnsKeyboard);
         toolbar_->SetTitle(fileLabel);
         toolbar_->SetZoomLabel(QStringLiteral("%1%").arg(canvas_ != nullptr ? qRound(canvas_->Zoom() * 100.0) : 100));
         toolbar_->SetMaximized(IsWindowMaximized());

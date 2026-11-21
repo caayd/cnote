@@ -40,7 +40,18 @@ Document Document::CreatePdfDocument(
         }
         pdfSources.push_back({ std::move(sourcePath), std::move(pdfData) });
     }
-    document.ReplaceWithProject(pdfSources.empty() ? std::filesystem::path {} : pdfSources.front().sourcePath, std::move(pdfSources), std::move(pages), currentPageIndex, pageDefaults);
+    // Snapshot the source path before the call: function-argument evaluation
+    // order is unspecified, so `std::move(pdfSources)` may empty the vector
+    // before `pdfSources.front().sourcePath` is read (which left a PDF
+    // container with an empty FilePath and defeated the save guard).
+    const std::filesystem::path projectPath = pdfSources.empty()
+        ? std::filesystem::path {}
+        : pdfSources.front().sourcePath;
+    document.ReplaceWithProject(
+        projectPath, std::move(pdfSources), std::move(pages), currentPageIndex, pageDefaults);
+    // ReplaceWithProject assigns the project kind; a PDF container is the one
+    // case where the destination path must never receive a project save.
+    document.kind_ = DocumentKind::PdfContainer;
     return document;
 }
 
@@ -49,14 +60,24 @@ Document Document::CreateProjectDocument(
     std::vector<PdfSource> pdfSources,
     std::vector<Page> pages,
     std::size_t currentPageIndex,
-    PageDefaults pageDefaults) {
+    PageDefaults pageDefaults,
+    DocumentKind kind) {
     Document document;
     document.ReplaceWithProject(std::move(filePath), std::move(pdfSources), std::move(pages), currentPageIndex, pageDefaults);
+    document.kind_ = kind;
     return document;
 }
 
 const std::filesystem::path& Document::FilePath() const noexcept {
     return filePath_;
+}
+
+DocumentKind Document::Kind() const noexcept {
+    return kind_;
+}
+
+void Document::SetKind(DocumentKind kind) noexcept {
+    kind_ = kind;
 }
 
 const std::shared_ptr<std::vector<std::uint8_t>>& Document::PdfData() const noexcept {
@@ -183,11 +204,13 @@ void Document::ResetToBlank() {
     pageEpochs_ = { NextPageEpoch() };
     currentPageIndex_ = 0;
     newPageDefaults_ = {};
+    kind_ = DocumentKind::Blank;
 }
 
 void Document::ReplaceWithEditable(std::filesystem::path filePath, std::vector<Page> pages, std::size_t currentPageIndex, PageDefaults pageDefaults) {
     filePath_ = std::move(filePath);
     pdfSources_.clear();
+    kind_ = DocumentKind::Project;
     if (pages.empty()) {
         pages_ = { Page {} };
     } else {
@@ -208,6 +231,7 @@ void Document::ReplaceWithProject(
     std::size_t currentPageIndex,
     PageDefaults pageDefaults) {
     filePath_ = std::move(filePath);
+    kind_ = DocumentKind::Project;
     pdfSources_.clear();
     for (PdfSource& pdfSource : pdfSources) {
         if (pdfSource.pdfData && !pdfSource.pdfData->empty()) {
