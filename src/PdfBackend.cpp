@@ -28,6 +28,8 @@ namespace cnote {
 namespace {
 
 constexpr float kStrokeRenderWidthDivisor = 2.15f;
+// Matches the stored-raster convention (representative 612x792 -> 918x1188).
+constexpr float kHydratedPdfRasterScale = 1.5f;
 constexpr char16_t kEmbeddedCnoteAttachmentName[] = u"cnote-edit-data.cnote";
 
 // PDFium wide strings are UTF-16 code units; build a null-terminated
@@ -81,8 +83,10 @@ std::optional<std::vector<std::uint8_t>> AttachmentFileBytes(FPDF_ATTACHMENT att
 bool AppendEmbeddedCnoteProject(
     FPDF_DOCUMENT documentHandle,
     std::span<const std::uint8_t> projectBytes) {
+    // PDFium only supports attachment contents smaller than INT_MAX bytes;
+    // reject earlier instead of handing it a length it cannot write.
     if (documentHandle == nullptr || projectBytes.empty()
-        || projectBytes.size() > std::numeric_limits<unsigned long>::max()) {
+        || projectBytes.size() >= static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         return false;
     }
 
@@ -393,6 +397,19 @@ std::optional<Document> PdfiumBackend::OpenFromMemory(
     for (int pageIndex = 0; pageIndex < pageCount; ++pageIndex) {
         FPDF_PAGE pageHandle = FPDF_LoadPage(documentHandle, pageIndex);
         if (pageHandle == nullptr) {
+            // A page that cannot be opened becomes raster-only with a solid
+            // fallback instead of silently shifting later page indices: the
+            // page must never claim a PDF source it cannot render.
+            Page page {};
+            FS_SIZEF size {};
+            if (FPDF_GetPageSizeByIndexF(documentHandle, pageIndex, &size) != 0) {
+                page.width = std::max(1.0f, size.width);
+                page.height = std::max(1.0f, size.height);
+            }
+            page.sourcePdfSourceIndex = -1;
+            page.sourcePdfPageIndex = -1;
+            page.raster = CreateSolidRaster(page.width, page.height, kHydratedPdfRasterScale, 0xFFFFFFFFU);
+            pages.push_back(std::move(page));
             continue;
         }
 
@@ -441,14 +458,26 @@ void PdfiumBackend::HydrateProject(Document& document) const {
         if (hasValidPdfSource) {
             const Document& sourceDocument = *openedSources[static_cast<std::size_t>(page.sourcePdfSourceIndex)];
             const Page& sourcePage = sourceDocument.PageAt(static_cast<std::size_t>(page.sourcePdfPageIndex));
-            // The saved frame already includes page rotation; the source PDF
-            // dimensions describe the unrotated background, not this page.
-            page.raster = sourcePage.raster;
+            if (sourcePage.sourcePdfPageIndex < 0) {
+                // OpenFromMemory marked this source page as unreadable with a
+                // raster-only placeholder; this page must not keep claiming it.
+                page.sourcePdfSourceIndex = -1;
+                page.sourcePdfPageIndex = -1;
+                if (page.raster.pixels.empty()) {
+                    page.raster = CreateSolidRaster(page.width, page.height, kHydratedPdfRasterScale, 0xFFFFFFFFU);
+                }
+            } else if (!sourcePage.raster.pixels.empty()) {
+                // A source raster that exists replaces the stored snapshot.
+                page.raster = sourcePage.raster;
+            }
+            // Otherwise the background stays lazy: the source page raster is
+            // materialized on demand by the PDF background provider, so the
+            // stored raster must not be overwritten with an empty one.
         } else {
             page.sourcePdfSourceIndex = -1;
             page.sourcePdfPageIndex = -1;
             if (page.raster.pixels.empty()) {
-                page.raster = CreateSolidRaster(page.width, page.height, 1.5f, 0xFFFFFFFFU);
+                page.raster = CreateSolidRaster(page.width, page.height, kHydratedPdfRasterScale, 0xFFFFFFFFU);
             }
         }
     }
@@ -695,7 +724,7 @@ bool PdfiumBackend::ExportPdf(
     }
 
     if (ok && !embeddedProject.empty()) {
-        static_cast<void>(AppendEmbeddedCnoteProject(outputDocument, embeddedProject));
+        ok = AppendEmbeddedCnoteProject(outputDocument, embeddedProject);
     }
 
     if (ok) {

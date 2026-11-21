@@ -30,9 +30,11 @@ public:
         const std::filesystem::path& sourcePath,
         std::shared_ptr<std::vector<std::uint8_t>> pdfBytes) const;
 
-    // Reopens each stored PDF source and fills page geometry/rasters from it.
-    // Missing or invalid sources fall back to a solid page raster. Model decode
-    // stays usable without calling this.
+    // Reopens each stored PDF source and validates page backgrounds. A valid
+    // source keeps its indices and any stored raster; a missing or invalid
+    // source (or an unreadable source page) clears the page's indices so it is
+    // raster-only, preserving the stored raster, with a solid fallback when
+    // none exists. Model decode stays usable without calling this.
     void HydrateProject(Document& document) const;
 
     // Returns the embedded cnote project attachment bytes, if present.

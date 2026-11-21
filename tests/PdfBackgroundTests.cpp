@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <QGuiApplication>
@@ -124,6 +125,164 @@ int main(int argc, char** argv) {
     }
     Check(panProvider.RenderCount() == 50U, "panning renders each page once");
     Check(panProvider.CachedPageCount() <= 8U, "cache stays bounded while panning a 50-page PDF");
+
+    // --- a failed provider render is retried after the source identity changes
+    {
+        auto retrySource = std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(1));
+        cnote::Page retryPage0;
+        retryPage0.width = 612.0f;
+        retryPage0.height = 792.0f;
+        retryPage0.sourcePdfSourceIndex = 0;
+        retryPage0.sourcePdfPageIndex = 0;
+        cnote::Page retryPage1 = retryPage0;
+        retryPage1.sourcePdfPageIndex = 1;  // beyond the one-page source
+        cnote::Document retryDocument = cnote::Document::CreateProjectDocument(
+            std::filesystem::path("retry.cnote"),
+            { { std::filesystem::path("one-page.pdf"), retrySource } },
+            { retryPage0, retryPage1 },
+            0,
+            {});
+        cnote::render::PdfiumBackgroundProvider retryProvider(backend, retryDocument, 8);
+
+        Check(retryProvider.PageBackground(0, 1, 1.0f).isNull(),
+            "a failed source page render yields no background");
+        Check(retryProvider.FailedRenderCount() == 1U, "the failed render was attempted once");
+        static_cast<void>(retryProvider.PageBackground(0, 1, 1.0f));
+        Check(retryProvider.FailedRenderCount() == 1U, "the failed render is negatively cached");
+        Check(!retryProvider.PageBackground(0, 0, 1.0f).isNull(), "a valid source page renders");
+        Check(retryProvider.RenderCount() == 1U, "the valid source page was rendered once");
+
+        // Same source index and page, different PDF bytes: the failure must be
+        // retried instead of being served from the negative cache.
+        auto widerSource = std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(2));
+        std::vector<cnote::Page> retryPages { retryDocument.PageAt(0), retryDocument.PageAt(1) };
+        retryDocument.ReplaceWithProject(
+            std::filesystem::path("retry.cnote"),
+            { { std::filesystem::path("two-page.pdf"), widerSource } },
+            std::move(retryPages),
+            0,
+            {});
+        Check(!retryProvider.PageBackground(0, 1, 1.0f).isNull(),
+            "a failed render is retried after the source identity changes");
+        Check(retryProvider.RenderCount() == 2U, "the retry rendered the background");
+        Check(retryProvider.FailedRenderCount() == 1U, "the retry was not another failed attempt");
+
+        // Source validation happens before a cache lookup: removing the source
+        // must not serve the previously cached background.
+        retryDocument.ReplaceWithProject(
+            std::filesystem::path("retry.cnote"),
+            {},
+            { retryDocument.PageAt(0) },
+            0,
+            {});
+        Check(retryProvider.PageBackground(0, 0, 1.0f).isNull(),
+            "a removed source is validated before a cache hit is served");
+        retryProvider.Invalidate();
+        Check(retryProvider.CachedPageCount() == 0U,
+            "Invalidate drops positive and negative entries");
+    }
+
+    // --- hydration never leaves a page claiming a source it cannot show -----
+    {
+        const cnote::RasterImage storedRaster =
+            cnote::CreateSolidRaster(120.0f, 160.0f, 1.0f, 0xFF336699U);
+
+        cnote::Page missingSourcePage;
+        missingSourcePage.width = 120.0f;
+        missingSourcePage.height = 160.0f;
+        missingSourcePage.sourcePdfSourceIndex = 0;
+        missingSourcePage.sourcePdfPageIndex = 0;
+        missingSourcePage.raster = storedRaster;
+        cnote::Document missingDocument = cnote::Document::CreateProjectDocument(
+            std::filesystem::path("missing.cnote"),
+            { { std::filesystem::path("missing.pdf"), std::make_shared<std::vector<std::uint8_t>>() } },
+            { missingSourcePage },
+            0,
+            {});
+        backend.HydrateProject(missingDocument);
+        Check(missingDocument.PageAt(0).sourcePdfSourceIndex == -1
+                && missingDocument.PageAt(0).sourcePdfPageIndex == -1,
+            "hydration clears source indices for a missing source");
+        Check(cnote::RasterImageEqual(missingDocument.PageAt(0).raster, storedRaster),
+            "hydration keeps the stored raster for a missing source");
+
+        cnote::Page corruptSourcePage;
+        corruptSourcePage.width = 120.0f;
+        corruptSourcePage.height = 160.0f;
+        corruptSourcePage.sourcePdfSourceIndex = 0;
+        corruptSourcePage.sourcePdfPageIndex = 0;
+        corruptSourcePage.raster = storedRaster;
+        cnote::Document corruptDocument = cnote::Document::CreateProjectDocument(
+            std::filesystem::path("corrupt.cnote"),
+            { { std::filesystem::path("corrupt.pdf"),
+                std::make_shared<std::vector<std::uint8_t>>(8, 0x7FU) } },
+            { corruptSourcePage },
+            0,
+            {});
+        backend.HydrateProject(corruptDocument);
+        Check(corruptDocument.PageAt(0).sourcePdfSourceIndex == -1
+                && corruptDocument.PageAt(0).sourcePdfPageIndex == -1,
+            "hydration clears source indices for an invalid source");
+        Check(cnote::RasterImageEqual(corruptDocument.PageAt(0).raster, storedRaster),
+            "hydration keeps the stored raster for an invalid source");
+
+        cnote::Page badPageIndex;
+        badPageIndex.width = 612.0f;
+        badPageIndex.height = 792.0f;
+        badPageIndex.sourcePdfSourceIndex = 0;
+        badPageIndex.sourcePdfPageIndex = 3;  // the source has one page
+        badPageIndex.raster = storedRaster;
+        cnote::Document badPageIndexDocument = cnote::Document::CreateProjectDocument(
+            std::filesystem::path("bad-page.cnote"),
+            { { std::filesystem::path("one-page.pdf"),
+                std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(1)) } },
+            { badPageIndex },
+            0,
+            {});
+        backend.HydrateProject(badPageIndexDocument);
+        Check(badPageIndexDocument.PageAt(0).sourcePdfSourceIndex == -1
+                && badPageIndexDocument.PageAt(0).sourcePdfPageIndex == -1,
+            "hydration clears source indices when the source page cannot render");
+        Check(cnote::RasterImageEqual(badPageIndexDocument.PageAt(0).raster, storedRaster),
+            "hydration keeps the stored raster when the source page cannot render");
+
+        cnote::Page lazyPage;
+        lazyPage.width = 612.0f;
+        lazyPage.height = 792.0f;
+        lazyPage.sourcePdfSourceIndex = 0;
+        lazyPage.sourcePdfPageIndex = 0;
+        cnote::Document lazyDocument = cnote::Document::CreateProjectDocument(
+            std::filesystem::path("lazy.cnote"),
+            { { std::filesystem::path("one-page.pdf"),
+                std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(1)) } },
+            { lazyPage },
+            0,
+            {});
+        backend.HydrateProject(lazyDocument);
+        Check(lazyDocument.PageAt(0).sourcePdfSourceIndex == 0
+                && lazyDocument.PageAt(0).sourcePdfPageIndex == 0,
+            "hydration keeps valid source indices");
+        Check(lazyDocument.PageAt(0).raster.pixels.empty(),
+            "hydration leaves a valid source background lazy");
+
+        cnote::Page storedRasterPage = lazyPage;
+        const cnote::RasterImage validStoredRaster =
+            cnote::CreateSolidRaster(612.0f, 792.0f, 1.0f, 0xFF336699U);
+        storedRasterPage.raster = validStoredRaster;
+        cnote::Document storedRasterDocument = cnote::Document::CreateProjectDocument(
+            std::filesystem::path("stored-raster.cnote"),
+            { { std::filesystem::path("one-page.pdf"),
+                std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(1)) } },
+            { storedRasterPage },
+            0,
+            {});
+        backend.HydrateProject(storedRasterDocument);
+        Check(storedRasterDocument.PageAt(0).sourcePdfSourceIndex == 0
+                && storedRasterDocument.PageAt(0).sourcePdfPageIndex == 0,
+            "hydration keeps valid source indices with a stored raster");
+        Check(cnote::RasterImageEqual(storedRasterDocument.PageAt(0).raster, validStoredRaster),
+            "hydration does not overwrite a stored raster with the lazy source's empty one");
+    }
 
     std::printf("renderCount=%zu cachedPages=%zu\n", provider.RenderCount(), provider.CachedPageCount());
     std::printf(g_failures == 0 ? "ALL PDF BACKGROUND CHECKS PASSED\n" : "%d PDF BACKGROUND CHECK(S) FAILED\n", g_failures);

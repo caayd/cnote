@@ -25,6 +25,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -37,6 +38,7 @@
 
 #include "Document.h"
 #include "qt/QtDocumentController.h"
+#include "render/PageRenderer.h"
 #include "shell/AppManager.h"
 #include "ui/CanvasWidget.h"
 #include "ui/PageDefaultsQt.h"
@@ -109,6 +111,25 @@ int main(int argc, char** argv) {
     cnote::AppManager manager;
     cnote::qt::QtDocumentController controller(manager);
     controller.NewBlankDocument();
+
+    // A page retargeted to a PDF source/page must produce a different surface
+    // signature, so the cached surface of the previous background is discarded.
+    {
+        cnote::Page retargeted = controller.DocumentRef().PageAt(0);
+        cnote::render::PageRenderParams signatureParams;
+        signatureParams.scale = 1.0f;
+        const std::uint64_t rasterOnly =
+            cnote::render::PageSurfaceSignature(retargeted, signatureParams);
+        retargeted.sourcePdfSourceIndex = 0;
+        retargeted.sourcePdfPageIndex = 0;
+        const std::uint64_t sourcePageZero =
+            cnote::render::PageSurfaceSignature(retargeted, signatureParams);
+        Check(rasterOnly != sourcePageZero, "retargeting a page to a PDF source changes its signature");
+        retargeted.sourcePdfPageIndex = 1;
+        const std::uint64_t sourcePageOne =
+            cnote::render::PageSurfaceSignature(retargeted, signatureParams);
+        Check(sourcePageZero != sourcePageOne, "retargeting to another source page changes its signature");
+    }
 
     ui::CanvasWidget canvas(controller);
     canvas.resize(1400, 1400);
