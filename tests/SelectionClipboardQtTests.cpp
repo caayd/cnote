@@ -245,13 +245,14 @@ PageImage MakeImage(std::uint8_t alpha) {
     image.pixelWidth = 3;
     image.pixelHeight = 2;
     image.stride = 12;
-    image.pixels.assign(24U, 0U);
+    std::vector<std::uint8_t> pixels(24U, 0U);
     for (int i = 0; i < 6; ++i) {
-        image.pixels[static_cast<std::size_t>(i) * 4U + 0U] = static_cast<std::uint8_t>(1 + i);   // blue
-        image.pixels[static_cast<std::size_t>(i) * 4U + 1U] = static_cast<std::uint8_t>(11 + i);  // green
-        image.pixels[static_cast<std::size_t>(i) * 4U + 2U] = static_cast<std::uint8_t>(21 + i);  // red
-        image.pixels[static_cast<std::size_t>(i) * 4U + 3U] = alpha;
+        pixels[static_cast<std::size_t>(i) * 4U + 0U] = static_cast<std::uint8_t>(1 + i);   // blue
+        pixels[static_cast<std::size_t>(i) * 4U + 1U] = static_cast<std::uint8_t>(11 + i);  // green
+        pixels[static_cast<std::size_t>(i) * 4U + 2U] = static_cast<std::uint8_t>(21 + i);  // red
+        pixels[static_cast<std::size_t>(i) * 4U + 3U] = alpha;
     }
+    image.pixels = cnote::PixelBuffer(std::move(pixels));
     return image;
 }
 

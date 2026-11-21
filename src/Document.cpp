@@ -252,6 +252,18 @@ void Document::ReplaceWithProject(
     newPageDefaults_ = pageDefaults;
 }
 
+PixelBuffer::PixelBuffer(std::vector<std::uint8_t> bytes)
+    : bytes_(bytes.empty() ? nullptr : std::make_shared<const std::vector<std::uint8_t>>(std::move(bytes))) {}
+
+const std::vector<std::uint8_t>& PixelBuffer::bytes() const noexcept {
+    static const std::vector<std::uint8_t> kEmpty;
+    return bytes_ != nullptr ? *bytes_ : kEmpty;
+}
+
+bool operator==(const PixelBuffer& a, const PixelBuffer& b) noexcept {
+    return a.bytes_ == b.bytes_ || a.bytes() == b.bytes();
+}
+
 bool RasterImageEqual(const RasterImage& a, const RasterImage& b) {
     return a.width == b.width
         && a.height == b.height
@@ -270,18 +282,19 @@ RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderSca
     raster.height = bitmapHeight;
     raster.stride = stride;
     raster.scale = renderScale;
-    raster.pixels.resize(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight));
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight));
 
     const auto alpha = static_cast<std::uint8_t>((argb >> 24U) & 0xFFU);
     const auto red = static_cast<std::uint8_t>((argb >> 16U) & 0xFFU);
     const auto green = static_cast<std::uint8_t>((argb >> 8U) & 0xFFU);
     const auto blue = static_cast<std::uint8_t>(argb & 0xFFU);
-    for (std::size_t offset = 0; offset + 3U < raster.pixels.size(); offset += 4U) {
-        raster.pixels[offset] = blue;
-        raster.pixels[offset + 1U] = green;
-        raster.pixels[offset + 2U] = red;
-        raster.pixels[offset + 3U] = alpha;
+    for (std::size_t offset = 0; offset + 3U < pixels.size(); offset += 4U) {
+        pixels[offset] = blue;
+        pixels[offset + 1U] = green;
+        pixels[offset + 2U] = red;
+        pixels[offset + 3U] = alpha;
     }
+    raster.pixels = PixelBuffer(std::move(pixels));
 
     return raster;
 }
@@ -426,7 +439,7 @@ RasterImage RotateRasterQuarterTurn(const RasterImage& raster, int quarterTurns)
     rotated.height = (turns % 2 == 0) ? raster.height : raster.width;
     rotated.stride = rotated.width * 4;
     rotated.scale = raster.scale;
-    rotated.pixels.resize(static_cast<std::size_t>(rotated.stride) * static_cast<std::size_t>(rotated.height));
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(rotated.stride) * static_cast<std::size_t>(rotated.height));
 
     for (int y = 0; y < rotated.height; ++y) {
         for (int x = 0; x < rotated.width; ++x) {
@@ -450,12 +463,13 @@ RasterImage RotateRasterQuarterTurn(const RasterImage& raster, int quarterTurns)
             const auto* source = raster.pixels.data()
                 + (static_cast<std::size_t>(sourceY) * static_cast<std::size_t>(raster.stride))
                 + (static_cast<std::size_t>(sourceX) * 4U);
-            std::uint8_t* destination = rotated.pixels.data()
+            std::uint8_t* destination = pixels.data()
                 + (static_cast<std::size_t>(y) * static_cast<std::size_t>(rotated.stride))
                 + (static_cast<std::size_t>(x) * 4U);
             std::copy_n(source, 4U, destination);
         }
     }
+    rotated.pixels = PixelBuffer(std::move(pixels));
     return rotated;
 }
 

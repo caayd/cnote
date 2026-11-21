@@ -80,7 +80,7 @@ cnote::Document BuildDocument() {
     page.raster.height = 200;
     page.raster.stride = 200 * 4;
     page.raster.scale = 1.0f;
-    page.raster.pixels = SolidBgra(200, 200, 0x60, 0x40, 0x20, 0xFF);
+    page.raster.pixels = cnote::PixelBuffer(SolidBgra(200, 200, 0x60, 0x40, 0x20, 0xFF));
 
     // Translucent image over the background.
     cnote::PageImage image {};
@@ -91,7 +91,7 @@ cnote::Document BuildDocument() {
     image.pixelWidth = 40;
     image.pixelHeight = 40;
     image.stride = 40 * 4;
-    image.pixels = SolidBgra(40, 40, 0x00, 0x00, 0xFF, 0x80);
+    image.pixels = cnote::PixelBuffer(SolidBgra(40, 40, 0x00, 0x00, 0xFF, 0x80));
     page.images.push_back(image);
 
     // Styled multiline text with a surrogate pair; the first three code units

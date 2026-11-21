@@ -340,7 +340,9 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
         image.pixelHeight = static_cast<int>(pixelHeight);
         image.stride = static_cast<int>(stride);
         if (ok) {
-            ok = reader.ReadBytes(image.pixels, dataSize);
+            std::vector<std::uint8_t> pixels;
+            ok = reader.ReadBytes(pixels, dataSize);
+            image.pixels = PixelBuffer(std::move(pixels));
         }
         if (ok) {
             data.images.push_back(std::move(image));

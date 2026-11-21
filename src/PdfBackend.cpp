@@ -129,7 +129,7 @@ std::optional<RasterImage> RenderPageBitmap(FPDF_PAGE pageHandle, float renderSc
 
     const auto* source = static_cast<const std::uint8_t*>(FPDFBitmap_GetBuffer(bitmap));
     const std::size_t totalBytes = static_cast<std::size_t>(raster.stride) * static_cast<std::size_t>(bitmapHeight);
-    raster.pixels.assign(source, source + totalBytes);
+    raster.pixels = PixelBuffer(std::vector<std::uint8_t>(source, source + totalBytes));
     FPDFBitmap_Destroy(bitmap);
     return raster;
 }
@@ -200,7 +200,7 @@ bool AppendBitmapObject(
     int pixelWidth,
     int pixelHeight,
     int stride,
-    std::uint8_t* pixels,
+    const std::uint8_t* pixels,
     double a,
     double b,
     double c,
@@ -213,11 +213,13 @@ bool AppendBitmapObject(
         return false;
     }
 
+    // PDFium only reads an external BGRA buffer it is handed for an image
+    // object; the API just lacks a const overload.
     FPDF_BITMAP bitmapHandle = FPDFBitmap_CreateEx(
         pixelWidth,
         pixelHeight,
         FPDFBitmap_BGRA,
-        pixels,
+        const_cast<std::uint8_t*>(pixels),
         stride);
     if (bitmapHandle == nullptr) {
         return false;
@@ -246,7 +248,7 @@ bool AppendFullPageRasterObject(
     FPDF_DOCUMENT documentHandle,
     FPDF_PAGE pageHandle,
     const Page& page,
-    RasterImage& raster,
+    const RasterImage& raster,
     std::vector<FPDF_BITMAP>& ownedBitmaps) {
     return AppendBitmapObject(
         documentHandle,
@@ -294,7 +296,7 @@ bool AppendPageImageObject(
         image.pixelWidth,
         image.pixelHeight,
         image.stride,
-        const_cast<std::uint8_t*>(image.pixels.data()),
+        image.pixels.data(),
         a,
         b,
         c,
@@ -327,7 +329,7 @@ RasterImage CreateBlankRaster(float pageWidth, float pageHeight, float renderSca
     raster.height = bitmapHeight;
     raster.stride = stride;
     raster.scale = renderScale;
-    raster.pixels.assign(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight), 0xFF);
+    raster.pixels = PixelBuffer(std::vector<std::uint8_t>(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight), 0xFF));
     return raster;
 }
 

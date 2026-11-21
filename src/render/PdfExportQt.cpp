@@ -30,11 +30,11 @@ RasterImage ToStraightBgra(const QImage& image, float renderScale) {
     raster.height = image.height();
     raster.stride = image.width() * 4;
     raster.scale = renderScale;
-    raster.pixels.resize(static_cast<std::size_t>(raster.stride) * static_cast<std::size_t>(raster.height));
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(raster.stride) * static_cast<std::size_t>(raster.height));
 
     for (int y = 0; y < image.height(); ++y) {
         const auto* source = reinterpret_cast<const std::uint8_t*>(image.constScanLine(y));
-        std::uint8_t* destination = raster.pixels.data()
+        std::uint8_t* destination = pixels.data()
             + (static_cast<std::size_t>(y) * static_cast<std::size_t>(raster.stride));
         for (int x = 0; x < image.width(); ++x) {
             const std::uint8_t blue = source[(x * 4) + 0];
@@ -54,6 +54,7 @@ RasterImage ToStraightBgra(const QImage& image, float renderScale) {
             destination[(x * 4) + 3] = alpha;
         }
     }
+    raster.pixels = PixelBuffer(std::move(pixels));
     return raster;
 }
 
