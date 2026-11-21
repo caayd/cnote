@@ -206,5 +206,12 @@ qreal ReservedToolbarHeight(bool autoHide, bool maximized);
 // `interactionActive` is the reference's guard list of active drags/editors
 // (App.cpp:2444-2464) and produces ToolbarAutoHide::None.
 ToolbarAutoHide ResolveToolbarAutoHide(qreal cursorY, bool maximized, bool revealed, bool interactionActive, qreal frameThicknessX = 0.0);
+// Decision when the cursor crosses the window's client boundary - it entered
+// the client area or left it (App.cpp:369-396, the WM_MOUSELEAVE handler).
+// A cursor inside the band area [0, ToolbarHeight) reveals, anywhere else
+// hides.  The per-move rule above only reveals inside the 12-pixel strip, which
+// a cursor coming from outside an unmaximized window skips easily; at the
+// boundary the whole band counts.
+ToolbarAutoHide ResolveToolbarAutoHideAtBoundary(const QPointF& cursor, const QSizeF& clientSize, bool maximized, bool interactionActive);
 
 }  // namespace cnote::appui::qt

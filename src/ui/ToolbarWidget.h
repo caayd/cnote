@@ -235,6 +235,10 @@ public:
     // `hostPosition` is in host (window) coordinates, `interactionActive` is the
     // reference guard list of active drags/editors.
     void UpdateAutoHideForCursor(const QPointF& hostPosition, bool interactionActive);
+    // The cursor entered or left the host's client area at `hostPosition`
+    // (qt::ResolveToolbarAutoHideAtBoundary): inside the band area reveals,
+    // anywhere else hides, under the same guards as UpdateAutoHideForCursor.
+    void UpdateAutoHideAtBoundary(const QPointF& hostPosition, bool interactionActive);
     // Current vertical offset inside the host for the reveal animation
     // (App::ToolbarOffsetYForProgress).
     [[nodiscard]] qreal ToolbarOffsetY() const;
