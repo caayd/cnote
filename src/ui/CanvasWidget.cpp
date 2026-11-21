@@ -68,6 +68,12 @@ constexpr float kMaxDrawCursorDiameter = 24.0f;
 constexpr float kEraserMinRadiusPixels = 3.5f;
 constexpr qreal kEraserOutlinePixels = 0.75f;
 
+// Eraser trail look (Excalidraw's EraserTrail): 20% black, repainted every
+// frame (~60 Hz) while it decays; arcs flattened to a quarter logical pixel.
+constexpr int kEraserTrailAlpha = 51;
+constexpr int kEraserTrailFrameMs = 16;
+constexpr float kEraserTrailTolerance = 0.25f;
+
 // LaTeX source box and completion popup metrics (logical pixels).
 constexpr int kLatexSourceBoxHeight = 120;
 constexpr int kLatexSourceBoxGap = 6;
@@ -109,6 +115,11 @@ CanvasWidget::CanvasWidget(CanvasController& controller, QWidget* parent)
     zoomSettleTimer_->setSingleShot(true);
     zoomSettleTimer_->setInterval(kZoomSessionDelayMs);
     connect(zoomSettleTimer_, &QTimer::timeout, this, [this]() { EndZoomSession(); });
+
+    eraserTrailClock_.start();
+    eraserTrailTimer_ = new QTimer(this);
+    eraserTrailTimer_->setInterval(kEraserTrailFrameMs);
+    connect(eraserTrailTimer_, &QTimer::timeout, this, [this]() { RefreshEraserTrail(); });
 }
 
 CanvasWidget::~CanvasWidget() = default;
@@ -1379,6 +1390,17 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     // next gesture samples start a fresh region.
     transientDirty_ = QRect();
     PruneSurfaces(visiblePages);
+    // The erase drag's fading trail floats above the pages like the
+    // selection chrome (Excalidraw: rgba(0, 0, 0, 0.2) on the light theme).
+    if (const std::int64_t now = eraserTrailClock_.elapsed(); eraserTrail_.Visible(now)) {
+        InkOutline outline;
+        eraserTrail_.AppendOutline(now, kEraserTrailTolerance, outline);
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(Qt::NoPen);
+        painter.fillPath(render::InkOutlinePath(outline), QColor(0, 0, 0, kEraserTrailAlpha));
+        painter.restore();
+    }
     PaintSelectionOverlay(painter);
     PositionOverlays();
 }
@@ -2151,15 +2173,18 @@ void CanvasWidget::HandlePointerPress(const PointerSample& sample) {
         CommitActiveEdit();
     }
     router_->HandlePointerPress(sample);
+    TrackEraserTrail(sample.position);
     update();
 }
 
 void CanvasWidget::HandlePointerMove(const PointerSample& sample) {
     router_->HandlePointerMove(sample);
+    TrackEraserTrail(sample.position);
 }
 
 void CanvasWidget::HandlePointerRelease(const PointerSample& sample) {
     router_->HandlePointerRelease(sample);
+    TrackEraserTrail(sample.position);
     update();
 }
 
@@ -2170,7 +2195,48 @@ void CanvasWidget::HandlePointerCancel(CancelReason reason) {
     // canvas focus change must not discard typed content (Escape cancels).
     static_cast<void>(reason);
     router_->CancelInteraction();
+    TrackEraserTrail(std::nullopt);
     update();
+}
+
+void CanvasWidget::TrackEraserTrail(std::optional<QPointF> position) {
+    const bool erasing = router_->ActiveInteraction() == InteractionKind::Erase && position.has_value();
+    if (!erasing && !eraserTrail_.Active()) {
+        return;
+    }
+    if (erasing) {
+        const std::int64_t now = eraserTrailClock_.elapsed();
+        const Vec2 point { static_cast<float>(position->x()), static_cast<float>(position->y()) };
+        if (eraserTrail_.Active()) {
+            eraserTrail_.Add(point, now);
+        } else {
+            // The swept width is the eraser's own hit radius (EraseTargetsAt).
+            eraserTrail_.Begin(point, now, std::max(kEraserMinRadiusPixels, eraseBrushSize_ * 4.0f));
+        }
+    } else {
+        eraserTrail_.End();
+    }
+    RefreshEraserTrail();
+}
+
+void CanvasWidget::RefreshEraserTrail() {
+    const std::int64_t now = eraserTrailClock_.elapsed();
+    QRect next;
+    float left = 0.0f, top = 0.0f, right = 0.0f, bottom = 0.0f;
+    if (eraserTrail_.Bounds(now, &left, &top, &right, &bottom)) {
+        next = QRectF(QPointF(left, top), QPointF(right, bottom)).toAlignedRect().adjusted(-2, -2, 2, 2);
+    }
+    // QRect::united treats an empty rect as a point at the origin.
+    const QRect dirty = eraserTrailRect_.isEmpty() ? next : (next.isEmpty() ? eraserTrailRect_ : eraserTrailRect_.united(next));
+    if (!dirty.isEmpty()) {
+        update(dirty);
+    }
+    eraserTrailRect_ = next;
+    if (!eraserTrail_.Visible(now)) {
+        eraserTrailTimer_->stop();
+    } else if (!eraserTrailTimer_->isActive()) {
+        eraserTrailTimer_->start();
+    }
 }
 
 std::optional<PageHit> CanvasWidget::HitTestPage(const QPointF& logical) const {
