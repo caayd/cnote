@@ -16,6 +16,7 @@
 #include "settings/SettingsStoreQt.h"
 #include "ui/LayoutQt.h"
 
+class QFocusEvent;
 class QTimer;
 
 namespace cnote::ui {
@@ -24,6 +25,33 @@ class QuickSizePopup;
 class TextFormatPopup;
 class PaletteMenuPopup;
 class PaletteWheelOverlay;
+
+// Hand-drawn inline editor state shared by the toolbar's zoom label and the
+// sidebar's page indicator.  Exactly one owner at a time; `active` gates both
+// paint and key handling, `text` is the pending digits.
+struct InlineEdit {
+    bool active = false;
+    QString text {};
+};
+
+// The four transient toolbar surfaces.  One value is the truth: at most one is
+// open, and every show/hide transition goes through Open/Toggle/CloseOverlay.
+enum class OverlayId {
+    None,
+    PaletteMenu,
+    PaletteWheel,
+    QuickSize,
+    TextFormat,
+};
+
+// Auto-hide animation phase.  `from`/`to` are the endpoints of the running
+// segment; `RevealProgress()` is the interpolated value between them.
+enum class RevealPhase {
+    Hidden,
+    Showing,
+    Shown,
+    Hiding,
+};
 
 // One control of the reference compact toolbar.  The geometry of every control
 // comes from cnote::appui::qt::BuildToolbarLayout; this enum is the identity used
@@ -143,9 +171,13 @@ public:
     void BeginZoomEdit();
     void CancelZoomEdit();
     void CommitZoomEdit();
-    [[nodiscard]] bool ZoomEditing() const { return zoomEditing_; }
+    [[nodiscard]] bool ZoomEditing() const { return zoomEdit_.active; }
 
     // --- overlays ---------------------------------------------------------
+    // The single open overlay, if any.  The per-overlay *Visible() accessors
+    // below derive from this value rather than from widget visibility, so a
+    // host-side hide can never leave the widget and the model disagreeing.
+    [[nodiscard]] OverlayId ActiveOverlay() const { return activeOverlay_; }
     // The host-space canvas rect (client area below the reserved toolbar band)
     // that anchors and clamps the overlays - the reference App::CanvasRect.
     // The shell needs it to resolve the Ctrl+W cursor anchor's out-of-canvas
@@ -195,7 +227,10 @@ public:
     void SetAutoHideEnabled(bool enabled);
     [[nodiscard]] bool AutoHideEnabled() const { return settings_.autoHideToolbar; }
     void SetRevealed(bool revealed);
-    [[nodiscard]] bool Revealed() const { return revealed_; }
+    [[nodiscard]] bool Revealed() const {
+        return reveal_.phase == RevealPhase::Showing || reveal_.phase == RevealPhase::Shown;
+    }
+    [[nodiscard]] RevealPhase Phase() const { return reveal_.phase; }
     [[nodiscard]] qreal RevealProgress() const { return revealProgress_; }
     // `hostPosition` is in host (window) coordinates, `interactionActive` is the
     // reference guard list of active drags/editors.
@@ -243,13 +278,23 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void leaveEvent(QEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void focusOutEvent(QFocusEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
     bool event(QEvent* event) override;
 
 private:
     void UpdateToolbarGeometry();
-    void StartRevealAnimation(qreal target);
+    // The only writer of the reveal state: starts (or snaps) the transition to
+    // `revealed`, emits RevealStateChanged when the exposed truth changes, and
+    // always leaves geometry and RevealProgressChanged consistent.
+    void SetRevealTarget(bool revealed, bool animate = true);
     void OnRevealTick();
+    // Overlay truth: at most one is open.  Opening always closes the previous
+    // one; closing only acts when `id` is active.
+    void OpenOverlay(OverlayId id);
+    void ToggleOverlay(OverlayId id);
+    void CloseOverlay(OverlayId id);
+    [[nodiscard]] bool MayShowOverlay(OverlayId id) const;
     void EnsureOverlays();
     void PositionOverlays();
     void OnQuickSizeChanged(settings::Tool tool, float size);
@@ -286,15 +331,19 @@ private:
     std::size_t formatSizePreset_ = 1;  // medium until the shell reports otherwise
     ToolbarControl hovered_ = ToolbarControl::None;
     ToolbarControl pressed_ = ToolbarControl::None;
-    bool zoomEditing_ = false;
-    QString zoomEditText_ {};
+    InlineEdit zoomEdit_ {};
 
-    bool revealed_ = true;
+    struct RevealState {
+        RevealPhase phase = RevealPhase::Shown;
+        qreal from = 1.0;
+        qreal to = 1.0;
+    };
+    RevealState reveal_ {};
     qreal revealProgress_ = 1.0;
     QTimer* revealTimer_ = nullptr;
     QElapsedTimer revealClock_ {};
-    qreal revealFrom_ = 1.0;
-    qreal revealTo_ = 1.0;
+
+    OverlayId activeOverlay_ = OverlayId::None;
 
     std::optional<std::size_t> wheelHoverIndex_ {};
     QRectF textFormatEditRect_ {};

@@ -8,6 +8,7 @@
 
 #include <QApplication>
 #include <QEvent>
+#include <QFocusEvent>
 #include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QMenu>
@@ -258,6 +259,16 @@ public:
     [[nodiscard]] bool SliderDragging() const { return dragging_; }
     [[nodiscard]] float BrushSize() const { return brushSize_; }
 
+    // Hiding the popup abandons an in-flight drag or text edit; otherwise a
+    // later reopen would paint the stale active thumb and keep the auto-hide
+    // guard raised through QuickSizeSliderDragging().
+    void ResetInteraction() {
+        dragging_ = false;
+        editing_ = false;
+        editText_.clear();
+        update();
+    }
+
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
@@ -504,6 +515,16 @@ public:
     [[nodiscard]] bool FontMenuOpen() const { return fontMenuOpen_; }
     [[nodiscard]] bool SizeMenuOpen() const { return sizeMenuOpen_; }
     [[nodiscard]] std::optional<TextFontFamily> HoveredFontOption() const { return hoveredFontOption_; }
+
+    // Closing the popup drops both dropdowns and any hover highlight so the
+    // next open starts from a clean paint state.
+    void ResetInteraction() {
+        fontMenuOpen_ = false;
+        sizeMenuOpen_ = false;
+        hoveredFontOption_.reset();
+        hoveredSizeOption_.reset();
+        update();
+    }
 
 protected:
     void paintEvent(QPaintEvent*) override {
@@ -1162,21 +1183,20 @@ void ToolbarWidget::SetSettings(const settings::Settings& settings) {
     settings_ = settings;
     // A wheel-tool toggle while the wheel is open re-slices it (the reference
     // repaints from wheel_.tools on the next frame, App.cpp:6755-6760).
-    if (paletteWheel_ != nullptr && paletteWheel_->isVisible()) {
+    if (activeOverlay_ == OverlayId::PaletteWheel && paletteWheel_ != nullptr) {
         paletteWheel_->SetEntries(settings_.palette, PaletteWheelDisplayedTools(), settings_.colorIndex, paletteWheel_->ZoomPresetMode(), settings_.zoomPresets);
     }
     if (!settings_.autoHideToolbar) {
-        revealProgress_ = 1.0;
-        revealed_ = true;
+        SetRevealTarget(true, /*animate=*/false);
     } else if (!wasAutoHide) {
         // Auto-hide just turned on (including the first settings load): the
         // band parks above the host.  SetAutoHideEnabled early-returns once
         // the flag already matches, so without this the band would start
         // revealed and slide away on the first mouse move.
-        revealProgress_ = 0.0;
-        revealed_ = false;
+        SetRevealTarget(false, /*animate=*/false);
+    } else {
+        UpdateToolbarGeometry();
     }
-    UpdateToolbarGeometry();
     update();
 }
 
@@ -1226,11 +1246,29 @@ bool ToolbarWidget::ShowWheelToolMenu(const QPointF& widgetPosition, const QPoin
     return true;
 }
 
+bool ToolbarWidget::MayShowOverlay(OverlayId id) const {
+    switch (id) {
+    case OverlayId::QuickSize:
+        return activeTool_ == settings::Tool::Draw || activeTool_ == settings::Tool::Erase;
+    case OverlayId::TextFormat:
+        return activeTool_ == settings::Tool::Text;
+    case OverlayId::None:
+    case OverlayId::PaletteMenu:
+    case OverlayId::PaletteWheel:
+        return true;
+    }
+    return true;
+}
+
 void ToolbarWidget::SetActiveTool(settings::Tool tool) {
     if (activeTool_ == tool) {
         return;
     }
     activeTool_ = tool;
+    // A popup that belongs to the old tool cannot survive the switch.
+    if (activeOverlay_ != OverlayId::None && !MayShowOverlay(activeOverlay_)) {
+        CloseOverlay(activeOverlay_);
+    }
     update();
 }
 
@@ -1490,8 +1528,8 @@ qreal ToolbarWidget::VisibleToolbarHeight() const {
     // reveal animation runs, while it is revealed, or while an inline editor or
     // an open overlay owns it.
     const bool visible = revealProgress_ > 0.001
-        || revealed_
-        || zoomEditing_
+        || Revealed()
+        || zoomEdit_.active
         || QuickSizeSliderDragging()
         || AnyOverlayVisible();
     return visible ? qt::ToolbarHeight(maximized_) : 0.0;
@@ -1502,29 +1540,67 @@ void ToolbarWidget::SetAutoHideEnabled(bool enabled) {
         return;
     }
     settings_.autoHideToolbar = enabled;
-    if (enabled) {
-        revealProgress_ = 0.0;
-        revealed_ = false;
-    } else {
-        revealProgress_ = 1.0;
-        revealed_ = true;
-    }
-    UpdateToolbarGeometry();
-    emit RevealStateChanged(revealed_);
-    emit RevealProgressChanged(revealProgress_);
+    SetRevealTarget(!enabled, /*animate=*/false);
     update();
 }
 
 void ToolbarWidget::SetRevealed(bool revealed) {
+    SetRevealTarget(revealed);
+}
+
+void ToolbarWidget::SetRevealTarget(bool revealed, bool animate) {
     if (!settings_.autoHideToolbar) {
         revealed = true;
     }
-    if (revealed_ == revealed) {
+    const qreal target = revealed ? 1.0 : 0.0;
+    if (!animate) {
+        // Toggling auto-hide parks or restores the band immediately (the
+        // reference never animates that switch).
+        const bool stateChanged = Revealed() != revealed;
+        const bool progressChanged = std::abs(revealProgress_ - target) > 0.0001;
+        revealTimer_->stop();
+        revealProgress_ = target;
+        reveal_.from = target;
+        reveal_.to = target;
+        reveal_.phase = revealed ? RevealPhase::Shown : RevealPhase::Hidden;
+        if (stateChanged) {
+            emit RevealStateChanged(revealed);
+        }
+        UpdateToolbarGeometry();
+        if (stateChanged || progressChanged) {
+            emit RevealProgressChanged(revealProgress_);
+        }
+        update();
         return;
     }
-    revealed_ = revealed;
-    emit RevealStateChanged(revealed_);
-    StartRevealAnimation(revealed ? 1.0 : 0.0);
+    // A repeated request in the same direction must not restart the 120 ms
+    // easing on every mouse move.
+    if (Revealed() == revealed) {
+        return;
+    }
+    // Elapsed-time driven (plan step 5.3): capture the current progress and ease
+    // toward the target over the reference 120 ms, never blocking.  Retargeting
+    // folds the pending frame into `from` without emitting a throwaway signal.
+    if (revealTimer_->isActive()) {
+        const qreal linear = std::clamp(static_cast<double>(revealClock_.elapsed()) / 120.0, 0.0, 1.0);
+        const qreal eased = linear * linear * (3.0 - (2.0 * linear));
+        revealProgress_ = reveal_.from + ((reveal_.to - reveal_.from) * eased);
+    }
+    reveal_.from = revealProgress_;
+    reveal_.to = target;
+    reveal_.phase = revealed ? RevealPhase::Showing : RevealPhase::Hiding;
+    emit RevealStateChanged(revealed);
+    if (std::abs(reveal_.from - reveal_.to) <= 0.001) {
+        revealProgress_ = reveal_.to;
+        reveal_.phase = revealed ? RevealPhase::Shown : RevealPhase::Hidden;
+        revealTimer_->stop();
+        UpdateToolbarGeometry();
+        emit RevealProgressChanged(revealProgress_);
+        update();
+        return;
+    }
+    revealClock_.start();
+    revealTimer_->start();
 }
 
 void ToolbarWidget::UpdateAutoHideForCursor(const QPointF& hostPosition, bool interactionActive) {
@@ -1536,8 +1612,8 @@ void ToolbarWidget::UpdateAutoHideForCursor(const QPointF& hostPosition, bool in
     // up.  The Qt overlays are real widgets, so an open wheel/popup covering
     // the band would otherwise deliver a Leave that hides it mid-gesture.
     const qt::ToolbarAutoHide decision = qt::ResolveToolbarAutoHide(
-        hostPosition.y(), maximized_, revealed_,
-        interactionActive || AnyOverlayVisible() || zoomEditing_, frameThicknessX_);
+        hostPosition.y(), maximized_, Revealed(),
+        interactionActive || AnyOverlayVisible() || zoomEdit_.active, frameThicknessX_);
     if (decision == qt::ToolbarAutoHide::Reveal) {
         SetRevealed(true);
     } else if (decision == qt::ToolbarAutoHide::Hide) {
@@ -1545,38 +1621,14 @@ void ToolbarWidget::UpdateAutoHideForCursor(const QPointF& hostPosition, bool in
     }
 }
 
-void ToolbarWidget::StartRevealAnimation(qreal target) {
-    if (!settings_.autoHideToolbar) {
-        revealProgress_ = std::clamp(target, 0.0, 1.0);
-        UpdateToolbarGeometry();
-        return;
-    }
-    // Elapsed-time driven (plan step 5.3): capture the current progress and ease
-    // toward the target over the reference 120 ms, never blocking.
-    if (revealTimer_->isActive()) {
-        OnRevealTick();
-    }
-    revealFrom_ = revealProgress_;
-    revealTo_ = std::clamp(target, 0.0, 1.0);
-    if (std::abs(revealFrom_ - revealTo_) <= 0.001) {
-        revealProgress_ = revealTo_;
-        revealTimer_->stop();
-        UpdateToolbarGeometry();
-        emit RevealProgressChanged(revealProgress_);
-        update();
-        return;
-    }
-    revealClock_.start();
-    revealTimer_->start();
-}
-
 void ToolbarWidget::OnRevealTick() {
     const double elapsed = static_cast<double>(revealClock_.elapsed());
     const qreal linear = std::clamp(elapsed / 120.0, 0.0, 1.0);
     const qreal eased = linear * linear * (3.0 - (2.0 * linear));  // smoothstep, App.cpp:2501
-    revealProgress_ = revealFrom_ + ((revealTo_ - revealFrom_) * eased);
+    revealProgress_ = reveal_.from + ((reveal_.to - reveal_.from) * eased);
     if (linear >= 1.0) {
-        revealProgress_ = revealTo_;
+        revealProgress_ = reveal_.to;
+        reveal_.phase = reveal_.to >= 1.0 ? RevealPhase::Shown : RevealPhase::Hidden;
         revealTimer_->stop();
     }
     UpdateToolbarGeometry();
@@ -1585,7 +1637,8 @@ void ToolbarWidget::OnRevealTick() {
 }
 
 void ToolbarWidget::paintEvent(QPaintEvent*) {
-    if (settings_.autoHideToolbar && revealProgress_ <= 0.001) {
+    // Exactly the vertical-extent truth the shell's hit test consumes.
+    if (VisibleToolbarHeight() <= 0.0) {
         return;
     }
     QPainter painter(this);
@@ -1690,13 +1743,13 @@ void ToolbarWidget::paintEvent(QPaintEvent*) {
         if (hovered_ == ToolbarControl::Zoom) {
             ChromeFillRoundedRect(painter, titleLayout.zoomRect.adjusted(1.0, 1.0, -1.0, -1.0), ChromeColor(kChromeButtonFillHover), 4.0);
         }
-        if (zoomEditing_) {
+        if (zoomEdit_.active) {
             const QRectF entry = titleLayout.zoomRect.adjusted(0.0, 7.0, 0.0, -7.0);
             ChromeStrokeRoundedRect(painter, entry, ChromeColor(kChromeAccent), 1.0, 4.0);
             painter.setPen(ChromeColor(kChromeSelectionBorder));
             const QRectF textRect = entry.adjusted(6.0, 0.0, -6.0, 0.0);
-            painter.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, zoomEditText_);
-            const qreal advance = QFontMetricsF(ChromeFont(15)).horizontalAdvance(zoomEditText_);
+            painter.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, zoomEdit_.text);
+            const qreal advance = QFontMetricsF(ChromeFont(15)).horizontalAdvance(zoomEdit_.text);
             const qreal caretX = std::min(textRect.right() - 1.0, textRect.left() + advance + 1.0);
             painter.drawLine(QPointF(caretX, entry.top() + 4.0), QPointF(caretX, entry.bottom() - 4.0));
         } else {
@@ -1744,8 +1797,7 @@ void ToolbarWidget::mousePressEvent(QMouseEvent* event) {
     }
 
     if (control == ToolbarControl::Zoom) {
-        HidePaletteMenu();
-        HideQuickSizePopup();
+        CloseOverlays();
         BeginZoomEdit();
         return;
     }
@@ -1824,7 +1876,7 @@ void ToolbarWidget::leaveEvent(QEvent* event) {
 }
 
 void ToolbarWidget::keyPressEvent(QKeyEvent* event) {
-    if (!zoomEditing_) {
+    if (!zoomEdit_.active) {
         QWidget::keyPressEvent(event);
         return;
     }
@@ -1837,14 +1889,14 @@ void ToolbarWidget::keyPressEvent(QKeyEvent* event) {
         return;
     }
     if (event->key() == Qt::Key_Backspace) {
-        zoomEditText_.chop(1);
+        zoomEdit_.text.chop(1);
         update();
         return;
     }
     const QString text = event->text();
     if (!text.isEmpty() && (text.at(0).isDigit() || text.at(0) == QLatin1Char('%') || text.at(0) == QLatin1Char('.'))) {
         if (text.at(0) != QLatin1Char('%')) {
-            zoomEditText_ += text;
+            zoomEdit_.text += text;
         }
         update();
         return;
@@ -1852,24 +1904,39 @@ void ToolbarWidget::keyPressEvent(QKeyEvent* event) {
     QWidget::keyPressEvent(event);
 }
 
+void ToolbarWidget::focusOutEvent(QFocusEvent* event) {
+    // Leaving the toolbar commits like the reference's edit controls; the
+    // hand-drawn editor otherwise stayed active forever and kept the auto-hide
+    // guard raised.
+    if (zoomEdit_.active) {
+        CommitZoomEdit();
+    }
+    QWidget::focusOutEvent(event);
+}
+
 void ToolbarWidget::BeginZoomEdit() {
-    zoomEditing_ = true;
-    zoomEditText_ = zoomLabel_;
+    zoomEdit_.active = true;
+    zoomEdit_.text = zoomLabel_;
     setFocus(Qt::MouseFocusReason);
     update();
 }
 
 void ToolbarWidget::CancelZoomEdit() {
-    zoomEditing_ = false;
+    if (!zoomEdit_.active) {
+        return;
+    }
+    zoomEdit_.active = false;
+    zoomEdit_.text.clear();
     update();
 }
 
 void ToolbarWidget::CommitZoomEdit() {
-    if (!zoomEditing_) {
+    if (!zoomEdit_.active) {
         return;
     }
-    const QString text = zoomEditText_.remove(QLatin1Char('%')).trimmed();
-    zoomEditing_ = false;
+    const QString text = zoomEdit_.text.remove(QLatin1Char('%')).trimmed();
+    zoomEdit_.active = false;
+    zoomEdit_.text.clear();
     update();
     if (!text.isEmpty()) {
         emit ZoomTextCommitted(text);
@@ -1877,9 +1944,7 @@ void ToolbarWidget::CommitZoomEdit() {
 }
 
 void ToolbarWidget::ZoomCommitIfEditing() {
-    if (zoomEditing_) {
-        CommitZoomEdit();
-    }
+    CommitZoomEdit();
 }
 
 void ToolbarWidget::EnsureOverlays() {
@@ -1913,14 +1978,14 @@ QRectF ToolbarWidget::HostCanvasRect() const {
 }
 
 void ToolbarWidget::PositionOverlays() {
-    if (textFormatPopup_ != nullptr && textFormatPopup_->isVisible()) {
+    if (activeOverlay_ == OverlayId::TextFormat && textFormatPopup_ != nullptr) {
         const QRectF canvas = HostCanvasRect();
         const QRectF editRect = textFormatEditRect_;
         const qt::TextFormatPopupLayout layout = qt::BuildTextFormatPopupLayout(
             canvas, editRect, textFormatPopup_->FontMenuOpen(), textFormatPopup_->SizeMenuOpen());
         textFormatPopup_->Configure(layout, qt::TextFormatPopupBounds(layout).toAlignedRect());
     }
-    if (paletteWheel_ != nullptr && paletteWheel_->isVisible()) {
+    if (activeOverlay_ == OverlayId::PaletteWheel && paletteWheel_ != nullptr) {
         paletteWheel_->Configure(HostClientRect().toAlignedRect());
     }
 }
@@ -1934,20 +1999,15 @@ void ToolbarWidget::ShowQuickSizePopup(settings::Tool tool, const QPointF& hostA
     quickSizePopup_->Configure(layout, qt::QuickSizePopupBounds(layout).toAlignedRect());
     quickSizePopup_->SetState(tool, brushSize, settings_.quickSizeSliderMax, settings_.brushSizePresets,
         tool == settings::Tool::Erase ? 0xFFFFFFFFU : (settings_.palette.empty() ? 0xFF1F2937U : settings_.palette[settings_.colorIndex % settings_.palette.size()]));
-    quickSizePopup_->show();
-    quickSizePopup_->raise();
-
+    OpenOverlay(OverlayId::QuickSize);
 }
 
 void ToolbarWidget::HideQuickSizePopup() {
-    if (quickSizePopup_ != nullptr && quickSizePopup_->isVisible()) {
-        quickSizePopup_->hide();
-
-    }
+    CloseOverlay(OverlayId::QuickSize);
 }
 
 bool ToolbarWidget::QuickSizePopupVisible() const {
-    return quickSizePopup_ != nullptr && quickSizePopup_->isVisible();
+    return activeOverlay_ == OverlayId::QuickSize;
 }
 
 QRect ToolbarWidget::QuickSizePopupBounds() const {
@@ -1977,22 +2037,15 @@ void ToolbarWidget::ShowTextFormatPopup(const QRectF& editRectInHost) {
         canvas, editRectInHost, textFormatPopup_->FontMenuOpen(), textFormatPopup_->SizeMenuOpen());
     textFormatPopup_->SetState(formatStyle_, formatAlignment_, formatSizePreset_);
     textFormatPopup_->Configure(layout, qt::TextFormatPopupBounds(layout).toAlignedRect());
-    textFormatPopup_->show();
-    textFormatPopup_->raise();
-
+    OpenOverlay(OverlayId::TextFormat);
 }
 
 void ToolbarWidget::HideTextFormatPopup() {
-    if (textFormatPopup_ != nullptr && textFormatPopup_->isVisible()) {
-        textFormatPopup_->hide();
-        textFormatPopup_->SetFontMenuOpen(false);
-        textFormatPopup_->SetSizeMenuOpen(false);
-
-    }
+    CloseOverlay(OverlayId::TextFormat);
 }
 
 bool ToolbarWidget::TextFormatPopupVisible() const {
-    return textFormatPopup_ != nullptr && textFormatPopup_->isVisible();
+    return activeOverlay_ == OverlayId::TextFormat;
 }
 
 QRect ToolbarWidget::TextFormatPopupBounds() const {
@@ -2001,34 +2054,20 @@ QRect ToolbarWidget::TextFormatPopupBounds() const {
 
 void ToolbarWidget::TogglePaletteMenu() {
     EnsureOverlays();
-    const bool open = !paletteMenuPopup_->isVisible();
-    if (open) {
-        CloseOverlays();
+    if (activeOverlay_ != OverlayId::PaletteMenu) {
         const qt::PaletteMenuLayout layout = qt::BuildPaletteMenuLayout(ComputeLayout(), settings_.palette.size());
         paletteMenuPopup_->SetState(settings_.palette, settings_.colorIndex);
         paletteMenuPopup_->Configure(layout, layout.panelRect.toAlignedRect());
-        paletteMenuPopup_->show();
-        paletteMenuPopup_->raise();
-
-    } else {
-        paletteMenuPopup_->hide();
-
     }
-    emit PaletteOverlayToggled(open);
-    update();
+    ToggleOverlay(OverlayId::PaletteMenu);
 }
 
 void ToolbarWidget::HidePaletteMenu() {
-    if (paletteMenuPopup_ != nullptr && paletteMenuPopup_->isVisible()) {
-        paletteMenuPopup_->hide();
-        emit PaletteOverlayToggled(false);
-
-        update();
-    }
+    CloseOverlay(OverlayId::PaletteMenu);
 }
 
 bool ToolbarWidget::PaletteMenuVisible() const {
-    return paletteMenuPopup_ != nullptr && paletteMenuPopup_->isVisible();
+    return activeOverlay_ == OverlayId::PaletteMenu;
 }
 
 QRectF ToolbarWidget::PaletteMenuBounds() const {
@@ -2067,50 +2106,125 @@ void ToolbarWidget::TogglePaletteWheel() {
 
 void ToolbarWidget::TogglePaletteWheel(const QPointF& hostCenter) {
     EnsureOverlays();
-    const bool open = !paletteWheel_->isVisible();
-    if (open) {
-        CloseOverlays();
-        wheelCenter_ = hostCenter;
-        wheelHoverIndex_.reset();
-        paletteWheel_->SetEntries(settings_.palette, PaletteWheelDisplayedTools(), settings_.colorIndex, false, settings_.zoomPresets);
-        paletteWheel_->Configure(HostClientRect().toAlignedRect());
-        paletteWheel_->show();
-        paletteWheel_->raise();
-        // The reference seeds the hover slice under the cursor right after
-        // opening (ToolbarState.cpp:145-147 UpdatePaletteWheelHover(cursor)).
-        paletteWheel_->UpdateHover(hostCenter);
-    } else {
-        paletteWheel_->hide();
-        wheelHoverIndex_.reset();
+    if (activeOverlay_ == OverlayId::PaletteWheel) {
+        CloseOverlay(OverlayId::PaletteWheel);
+        return;
     }
-    emit PaletteOverlayToggled(open);
-    update();
+    wheelCenter_ = hostCenter;
+    wheelHoverIndex_.reset();
+    // Opening is the one deliberate reset of the wheel's presets/tools mode;
+    // every other state refresh preserves the mode the user toggled.
+    paletteWheel_->SetEntries(settings_.palette, PaletteWheelDisplayedTools(), settings_.colorIndex, false, settings_.zoomPresets);
+    paletteWheel_->Configure(HostClientRect().toAlignedRect());
+    // The reference seeds the hover slice under the cursor right after
+    // opening (ToolbarState.cpp:145-147 UpdatePaletteWheelHover(cursor)).
+    paletteWheel_->UpdateHover(hostCenter);
+    OpenOverlay(OverlayId::PaletteWheel);
 }
 
 void ToolbarWidget::HidePaletteWheel() {
-    if (paletteWheel_ != nullptr && paletteWheel_->isVisible()) {
-        paletteWheel_->hide();
-        wheelHoverIndex_.reset();
-        emit PaletteOverlayToggled(false);
-
-        update();
-    }
+    CloseOverlay(OverlayId::PaletteWheel);
 }
 
 bool ToolbarWidget::PaletteWheelVisible() const {
-    return paletteWheel_ != nullptr && paletteWheel_->isVisible();
+    return activeOverlay_ == OverlayId::PaletteWheel;
+}
+
+void ToolbarWidget::OpenOverlay(OverlayId id) {
+    if (id == OverlayId::None) {
+        CloseOverlays();
+        return;
+    }
+    QWidget* overlay = nullptr;
+    switch (id) {
+    case OverlayId::PaletteMenu: overlay = paletteMenuPopup_; break;
+    case OverlayId::PaletteWheel: overlay = paletteWheel_; break;
+    case OverlayId::QuickSize: overlay = quickSizePopup_; break;
+    case OverlayId::TextFormat: overlay = textFormatPopup_; break;
+    case OverlayId::None: break;
+    }
+    if (activeOverlay_ == id) {
+        // Re-show/re-anchor an overlay that is already the truth (e.g. the
+        // brush popup moved because the cursor moved).
+        if (overlay != nullptr) {
+            overlay->show();
+            overlay->raise();
+        }
+        return;
+    }
+    if (activeOverlay_ != OverlayId::None) {
+        CloseOverlay(activeOverlay_);
+    }
+    activeOverlay_ = id;
+    if (overlay != nullptr) {
+        overlay->show();
+        overlay->raise();
+    }
+    if (id == OverlayId::PaletteMenu || id == OverlayId::PaletteWheel) {
+        emit PaletteOverlayToggled(true);
+    }
+    update();
+}
+
+void ToolbarWidget::ToggleOverlay(OverlayId id) {
+    if (id == OverlayId::None) {
+        CloseOverlays();
+        return;
+    }
+    if (activeOverlay_ == id) {
+        CloseOverlay(id);
+    } else {
+        OpenOverlay(id);
+    }
+}
+
+void ToolbarWidget::CloseOverlay(OverlayId id) {
+    if (activeOverlay_ != id) {
+        return;
+    }
+    activeOverlay_ = OverlayId::None;
+    switch (id) {
+    case OverlayId::QuickSize:
+        if (quickSizePopup_ != nullptr) {
+            quickSizePopup_->ResetInteraction();
+            quickSizePopup_->hide();
+        }
+        break;
+    case OverlayId::TextFormat:
+        if (textFormatPopup_ != nullptr) {
+            textFormatPopup_->ResetInteraction();
+            textFormatPopup_->hide();
+        }
+        textFormatEditRect_ = {};
+        break;
+    case OverlayId::PaletteMenu:
+        if (paletteMenuPopup_ != nullptr) {
+            paletteMenuPopup_->hide();
+        }
+        emit PaletteOverlayToggled(false);
+        break;
+    case OverlayId::PaletteWheel:
+        if (paletteWheel_ != nullptr) {
+            paletteWheel_->hide();
+        }
+        wheelHoverIndex_.reset();
+        emit PaletteOverlayToggled(false);
+        break;
+    case OverlayId::None:
+        break;
+    }
+    update();
 }
 
 void ToolbarWidget::CloseOverlays() {
-    HideQuickSizePopup();
-    HideTextFormatPopup();
-    HidePaletteWheel();
-    HidePaletteMenu();
-
+    // Closing chrome dismisses a hand-drawn zoom editor rather than committing
+    // the half-typed value (Cancel is also what Escape does).
+    CancelZoomEdit();
+    CloseOverlay(activeOverlay_);
 }
 
 bool ToolbarWidget::AnyOverlayVisible() const {
-    return QuickSizePopupVisible() || TextFormatPopupVisible() || PaletteWheelVisible() || PaletteMenuVisible();
+    return activeOverlay_ != OverlayId::None;
 }
 
 void ToolbarWidget::OnQuickSizeChanged(settings::Tool tool, float size) {
@@ -2251,19 +2365,23 @@ bool ToolbarWidget::eventFilter(QObject* watched, QEvent* event) {
             // Reference order (App.cpp:186-230): an open palette menu or wheel
             // consumes the first click outside it and closes; the quick-size and
             // text-format popups close but let the click through.
-            if (PaletteMenuVisible() && !ContainsPixel(PaletteMenuBounds().toAlignedRect(), hostPosition)) {
-                CloseOverlays();
+            if (activeOverlay_ == OverlayId::PaletteMenu
+                && !ContainsPixel(PaletteMenuBounds().toAlignedRect(), hostPosition)) {
+                CloseOverlay(OverlayId::PaletteMenu);
                 return true;
             }
-            if (PaletteWheelVisible() && !paletteWheel_->geometry().contains(hostPosition)) {
-                CloseOverlays();
+            if (activeOverlay_ == OverlayId::PaletteWheel
+                && (paletteWheel_ == nullptr || !paletteWheel_->geometry().contains(hostPosition))) {
+                CloseOverlay(OverlayId::PaletteWheel);
                 return true;
             }
-            if (QuickSizePopupVisible() && !QuickSizePopupBounds().contains(hostPosition)) {
-                HideQuickSizePopup();
+            if (activeOverlay_ == OverlayId::QuickSize
+                && !QuickSizePopupBounds().contains(hostPosition)) {
+                CloseOverlay(OverlayId::QuickSize);
             }
-            if (TextFormatPopupVisible() && !TextFormatPopupBounds().contains(hostPosition)) {
-                HideTextFormatPopup();
+            if (activeOverlay_ == OverlayId::TextFormat
+                && !TextFormatPopupBounds().contains(hostPosition)) {
+                CloseOverlay(OverlayId::TextFormat);
             }
         }
     }

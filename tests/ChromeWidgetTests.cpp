@@ -21,6 +21,7 @@
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QEventLoop>
+#include <QFocusEvent>
 #include <QImage>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -71,6 +72,11 @@ void SendMouse(QWidget& widget, QEvent::Type type, const QPointF& position, Qt::
 void ClickWidget(QWidget& widget, const QPointF& position) {
     SendMouse(widget, QEvent::MouseButtonPress, position, Qt::LeftButton, Qt::LeftButton);
     SendMouse(widget, QEvent::MouseButtonRelease, position, Qt::LeftButton, Qt::NoButton);
+}
+
+void SendFocusOut(QWidget& widget) {
+    QFocusEvent event(QEvent::FocusOut, Qt::OtherFocusReason);
+    QApplication::sendEvent(&widget, &event);
 }
 
 void SendWheel(QWidget& widget, const QPointF& position, int delta) {
@@ -462,6 +468,142 @@ void TestPopupPlacementAndClamping() {
     }
 }
 
+void TestOverlayExclusivity() {
+    QWidget host;
+    host.resize(1000, 700);
+    cnote::ui::ToolbarWidget* toolbar = new cnote::ui::ToolbarWidget(&host);
+    toolbar->SetSettings(BuildSettings());
+    toolbar->resize(1000, 34);
+    host.show();
+    QApplication::processEvents();
+
+    toolbar->SetTextFormatAvailable(true);
+    toolbar->ShowTextFormatPopup(QRectF(400.0, 300.0, 160.0, 50.0));
+    Check(toolbar->TextFormatPopupVisible(), "text-format popup opens");
+    Check(toolbar->ActiveOverlay() == cnote::ui::OverlayId::TextFormat, "text format is the active overlay");
+
+    // Opening the brush popup must retire the text popup, not stack them.
+    toolbar->ShowQuickSizePopup(cnote::settings::Tool::Draw, QPointF(400.0, 300.0));
+    Check(toolbar->QuickSizePopupVisible(), "quick-size popup opens over the text popup");
+    Check(!toolbar->TextFormatPopupVisible(), "opening quick-size closes the text-format popup");
+    Check(toolbar->ActiveOverlay() == cnote::ui::OverlayId::QuickSize, "quick size is the only active overlay");
+
+    toolbar->TogglePaletteMenu();
+    Check(toolbar->PaletteMenuVisible() && !toolbar->QuickSizePopupVisible(), "palette menu replaces the brush popup");
+    Check(toolbar->ActiveOverlay() == cnote::ui::OverlayId::PaletteMenu, "palette menu is the active overlay");
+
+    toolbar->TogglePaletteWheel(QPointF(420.0, 320.0));
+    Check(toolbar->PaletteWheelVisible() && !toolbar->PaletteMenuVisible(), "palette wheel replaces the palette menu");
+    Check(toolbar->ActiveOverlay() == cnote::ui::OverlayId::PaletteWheel, "palette wheel is the active overlay");
+
+    toolbar->TogglePaletteWheel(QPointF(420.0, 320.0));
+    Check(!toolbar->AnyOverlayVisible(), "toggling the wheel again closes it");
+    Check(toolbar->ActiveOverlay() == cnote::ui::OverlayId::None, "no overlay remains active");
+
+    // Tool-owned popups do not survive a switch to a tool that cannot use them.
+    toolbar->SetActiveTool(cnote::settings::Tool::Draw);
+    toolbar->ShowQuickSizePopup(cnote::settings::Tool::Draw, QPointF(400.0, 300.0));
+    Check(toolbar->QuickSizePopupVisible(), "quick-size opens for the draw tool");
+    toolbar->SetActiveTool(cnote::settings::Tool::Select);
+    Check(!toolbar->QuickSizePopupVisible(), "switching to select closes the brush popup");
+
+    toolbar->SetActiveTool(cnote::settings::Tool::Text);
+    toolbar->ShowTextFormatPopup(QRectF(400.0, 300.0, 160.0, 50.0));
+    Check(toolbar->TextFormatPopupVisible(), "text format opens for the text tool");
+    toolbar->SetActiveTool(cnote::settings::Tool::Latex);
+    Check(!toolbar->TextFormatPopupVisible(), "switching to latex closes the text-format popup");
+
+    // Palette overlays are global, not owned by the active tool.
+    toolbar->TogglePaletteMenu();
+    toolbar->SetActiveTool(cnote::settings::Tool::Draw);
+    Check(toolbar->PaletteMenuVisible(), "the palette menu survives a tool switch");
+    toolbar->HidePaletteMenu();
+}
+
+void TestQuickSizeHideClearsDrag() {
+    QWidget host;
+    host.resize(1000, 700);
+    cnote::ui::ToolbarWidget* toolbar = new cnote::ui::ToolbarWidget(&host);
+    toolbar->SetSettings(BuildSettings());
+    toolbar->resize(1000, 34);
+    host.show();
+    QApplication::processEvents();
+
+    const QPointF anchor(400.0, 320.0);
+    toolbar->ShowQuickSizePopup(cnote::settings::Tool::Draw, anchor);
+    Check(toolbar->QuickSizePopupVisible(), "quick-size opens before the drag-reset check");
+    QWidget* popup = host.findChild<QWidget*>(QStringLiteral("cnoteQuickSizePopup"));
+    Check(popup != nullptr, "quick-size popup widget exists");
+    if (popup == nullptr) {
+        return;
+    }
+
+    const qt::QuickSizePopupLayout layout = qt::BuildQuickSizePopupLayout(
+        toolbar->HostCanvasRect(), anchor, 5);
+    const QRectF track = qt::ToolbarBrushTrackRect(layout.sliderRect).translated(-QPointF(popup->geometry().topLeft()));
+    SendMouse(*popup, QEvent::MouseButtonPress, track.center(), Qt::LeftButton, Qt::LeftButton);
+    Check(toolbar->QuickSizeSliderDragging(), "pressing the slider starts a drag");
+
+    // Hiding the popup mid-drag must not leave the auto-hide guard (or the
+    // active-thumb paint) latched to the abandoned gesture.
+    toolbar->HideQuickSizePopup();
+    Check(!toolbar->QuickSizePopupVisible(), "quick-size hides mid-drag");
+    Check(!toolbar->QuickSizeSliderDragging(), "hiding quick-size clears the slider drag");
+    SendMouse(*popup, QEvent::MouseButtonRelease, track.center(), Qt::LeftButton, Qt::NoButton);
+}
+
+void TestInlineEditFocusLoss() {
+    QWidget host;
+    host.resize(1200, 800);
+    cnote::ui::ToolbarWidget* toolbar = new cnote::ui::ToolbarWidget(&host);
+    toolbar->SetSettings(BuildSettings());
+    toolbar->SetZoomLabel(QStringLiteral("1"));
+    toolbar->resize(1200, 34);
+    host.show();
+    QApplication::processEvents();
+
+    QString committedZoom;
+    QObject::connect(toolbar, &cnote::ui::ToolbarWidget::ZoomTextCommitted,
+        [&](const QString& text) { committedZoom = text; });
+    toolbar->BeginZoomEdit();
+    for (const auto* text : { "5", "0" }) {
+        QKeyEvent key(QEvent::KeyPress, Qt::Key_0, Qt::NoModifier, QString::fromLatin1(text));
+        QApplication::sendEvent(toolbar, &key);
+    }
+    SendFocusOut(*toolbar);
+    Check(!toolbar->ZoomEditing(), "focus loss closes the zoom editor");
+    Check(committedZoom == QStringLiteral("150"), "focus loss commits the typed zoom value");
+
+    toolbar->BeginZoomEdit();
+    toolbar->CloseOverlays();
+    Check(!toolbar->ZoomEditing(), "closing the overlays cancels the zoom editor");
+    Check(committedZoom == QStringLiteral("150"), "cancel does not emit another zoom commit");
+
+    cnote::ui::SidebarWidget sidebar(&host);
+    cnote::Document document = BuildDocument(5);
+    sidebar.SetDocument(&document, nullptr);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    sidebar.SetOpen(true);
+    std::optional<std::size_t> jumpedPage;
+    QObject::connect(&sidebar, &cnote::ui::SidebarWidget::PageJumpRequested,
+        [&](std::size_t page) { jumpedPage = page; });
+    sidebar.BeginPageJumpEdit();
+    Check(sidebar.PageJumpEditing(), "page jump edit begins");
+    {
+        QKeyEvent clear(QEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier);
+        QApplication::sendEvent(&sidebar, &clear);
+        QKeyEvent digit(QEvent::KeyPress, Qt::Key_3, Qt::NoModifier, QStringLiteral("3"));
+        QApplication::sendEvent(&sidebar, &digit);
+    }
+    SendFocusOut(sidebar);
+    Check(!sidebar.PageJumpEditing(), "focus loss closes the page jump editor");
+    Check(jumpedPage.has_value() && *jumpedPage == 2U, "focus loss commits the typed page number");
+
+    sidebar.BeginPageJumpEdit();
+    sidebar.SetOpen(false);
+    Check(!sidebar.PageJumpEditing(), "closing the sidebar cancels the page jump editor");
+}
+
 void TestSidebarListAndNavigation() {
     QWidget host;
     host.resize(1400, 900);
@@ -652,6 +794,69 @@ void TestSidebarEnsureVisibleFromScrolled() {
     }, 1000), "selecting a page above the fold scrolls it to the top edge");
 }
 
+void TestSidebarSlideState() {
+    QWidget host;
+    host.resize(1400, 900);
+    cnote::ui::SidebarWidget sidebar(&host);
+    cnote::Document document = BuildDocument(6);
+    sidebar.SetDocument(&document, nullptr);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    host.show();
+    QApplication::processEvents();
+
+    Check(sidebar.State() == cnote::ui::SidebarWidget::SlideState::Closed, "sidebar starts closed");
+    Check(!sidebar.IsOpen() && !sidebar.SidebarVisible(), "closed sidebar reports no open intent and is invisible");
+
+    sidebar.SetOpen(true);
+    Check(sidebar.IsOpen(), "open intent is visible immediately while the slide runs");
+    Check(sidebar.State() == cnote::ui::SidebarWidget::SlideState::Opening, "opening is the transient slide state");
+    Check(std::abs(sidebar.SlideTarget() - 1.0) <= 0.001, "opening targets the fully open slide");
+    Check(sidebar.SidebarVisible(), "the opening sidebar is visible while it slides in");
+    Check(WaitFor([&]() { return sidebar.State() == cnote::ui::SidebarWidget::SlideState::Open; }, 3000),
+        "the slide settles in the Open state");
+
+    sidebar.SetOpen(false);
+    Check(!sidebar.IsOpen(), "closing clears the open intent");
+    Check(sidebar.State() == cnote::ui::SidebarWidget::SlideState::Closing, "closing is the transient slide state");
+    Check(std::abs(sidebar.SlideTarget()) <= 0.001, "closing targets the fully closed slide");
+    Check(sidebar.SidebarVisible(), "the closing sidebar stays visible while it slides out");
+    Check(WaitFor([&]() { return sidebar.State() == cnote::ui::SidebarWidget::SlideState::Closed; }, 3000),
+        "the slide settles in the Closed state");
+    Check(!sidebar.SidebarVisible(), "the closed sidebar paints nothing");
+}
+
+void TestSidebarThumbnailCacheInvalidation() {
+    QWidget host;
+    host.resize(1400, 900);
+    cnote::ui::SidebarWidget sidebar(&host);
+    cnote::Document document = BuildDocument(3);
+    sidebar.SetDocument(&document, nullptr);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    sidebar.SetOpen(true);
+    host.show();
+    QApplication::processEvents();
+    Check(WaitFor([&]() { return sidebar.SlideProgress() >= 0.999; }, 3000), "sidebar opens before thumbnail test");
+
+    static_cast<void>(sidebar.grab());
+    Check(sidebar.HasThumbnail(0), "first page thumbnail is cached after paint");
+    Check(sidebar.RenderedThumbnailCount() > 0U, "the thumbnail cache is populated");
+
+    // Insert/remove keep the Document object (and its address) but change the
+    // page slots; SetDocument and NotifyDocumentChanged must drop the cache.
+    document.InsertPage(0, cnote::Page {});
+    sidebar.SetDocument(&document, nullptr);
+    Check(sidebar.RenderedThumbnailCount() == 0U, "SetDocument invalidates thumbnails on page-count change");
+    Check(!sidebar.HasThumbnail(0), "no stale thumbnail survives a page insert");
+
+    static_cast<void>(sidebar.grab());
+    Check(sidebar.HasThumbnail(0), "the shifted page re-renders its thumbnail");
+
+    document.RemovePage(0);
+    sidebar.NotifyDocumentChanged();
+    Check(sidebar.RenderedThumbnailCount() == 0U, "NotifyDocumentChanged invalidates thumbnails on page removal");
+    Check(!sidebar.HasThumbnail(0), "no stale thumbnail survives a page removal");
+}
+
 void TestToolbarAutoHide() {
     QWidget host;
     host.resize(1400, 900);
@@ -818,9 +1023,14 @@ int main(int argc, char** argv) {
     TestPaletteWheelIntents();
     TestPaletteWheelAnchor();
     TestPopupPlacementAndClamping();
+    TestOverlayExclusivity();
+    TestQuickSizeHideClearsDrag();
+    TestInlineEditFocusLoss();
     TestSidebarListAndNavigation();
     TestSidebarWheelIsolation();
     TestSidebarEnsureVisibleFromScrolled();
+    TestSidebarSlideState();
+    TestSidebarThumbnailCacheInvalidation();
     TestToolbarAutoHide();
     TestOverlayDismissalConsumesPaletteMenu();
     TestToolbarToolIconsAreBundled();

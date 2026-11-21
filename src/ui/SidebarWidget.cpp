@@ -4,10 +4,12 @@
 #include <cmath>
 
 #include <QApplication>
+#include <QFocusEvent>
 #include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QSignalBlocker>
 #include <QVariantAnimation>
 #include <QWheelEvent>
 
@@ -52,15 +54,40 @@ SidebarWidget::SidebarWidget(QWidget* parent)
     slideAnimation_ = new QVariantAnimation(this);
     slideAnimation_->setDuration(kSlideAnimationMs);
     connect(slideAnimation_, &QVariantAnimation::valueChanged, this, [this](const QVariant&) {
+        // A value emitted while the old run is being stopped belongs to no
+        // transition; it must not republish progress or a terminal state.
+        if (slideStopping_) {
+            return;
+        }
         const qreal t = slideAnimation_->duration() > 0
             ? std::clamp(static_cast<qreal>(slideAnimation_->currentTime()) / slideAnimation_->duration(), 0.0, 1.0)
             : 1.0;
         const qreal from = slideAnimation_->startValue().toReal();
         const qreal to = slideAnimation_->endValue().toReal();
         slideProgress_ = from + ((to - from) * Smoothstep(t));
+        if (t >= 1.0) {
+            slideState_ = slideTarget_ >= 1.0 ? SlideState::Open : SlideState::Closed;
+        }
         UpdateGeometry();
         UpdateVisibility();
         emit SlideProgressChanged(slideProgress_);
+    });
+    connect(slideAnimation_, &QVariantAnimation::finished, this, [this]() {
+        // `stop()` can also emit finished in Qt; a stopped run must not settle
+        // the new transition.  Only the run that actually reached its end and
+        // still matches the current target may publish Open/Closed.
+        if (slideStopping_ || slideAnimation_->currentTime() < slideAnimation_->duration()
+            || std::abs(slideAnimation_->endValue().toReal() - slideTarget_) > 0.001) {
+            return;
+        }
+        const bool changed = std::abs(slideProgress_ - slideTarget_) > 0.0001;
+        slideProgress_ = slideTarget_;
+        slideState_ = slideTarget_ >= 1.0 ? SlideState::Open : SlideState::Closed;
+        UpdateGeometry();
+        UpdateVisibility();
+        if (changed) {
+            emit SlideProgressChanged(slideProgress_);
+        }
     });
 
     scrollAnimation_ = new QVariantAnimation(this);
@@ -77,6 +104,16 @@ SidebarWidget::SidebarWidget(QWidget* parent)
             update();
             emit ScrollChanged(scrollY_);
         }
+        if (t >= 1.0) {
+            scrollTarget_ = y;
+        }
+    });
+    connect(scrollAnimation_, &QVariantAnimation::finished, this, [this]() {
+        if (scrollY_ != scrollTarget_) {
+            scrollY_ = scrollTarget_;
+            update();
+            emit ScrollChanged(scrollY_);
+        }
     });
 
     hide();
@@ -85,23 +122,42 @@ SidebarWidget::SidebarWidget(QWidget* parent)
 SidebarWidget::~SidebarWidget() = default;
 
 void SidebarWidget::SetDocument(const Document* document, render::PdfBackgroundProvider* pdfBackground) {
-    if (document_ == document && pdfBackground_ == pdfBackground) {
+    // A replacement document (or a page insert/remove on the same one) makes
+    // the page-jump text and every cached thumbnail meaningless.
+    CancelPageJumpEdit();
+    const std::size_t pageCount = document != nullptr ? document->PageCount() : 0U;
+    const bool documentChanged = document_ != document;
+    const bool backgroundChanged = pdfBackground_ != pdfBackground;
+    if (!documentChanged && !backgroundChanged && documentPageCount_ == pageCount) {
         return;
+    }
+    if (documentChanged) {
+        // A new document resets navigation and the scroll position; a page
+        // insert/remove below only drops the caches.
+        currentPage_ = document != nullptr ? document->CurrentPageIndex() : 0;
+        scrollY_ = 0;
+        scrollTarget_ = 0;
+        scrollAnimation_->stop();
+        wheelRemainder_ = 0.0;
     }
     document_ = document;
     pdfBackground_ = pdfBackground;
-    currentPage_ = document != nullptr ? document->CurrentPageIndex() : 0;
-    scrollY_ = 0;
-    scrollAnimation_->stop();
-    wheelRemainder_ = 0.0;
+    documentPageCount_ = pageCount;
     InvalidateThumbnails();
     UpdateVisibility();
     update();
 }
 
 void SidebarWidget::NotifyDocumentChanged() {
-    // Repaint only: ThumbnailAt re-renders an entry whose page epoch changed,
-    // so a commit on one page does not re-rasterize every visible thumbnail.
+    // Repaint only for an ordinary content commit: ThumbnailAt re-renders an
+    // entry whose page epoch changed, so a commit on one page does not
+    // re-rasterize every visible thumbnail.  A page-count change is structural
+    // and does invalidate the cache and the page-jump editor.
+    if (document_ != nullptr && document_->PageCount() != documentPageCount_) {
+        documentPageCount_ = document_->PageCount();
+        CancelPageJumpEdit();
+        InvalidateThumbnails();
+    }
     update();
 }
 
@@ -223,6 +279,7 @@ void SidebarWidget::SetScrollY(int scrollY, bool animated) {
         return;
     }
     scrollAnimation_->stop();
+    scrollTarget_ = clamped;
     if (scrollY_ == clamped) {
         return;
     }
@@ -237,6 +294,7 @@ void SidebarWidget::ScrollByPixels(int pixels, bool animated) {
 
 void SidebarWidget::StartScrollAnimation(int target) {
     scrollAnimation_->stop();
+    scrollTarget_ = target;
     if (target == scrollY_) {
         return;
     }
@@ -270,29 +328,52 @@ void SidebarWidget::EnsureCurrentPageVisible() {
 }
 
 void SidebarWidget::SetOpen(bool open) {
-    if (open_ == open) {
+    // Hiding or replacing the panel abandons a half-typed page jump; the
+    // editor is owned by this widget and must not outlive its visible state.
+    CancelPageJumpEdit();
+    if (open == IsOpen()) {
         return;
     }
-    open_ = open;
-    UpdateVisibility();
     StartSlideAnimation(open ? 1.0 : 0.0);
-    emit OpenChanged(open_);
+    UpdateVisibility();
+    emit OpenChanged(open);
 }
 
 void SidebarWidget::StartSlideAnimation(qreal target) {
     const qreal clamped = std::clamp(target, 0.0, 1.0);
+    // Stop the previous run *before* retargeting, and suppress its `finished`
+    // signal: a stop must never publish Open/Closed for the new transition.
+    slideStopping_ = true;
     slideAnimation_->stop();
-    if (clamped == slideProgress_) {
+    slideStopping_ = false;
+    slideTarget_ = clamped;
+
+    const bool atTarget = std::abs(clamped - slideProgress_) <= 0.0001;
+    if (atTarget) {
+        slideState_ = clamped >= 1.0 ? SlideState::Open : SlideState::Closed;
         UpdateGeometry();
+        UpdateVisibility();
         return;
     }
-    slideAnimation_->setStartValue(slideProgress_);
-    slideAnimation_->setEndValue(clamped);
-    slideAnimation_->start();
+
+    // Configuring/starting a stopped QVariantAnimation can synchronously emit
+    // valueChanged with the old terminal currentTime, which would settle the
+    // new transition before its first real tick.  Block that initial burst and
+    // own the transient state explicitly; later ticks are unblocked.
+    {
+        const QSignalBlocker blocker(slideAnimation_);
+        slideAnimation_->setStartValue(slideProgress_);
+        slideAnimation_->setEndValue(clamped);
+        slideAnimation_->setCurrentTime(0);
+        slideAnimation_->start();
+    }
+    slideState_ = clamped >= 1.0 ? SlideState::Opening : SlideState::Closing;
+    UpdateGeometry();
+    UpdateVisibility();
 }
 
 bool SidebarWidget::SidebarVisible() const {
-    return document_ != nullptr && document_->PageCount() > 0U && (open_ || slideProgress_ > 0.001);
+    return document_ != nullptr && document_->PageCount() > 0U && (IsOpen() || slideProgress_ > 0.001);
 }
 
 void SidebarWidget::UpdateVisibility() {
@@ -311,7 +392,9 @@ void SidebarWidget::SetHostClientRect(const QRect& clientRect, int reservedTop) 
     UpdateGeometry();
     const int clampedScroll = std::clamp(scrollY_, 0, MaxScroll());
     if (clampedScroll != scrollY_) {
+        scrollAnimation_->stop();
         scrollY_ = clampedScroll;
+        scrollTarget_ = clampedScroll;
         emit ScrollChanged(scrollY_);
     }
     update();
@@ -427,7 +510,7 @@ void SidebarWidget::paintEvent(QPaintEvent*) {
 
     painter.setFont(ChromeFont(14));
     const QString label = PageIndicatorLabel();
-    if (pageJumpEditing_) {
+    if (pageJump_.active) {
         const QRect entry = pageLabel.adjusted(0, 5, 0, -5);
         painter.setBrush(Qt::NoBrush);
         painter.setPen(QPen(ChromeColor(kChromeAccent), 1.0));
@@ -452,8 +535,8 @@ const QImage* SidebarWidget::ThumbnailAt(std::size_t index, int width, int heigh
         thumbnails_.resize(document_->PageCount());
     }
     Thumbnail& entry = thumbnails_[index];
-    const std::uint64_t epoch = document_->PageEpoch(index);
-    if (entry.valid && entry.pageEpoch == epoch && entry.width == width && entry.height == height) {
+    const ThumbnailKey key { document_, document_->PageEpoch(index), width, height };
+    if (entry.key == key && entry.key.IsValid()) {
         return &entry.image;
     }
 
@@ -510,23 +593,32 @@ const QImage* SidebarWidget::ThumbnailAt(std::size_t index, int width, int heigh
     }
     painter.end();
 
-    entry.pageEpoch = epoch;
+    entry.key = key;
     entry.image = std::move(image);
-    entry.width = width;
-    entry.height = height;
-    entry.valid = true;
     return &entry.image;
 }
 
 bool SidebarWidget::HasThumbnail(std::size_t index) const {
-    return index < thumbnails_.size() && thumbnails_[index].valid
-        && document_ != nullptr && thumbnails_[index].pageEpoch == document_->PageEpoch(index);
+    if (document_ == nullptr || index >= document_->PageCount() || index >= thumbnails_.size()) {
+        return false;
+    }
+    const std::optional<QRect> item = PageItemRect(index);
+    if (!item.has_value()) {
+        return false;
+    }
+    const ThumbnailKey key {
+        document_,
+        document_->PageEpoch(index),
+        item->width(),
+        item->height() - static_cast<int>(Metrics().labelHeight),
+    };
+    return key == thumbnails_[index].key && key.IsValid();
 }
 
 std::size_t SidebarWidget::RenderedThumbnailCount() const {
     std::size_t count = 0;
     for (const Thumbnail& thumbnail : thumbnails_) {
-        if (thumbnail.valid) {
+        if (thumbnail.key.IsValid()) {
             ++count;
         }
     }
@@ -549,8 +641,8 @@ std::size_t SidebarWidget::VisibleThumbnailCount() const {
 }
 
 QString SidebarWidget::PageIndicatorLabel() const {
-    if (pageJumpEditing_) {
-        return pageJumpText_;
+    if (pageJump_.active) {
+        return pageJump_.text;
     }
     return FormatPageJumpLabel(currentPage_, PageCount());
 }
@@ -559,29 +651,29 @@ void SidebarWidget::BeginPageJumpEdit() {
     if (document_ == nullptr || document_->PageCount() == 0U) {
         return;
     }
-    pageJumpEditing_ = true;
-    pageJumpText_ = QString::number(currentPage_ + 1U);
+    pageJump_.active = true;
+    pageJump_.text = QString::number(currentPage_ + 1U);
     setFocus(Qt::MouseFocusReason);
     update();
 }
 
 void SidebarWidget::CancelPageJumpEdit() {
-    if (!pageJumpEditing_) {
+    if (!pageJump_.active) {
         return;
     }
-    pageJumpEditing_ = false;
-    pageJumpText_.clear();
+    pageJump_.active = false;
+    pageJump_.text.clear();
     update();
 }
 
 void SidebarWidget::CommitPageJumpEdit() {
-    if (!pageJumpEditing_) {
+    if (!pageJump_.active) {
         return;
     }
     bool ok = false;
-    const unsigned long value = pageJumpText_.toULong(&ok);
-    pageJumpEditing_ = false;
-    pageJumpText_.clear();
+    const unsigned long value = pageJump_.text.toULong(&ok);
+    pageJump_.active = false;
+    pageJump_.text.clear();
     update();
     if (!ok || value == 0UL) {
         return;
@@ -608,7 +700,7 @@ void SidebarWidget::mousePressEvent(QMouseEvent* event) {
     const QPoint position = event->position().toPoint();
     const qt::SidebarHeaderLayout headerLayout = HeaderLayout();
 
-    if (pageJumpEditing_ && !ContainsPixel(headerLayout.pageLabelRect.toAlignedRect(), position)) {
+    if (pageJump_.active && !ContainsPixel(headerLayout.pageLabelRect.toAlignedRect(), position)) {
         CommitPageJumpEdit();
     }
 
@@ -658,6 +750,7 @@ void SidebarWidget::wheelEvent(QWheelEvent* event) {
     if (target != scrollY_) {
         scrollAnimation_->stop();
         scrollY_ = target;
+        scrollTarget_ = target;
         update();
         emit ScrollChanged(scrollY_);
     }
@@ -669,7 +762,7 @@ bool SidebarWidget::event(QEvent* event) {
     // The page-jump editor is hand-drawn, not a real line edit, so it must
     // claim ShortcutOverride itself: otherwise window shortcuts (zoom presets
     // on 1-5, tool keys) swallow the digits it is editing.
-    if (pageJumpEditing_ && event->type() == QEvent::ShortcutOverride) {
+    if (pageJump_.active && event->type() == QEvent::ShortcutOverride) {
         auto* key = static_cast<QKeyEvent*>(event);
         const QString text = key->text();
         if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter
@@ -683,7 +776,7 @@ bool SidebarWidget::event(QEvent* event) {
 }
 
 void SidebarWidget::keyPressEvent(QKeyEvent* event) {
-    if (!pageJumpEditing_) {
+    if (!pageJump_.active) {
         QWidget::keyPressEvent(event);
         return;
     }
@@ -696,17 +789,26 @@ void SidebarWidget::keyPressEvent(QKeyEvent* event) {
         return;
     }
     if (event->key() == Qt::Key_Backspace) {
-        pageJumpText_.chop(1);
+        pageJump_.text.chop(1);
         update();
         return;
     }
     const QString text = event->text();
     if (!text.isEmpty() && text.at(0).isDigit()) {
-        pageJumpText_ += text;
+        pageJump_.text += text;
         update();
         return;
     }
     QWidget::keyPressEvent(event);
+}
+
+void SidebarWidget::focusOutEvent(QFocusEvent* event) {
+    // The page indicator is a hand-drawn editor; losing focus must behave like
+    // Return (emit the jump intent) instead of leaving it visually stuck.
+    if (pageJump_.active) {
+        CommitPageJumpEdit();
+    }
+    QWidget::focusOutEvent(event);
 }
 
 }  // namespace cnote::ui

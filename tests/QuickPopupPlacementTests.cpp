@@ -33,6 +33,7 @@
 #include <QPointF>
 #include <QRect>
 #include <QRectF>
+#include <QSize>
 #include <QWindow>
 #include <QtTest/QTest>
 
@@ -270,6 +271,37 @@ void SliderDragTracksPointer() {
 }
 
 
+// The Ctrl+W popup is one of four transient surfaces: opening it through the
+// real shortcut path must retire whichever overlay was open, never stack two.
+void QuickSizeReplacesOpenOverlays() {
+    Harness harness(QSize(1000, 700));
+    Check(harness.toolbar != nullptr, "overlay replacement: chrome exists");
+    if (harness.toolbar == nullptr) {
+        return;
+    }
+
+    harness.toolbar->TogglePaletteMenu();
+    Check(harness.toolbar->PaletteMenuVisible(), "overlay replacement: palette menu opens");
+
+    const QPointF centre = harness.CanvasRect().center();
+    harness.ToggleAt(centre);
+    Check(harness.toolbar->QuickSizePopupVisible(), "overlay replacement: Ctrl+W opens quick-size over the menu");
+    Check(!harness.toolbar->PaletteMenuVisible(), "overlay replacement: the palette menu closes");
+    Check(harness.toolbar->ActiveOverlay() == cnote::ui::OverlayId::QuickSize,
+        "overlay replacement: quick-size is the only active overlay");
+
+    harness.toolbar->SetTextFormatAvailable(true);
+    harness.toolbar->ShowTextFormatPopup(QRectF(centre, QSizeF(120.0, 40.0)));
+    Check(harness.toolbar->TextFormatPopupVisible(), "overlay replacement: text format opens");
+    Check(!harness.toolbar->QuickSizePopupVisible(), "overlay replacement: text format closes quick-size");
+
+    harness.ToggleAt(centre);
+    Check(harness.toolbar->QuickSizePopupVisible(), "overlay replacement: Ctrl+W takes the surface back");
+    Check(!harness.toolbar->TextFormatPopupVisible(), "overlay replacement: the text popup closes");
+    harness.ToggleAt(centre);
+    Check(!harness.toolbar->AnyOverlayVisible(), "overlay replacement: the second Ctrl+W closes everything");
+}
+
 std::filesystem::path MakeTempDir(const std::string& name) {
     std::error_code error;
     const std::filesystem::path dir =
@@ -304,6 +336,7 @@ int main(int argc, char** argv) {
     PopupFollowsCursor(QSize(1200, 800), "normal");
     PopupFollowsCursor(QSize(420, 500), "compact");
     PopupTracksLargerBrushPreview();
+    QuickSizeReplacesOpenOverlays();
     FallbackAnchorScalesWithDpr();
     SliderDragTracksPointer();
 
