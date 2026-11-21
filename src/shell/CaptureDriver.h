@@ -109,36 +109,72 @@ void SetScreenScale(qreal factor);
 [[nodiscard]] QImage GrabComposite(QWidget& window);
 
 // Runs steps against the window on the event loop and calls finished(exitCode)
-// once: 0 after the last step, 4 when a capture cannot be written.  Each step is
-// scheduled before it runs, so a step that enters a nested event loop (a context
-// menu's exec) does not stall the script.
+// once: 0 after the last step, 4 when a capture cannot be written or the window
+// is destroyed.  Each step is scheduled only after the previous one returns, so
+// a step that enters a nested event loop (a context menu's exec) never runs
+// later steps early.  A click that opens a menu/popup reports that it suspends
+// the event loop, and the continuation is queued for after that loop returns.
 class CaptureDriver : public QObject {
 public:
+    // Idle until Start; Running while steps are scheduled; Finished after
+    // Finish reported once, when no further step may run.
+    enum class RunPhase { Idle, Running, Finished };
+
+    // Buttons the script holds down and the widget that took the first press
+    // (the platform's implicit grab).  A held button always has a grab: the
+    // press target, or the main window when the target is missing; Finish
+    // clears both.
+    struct MouseState {
+        Qt::MouseButtons buttons = Qt::NoButton;
+        QPointer<QWidget> grab;
+
+        // Records the press; `target` is where a pointer would land, `window`
+        // the deterministic fallback when it is null.  Returns the widget that
+        // receives the event, or null when neither exists.
+        QWidget* Press(Qt::MouseButton button, QWidget* target, QWidget* window);
+        // Sends to the recorded grab while it exists (else `window`), clears
+        // the button and, on the last release, the grab.  Returns the receiver.
+        QWidget* Release(Qt::MouseButton button, QWidget* window);
+        void Finish();
+    };
+
     CaptureDriver(QWidget& window, std::vector<CaptureStep> steps, std::function<void(int)> finished);
     ~CaptureDriver() override;
 
     void Start();
 
 private:
+    // One step's outcome: failure ends the run; suspendsEventLoop records that
+    // the step opened a menu/popup and may have run a nested event loop.
+    struct ExecuteResult {
+        bool ok = true;
+        bool suspendsEventLoop = false;
+    };
+
     void RunNext();
-    [[nodiscard]] bool Execute(const CaptureStep& step);
+    void ScheduleNext(const CaptureStep& step, bool suspendsEventLoop);
+    [[nodiscard]] ExecuteResult Execute(const CaptureStep& step);
     // Main-window client position to global coordinates.
     [[nodiscard]] QPointF Global(const QPointF& position) const;
-    // The window a real pointer at `global` would reach: an open dialog over
-    // the main window, or the pressed window while a button is down.
-    [[nodiscard]] QWidget* WindowAt(const QPointF& global) const;
+    // The window a real pointer at `global` would reach: the recorded grab
+    // while a button is down, an open dialog over the main window, or the main
+    // window itself.  Records the fallback grab when the pressed widget died.
+    QWidget* WindowAt(const QPointF& global);
     void SendMouse(QEvent::Type type, const QPointF& position, Qt::MouseButton button, Qt::KeyboardModifiers modifiers);
     void SendKey(int key, Qt::KeyboardModifiers modifiers, const QString& text);
     [[nodiscard]] QWindow* KeyTarget() const;
+    // Reports the exit code once and clears the mouse state.  Never schedules
+    // another step.
     void Finish(int exitCode);
 
     QPointer<QWidget> window_;
     std::vector<CaptureStep> steps_;
     std::size_t next_ = 0;
-    Qt::MouseButtons buttons_ = Qt::NoButton;
-    QPointer<QWidget> pressed_;
+    MouseState mouse_;
+    RunPhase phase_ = RunPhase::Idle;
+    // True while Execute runs, including any nested event loop it enters.
+    bool executing_ = false;
     std::function<void(int)> finished_;
-    bool done_ = false;
 };
 
 }  // namespace cnote::shell

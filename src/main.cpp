@@ -33,6 +33,7 @@
 #include <QTemporaryDir>
 
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -106,12 +107,10 @@ public:
 
     void SetOpenHandler(std::function<void(const std::filesystem::path&)> handler) {
         openHandler_ = std::move(handler);
-        if (pendingOpen_.has_value()) {
-            const std::filesystem::path path = std::move(*pendingOpen_);
-            pendingOpen_.reset();
-            if (openHandler_) {
-                openHandler_(path);
-            }
+        while (openHandler_ && !pendingOpen_.empty()) {
+            const std::filesystem::path path = std::move(pendingOpen_.front());
+            pendingOpen_.pop_front();
+            openHandler_(path);
         }
     }
 
@@ -127,7 +126,7 @@ protected:
             if (openHandler_) {
                 openHandler_(path);
             } else {
-                pendingOpen_ = path;
+                pendingOpen_.push_back(path);
             }
             return true;
         }
@@ -136,7 +135,8 @@ protected:
 
 private:
     std::function<void(const std::filesystem::path&)> openHandler_;
-    std::optional<std::filesystem::path> pendingOpen_;
+    // Several file-open requests can arrive before the window's handler exists.
+    std::deque<std::filesystem::path> pendingOpen_;
 };
 
 void AutoSaveSession(const std::shared_ptr<cnote::ProjectSession>& session, QObject* owner) {
@@ -151,17 +151,15 @@ void AutoSaveSession(const std::shared_ptr<cnote::ProjectSession>& session, QObj
     static_cast<void>(controller->SaveTo(session->document.FilePath(), &error));
 }
 
-// --capture/--script settings; see the file comment.
-struct CaptureOptions {
-    std::filesystem::path output;
-    std::filesystem::path script;
-    QSize size { 1400, 960 };
-    double scale = 1.0;
-    bool sizeOrScaleGiven = false;
+enum class StartupMode {
+    Interactive,
+    SelfCheck,
+    Capture,
 };
 
-// These run before QApplication exists: the capture flag decides the
-// platform, and either flag decides where failures are reported.
+// Before QApplication exists, headless runs route failures to stderr
+// (shell/HeadlessFailures.h); the flags are ASCII, so argv serves on every
+// platform even where LaunchOptions is parsed from Qt's wide command line.
 bool HasArgument(int argc, char** argv, std::string_view prefix) {
     for (int index = 1; index < argc; ++index) {
         if (std::string_view(argv[index]).rfind(prefix, 0) == 0) {
@@ -170,6 +168,47 @@ bool HasArgument(int argc, char** argv, std::string_view prefix) {
     }
     return false;
 }
+
+// One parse of the command line, shared by the pre-QApplication platform
+// decision and the run itself.  Tokens are UTF-8: argv on Linux, and
+// QString::toUtf8 after QApplication so Windows/macOS keep non-ASCII paths
+// from Qt's wide command line.
+struct LaunchOptions {
+    StartupMode mode = StartupMode::Interactive;
+    std::filesystem::path openPath;
+    std::filesystem::path selfCheckFixture;
+    std::filesystem::path captureOutput;
+    std::filesystem::path captureScript;
+    QSize captureSize { 1400, 960 };
+    double captureScale = 1.0;
+};
+
+#if !defined(Q_OS_WIN) && !defined(Q_OS_MACOS)
+// Only the Linux path decides the platform before QApplication exists; there
+// argv is UTF-8, so the same parser can read it directly.
+std::vector<std::string> RawArguments(int argc, char** argv) {
+    std::vector<std::string> arguments;
+    arguments.reserve(static_cast<std::size_t>(argc > 0 ? argc - 1 : 0));
+    for (int index = 1; index < argc; ++index) {
+        arguments.emplace_back(argv[index]);
+    }
+    return arguments;
+}
+#endif
+
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+// Qt's wide command line preserves paths the code-page encoded argv cannot.
+std::vector<std::string> Utf8Arguments(const QStringList& arguments) {
+    // Qt's list starts with the executable; the parser takes only the
+    // arguments after it, matching argv in RawArguments.
+    std::vector<std::string> tokens;
+    tokens.reserve(static_cast<std::size_t>(arguments.size()));
+    for (int index = 1; index < arguments.size(); ++index) {
+        tokens.push_back(arguments.at(index).toUtf8().toStdString());
+    }
+    return tokens;
+}
+#endif
 
 bool RequestsCapture(int argc, char** argv) {
     return HasArgument(argc, argv, "--capture=") || HasArgument(argc, argv, "--script=");
@@ -191,25 +230,83 @@ bool ParseSize(const QString& text, QSize* size) {
     return true;
 }
 
+// Fills *options from the command line.  On failure returns false and sets
+// *error to a message without the "cnote: " prefix.  Unknown "--" options are
+// errors instead of being silently ignored.
+bool ParseLaunchOptions(const std::vector<std::string>& arguments, LaunchOptions* options, std::string* error) {
+    bool selfCheck = false;
+    bool capture = false;
+    bool sizeOrScaleGiven = false;
+    for (const std::string& argument : arguments) {
+        const auto value = [&argument](std::string_view prefix) {
+            return argument.substr(prefix.size());
+        };
+        if (argument == "--self-check") {
+            selfCheck = true;
+        } else if (argument.rfind("--self-check=", 0) == 0) {
+            selfCheck = true;
+            options->selfCheckFixture = cnote::Utf8ToPath(value("--self-check="));
+        } else if (argument.rfind("--capture=", 0) == 0) {
+            capture = true;
+            options->captureOutput = cnote::Utf8ToPath(value("--capture="));
+        } else if (argument.rfind("--script=", 0) == 0) {
+            capture = true;
+            options->captureScript = cnote::Utf8ToPath(value("--script="));
+        } else if (argument.rfind("--size=", 0) == 0) {
+            sizeOrScaleGiven = true;
+            if (!ParseSize(QString::fromStdString(value("--size=")), &options->captureSize)) {
+                *error = "--size expects WxH, for example --size=1400x960";
+                return false;
+            }
+        } else if (argument.rfind("--scale=", 0) == 0) {
+            sizeOrScaleGiven = true;
+            bool ok = false;
+            options->captureScale = QString::fromStdString(value("--scale=")).toDouble(&ok);
+            if (!ok || options->captureScale <= 0.0) {
+                *error = "--scale expects a positive device pixel ratio, for example --scale=1.75";
+                return false;
+            }
+        } else if (argument.rfind("--", 0) == 0) {
+            *error = "unknown option " + argument;
+            return false;
+        } else if (options->openPath.empty()) {
+            options->openPath = cnote::Utf8ToPath(argument);
+        }
+    }
+    if (selfCheck && capture) {
+        *error = "--self-check cannot be combined with --capture or --script";
+        return false;
+    }
+    if (sizeOrScaleGiven && !capture) {
+        *error = "--size and --scale only apply with --capture or --script";
+        return false;
+    }
+    if (selfCheck && options->selfCheckFixture.empty()) {
+        options->selfCheckFixture = options->openPath;
+    }
+    options->mode = capture ? StartupMode::Capture : (selfCheck ? StartupMode::SelfCheck : StartupMode::Interactive);
+    return true;
+}
+
 // Builds the step list: the script's steps, then the --capture output.
-bool LoadCaptureSteps(const CaptureOptions& options, std::vector<cnote::shell::CaptureStep>* steps) {
-    if (!options.script.empty()) {
-        std::ifstream file(options.script, std::ios::binary);
+bool LoadCaptureSteps(const LaunchOptions& options, std::vector<cnote::shell::CaptureStep>* steps) {
+    if (!options.captureScript.empty()) {
+        std::ifstream file(options.captureScript, std::ios::binary);
         if (!file) {
-            std::fprintf(stderr, "capture: cannot read script %s\n", cnote::PathToUtf8(options.script).c_str());
+            std::fprintf(stderr, "capture: cannot read script %s\n", cnote::PathToUtf8(options.captureScript).c_str());
             return false;
         }
         const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
         std::string error;
         if (!cnote::shell::ParseCaptureScript(text, steps, &error)) {
-            std::fprintf(stderr, "capture: %s: %s\n", cnote::PathToUtf8(options.script).c_str(), error.c_str());
+            std::fprintf(stderr, "capture: %s: %s\n", cnote::PathToUtf8(options.captureScript).c_str(), error.c_str());
             return false;
         }
     }
-    if (!options.output.empty()) {
+    if (!options.captureOutput.empty()) {
         cnote::shell::CaptureStep step;
         step.kind = cnote::shell::CaptureStepKind::Capture;
-        step.path = options.output;
+        step.path = options.captureOutput;
         steps->push_back(std::move(step));
     }
     for (const cnote::shell::CaptureStep& step : *steps) {
@@ -227,14 +324,24 @@ int main(int argc, char** argv) {
 #if defined(Q_OS_WIN)
     AdoptParentConsole();
 #endif
-    const bool capture = RequestsCapture(argc, argv);
-    if (capture || HasArgument(argc, argv, "--self-check")) {
+    if (const bool capture = RequestsCapture(argc, argv); capture || HasArgument(argc, argv, "--self-check")) {
         cnote::shell::RouteHeadlessFailuresToStderr(capture ? "capture" : "self-check");
     }
+    // The command line is parsed once.  Linux must choose the platform before
+    // QApplication exists, and argv is UTF-8 there, so that parse also feeds
+    // the run.  Windows and macOS parse Qt's wide command line after
+    // QApplication, because argv is code-page encoded and non-ASCII paths (a
+    // double-clicked project with an accented name) would be lost.
+    LaunchOptions launch;
 #if !defined(Q_OS_WIN) && !defined(Q_OS_MACOS)
     // Linux has its real fonts on the offscreen platform, and an agent's
     // machine may have no display at all.
-    if (capture && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
+    std::string platformError;
+    if (!ParseLaunchOptions(RawArguments(argc, argv), &launch, &platformError)) {
+        std::fprintf(stderr, "cnote: %s\n", platformError.c_str());
+        return 2;
+    }
+    if (launch.mode == StartupMode::Capture && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
         qputenv("QT_QPA_PLATFORM", "offscreen");
     }
 #endif
@@ -244,63 +351,20 @@ int main(int argc, char** argv) {
     // (plan step 6.4) and macOS/Linux use the bare application name.
     cnote::platform::ApplyApplicationIcon();
 
-    bool selfCheck = false;
-    std::filesystem::path selfCheckFixture;
-    std::filesystem::path startupFile;
-    CaptureOptions captureOptions;
-    // Qt's argument list is the wide command line; argv is code-page encoded and
-    // std::filesystem::path(narrow) decodes as UTF-8 on MinGW, which throws for
-    // non-ASCII paths (a double-clicked project with an accented name).
-    const QStringList argumentList = QCoreApplication::arguments();
-    for (int index = 1; index < argumentList.size(); ++index) {
-        const std::string argument = argumentList.at(index).toUtf8().toStdString();
-        constexpr const char* kSelfCheck = "--self-check=";
-        const auto value = [&argument](const char* prefix) {
-            return argument.substr(std::char_traits<char>::length(prefix));
-        };
-        if (argument == "--self-check") {
-            selfCheck = true;
-        } else if (argument.rfind(kSelfCheck, 0) == 0) {
-            selfCheck = true;
-            selfCheckFixture = cnote::Utf8ToPath(value(kSelfCheck));
-        } else if (argument.rfind("--capture=", 0) == 0) {
-            captureOptions.output = cnote::Utf8ToPath(value("--capture="));
-        } else if (argument.rfind("--script=", 0) == 0) {
-            captureOptions.script = cnote::Utf8ToPath(value("--script="));
-        } else if (argument.rfind("--size=", 0) == 0) {
-            captureOptions.sizeOrScaleGiven = true;
-            if (!ParseSize(QString::fromStdString(value("--size=")), &captureOptions.size)) {
-                std::fprintf(stderr, "cnote: --size expects WxH, for example --size=1400x960\n");
-                return 2;
-            }
-        } else if (argument.rfind("--scale=", 0) == 0) {
-            captureOptions.sizeOrScaleGiven = true;
-            bool ok = false;
-            captureOptions.scale = QString::fromStdString(value("--scale=")).toDouble(&ok);
-            if (!ok || captureOptions.scale <= 0.0) {
-                std::fprintf(stderr, "cnote: --scale expects a positive device pixel ratio, for example --scale=1.75\n");
-                return 2;
-            }
-        } else if (argument.rfind("--", 0) != 0 && startupFile.empty()) {
-            startupFile = cnote::Utf8ToPath(argument);
-        }
-    }
-    if (selfCheck && selfCheckFixture.empty()) {
-        selfCheckFixture = startupFile;
-    }
-    if (captureOptions.sizeOrScaleGiven && !capture) {
-        std::fprintf(stderr, "cnote: --size and --scale only apply with --capture or --script\n");
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+    std::string launchError;
+    if (!ParseLaunchOptions(Utf8Arguments(QCoreApplication::arguments()), &launch, &launchError)) {
+        std::fprintf(stderr, "cnote: %s\n", launchError.c_str());
         return 2;
     }
-    if (capture && selfCheck) {
-        std::fprintf(stderr, "cnote: --self-check cannot be combined with --capture or --script\n");
-        return 2;
-    }
+#endif
+    const bool capture = launch.mode == StartupMode::Capture;
+    const bool selfCheck = launch.mode == StartupMode::SelfCheck;
 
     std::vector<cnote::shell::CaptureStep> captureSteps;
     std::optional<QTemporaryDir> captureScratch;
     if (capture) {
-        if (!LoadCaptureSteps(captureOptions, &captureSteps)) {
+        if (!LoadCaptureSteps(launch, &captureSteps)) {
             return 2;
         }
         captureScratch.emplace();
@@ -315,19 +379,20 @@ int main(int argc, char** argv) {
         cnote::settings::SettingsStoreQt::OverrideSettingsPath(scratch / "settings.ini");
         // The run opens a copy: a script may edit and save, and the user's
         // document must stay untouched.
-        if (!startupFile.empty()) {
+        if (!launch.openPath.empty()) {
             std::error_code error;
-            const std::filesystem::path copy = scratch / startupFile.filename();
-            std::filesystem::copy_file(startupFile, copy, std::filesystem::copy_options::overwrite_existing, error);
+            const std::filesystem::path copy = scratch / launch.openPath.filename();
+            std::filesystem::copy_file(launch.openPath, copy, std::filesystem::copy_options::overwrite_existing, error);
             if (error) {
-                std::fprintf(stderr, "capture: cannot open %s: %s\n", cnote::PathToUtf8(startupFile).c_str(),
+                std::fprintf(stderr, "capture: cannot open %s: %s\n", cnote::PathToUtf8(launch.openPath).c_str(),
                     error.message().c_str());
                 return 3;
             }
-            startupFile = copy;
+            // The window opens the same parsed path the run copied.
+            launch.openPath = copy;
         }
         cnote::qt::QtMainWindow::SetHeadlessModals(true);
-        cnote::shell::SetScreenScale(captureOptions.scale);
+        cnote::shell::SetScreenScale(launch.captureScale);
         // Closing the main window from a script must not end the run early.
         app.setQuitOnLastWindowClosed(false);
     }
@@ -383,15 +448,15 @@ int main(int argc, char** argv) {
             }
             window.show();
             // showEvent applies the preferred start size first.
-            window.resize(captureOptions.size);
-            if (window.size() != captureOptions.size) {
+            window.resize(launch.captureSize);
+            if (window.size() != launch.captureSize) {
                 std::fprintf(stderr, "capture: window is %dx%d, not the requested %dx%d (screen limit)\n",
-                    window.width(), window.height(), captureOptions.size.width(), captureOptions.size.height());
+                    window.width(), window.height(), launch.captureSize.width(), launch.captureSize.height());
             }
         } else if (!selfCheck) {
             window.show();
         }
-        const std::filesystem::path& fileToOpen = selfCheck ? selfCheckFixture : startupFile;
+        const std::filesystem::path& fileToOpen = selfCheck ? launch.selfCheckFixture : launch.openPath;
         if (!fileToOpen.empty()) {
             if (!window.OpenPath(fileToOpen)) {
                 if (selfCheck || capture) {
