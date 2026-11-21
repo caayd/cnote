@@ -398,7 +398,11 @@ void TestAutoHideBandStateMachine() {
     // A cursor over the canvas hides it again.
     toolbar.UpdateAutoHideForCursor(QPointF(700.0, 600.0), false);
     Check(WaitFor([&]() { return toolbar.VisibleToolbarHeight() == 0.0; }, 1000), "leaving the band hides it again");
-    Check(toolbar.Phase() == cnote::ui::RevealPhase::Hidden, "the settled hide reports the Hidden phase");
+    // The band reports zero height once the eased progress drops under its
+    // 0.001 threshold, a frame or two before the slide ends and the phase
+    // settles, so wait for the settled phase itself.
+    Check(WaitFor([&]() { return toolbar.Phase() == cnote::ui::RevealPhase::Hidden; }, 1000),
+        "the settled hide reports the Hidden phase");
 
     // Retargeting mid-slide keeps the exposed state and settles without a
     // stuck Hiding/Showing phase.
