@@ -38,7 +38,6 @@ bool OnSegment(Vec2 a, Vec2 b, Vec2 point);
 bool SegmentsIntersect(Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2);
 bool PointInPolygon(Vec2 point, const std::vector<Vec2>& polygon);
 bool PointInRectF(Vec2 point, float left, float top, float right, float bottom);
-std::vector<Vec2> StrokeRenderPoints(const Stroke& stroke, float fallbackSmoothing);
 bool StrokeBounds(const Stroke& stroke, float* minX, float* minY, float* maxX, float* maxY);
 void TranslateStrokePoints(Stroke& stroke, Vec2 delta);
 Vec2 ClampStrokeDeltaToPage(const Stroke& stroke, const Page& page, Vec2 delta);
@@ -330,7 +329,7 @@ inline bool ImageHitsSegment(const PageImage& image, Vec2 a, Vec2 b, float radiu
 // first point against the erase segment, then segment-vs-segment for the rest.
 inline bool StrokeHitsSegment(const Stroke& stroke, Vec2 a, Vec2 b, float radius, float fallbackSmoothing) {
     const float radiusSquared = radius * radius;
-    const std::vector<Vec2> points = StrokeRenderPoints(stroke, fallbackSmoothing);
+    const std::vector<Vec2> points = BuildStrokeRenderPoints(stroke, fallbackSmoothing);
     if (points.empty()) {
         return false;
     }
@@ -365,10 +364,6 @@ inline bool PointInPolygon(Vec2 point, const std::vector<Vec2>& polygon) {
         }
     }
     return inside;
-}
-
-inline std::vector<Vec2> StrokeRenderPoints(const Stroke& stroke, float fallbackSmoothing) {
-    return BuildSmoothedPoints(stroke.points, StrokeRenderSmoothing(stroke, fallbackSmoothing));
 }
 
 inline bool StrokeBounds(const Stroke& stroke, float* minX, float* minY, float* maxX, float* maxY) {
@@ -454,7 +449,7 @@ inline float SelectionRotateOffsetPageUnits(float pageScale, int dpi) {
 
 inline bool StrokeHitsPoint(const Stroke& stroke, Vec2 point, float radius, float fallbackSmoothing) {
     const float radiusSquared = radius * radius;
-    const std::vector<Vec2> points = StrokeRenderPoints(stroke, fallbackSmoothing);
+    const std::vector<Vec2> points = BuildStrokeRenderPoints(stroke, fallbackSmoothing);
     if (points.empty()) {
         return false;
     }
@@ -470,7 +465,7 @@ inline bool StrokeHitsPoint(const Stroke& stroke, Vec2 point, float radius, floa
 }
 
 inline bool StrokeIntersectsRectSelection(const Stroke& stroke, Vec2 a, Vec2 b, float fallbackSmoothing) {
-    const std::vector<Vec2> points = StrokeRenderPoints(stroke, fallbackSmoothing);
+    const std::vector<Vec2> points = BuildStrokeRenderPoints(stroke, fallbackSmoothing);
     if (points.empty()) {
         return false;
     }
@@ -494,7 +489,7 @@ inline bool StrokeIntersectsRectSelection(const Stroke& stroke, Vec2 a, Vec2 b, 
 }
 
 inline bool StrokeIntersectsPolygonSelection(const Stroke& stroke, const std::vector<Vec2>& polygon, float fallbackSmoothing) {
-    const std::vector<Vec2> points = StrokeRenderPoints(stroke, fallbackSmoothing);
+    const std::vector<Vec2> points = BuildStrokeRenderPoints(stroke, fallbackSmoothing);
     if (points.empty() || polygon.size() < 3U) {
         return false;
     }

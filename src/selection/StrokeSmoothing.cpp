@@ -13,7 +13,73 @@ float DistanceSquared(Vec2 a, Vec2 b) {
     return (dx * dx) + (dy * dy);
 }
 
+Vec2 Lerp(Vec2 from, Vec2 to, float amount) {
+    return Vec2 {
+        from.x + ((to.x - from.x) * amount),
+        from.y + ((to.y - from.y) * amount),
+    };
+}
+
+// Upper bound on the steps one long pull is resampled into (App.cpp:1964).
+constexpr int kMaxInterpolatedPoints = 64;
+
 }  // namespace
+
+void IncrementalStrokeStabilizer::Reset(StrokeSampling sampling) {
+    // Non-finite values (a damaged file) fall back to the identity.
+    sampling_.streamline = std::isfinite(sampling.streamline) ? std::clamp(sampling.streamline, 0.0f, 0.95f) : 0.0f;
+    sampling_.spacing = std::isfinite(sampling.spacing) ? std::max(0.0f, sampling.spacing) : 0.0f;
+    hasLast_ = false;
+    last_ = {};
+}
+
+void IncrementalStrokeStabilizer::Feed(Vec2 raw, std::vector<Vec2>& out) {
+    if (!hasLast_) {
+        out.push_back(raw);
+        last_ = raw;
+        hasLast_ = true;
+        return;
+    }
+
+    // The reference's follow factor, clamp(1 - smoothing, 0.05, 0.95); a zero
+    // streamline keeps the sample bit-exact instead of lerping by 1.
+    const Vec2 filtered = sampling_.streamline > 0.0f
+        ? Lerp(last_, raw, std::max(0.05f, 1.0f - sampling_.streamline))
+        : raw;
+    if (sampling_.spacing <= 0.0f) {
+        out.push_back(filtered);
+        last_ = filtered;
+        return;
+    }
+
+    // App.cpp:1958-1979: drop a pull below the spacing, resample a longer one.
+    const float spacing = std::max(0.05f, sampling_.spacing);
+    const float distance = std::sqrt(DistanceSquared(filtered, last_));
+    if (distance < spacing) {
+        return;
+    }
+    const int segmentCount = std::min(
+        kMaxInterpolatedPoints + 1,
+        std::max(1, static_cast<int>(std::ceil(distance / spacing))));
+    for (int segment = 1; segment <= segmentCount; ++segment) {
+        out.push_back(Lerp(last_, filtered, static_cast<float>(segment) / static_cast<float>(segmentCount)));
+    }
+    last_ = filtered;
+}
+
+std::vector<Vec2> BuildStabilizedPoints(const std::vector<Vec2>& points, StrokeSampling sampling) {
+    if (sampling.streamline == 0.0f && sampling.spacing == 0.0f) {
+        return points;
+    }
+    IncrementalStrokeStabilizer stabilizer;
+    stabilizer.Reset(sampling);
+    std::vector<Vec2> stabilized;
+    stabilized.reserve(points.size());
+    for (const Vec2& point : points) {
+        stabilizer.Feed(point, stabilized);
+    }
+    return stabilized;
+}
 
 std::vector<Vec2> BuildSmoothedPoints(const std::vector<Vec2>& points, float strength) {
     if (points.size() <= 2U || strength <= 0.001f) {
@@ -95,6 +161,12 @@ bool IncrementalStrokeSmoother::TailPoint(Vec2 rawLast, Vec2 lastSmoothed, Vec2*
 float StrokeRenderSmoothing(const Stroke& stroke, float fallbackSmoothing) {
     const float smoothing = std::isfinite(stroke.smoothing) ? stroke.smoothing : fallbackSmoothing;
     return std::clamp(smoothing, 0.0f, 1.0f);
+}
+
+std::vector<Vec2> BuildStrokeRenderPoints(const Stroke& stroke, float fallbackSmoothing) {
+    return BuildSmoothedPoints(
+        BuildStabilizedPoints(stroke.points, stroke.sampling),
+        StrokeRenderSmoothing(stroke, fallbackSmoothing));
 }
 
 }  // namespace cnote

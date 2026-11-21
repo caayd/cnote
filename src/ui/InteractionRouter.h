@@ -250,11 +250,13 @@ public:
 
     // --- stroke -----------------------------------------------------------
     // The host applies the current brush colour/width; `dotted` is the mode the
-    // router tracked (App.cpp:1990).
-    virtual void BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted) = 0;
+    // router tracked (App.cpp:1990) and `sampling` the stabilization the stroke
+    // replays at render time (the tuning at the page's current scale).
+    virtual void BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted, StrokeSampling sampling) = 0;
     // App::ApplyStrokePoint writes activeStroke_->style.dotted directly
     // (App.cpp:4515-4517) when only the Space mode changed.
     virtual void SetStrokeDotted(bool dotted) = 0;
+    // One raw pointer sample, in page units.
     virtual void AppendStrokePoint(Vec2 pagePoint, bool dotted) = 0;
     // Straight-line/oval modes replace the whole point list (App.cpp:4532-4544).
     virtual void ReplaceStrokePoints(const std::vector<Vec2>& points, bool dotted) = 0;
@@ -345,12 +347,12 @@ public:
 
     // Pure ports of the legacy stroke helpers, exposed for the tests and for
     // the canvas preview: App.cpp:1997 (SnapLineEndpoint), App.cpp:2013
-    // (BuildOvalStrokePoints), App.cpp:2050 (InputSpacingPageUnits),
-    // App.cpp:1958 (AppendStrokePointWithResampling).
+    // (BuildOvalStrokePoints), App.cpp:2050 (InputSpacingPageUnits).  The
+    // App.cpp:1958 filter/resample now replays at render time
+    // (BuildStabilizedPoints).
     [[nodiscard]] static Vec2 SnapLineEndpoint(Vec2 start, Vec2 end);
     [[nodiscard]] static std::vector<Vec2> BuildOvalStrokePoints(Vec2 start, Vec2 end, bool circle);
     [[nodiscard]] static float InputSpacingPageUnits(float pageSpacing, float pageScale);
-    static void AppendStrokePointWithResampling(std::vector<Vec2>& points, Vec2 point, float spacing);
 
 private:
     // MessageLoop.cpp:189-246 (left) and 250-256 (middle) press routing.
@@ -392,7 +394,7 @@ private:
         struct StrokeData {
             std::optional<PageHit> page;
             std::vector<Vec2> points;    // active points (line/oval modes replace them)
-            std::vector<Vec2> freehandPoints;  // unfiltered freehand accumulation (App.cpp:4497)
+            std::vector<Vec2> freehandPoints;  // raw freehand samples (App.cpp:4497)
             bool dotted = false;
         };
         struct EraseData {

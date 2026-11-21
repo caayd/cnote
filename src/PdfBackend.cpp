@@ -142,9 +142,7 @@ bool AppendVectorStroke(FPDF_PAGE pageHandle, const Page& page, const Stroke& st
         return true;
     }
 
-    const std::vector<Vec2> smoothedPoints = BuildSmoothedPoints(
-        stroke.points,
-        StrokeRenderSmoothing(stroke, strokeSmoothing));
+    const std::vector<Vec2> smoothedPoints = BuildStrokeRenderPoints(stroke, strokeSmoothing);
     if (smoothedPoints.empty()) {
         return true;
     }

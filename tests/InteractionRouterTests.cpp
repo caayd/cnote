@@ -31,6 +31,7 @@
 namespace {
 
 using cnote::Vec2;
+using cnote::StrokeSampling;
 namespace ui = cnote::ui;
 
 int g_checks = 0;
@@ -90,6 +91,7 @@ public:
     std::optional<ui::TransformRequest> selectionHandle;
     bool beginTransformSucceeds = true;
     std::vector<ui::ObjectRef> eraseTargets;
+    StrokeSampling lastSampling {};
 
     std::optional<ui::PageHit> HitTestPage(const QPointF& logical) const override { return hitPage(logical); }
     Vec2 ScreenToPage(const QPointF& logical, bool clampToPage) const override { return screenToPage(logical, clampToPage); }
@@ -118,7 +120,8 @@ public:
     void SetCursor(ui::CursorKind cursor) override { ops.push_back("SetCursor(" + std::to_string(static_cast<int>(cursor)) + ")"); }
     void InvalidateCanvas() override { ++invalidateCount; }
 
-    void BeginStroke(std::size_t pageIndex, Vec2 point, bool dotted) override {
+    void BeginStroke(std::size_t pageIndex, Vec2 point, bool dotted, StrokeSampling sampling) override {
+        lastSampling = sampling;
         ops.push_back("BeginStroke(page=" + std::to_string(pageIndex) + ",point=" + Format(point) + ",dotted=" + (dotted ? "1" : "0") + ")");
     }
     void SetStrokeDotted(bool dotted) override { ops.push_back("SetStrokeDotted(" + std::string(dotted ? "1" : "0") + ")"); }
@@ -408,30 +411,35 @@ void TestStrokePageSegmentation() {
     Check(router.ActiveInteraction() == ui::InteractionKind::None, "release ends the stroke");
 }
 
-// App.cpp:4497-4559 sampling: the smoothed follow point is dropped below the
-// input spacing and resampled above it (App.cpp:1958-1979).
-void TestStrokeSpacingAndResampling() {
+// Raw sampling: every distinct pointer sample reaches the host verbatim, and
+// the stroke records the stabilization it replays at render time (App.cpp:
+// 1958-1979 follow/spacing; spacing clamped per App.cpp:2050-2055).
+void TestStrokeRawSamplesAndSampling() {
     RecordingHost host;
     ui::InteractionRouter router(host);
     router.SetTool(ui::Tool::Draw);
     router.HandlePointerPress(Press(0.0, 0.0));
+    Check(Near(host.lastSampling.streamline, 0.3) && Near(host.lastSampling.spacing, 1.75),
+        "the stroke records the default stabilization at the page's scale");
     host.Reset();
 
-    // follow = clamp(1 - 0.3, 0.05, 0.95) = 0.7; a 100 px move is 1.0 page unit,
-    // the filtered point travels 0.7 page units, below the 1.75 spacing floor
-    // (App.cpp:2050-2055), so nothing is appended.
+    // A 100 px move is 1.0 page unit: below the spacing, yet still stored -
+    // the render-time replay decides what it contributes.
     router.HandlePointerMove(Move(100.0, 0.0));
-    Check(host.CountOp("AppendStrokePoint") == 0, "a sub-spacing move appends no point\n" + host.Dump());
+    Check(host.HasOp("AppendStrokePoint((1.000,0.000),dotted=0)"), "a small move appends the raw sample\n" + host.Dump());
 
-    // A 400 px move is 4.0 page units; the filtered point travels 2.8, which is
-    // resampled into ceil(2.8 / 1.75) = 2 appended points.
+    host.Reset();
+    router.HandlePointerMove(Move(100.0, 0.0));
+    Check(host.CountOp("AppendStrokePoint") == 0, "a repeated sample appends nothing\n" + host.Dump());
+
     host.Reset();
     router.HandlePointerMove(Move(400.0, 0.0));
-    Check(host.CountOp("AppendStrokePoint") == 2, "a long move is resampled into spacing-sized steps\n" + host.Dump());
+    Check(host.CountOp("AppendStrokePoint") == 1 && host.HasOp("AppendStrokePoint((4.000,0.000),dotted=0)"),
+        "a long move appends one raw sample, unresampled\n" + host.Dump());
 
     host.Reset();
     router.HandlePointerRelease(Release(400.0, 0.0));
-    Check(host.CountOp("CommitStroke") == 1, "the resampled segment commits once");
+    Check(host.CountOp("CommitStroke") == 1, "the raw stroke commits once");
 }
 
 // App.cpp:1981-2006 and 4532-4544: 'A' switches to a straight line, Shift snaps
@@ -1166,14 +1174,6 @@ void TestPortedReferenceValues() {
     const double angleDegrees = std::atan2(snapped.y, snapped.x) * 180.0 / 3.14159265358979323846;
     Check(Near(std::fmod(std::abs(angleDegrees), 15.0), 0.0, 1e-3) || Near(std::fmod(std::abs(angleDegrees), 15.0), 15.0, 1e-3),
         "snapped endpoints land on the 15-degree grid (App.cpp:2000)");
-
-    std::vector<Vec2> points;
-    ui::InteractionRouter::AppendStrokePointWithResampling(points, Vec2 { 0.0f, 0.0f }, 1.0f);
-    ui::InteractionRouter::AppendStrokePointWithResampling(points, Vec2 { 0.5f, 0.0f }, 1.0f);
-    Check(points.size() == 1U, "resampling drops a point below the spacing (App.cpp:1968-1970)");
-    ui::InteractionRouter::AppendStrokePointWithResampling(points, Vec2 { 4.0f, 0.0f }, 1.0f);
-    Check(points.size() == 5U, "resampling splits a 4-unit gap into four 1-unit steps (starting point included)");
-    Check(Near(points.back().x, 4.0) && Near(points.back().y, 0.0), "resampling ends exactly on the requested point");
 }
 
 }  // namespace
@@ -1201,7 +1201,7 @@ int main() {
     TestMiddleButtonPanPrecedence();
     TestPanToolDeltas();
     TestStrokePageSegmentation();
-    TestStrokeSpacingAndResampling();
+    TestStrokeRawSamplesAndSampling();
     TestStrokeStraightLineSnapAndOval();
     TestStrokeDottedModifierWithoutMotion();
     TestStrokeReleaseOutsideCanvas();

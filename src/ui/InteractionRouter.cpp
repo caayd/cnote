@@ -10,24 +10,9 @@ namespace {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kSnapAngleRadians = kPi / 12.0f;      // App.cpp:2000
 constexpr int kOvalSegmentCount = 72;                 // App.cpp:2014
-constexpr int kMaxInterpolatedPoints = 64;            // App.cpp:1964
 constexpr float kMinScreenSpacing = 1.75f;            // App.cpp:2051
 constexpr float kMaxScreenSpacing = 3.0f;             // App.cpp:2052
 constexpr int kWheelDeltaUnits = 120;                 // Win32 WHEEL_DELTA
-
-float SquaredDistance(Vec2 a, Vec2 b) {
-    const float dx = a.x - b.x;
-    const float dy = a.y - b.y;
-    return (dx * dx) + (dy * dy);
-}
-
-float DistanceBetween(Vec2 a, Vec2 b) {
-    return std::sqrt(SquaredDistance(a, b));
-}
-
-Vec2 LerpPoint(Vec2 a, Vec2 b, float t) {
-    return { a.x + ((b.x - a.x) * t), a.y + ((b.y - a.y) * t) };
-}
 
 float SquaredDistance(const QPointF& a, const QPointF& b) {
     const qreal dx = a.x() - b.x();
@@ -100,28 +85,6 @@ float InteractionRouter::InputSpacingPageUnits(float pageSpacing, float pageScal
     const float scale = std::max(0.1f, pageScale);
     const float screenSpacing = std::clamp(std::max(0.05f, pageSpacing) * scale, kMinScreenSpacing, kMaxScreenSpacing);
     return screenSpacing / scale;
-}
-
-void InteractionRouter::AppendStrokePointWithResampling(std::vector<Vec2>& points, Vec2 point, float spacing) {
-    if (points.empty()) {
-        points.push_back(point);
-        return;
-    }
-
-    const float minSpacing = std::max(0.05f, spacing);
-    const Vec2 from = points.back();
-    const float distance = DistanceBetween(from, point);
-    if (distance < minSpacing) {
-        return;
-    }
-
-    const int segmentCount = std::min(
-        kMaxInterpolatedPoints + 1,
-        std::max(1, static_cast<int>(std::ceil(distance / minSpacing))));
-    for (int segment = 1; segment <= segmentCount; ++segment) {
-        const float t = static_cast<float>(segment) / static_cast<float>(segmentCount);
-        points.push_back(LerpPoint(from, point, t));
-    }
 }
 
 InteractionRouter::InteractionRouter(InteractionHost& host, InteractionTuning tuning)
@@ -510,7 +473,10 @@ void InteractionRouter::StartStrokeSegment(const PageHit& hit, Vec2 pagePoint, b
     state_.stroke.dotted = dotted;
     state_.kind = InteractionKind::Stroke;
     UpdateCapture();
-    host_.BeginStroke(hit.pageIndex, pagePoint, dotted);
+    host_.BeginStroke(hit.pageIndex, pagePoint, dotted, StrokeSampling {
+        std::clamp(tuning_.inputSmoothing, 0.05f, 0.95f),
+        InputSpacingPageUnits(tuning_.inputSpacing, hit.scale),
+    });
 }
 
 void InteractionRouter::BeginStroke(const QPointF& logical) {
@@ -561,7 +527,6 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
     const Vec2 rawPoint = hit.has_value()
         ? host_.ScreenToPage(logical, true)
         : host_.ScreenToPageOnPage(state_.stroke.page->pageIndex, logical, true);
-    const float inputSpacing = InputSpacingPageUnits(tuning_.inputSpacing, pageScale);
     const bool straightLineMode = modifiers_.straightLine;
 
     if (state_.stroke.freehandPoints.empty()) {
@@ -575,22 +540,14 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
         host_.SetStrokeDotted(dottedMode);
     }
 
-    bool pointAppended = true;
-    Vec2 filteredPoint = rawPoint;
-    if (!state_.stroke.freehandPoints.empty()) {
-        const float followAmount = std::clamp(1.0f - tuning_.inputSmoothing, 0.05f, 0.95f);
-        filteredPoint = LerpPoint(state_.stroke.freehandPoints.back(), rawPoint, followAmount);
-        if (SquaredDistance(filteredPoint, state_.stroke.freehandPoints.back()) < (inputSpacing * inputSpacing)) {
-            pointAppended = false;
-        }
-    }
-
+    // Raw samples are stored as they arrive; the stroke's StrokeSampling
+    // replays the stabilization at render time.  A repeated sample adds
+    // nothing.
+    const bool pointAppended = state_.stroke.freehandPoints.empty()
+        || !Vec2Equal(state_.stroke.freehandPoints.back(), rawPoint);
     if (pointAppended) {
-        const std::size_t previousCount = state_.stroke.freehandPoints.size();
-        AppendStrokePointWithResampling(state_.stroke.freehandPoints, filteredPoint, inputSpacing);
-        for (std::size_t index = previousCount; index < state_.stroke.freehandPoints.size(); ++index) {
-            host_.AppendStrokePoint(state_.stroke.freehandPoints[index], dottedMode);
-        }
+        state_.stroke.freehandPoints.push_back(rawPoint);
+        host_.AppendStrokePoint(rawPoint, dottedMode);
     }
 
     if (straightLineMode && !state_.stroke.freehandPoints.empty()) {

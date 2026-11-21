@@ -153,7 +153,7 @@ public:
     void SetCursor(CursorKind cursor) override;
     void InvalidateCanvas() override;
     void SetPointerCapture(bool captured) override;
-    void BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted) override;
+    void BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted, StrokeSampling sampling) override;
     void SetStrokeDotted(bool dotted) override;
     void AppendStrokePoint(Vec2 pagePoint, bool dotted) override;
     void ReplaceStrokePoints(const std::vector<Vec2>& points, bool dotted) override;
@@ -351,14 +351,16 @@ private:
         IncrementalStrokeSmoother smoother;
     };
 
-    // Keeps the live-stroke layer in sync with the pending stroke and reports
-    // whether it applies (false: caller falls back to PaintStrokePreview -
-    // dotted strokes, replaced point lists mid-rebuild, allocation failure).
-    bool SyncStrokeLayer(const Stroke& stroke, const CanvasPageView& view);
+    // Keeps the live-stroke layer in sync with the pending stroke's stabilized
+    // points (`points`, liveStrokePoints_) and reports whether it applies
+    // (false: caller falls back to PaintStrokePreview - dotted strokes,
+    // replaced point lists mid-rebuild, allocation failure).
+    bool SyncStrokeLayer(const Stroke& stroke, const std::vector<Vec2>& points, const CanvasPageView& view);
     void ResetStrokeLayer();
     // Draws the provisional tail (the smoothed segments that still change as
     // points arrive) on top of the layer at widget scale.
-    void PaintStrokeTail(QPainter& painter, const Stroke& stroke, const CanvasPageView& view);
+    void PaintStrokeTail(QPainter& painter, const Stroke& stroke, const std::vector<Vec2>& points,
+        const CanvasPageView& view);
 
     [[nodiscard]] render::PageRenderParams RenderParamsFor(const CanvasPageView& view) const;
     const render::PageSurfaceCache* FindSurface(std::size_t pageIndex, float scale, float devicePixelRatio) const;
@@ -568,6 +570,11 @@ private:
     // InvalidateCanvas repaints it instead of the whole widget.
     QRect transientDirty_ {};
     LiveStrokeLayer strokeLayer_ {};
+    // The pending stroke's raw samples run through its StrokeSampling as they
+    // arrive: point-for-point what BuildStabilizedPoints yields at commit, so
+    // the live layer and the dirty rects follow the ink that will be drawn.
+    IncrementalStrokeStabilizer liveStabilizer_ {};
+    std::vector<Vec2> liveStrokePoints_;
     render::PdfBackgroundProvider* pdfBackground_ = nullptr;
     float cachedDevicePixelRatio_ = 0.0f;
     std::size_t lastPaintPageCount_ = 0;
