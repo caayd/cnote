@@ -10,7 +10,9 @@
 #include "settings/SettingsStoreQt.h"
 
 class QCheckBox;
+class QCloseEvent;
 class QComboBox;
+class QHideEvent;
 class QKeyEvent;
 class QLabel;
 class QLineEdit;
@@ -31,12 +33,26 @@ namespace cnote::ui {
 // The legacy dialog had no OK/Cancel: every edit is applied to the live model
 // and persisted immediately (SaveAppSettings), and closing it changed nothing
 // further.  This dialog keeps that behaviour: `settings` is the application's
-// model, mutated in place, and `settingsChanged()` is emitted after every edit
-// so the owning window can re-read palette/brush/chrome values.  A failed
-// persist still applies the in-memory value (legacy semantics) but reports
-// false through lastSaveSucceeded() and emits settingsSaveFailed().
+// model.  An edit is staged into a copy, clamped, saved, and only then assigned
+// to `settings`; `settingsChanged()` is emitted after a successful edit.  A
+// failed persist therefore leaves the live model and the controls unchanged and
+// reports the failure through lastSaveSucceeded() and settingsSaveFailed().
 class CNOTE_UI_EXPORT SettingsDialogQt : public QDialog {
     Q_OBJECT
+
+private:
+    // Shortcut capture owns an application-wide key filter while armed; it must
+    // never outlive visibility.  `Armed` is the only phase in which key events
+    // are intercepted, and hide/close/destruction return to `Idle`.
+    struct CaptureState {
+        enum class Kind {
+            Idle,
+            Armed,
+        };
+
+        Kind kind = Kind::Idle;
+        settings::ShortcutAction action = settings::ShortcutAction::ToolDraw;  // valid only when Armed
+    };
 
 public:
     SettingsDialogQt(settings::Settings& settings, settings::SettingsStoreQt store, QWidget* parent = nullptr);
@@ -52,8 +68,13 @@ public:
     [[nodiscard]] bool lastSaveSucceeded() const { return lastSaveSucceeded_; }
     [[nodiscard]] QString lastSaveError() const { return lastSaveError_; }
 
-    [[nodiscard]] bool capturingShortcut() const { return capturingAction_.has_value(); }
-    [[nodiscard]] std::optional<settings::ShortcutAction> capturingAction() const { return capturingAction_; }
+    [[nodiscard]] bool capturingShortcut() const { return captureState_.kind == CaptureState::Kind::Armed; }
+    [[nodiscard]] std::optional<settings::ShortcutAction> capturingAction() const {
+        if (captureState_.kind != CaptureState::Kind::Armed) {
+            return std::nullopt;
+        }
+        return captureState_.action;
+    }
 
     // Selects the shortcut row for `action` and starts the legacy capture mode
     // ("Press Key..."); Esc cancels.  Used by the button and by the tests.
@@ -66,6 +87,8 @@ signals:
 
 protected:
     void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
+    void closeEvent(QCloseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
@@ -75,7 +98,9 @@ private:
     void buildDrawingPage();
     void buildShortcutsPage();
 
-    void persist();
+    // Stages `candidate`, clamps it, saves it, and only applies it to the live
+    // model on success.  Returns whether the settings were applied.
+    bool persist(settings::Settings candidate);
     void notifyShortcutHint();
 
     void refreshPaletteControls(bool syncSliders);
@@ -100,7 +125,6 @@ private:
     void applyTextSizePresetEdit(QLineEdit* edit, std::size_t index, bool normalizeText);
     void cancelShortcutCapture();
 
-    [[nodiscard]] std::size_t selectedPaletteIndex() const;
     [[nodiscard]] std::optional<std::size_t> selectedSavedPaletteIndex() const;
     [[nodiscard]] std::optional<settings::ShortcutAction> selectedShortcutAction() const;
     [[nodiscard]] settings::ShortcutBinding* bindingFor(settings::ShortcutAction action);
@@ -110,7 +134,7 @@ private:
     bool lastSaveSucceeded_ = true;
     QString lastSaveError_ {};
     bool refreshing_ = false;
-    std::optional<settings::ShortcutAction> capturingAction_ {};
+    CaptureState captureState_ {};
 
     QTabWidget* categoryTabs_ = nullptr;
 

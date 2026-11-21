@@ -6,6 +6,7 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -221,10 +222,14 @@ void NewPageDialogQt::buildUi() {
         });
     }
     connect(paletteProfileCombo_, &QComboBox::activated, this, [this](int index) {
-        if (index == 0) {
+        if (index < 0 || static_cast<std::size_t>(index) >= paletteIndices_.size()) {
+            return;
+        }
+        const std::size_t savedIndex = paletteIndices_[static_cast<std::size_t>(index)];
+        if (savedIndex == kCurrentPaletteRow) {
             draft_.paletteProfile = ResolvedPaletteProfile({}, settings_.palette);
-        } else if (index > 0 && static_cast<std::size_t>(index - 1) < settings_.savedPalettes.size()) {
-            draft_.paletteProfile = settings_.savedPalettes[static_cast<std::size_t>(index - 1)].colors;
+        } else if (savedIndex < settings_.savedPalettes.size()) {
+            draft_.paletteProfile = settings_.savedPalettes[savedIndex].colors;
         } else {
             return;
         }
@@ -337,18 +342,18 @@ void NewPageDialogQt::refreshDraftControls() {
 
     remapCheck_->setChecked(draft_.applyPaletteProfileToExistingStrokes);
 
-    // Palette profile combo: 0 = current palette, 1..n = saved palettes; a
-    // profile matching neither shows a disabled legacy "Custom Profile" entry.
+    // Palette profile combo: row 0 is the current palette, rows 1..n are the
+    // non-empty saved palettes in paletteIndices_; a profile matching neither
+    // shows a disabled legacy "Custom Profile" entry.
     paletteProfileCombo_->setCurrentIndex(0);
     const std::vector<std::uint32_t> resolved = resolvedDraftProfile();
     bool matchedProfile = resolved == settings_.palette;
     if (!matchedProfile) {
-        for (std::size_t index = 0; index < settings_.savedPalettes.size(); ++index) {
-            if (settings_.savedPalettes[index].colors == resolved) {
-                const int comboIndex = static_cast<int>(index) + 1;
-                if (comboIndex < paletteProfileCombo_->count()) {
-                    paletteProfileCombo_->setCurrentIndex(comboIndex);
-                }
+        for (std::size_t row = 1; row < paletteIndices_.size(); ++row) {
+            const std::size_t savedIndex = paletteIndices_[row];
+            if (savedIndex < settings_.savedPalettes.size()
+                && settings_.savedPalettes[savedIndex].colors == resolved) {
+                paletteProfileCombo_->setCurrentIndex(static_cast<int>(row));
                 matchedProfile = true;
                 break;
             }
@@ -437,12 +442,18 @@ void NewPageDialogQt::refreshRecentColors() {
 void NewPageDialogQt::refreshPaletteProfileCombo() {
     const QSignalBlocker block(paletteProfileCombo_);
     paletteProfileCombo_->clear();
+    paletteIndices_.clear();
     paletteProfileCombo_->addItem(QStringLiteral("Current Palette"));
-    for (const settings::NamedPalette& palette : settings_.savedPalettes) {
+    paletteIndices_.push_back(kCurrentPaletteRow);
+    for (std::size_t index = 0; index < settings_.savedPalettes.size(); ++index) {
+        const settings::NamedPalette& palette = settings_.savedPalettes[index];
         if (palette.colors.empty()) {
             continue;
         }
-        paletteProfileCombo_->addItem(QString::fromUtf16(palette.name.data(), static_cast<qsizetype>(palette.name.size())));
+        paletteProfileCombo_->addItem(QString::fromUtf16(
+            palette.name.data(),
+            static_cast<qsizetype>(palette.name.size())));
+        paletteIndices_.push_back(index);
     }
 }
 
@@ -538,6 +549,11 @@ void NewPageDialogQt::applyToFuturePages() {
 void NewPageDialogQt::showEvent(QShowEvent* event) {
     QDialog::showEvent(event);
     refreshFromSettings();
+}
+
+void NewPageDialogQt::hideEvent(QHideEvent* event) {
+    QDialog::hideEvent(event);
+    syncDraftFromDefaults();
 }
 
 }  // namespace cnote::ui

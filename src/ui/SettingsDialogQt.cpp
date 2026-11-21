@@ -2,11 +2,14 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QColor>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QEvent>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QIcon>
 #include <QKeyEvent>
 #include <QLabel>
@@ -43,6 +46,53 @@ QString BindingLabel(const QKeySequence& sequence) {
     return sequence.toString(QKeySequence::NativeText);
 }
 
+settings::ShortcutBinding* FindBindingIn(settings::Settings& values, settings::ShortcutAction action) {
+    for (settings::ShortcutBinding& binding : values.shortcuts) {
+        if (binding.action == action) {
+            return &binding;
+        }
+    }
+    return nullptr;
+}
+
+// Central validation for a staged edit, mirroring the ranges ParseText accepts.
+// The dialog never invents a different policy for values the file format would
+// clamp anyway.
+void ClampSettings(settings::Settings& values) {
+    if (values.palette.empty()) {
+        values.palette = settings::DefaultPalette();
+    }
+    if (values.palette.size() > settings::kMaxPaletteColors) {
+        values.palette.resize(settings::kMaxPaletteColors);
+    }
+    values.paletteIndex = std::min(values.paletteIndex, values.palette.size() - 1U);
+    values.colorIndex = std::min(values.colorIndex, values.palette.size() - 1U);
+
+    const auto presets = DimensionPresets();
+    values.defaultPageSizePreset = std::min(values.defaultPageSizePreset, presets.size() - 1U);
+
+    values.quickSizeSliderMax = std::clamp(values.quickSizeSliderMax, 1.0f, settings::kMaxBrushSize);
+    values.drawBrushSize = std::clamp(values.drawBrushSize, 0.5f, values.quickSizeSliderMax);
+    values.eraseBrushSize = std::clamp(values.eraseBrushSize, 0.5f, values.quickSizeSliderMax);
+    values.inputSmoothing = std::clamp(values.inputSmoothing, 0.05f, 0.95f);
+    values.inputSpacing = std::clamp(values.inputSpacing, 0.05f, 4.05f);
+    values.strokeSmoothing = std::clamp(values.strokeSmoothing, 0.0f, 1.0f);
+    values.dashLength = std::clamp(values.dashLength, 0.5f, 8.0f);
+    values.dashGap = std::clamp(values.dashGap, 0.5f, 8.0f);
+    values.drawCursorSize = std::clamp(values.drawCursorSize, 4.0f, 24.0f);
+    values.autoSaveIntervalSeconds = std::min(values.autoSaveIntervalSeconds, 300U);
+    for (float& zoom : values.zoomPresets) {
+        const std::optional<float> decoded = DecodeZoomPreset(zoom);
+        zoom = decoded.has_value()
+            ? std::clamp(*decoded, settings::kMinZoom, settings::kMaxZoom)
+            : EncodeZoomPreset(std::nullopt);
+    }
+    for (float& size : values.textSizePresets) {
+        size = std::clamp(size, 4.0f, 512.0f);
+    }
+    values.textSizePreset = std::min(values.textSizePreset, settings::kTextSizePresetCount - 1U);
+}
+
 QWidget* MakeSliderRow(QSlider* slider, QLabel* label, QWidget* parent) {
     auto* row = new QWidget(parent);
     auto* layout = new QHBoxLayout(row);
@@ -71,7 +121,8 @@ SettingsDialogQt::SettingsDialogQt(
 }
 
 SettingsDialogQt::~SettingsDialogQt() {
-    if (capturingAction_.has_value()) {
+    captureState_ = {};
+    if (QCoreApplication::instance() != nullptr) {
         qApp->removeEventFilter(this);
     }
 }
@@ -296,39 +347,45 @@ void SettingsDialogQt::buildDrawingPage() {
 
     connect(stabilizationSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (refreshing_) return;
-        settings_.inputSmoothing = static_cast<float>(value) / 100.0f;
+        settings::Settings candidate = settings_;
+        candidate.inputSmoothing = static_cast<float>(value) / 100.0f;
+        persist(std::move(candidate));
         refreshDrawingControls();
-        persist();
     });
     connect(spacingSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (refreshing_) return;
-        settings_.inputSpacing = static_cast<float>(value) / 100.0f;
+        settings::Settings candidate = settings_;
+        candidate.inputSpacing = static_cast<float>(value) / 100.0f;
+        persist(std::move(candidate));
         refreshDrawingControls();
-        persist();
     });
     connect(strokeSmoothingSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (refreshing_) return;
-        settings_.strokeSmoothing = static_cast<float>(value) / 100.0f;
+        settings::Settings candidate = settings_;
+        candidate.strokeSmoothing = static_cast<float>(value) / 100.0f;
+        persist(std::move(candidate));
         refreshDrawingControls();
-        persist();
     });
     connect(drawCursorSizeSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (refreshing_) return;
-        settings_.drawCursorSize = static_cast<float>(value);
+        settings::Settings candidate = settings_;
+        candidate.drawCursorSize = static_cast<float>(value);
+        persist(std::move(candidate));
         refreshDrawingControls();
-        persist();
     });
     connect(dashLengthSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (refreshing_) return;
-        settings_.dashLength = static_cast<float>(value) / 10.0f;
+        settings::Settings candidate = settings_;
+        candidate.dashLength = static_cast<float>(value) / 10.0f;
+        persist(std::move(candidate));
         refreshDrawingControls();
-        persist();
     });
     connect(dashGapSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (refreshing_) return;
-        settings_.dashGap = static_cast<float>(value) / 10.0f;
+        settings::Settings candidate = settings_;
+        candidate.dashGap = static_cast<float>(value) / 10.0f;
+        persist(std::move(candidate));
         refreshDrawingControls();
-        persist();
     });
     connect(autoSaveSlider_, &QSlider::valueChanged, this, [this](int) {
         if (refreshing_) return;
@@ -336,27 +393,35 @@ void SettingsDialogQt::buildDrawingPage() {
     });
     connect(autoHideToolbarCheck_, &QCheckBox::toggled, this, [this](bool checked) {
         if (refreshing_) return;
-        settings_.autoHideToolbar = checked;
-        persist();
+        settings::Settings candidate = settings_;
+        candidate.autoHideToolbar = checked;
+        persist(std::move(candidate));
+        refreshDrawingControls();
     });
     connect(embedProjectInPdfCheck_, &QCheckBox::toggled, this, [this](bool checked) {
         if (refreshing_) return;
-        settings_.embedProjectInExportedPdfs = checked;
-        persist();
+        settings::Settings candidate = settings_;
+        candidate.embedProjectInExportedPdfs = checked;
+        persist(std::move(candidate));
+        refreshDrawingControls();
     });
     connect(drawCursorKindCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (refreshing_) return;
-        settings_.drawCursorKind = index == 1 ? settings::DrawCursorKind::PrecisionCrosshair : settings::DrawCursorKind::Dot;
+        settings::Settings candidate = settings_;
+        candidate.drawCursorKind = index == 1 ? settings::DrawCursorKind::PrecisionCrosshair : settings::DrawCursorKind::Dot;
+        persist(std::move(candidate));
         refreshDrawingControls();
-        persist();
     });
     connect(defaultPageSizeCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (refreshing_) return;
         if (index < 0 || static_cast<std::size_t>(index) >= DimensionPresets().size()) {
+            refreshDrawingControls();
             return;
         }
-        settings_.defaultPageSizePreset = static_cast<std::size_t>(index);
-        persist();
+        settings::Settings candidate = settings_;
+        candidate.defaultPageSizePreset = static_cast<std::size_t>(index);
+        persist(std::move(candidate));
+        refreshDrawingControls();
     });
     for (std::size_t index = 0; index < settings::kZoomPresetCount; ++index) {
         connect(zoomPresetEdits_[index], &QLineEdit::editingFinished, this, [this, index] {
@@ -437,7 +502,8 @@ void SettingsDialogQt::refreshPaletteControls(bool syncSliders) {
             FormatPaletteEntry(index, settings_.palette[index]));
         paletteList_->addItem(item);
     }
-    const std::size_t selection = selectedPaletteIndex();
+    const std::size_t selection =
+        std::min(settings_.paletteIndex, settings_.palette.empty() ? 0U : settings_.palette.size() - 1U);
     if (!settings_.palette.empty()) {
         paletteList_->setCurrentRow(static_cast<int>(selection));
     }
@@ -526,7 +592,7 @@ void SettingsDialogQt::refreshDrawingControls() {
     drawCursorSizeLabel_->setText(FormatPixelLabel(QStringLiteral("Draw Cursor Size"), settings_.drawCursorSize));
     dashLengthLabel_->setText(FormatDashLabel(QStringLiteral("Dash Length"), settings_.dashLength));
     dashGapLabel_->setText(FormatDashLabel(QStringLiteral("Dash Gap"), settings_.dashGap));
-    autoSaveLabel_->setText(FormatAutoSaveLabel(settings_.autoSaveIntervalSeconds));
+    autoSaveLabel_->setText(FormatAutoSaveLabel(DecodeAutoSaveInterval(settings_.autoSaveIntervalSeconds)));
 
     const bool dotCursor = settings_.drawCursorKind == settings::DrawCursorKind::Dot;
     drawCursorSizeSlider_->setEnabled(dotCursor);
@@ -534,7 +600,7 @@ void SettingsDialogQt::refreshDrawingControls() {
 
     for (std::size_t index = 0; index < settings::kZoomPresetCount; ++index) {
         const QSignalBlocker blockEdit(zoomPresetEdits_[index]);
-        zoomPresetEdits_[index]->setText(FormatZoomPresetValue(settings_.zoomPresets[index]));
+        zoomPresetEdits_[index]->setText(FormatZoomPresetValue(DecodeZoomPreset(settings_.zoomPresets[index])));
     }
     if (!quickSizeSliderMaxEdit_->hasFocus()) {
         quickSizeSliderMaxEdit_->setText(QString::fromStdString(settings::FormatBrushSizeValue(settings_.quickSizeSliderMax)));
@@ -572,7 +638,7 @@ void SettingsDialogQt::refreshShortcutButtons() {
 }
 
 void SettingsDialogQt::notifyShortcutHint() {
-    if (capturingAction_.has_value()) {
+    if (captureState_.kind == CaptureState::Kind::Armed) {
         changeShortcutButton_->setText(QStringLiteral("Press Key..."));
         shortcutHintLabel_->setText(QStringLiteral("Press the new shortcut. Esc cancels."));
     } else {
@@ -583,24 +649,19 @@ void SettingsDialogQt::notifyShortcutHint() {
 
 // --- edits -------------------------------------------------------------------
 
-void SettingsDialogQt::persist() {
-    lastSaveSucceeded_ = store_.Save(settings_);
+bool SettingsDialogQt::persist(settings::Settings candidate) {
+    ClampSettings(candidate);
+    lastSaveSucceeded_ = store_.Save(candidate);
     if (lastSaveSucceeded_) {
+        settings_ = std::move(candidate);
         lastSaveError_.clear();
+        emit settingsChanged();
     } else {
         lastSaveError_ = QStringLiteral("Could not write %1")
                              .arg(QString::fromStdString(store_.path().string()));
         emit settingsSaveFailed(lastSaveError_);
     }
-    emit settingsChanged();
-}
-
-std::size_t SettingsDialogQt::selectedPaletteIndex() const {
-    const int row = paletteList_->currentRow();
-    if (row < 0 || static_cast<std::size_t>(row) >= settings_.palette.size()) {
-        return std::min(settings_.paletteIndex, settings_.palette.empty() ? 0U : settings_.palette.size() - 1U);
-    }
-    return static_cast<std::size_t>(row);
+    return lastSaveSucceeded_;
 }
 
 std::optional<std::size_t> SettingsDialogQt::selectedSavedPaletteIndex() const {
@@ -638,34 +699,37 @@ void SettingsDialogQt::applyPaletteSelection() {
         refreshPaletteControls(true);
         return;
     }
-    settings_.paletteIndex = static_cast<std::size_t>(row);
+    settings::Settings candidate = settings_;
+    candidate.paletteIndex = static_cast<std::size_t>(row);
+    persist(std::move(candidate));
     refreshPaletteControls(true);
-    persist();
 }
 
 void SettingsDialogQt::addPaletteColor() {
     if (settings_.palette.empty() || settings_.palette.size() >= settings::kMaxPaletteColors) {
         return;
     }
-    const std::size_t source = std::min(settings_.paletteIndex, settings_.palette.size() - 1U);
-    settings_.palette.push_back(settings_.palette[source]);
-    settings_.paletteIndex = settings_.palette.size() - 1U;
-    settings_.colorIndex = std::min(settings_.colorIndex, settings_.palette.size() - 1U);
+    settings::Settings candidate = settings_;
+    const std::size_t source = std::min(candidate.paletteIndex, candidate.palette.size() - 1U);
+    candidate.palette.push_back(candidate.palette[source]);
+    candidate.paletteIndex = candidate.palette.size() - 1U;
+    candidate.colorIndex = std::min(candidate.colorIndex, candidate.palette.size() - 1U);
+    persist(std::move(candidate));
     refreshPaletteControls(true);
-    persist();
 }
 
 void SettingsDialogQt::removePaletteColor() {
     if (settings_.palette.size() <= 1U || settings_.paletteIndex >= settings_.palette.size()) {
         return;
     }
-    settings_.palette.erase(settings_.palette.begin() + static_cast<std::ptrdiff_t>(settings_.paletteIndex));
-    if (settings_.paletteIndex >= settings_.palette.size()) {
-        settings_.paletteIndex = settings_.palette.size() - 1U;
+    settings::Settings candidate = settings_;
+    candidate.palette.erase(candidate.palette.begin() + static_cast<std::ptrdiff_t>(candidate.paletteIndex));
+    if (candidate.paletteIndex >= candidate.palette.size()) {
+        candidate.paletteIndex = candidate.palette.size() - 1U;
     }
-    settings_.colorIndex = std::min(settings_.colorIndex, settings_.palette.size() - 1U);
+    candidate.colorIndex = std::min(candidate.colorIndex, candidate.palette.size() - 1U);
+    persist(std::move(candidate));
     refreshPaletteControls(true);
-    persist();
 }
 
 void SettingsDialogQt::applyHexColorEdit() {
@@ -678,11 +742,13 @@ void SettingsDialogQt::applyHexColorEdit() {
         return;
     }
     if (settings_.palette[settings_.paletteIndex] == *parsed) {
+        refreshPaletteControls(true);
         return;
     }
-    settings_.palette[settings_.paletteIndex] = *parsed;
+    settings::Settings candidate = settings_;
+    candidate.palette[candidate.paletteIndex] = *parsed;
+    persist(std::move(candidate));
     refreshPaletteControls(true);
-    persist();
 }
 
 void SettingsDialogQt::applyHueSaturationLightness() {
@@ -693,7 +759,12 @@ void SettingsDialogQt::applyHueSaturationLightness() {
     const float saturation = static_cast<float>(saturationSlider_->value()) / 100.0f;
     const float lightness = static_cast<float>(lightnessSlider_->value()) / 100.0f;
     const std::uint32_t color = HslToColor(hue, saturation, lightness);
-    settings_.palette[settings_.paletteIndex] = color;
+    settings::Settings candidate = settings_;
+    candidate.palette[candidate.paletteIndex] = color;
+    if (!persist(std::move(candidate))) {
+        refreshPaletteControls(true);
+        return;
+    }
 
     if (QListWidgetItem* item = paletteList_->item(static_cast<int>(settings_.paletteIndex)); item != nullptr) {
         item->setIcon(ColorSwatchIcon(color));
@@ -709,7 +780,6 @@ void SettingsDialogQt::applyHueSaturationLightness() {
     if (!hexColorEdit_->hasFocus()) {
         hexColorEdit_->setText(FormatHexColor(color));
     }
-    persist();
 }
 
 void SettingsDialogQt::saveNamedPalette() {
@@ -719,23 +789,24 @@ void SettingsDialogQt::saveNamedPalette() {
     }
 
     const std::u16string name = trimmedName.toStdU16String();
+    settings::Settings candidate = settings_;
     auto existing = std::find_if(
-        settings_.savedPalettes.begin(),
-        settings_.savedPalettes.end(),
+        candidate.savedPalettes.begin(),
+        candidate.savedPalettes.end(),
         [&](const settings::NamedPalette& palette) {
             return QString::fromUtf16(palette.name.data(), static_cast<qsizetype>(palette.name.size()))
                        .compare(trimmedName, Qt::CaseInsensitive)
                 == 0;
         });
-    if (existing != settings_.savedPalettes.end()) {
+    if (existing != candidate.savedPalettes.end()) {
         existing->name = name;
-        existing->colors = settings_.palette;
+        existing->colors = candidate.palette;
     } else {
-        settings_.savedPalettes.push_back({ name, settings_.palette });
+        candidate.savedPalettes.push_back({ name, candidate.palette });
     }
+    persist(std::move(candidate));
     refreshSavedPalettes();
     refreshSavedPaletteButtons();
-    persist();
 }
 
 void SettingsDialogQt::applySelectedNamedPalette() {
@@ -743,12 +814,13 @@ void SettingsDialogQt::applySelectedNamedPalette() {
     if (!selected.has_value() || settings_.savedPalettes[*selected].colors.empty()) {
         return;
     }
-    settings_.palette = settings_.savedPalettes[*selected].colors;
-    settings_.paletteIndex = std::min(settings_.paletteIndex, settings_.palette.size() - 1U);
-    settings_.colorIndex = std::min(settings_.colorIndex, settings_.palette.size() - 1U);
+    settings::Settings candidate = settings_;
+    candidate.palette = candidate.savedPalettes[*selected].colors;
+    candidate.paletteIndex = std::min(candidate.paletteIndex, candidate.palette.size() - 1U);
+    candidate.colorIndex = std::min(candidate.colorIndex, candidate.palette.size() - 1U);
+    persist(std::move(candidate));
     refreshPaletteControls(true);
     refreshSavedPaletteButtons();
-    persist();
 }
 
 void SettingsDialogQt::deleteSelectedNamedPalette() {
@@ -756,10 +828,11 @@ void SettingsDialogQt::deleteSelectedNamedPalette() {
     if (!selected.has_value()) {
         return;
     }
-    settings_.savedPalettes.erase(settings_.savedPalettes.begin() + static_cast<std::ptrdiff_t>(*selected));
+    settings::Settings candidate = settings_;
+    candidate.savedPalettes.erase(candidate.savedPalettes.begin() + static_cast<std::ptrdiff_t>(*selected));
+    persist(std::move(candidate));
     refreshSavedPalettes();
     refreshSavedPaletteButtons();
-    persist();
 }
 
 void SettingsDialogQt::applyZoomPresetEdit(QLineEdit* edit, std::size_t index, bool normalizeText) {
@@ -768,11 +841,12 @@ void SettingsDialogQt::applyZoomPresetEdit(QLineEdit* edit, std::size_t index, b
     }
     const QString text = edit->text();
     if (text.trimmed().isEmpty()) {
-        settings_.zoomPresets[index] = 0.0f;
-        persist();
+        settings::Settings candidate = settings_;
+        candidate.zoomPresets[index] = EncodeZoomPreset(std::nullopt);
+        persist(std::move(candidate));
         if (normalizeText) {
             const QSignalBlocker block(edit);
-            edit->setText(FormatZoomPresetValue(0.0f));
+            edit->setText(FormatZoomPresetValue(DecodeZoomPreset(settings_.zoomPresets[index])));
         }
         return;
     }
@@ -781,16 +855,17 @@ void SettingsDialogQt::applyZoomPresetEdit(QLineEdit* edit, std::size_t index, b
     if (!parsedPercent.has_value()) {
         if (normalizeText) {
             const QSignalBlocker block(edit);
-            edit->setText(FormatZoomPresetValue(settings_.zoomPresets[index]));
+            edit->setText(FormatZoomPresetValue(DecodeZoomPreset(settings_.zoomPresets[index])));
         }
         return;
     }
 
-    settings_.zoomPresets[index] = std::clamp(*parsedPercent / 100.0f, settings::kMinZoom, settings::kMaxZoom);
-    persist();
+    settings::Settings candidate = settings_;
+    candidate.zoomPresets[index] = std::clamp(*parsedPercent / 100.0f, settings::kMinZoom, settings::kMaxZoom);
+    persist(std::move(candidate));
     if (normalizeText) {
         const QSignalBlocker block(edit);
-        edit->setText(FormatZoomPresetValue(settings_.zoomPresets[index]));
+        edit->setText(FormatZoomPresetValue(DecodeZoomPreset(settings_.zoomPresets[index])));
     }
 }
 
@@ -804,10 +879,11 @@ void SettingsDialogQt::applyQuickSizeSliderMaxEdit(bool normalizeText) {
         return;
     }
 
-    settings_.quickSizeSliderMax = std::clamp(*parsed, 1.0f, settings::kMaxBrushSize);
-    settings_.drawBrushSize = std::min(settings_.drawBrushSize, settings_.quickSizeSliderMax);
-    settings_.eraseBrushSize = std::min(settings_.eraseBrushSize, settings_.quickSizeSliderMax);
-    persist();
+    settings::Settings candidate = settings_;
+    candidate.quickSizeSliderMax = std::clamp(*parsed, 1.0f, settings::kMaxBrushSize);
+    candidate.drawBrushSize = std::min(candidate.drawBrushSize, candidate.quickSizeSliderMax);
+    candidate.eraseBrushSize = std::min(candidate.eraseBrushSize, candidate.quickSizeSliderMax);
+    persist(std::move(candidate));
     if (normalizeText) {
         const QSignalBlocker block(quickSizeSliderMaxEdit_);
         quickSizeSliderMaxEdit_->setText(QString::fromStdString(settings::FormatBrushSizeValue(settings_.quickSizeSliderMax)));
@@ -824,8 +900,9 @@ void SettingsDialogQt::applyBrushSizePresetEdit(bool normalizeText) {
         return;
     }
 
-    settings_.brushSizePresets = std::move(presets);
-    persist();
+    settings::Settings candidate = settings_;
+    candidate.brushSizePresets = std::move(presets);
+    persist(std::move(candidate));
     if (normalizeText) {
         const QSignalBlocker block(brushSizePresetEdit_);
         brushSizePresetEdit_->setText(QString::fromStdString(settings::FormatBrushSizePresets(settings_.brushSizePresets)));
@@ -845,8 +922,9 @@ void SettingsDialogQt::applyTextSizePresetEdit(QLineEdit* edit, std::size_t inde
         return;
     }
 
-    settings_.textSizePresets[index] = std::clamp(*parsed, 4.0f, 512.0f);
-    persist();
+    settings::Settings candidate = settings_;
+    candidate.textSizePresets[index] = std::clamp(*parsed, 4.0f, 512.0f);
+    persist(std::move(candidate));
     if (normalizeText) {
         const QSignalBlocker block(edit);
         edit->setText(QString::fromStdString(settings::FormatBrushSizeValue(settings_.textSizePresets[index])));
@@ -858,30 +936,36 @@ void SettingsDialogQt::applyAutoSaveSlider() {
     const int value = autoSaveSlider_->value();
     const unsigned int seconds = static_cast<unsigned int>(
         std::clamp(std::lround(static_cast<float>(value) / 15.0f) * 15, 0L, 300L));
-    settings_.autoSaveIntervalSeconds = seconds;
-    if (autoSaveSlider_->value() != static_cast<int>(seconds)) {
+    settings::Settings candidate = settings_;
+    candidate.autoSaveIntervalSeconds = seconds;
+    persist(std::move(candidate));
+    if (autoSaveSlider_->value() != static_cast<int>(settings_.autoSaveIntervalSeconds)) {
         const QSignalBlocker block(autoSaveSlider_);
-        autoSaveSlider_->setValue(static_cast<int>(seconds));
+        autoSaveSlider_->setValue(static_cast<int>(settings_.autoSaveIntervalSeconds));
     }
-    autoSaveLabel_->setText(FormatAutoSaveLabel(seconds));
-    persist();
+    autoSaveLabel_->setText(FormatAutoSaveLabel(DecodeAutoSaveInterval(settings_.autoSaveIntervalSeconds)));
 }
 
 // --- shortcuts ---------------------------------------------------------------
 
 void SettingsDialogQt::beginShortcutCapture(settings::ShortcutAction action) {
-    capturingAction_ = action;
-    qApp->installEventFilter(this);
+    const bool wasArmed = captureState_.kind == CaptureState::Kind::Armed;
+    captureState_ = CaptureState { CaptureState::Kind::Armed, action };
+    if (!wasArmed && QCoreApplication::instance() != nullptr) {
+        qApp->installEventFilter(this);
+    }
     notifyShortcutHint();
     setFocus(Qt::OtherFocusReason);
 }
 
 void SettingsDialogQt::cancelShortcutCapture() {
-    if (!capturingAction_.has_value()) {
+    if (captureState_.kind != CaptureState::Kind::Armed) {
         return;
     }
-    capturingAction_.reset();
-    qApp->removeEventFilter(this);
+    captureState_ = {};
+    if (QCoreApplication::instance() != nullptr) {
+        qApp->removeEventFilter(this);
+    }
     notifyShortcutHint();
 }
 
@@ -890,16 +974,17 @@ void SettingsDialogQt::clearSelectedShortcut() {
     if (!action.has_value()) {
         return;
     }
-    if (settings::ShortcutBinding* binding = bindingFor(*action); binding != nullptr) {
+    settings::Settings candidate = settings_;
+    if (settings::ShortcutBinding* binding = FindBindingIn(candidate, *action); binding != nullptr) {
         binding->sequence = QKeySequence {};
     }
+    persist(std::move(candidate));
     refreshShortcutList();
     refreshShortcutButtons();
-    persist();
 }
 
 void SettingsDialogQt::keyPressEvent(QKeyEvent* event) {
-    if (!capturingAction_.has_value()) {
+    if (captureState_.kind != CaptureState::Kind::Armed) {
         QDialog::keyPressEvent(event);
         return;
     }
@@ -925,25 +1010,26 @@ void SettingsDialogQt::keyPressEvent(QKeyEvent* event) {
         return;
     }
 
+    const settings::ShortcutAction action = captureState_.action;
+    settings::Settings candidate = settings_;
     // The legacy capture clears any other command already using the same chord.
-    for (settings::ShortcutBinding& binding : settings_.shortcuts) {
-        if (binding.action != *capturingAction_ && binding.sequence == sequence) {
+    for (settings::ShortcutBinding& binding : candidate.shortcuts) {
+        if (binding.action != action && binding.sequence == sequence) {
             binding.sequence = QKeySequence {};
         }
     }
-    if (settings::ShortcutBinding* binding = bindingFor(*capturingAction_); binding != nullptr) {
+    if (settings::ShortcutBinding* binding = FindBindingIn(candidate, action); binding != nullptr) {
         binding->sequence = sequence;
     }
 
-    capturingAction_.reset();
-    qApp->removeEventFilter(this);
+    cancelShortcutCapture();
+    persist(std::move(candidate));
     refreshShortcutList();
     refreshShortcutButtons();
-    persist();
 }
 
 bool SettingsDialogQt::eventFilter(QObject* watched, QEvent* event) {
-    if (capturingAction_.has_value() && event->type() == QEvent::KeyPress) {
+    if (captureState_.kind == CaptureState::Kind::Armed && isVisible() && event->type() == QEvent::KeyPress) {
         keyPressEvent(static_cast<QKeyEvent*>(event));
         return true;
     }
@@ -953,6 +1039,16 @@ bool SettingsDialogQt::eventFilter(QObject* watched, QEvent* event) {
 void SettingsDialogQt::showEvent(QShowEvent* event) {
     QDialog::showEvent(event);
     refreshFromSettings();
+}
+
+void SettingsDialogQt::hideEvent(QHideEvent* event) {
+    cancelShortcutCapture();
+    QDialog::hideEvent(event);
+}
+
+void SettingsDialogQt::closeEvent(QCloseEvent* event) {
+    cancelShortcutCapture();
+    QDialog::closeEvent(event);
 }
 
 }  // namespace cnote::ui
