@@ -42,10 +42,9 @@ public:
 };
 
 // Tuning values the legacy App read from its settings; the canvas needs them to
-// sample and preview strokes exactly like the reference frontend.
+// preview and hit-test strokes exactly like the reference frontend.  Pointer
+// sampling (spacing, stabilization) is the router's: InteractionTuning.
 struct CanvasInputSettings {
-    float inputSpacing = 0.85f;     // page units at scale 1 (App::Settings default)
-    float inputSmoothing = 0.3f;    // 0..1 pointer follow factor
     float strokeSmoothing = 0.55f;  // render-time smoothing strength
     std::uint32_t objectColor = 0xFF111827;  // active palette slot; seeds new text/LaTeX objects
     // Pending style for text objects created before one exists (the Ctrl+W
@@ -92,10 +91,10 @@ public:
 
     // Freehand stroke lifecycle. CanvasWidget owns the per-view page scale and
     // segments strokes at page boundaries; it always calls
-    // Begin -> Extend* -> End|Cancel. pageScale lets the controller keep the
-    // reference's screen-relative sample spacing.
-    virtual void BeginStroke(std::size_t pageIndex, Vec2 point, float pageScale) = 0;
-    virtual void ExtendStroke(Vec2 point, float pageScale) = 0;
+    // Begin -> Extend* -> End|Cancel.  Points arrive already sampled and
+    // stabilized by the interaction router and are stored as given.
+    virtual void BeginStroke(std::size_t pageIndex, Vec2 point) = 0;
+    virtual void ExtendStroke(Vec2 point) = 0;
     virtual void EndStroke() = 0;
     virtual void CancelStroke() = 0;
     // Live stroke modes the interaction router tracks (line/oval replace the

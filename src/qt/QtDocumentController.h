@@ -175,8 +175,8 @@ public:
     [[nodiscard]] const Document& DocumentRef() const override;
     [[nodiscard]] ui::CanvasInputSettings InputSettings() const override { return input_; }
 
-    void BeginStroke(std::size_t pageIndex, Vec2 point, float pageScale) override;
-    void ExtendStroke(Vec2 point, float pageScale) override;
+    void BeginStroke(std::size_t pageIndex, Vec2 point) override;
+    void ExtendStroke(Vec2 point) override;
     void EndStroke() override;
     void CancelStroke() override;
     [[nodiscard]] const Stroke* PendingStroke() const override;
