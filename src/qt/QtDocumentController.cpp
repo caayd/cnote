@@ -448,7 +448,16 @@ std::uint64_t QtDocumentController::NextObjectId() const {
 
 // --- strokes ----------------------------------------------------------------
 
-void QtDocumentController::BeginStroke(std::size_t pageIndex, Vec2 point, StrokeSampling sampling) {
+namespace {
+
+float ClampPressure(float pressure) {
+    return std::isfinite(pressure) ? std::clamp(pressure, 0.0f, 1.0f) : 0.5f;
+}
+
+}  // namespace
+
+void QtDocumentController::BeginStroke(std::size_t pageIndex, Vec2 point, StrokeSampling sampling,
+    std::optional<float> pressure) {
     FinishInteraction();
     pendingStroke_.reset();
     if (PageAt(pageIndex) == nullptr) {
@@ -461,15 +470,22 @@ void QtDocumentController::BeginStroke(std::size_t pageIndex, Vec2 point, Stroke
     pending.stroke.smoothing = input_.strokeSmoothing;
     pending.stroke.sampling = sampling;
     pending.stroke.points.push_back(point);
+    if (pressure.has_value()) {
+        pending.stroke.pressures.push_back(ClampPressure(*pressure));
+    }
     pendingStroke_ = std::move(pending);
     SetCurrentPageIndex(pageIndex);
 }
 
-void QtDocumentController::ExtendStroke(Vec2 point) {
+void QtDocumentController::ExtendStroke(Vec2 point, std::optional<float> pressure) {
     if (!pendingStroke_.has_value()) {
         return;
     }
-    pendingStroke_->stroke.points.push_back(point);
+    Stroke& stroke = pendingStroke_->stroke;
+    stroke.points.push_back(point);
+    if (!stroke.pressures.empty()) {
+        stroke.pressures.push_back(pressure.has_value() ? ClampPressure(*pressure) : stroke.pressures.back());
+    }
 }
 
 void QtDocumentController::EndStroke() {
@@ -1561,6 +1577,7 @@ void QtDocumentController::ReplacePendingStrokePoints(const std::vector<Vec2>& p
     }
     pendingStroke_->stroke.points = points;
     pendingStroke_->stroke.sampling = {};
+    pendingStroke_->stroke.pressures.clear();
     pendingStroke_->stroke.style.dotted = dotted;
 }
 

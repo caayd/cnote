@@ -36,7 +36,7 @@ struct StrokeStyle {
 };
 
 // Pointer stabilization recorded when a stroke is drawn and replayed at render
-// time (BuildStabilizedPoints), so Stroke::points stay the raw samples.  Each
+// time (BuildStabilizedPath), so Stroke::points stay the raw samples.  Each
 // sample pulls the last kept point toward itself by 1 - streamline; a pull
 // shorter than `spacing` (page units) is dropped, a longer one is resampled
 // into spacing-sized steps.  The zero value is the identity: strokes from
@@ -51,6 +51,9 @@ struct Stroke {
     float smoothing = 0.55f;
     StrokeSampling sampling {};
     std::vector<Vec2> points;
+    // Pen pressure (0..1) per point, parallel to `points`; empty for strokes
+    // drawn without pressure (mouse), which render at constant width.
+    std::vector<float> pressures;
 };
 
 // Immutable straight-alpha BGRA bytes, shared by every copy of the object that

@@ -6,10 +6,12 @@
 #include <vector>
 
 #include <QImage>
+#include <QPainterPath>
 #include <QPointF>
 #include <QRectF>
 
 #include "Document.h"
+#include "selection/InkOutline.h"
 
 class QPainter;
 
@@ -110,13 +112,22 @@ void PaintPageSubset(QPainter& painter, const Page& page, const QPointF& pageOri
 // layer so all three agree on thickness.
 [[nodiscard]] float StrokeRenderPenWidth(const Stroke& stroke, float scale);
 
+// Ink diameter in scaled units for a pressure stroke at `pressure`
+// (InkWidthFactor of the nominal pen width, same minimum).  Shared by the
+// committed render and the live layer.
+[[nodiscard]] float StrokeRenderInkDiameter(const Stroke& stroke, float scale, float pressure);
+
+// A nonzero-filled QPainterPath of an ink outline (selection/InkOutline.h).
+[[nodiscard]] QPainterPath InkOutlinePath(const InkOutline& outline);
+
 // Draws one image in page units (rotation and opacity applied). `params.scale`
 // maps page units to painter units exactly like PaintPage.
 void PaintImage(QPainter& painter, const PageImage& image, const PageRenderParams& params, float opacity);
 
 // Draws one stroke in page units for a transient preview (live stroke, pending
-// erase). Same pen/path/dash/opacity rules as committed strokes; `params.scale`
-// maps page units to painter units exactly like PaintPage.
+// erase). Same pen/path/dash/opacity rules as committed strokes, and the same
+// filled outline for pressure strokes; `params.scale` maps page units to
+// painter units exactly like PaintPage.
 void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRenderParams& params, float opacity);
 
 // Draws one text/LaTeX block in page units (rotation and opacity applied),

@@ -92,8 +92,9 @@ struct ByteReader {
 
 std::vector<std::uint8_t> EncodeSelectionClipboard(const SelectionClipboardData& data) {
     std::vector<std::uint8_t> bytes;
-    // CTSA ("CTS10"): CTS9 plus each stroke's StrokeSampling.
-    const char magic[] = { 'C', 'T', 'S', 'A' };
+    // CTSB ("CTS11"): CTS9 plus each stroke's StrokeSampling (CTSA) and its
+    // pen pressures (count 0 or the point count, after the points).
+    const char magic[] = { 'C', 'T', 'S', 'B' };
     AppendBytes(bytes, magic, sizeof(magic));
     AppendUint32(bytes, static_cast<std::uint32_t>(data.strokes.size()));
     AppendUint32(bytes, static_cast<std::uint32_t>(data.texts.size()));
@@ -118,6 +119,10 @@ std::vector<std::uint8_t> EncodeSelectionClipboard(const SelectionClipboardData&
         for (const Vec2& point : stroke.points) {
             AppendFloat(bytes, point.x);
             AppendFloat(bytes, point.y);
+        }
+        AppendUint32(bytes, static_cast<std::uint32_t>(stroke.pressures.size()));
+        for (const float pressure : stroke.pressures) {
+            AppendFloat(bytes, pressure);
         }
     }
 
@@ -204,19 +209,23 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
     const bool isCts8 = std::memcmp(magic, "CTS8", 4) == 0;
     const bool isCts9 = std::memcmp(magic, "CTS9", 4) == 0;
     const bool isCtsA = std::memcmp(magic, "CTSA", 4) == 0;
-    if (!isCts1 && !isCts2 && !isCts3 && !isCts4 && !isCts5 && !isCts6 && !isCts7 && !isCts8 && !isCts9 && !isCtsA) {
+    const bool isCtsB = std::memcmp(magic, "CTSB", 4) == 0;
+    if (!isCts1 && !isCts2 && !isCts3 && !isCts4 && !isCts5 && !isCts6 && !isCts7 && !isCts8 && !isCts9 && !isCtsA
+        && !isCtsB) {
         return std::nullopt;
     }
 
+    const bool atLeastCtsA = isCtsA || isCtsB;
     const bool hasTextCount = !isCts1;
-    const bool hasTextWidth = isCts3 || isCts4 || isCts5 || isCts6 || isCts7 || isCts8 || isCts9 || isCtsA;
-    const bool hasTextHeight = isCts4 || isCts5 || isCts6 || isCts7 || isCts8 || isCts9 || isCtsA;
-    const bool hasTextFlags = isCts5 || isCts6 || isCts7 || isCts8 || isCts9 || isCtsA;
-    const bool hasStrokeFlags = isCts6 || isCts7 || isCts8 || isCts9 || isCtsA;
-    const bool hasStrokeSmoothing = isCts7 || isCts8 || isCts9 || isCtsA;
-    const bool hasStrokeSampling = isCtsA;
-    const bool hasObjectRotation = isCts9 || isCtsA;
-    const bool hasStyleSpansAndLatex = isCts8 || isCts9 || isCtsA;
+    const bool hasTextWidth = isCts3 || isCts4 || isCts5 || isCts6 || isCts7 || isCts8 || isCts9 || atLeastCtsA;
+    const bool hasTextHeight = isCts4 || isCts5 || isCts6 || isCts7 || isCts8 || isCts9 || atLeastCtsA;
+    const bool hasTextFlags = isCts5 || isCts6 || isCts7 || isCts8 || isCts9 || atLeastCtsA;
+    const bool hasStrokeFlags = isCts6 || isCts7 || isCts8 || isCts9 || atLeastCtsA;
+    const bool hasStrokeSmoothing = isCts7 || isCts8 || isCts9 || atLeastCtsA;
+    const bool hasStrokeSampling = atLeastCtsA;
+    const bool hasStrokePressure = isCtsB;
+    const bool hasObjectRotation = isCts9 || atLeastCtsA;
+    const bool hasStyleSpansAndLatex = isCts8 || isCts9 || atLeastCtsA;
 
     ByteReader reader { bytes, 4U };
     SelectionClipboardData data;
@@ -269,6 +278,18 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
             ok = reader.ReadFloat(point.x) && reader.ReadFloat(point.y);
             if (ok) {
                 stroke.points.push_back(point);
+            }
+        }
+        if (ok && hasStrokePressure) {
+            std::uint32_t pressureCount = 0;
+            ok = reader.ReadUint32(pressureCount)
+                && (pressureCount == 0U || pressureCount == pointCount)
+                && pressureCount <= reader.Remaining() / 4U;
+            if (ok) {
+                stroke.pressures.resize(pressureCount);
+            }
+            for (std::uint32_t pressureIndex = 0; ok && pressureIndex < pressureCount; ++pressureIndex) {
+                ok = reader.ReadFloat(stroke.pressures[pressureIndex]);
             }
         }
         if (ok) {

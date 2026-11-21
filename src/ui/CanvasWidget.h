@@ -153,9 +153,10 @@ public:
     void SetCursor(CursorKind cursor) override;
     void InvalidateCanvas() override;
     void SetPointerCapture(bool captured) override;
-    void BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted, StrokeSampling sampling) override;
+    void BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted, StrokeSampling sampling,
+        std::optional<float> pressure) override;
     void SetStrokeDotted(bool dotted) override;
-    void AppendStrokePoint(Vec2 pagePoint, bool dotted) override;
+    void AppendStrokePoint(Vec2 pagePoint, bool dotted, std::optional<float> pressure) override;
     void ReplaceStrokePoints(const std::vector<Vec2>& points, bool dotted) override;
     void CommitStroke() override;
     void DiscardStroke() override;
@@ -261,6 +262,9 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    // Pen input: the same pointer routing as the mouse, plus pressure.
+    // Accepting the event stops Qt from synthesizing the mouse event too.
+    void tabletEvent(QTabletEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void keyReleaseEvent(QKeyEvent* event) override;
@@ -340,10 +344,13 @@ private:
         float devicePixelRatio = 0.0f;
         StrokeStyle style {};
         float smoothing = 0.0f;
+        bool pressure = false;         // pressure ink: composites filled outlines
         QRectF pageRect {};            // stroke bounds the image covers (page units)
         QImage image;                  // ARGB32_Premultiplied at scale * DPR
         std::vector<Vec2> smoothed;
+        std::vector<float> smoothedPressures;  // parallel to `smoothed` (zeros without pressure)
         Vec2 lastEnd {};               // end of the last composited segment
+        float lastEndPressure = 0.0f;
         std::size_t consumedRaw = 0;   // raw points folded into `smoothed`
         Vec2 consumedLast {};
         Vec2 firstPoint {};
@@ -352,15 +359,14 @@ private:
     };
 
     // Keeps the live-stroke layer in sync with the pending stroke's stabilized
-    // points (`points`, liveStrokePoints_) and reports whether it applies
-    // (false: caller falls back to PaintStrokePreview - dotted strokes,
-    // replaced point lists mid-rebuild, allocation failure).
-    bool SyncStrokeLayer(const Stroke& stroke, const std::vector<Vec2>& points, const CanvasPageView& view);
+    // path (`path`, liveStroke_) and reports whether it applies (false:
+    // caller falls back to PaintStrokePreview - dotted strokes, replaced
+    // point lists mid-rebuild, allocation failure).
+    bool SyncStrokeLayer(const Stroke& stroke, const InkPath& path, const CanvasPageView& view);
     void ResetStrokeLayer();
     // Draws the provisional tail (the smoothed segments that still change as
     // points arrive) on top of the layer at widget scale.
-    void PaintStrokeTail(QPainter& painter, const Stroke& stroke, const std::vector<Vec2>& points,
-        const CanvasPageView& view);
+    void PaintStrokeTail(QPainter& painter, const Stroke& stroke, const InkPath& path, const CanvasPageView& view);
 
     [[nodiscard]] render::PageRenderParams RenderParamsFor(const CanvasPageView& view) const;
     const render::PageSurfaceCache* FindSurface(std::size_t pageIndex, float scale, float devicePixelRatio) const;
@@ -571,10 +577,10 @@ private:
     QRect transientDirty_ {};
     LiveStrokeLayer strokeLayer_ {};
     // The pending stroke's raw samples run through its StrokeSampling as they
-    // arrive: point-for-point what BuildStabilizedPoints yields at commit, so
+    // arrive: point-for-point what BuildStabilizedPath yields at commit, so
     // the live layer and the dirty rects follow the ink that will be drawn.
     IncrementalStrokeStabilizer liveStabilizer_ {};
-    std::vector<Vec2> liveStrokePoints_;
+    InkPath liveStroke_;
     render::PdfBackgroundProvider* pdfBackground_ = nullptr;
     float cachedDevicePixelRatio_ = 0.0f;
     std::size_t lastPaintPageCount_ = 0;
