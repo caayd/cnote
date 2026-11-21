@@ -14,6 +14,7 @@
 
 #include "PdfOverlay.h"
 #include "Unicode.h"
+#include "selection/InkOutline.h"
 #include "selection/StrokeSmoothing.h"
 
 #include "fpdf_attachment.h"
@@ -137,12 +138,65 @@ float ToPdfY(float pageHeight, float pageY) {
     return pageHeight - pageY;
 }
 
+// Pressure ink as one nonzero-filled path of its outline pieces (see
+// selection/InkOutline.h), in page units.
+bool AppendVectorInk(FPDF_PAGE pageHandle, const Page& page, const Stroke& stroke, const InkPath& ink) {
+    constexpr float kPdfInkTolerance = 0.02f;
+    InkOutline outline;
+    AppendInkOutline(outline,
+        BuildInkCenterline(ink, 1.0f,
+            [&stroke](float pressure) {
+                return std::max(0.6f, stroke.style.width / kStrokeRenderWidthDivisor * InkWidthFactor(pressure));
+            },
+            kPdfInkTolerance),
+        kPdfInkTolerance);
+    if (outline.polygonEnds.empty()) {
+        return true;
+    }
+
+    const Vec2 first = outline.vertices.front();
+    FPDF_PAGEOBJECT path = FPDFPageObj_CreateNewPath(first.x, ToPdfY(page.height, first.y));
+    if (path == nullptr) {
+        return false;
+    }
+    bool ok = true;
+    std::uint32_t begin = 0;
+    for (const std::uint32_t end : outline.polygonEnds) {
+        if (begin != 0U) {
+            ok = ok && FPDFPath_MoveTo(path, outline.vertices[begin].x, ToPdfY(page.height, outline.vertices[begin].y)) != 0;
+        }
+        for (std::uint32_t index = begin + 1U; ok && index < end; ++index) {
+            ok = FPDFPath_LineTo(path, outline.vertices[index].x, ToPdfY(page.height, outline.vertices[index].y)) != 0;
+        }
+        ok = ok && FPDFPath_Close(path) != 0;
+        begin = end;
+    }
+
+    const auto alpha = static_cast<unsigned int>((stroke.style.color >> 24U) & 0xFFU);
+    const auto red = static_cast<unsigned int>((stroke.style.color >> 16U) & 0xFFU);
+    const auto green = static_cast<unsigned int>((stroke.style.color >> 8U) & 0xFFU);
+    const auto blue = static_cast<unsigned int>(stroke.style.color & 0xFFU);
+    ok = ok
+        && FPDFPageObj_SetFillColor(path, red, green, blue, alpha) != 0
+        && FPDFPath_SetDrawMode(path, FPDF_FILLMODE_WINDING, 0) != 0;
+    if (!ok) {
+        FPDFPageObj_Destroy(path);
+        return false;
+    }
+    FPDFPage_InsertObject(pageHandle, path);
+    return true;
+}
+
 bool AppendVectorStroke(FPDF_PAGE pageHandle, const Page& page, const Stroke& stroke, float strokeSmoothing, float dashLength, float dashGap) {
     if (stroke.points.empty()) {
         return true;
     }
 
-    const std::vector<Vec2> smoothedPoints = BuildStrokeRenderPoints(stroke, strokeSmoothing);
+    const InkPath ink = BuildStrokeRenderPath(stroke, strokeSmoothing);
+    if (StrokeHasPressure(stroke)) {
+        return AppendVectorInk(pageHandle, page, stroke, ink);
+    }
+    const std::vector<Vec2>& smoothedPoints = ink.points;
     if (smoothedPoints.empty()) {
         return true;
     }

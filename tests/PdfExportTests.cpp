@@ -204,6 +204,48 @@ int main(int argc, char** argv) {
     Check(reopenedFlat.has_value() && reopenedFlat->PageCount() == document.PageCount(),
         "attachment-free export keeps the page count");
 
+    // --- pen ink exports as pressure-width vector ink -----------------------
+    // A pressure ramp must come out of the PDF thin at the light end and wide
+    // at the heavy end, like it renders on the canvas.
+    {
+        cnote::Document inkDocument = cnote::Document::CreateBlank();
+        cnote::Page& inkPage = inkDocument.CurrentPage();
+        inkPage.width = 200.0f;
+        inkPage.height = 100.0f;
+        cnote::Stroke ramp {};
+        ramp.style.color = 0xFF000000U;
+        ramp.style.width = 12.0f;
+        for (int i = 0; i <= 150; ++i) {
+            ramp.points.push_back({ 25.0f + static_cast<float>(i), 50.0f });
+            ramp.pressures.push_back(static_cast<float>(i) / 150.0f);
+        }
+        inkPage.strokes.push_back(ramp);
+        Check(backend.ExportPdf(inkDocument, dir / "ink.pdf", 1.0f, 0.55f, 3.0f, 2.0f, std::span<const std::uint8_t> {}),
+            "export pen ink");
+        const auto reopenedInk = cnote::LoadDocumentFile(dir / "ink.pdf", backend);
+        const auto inkRaster = reopenedInk.has_value()
+            ? backend.RenderPage(reopenedInk->PdfData(), 0U, 4.0f)
+            : std::optional<cnote::RasterImage> {};
+        Check(inkRaster.has_value(), "exported pen ink renders");
+        if (inkRaster.has_value()) {
+            const auto thicknessAt = [&inkRaster](float pageX) {
+                const int x = static_cast<int>(pageX * 4.0f);
+                int count = 0;
+                for (int y = 0; y < inkRaster->height; ++y) {
+                    const std::uint8_t* pixel = inkRaster->pixels.data()
+                        + (static_cast<std::size_t>(y) * static_cast<std::size_t>(inkRaster->stride))
+                        + (static_cast<std::size_t>(x) * 4U);
+                    count += pixel[1] < 128 ? 1 : 0;
+                }
+                return count;
+            };
+            const int light = thicknessAt(25.0f + 30.0f);
+            const int heavy = thicknessAt(25.0f + 120.0f);
+            Check(light > 0 && heavy > light * 2,
+                "exported pressure widens the ink (light=" + std::to_string(light) + " heavy=" + std::to_string(heavy) + ")");
+        }
+    }
+
     // --- the text/LaTeX overlay must not be an opaque rectangle -------------
     const auto overlay = cnote::ComposeTextOverlayRaster(document.PageAt(0), 1.0f);
     Check(overlay.has_value(), "text/LaTeX overlay composes");

@@ -34,7 +34,8 @@ namespace cnote::ui {
 //     popup (plan 5.6); the router only starts/ends edit sessions.
 //   * Model-side selection containment/translation and PDF text selection
 //     internals: the router emits the request, the host resolves objects.
-//   * Pointer pressure/tilt: the legacy code ignores both.
+//   * Pointer tilt: the legacy code ignores it.  Pen pressure (which the legacy
+//     ignored too) rides PointerSample into strokes.
 
 enum class Tool {
     Select,
@@ -125,13 +126,15 @@ enum class CancelReason {
     Escape,
 };
 
-// Plan step 5.1: the pointer sample the controller accepts.  No pressure/tilt.
+// Plan step 5.1: the pointer sample the controller accepts.  No tilt.
 struct PointerSample {
     QPointF position;
     Qt::MouseButton button = Qt::NoButton;
     Qt::MouseButtons buttons = Qt::NoButton;
     Qt::KeyboardModifiers modifiers = Qt::NoModifier;
     quint64 timestamp = 0;
+    // Pen pressure 0..1 from a tablet; empty for mouse input.
+    std::optional<float> pressure;
 };
 
 // The four stroke modes the legacy read straight from key state
@@ -251,13 +254,15 @@ public:
     // --- stroke -----------------------------------------------------------
     // The host applies the current brush colour/width; `dotted` is the mode the
     // router tracked (App.cpp:1990) and `sampling` the stabilization the stroke
-    // replays at render time (the tuning at the page's current scale).
-    virtual void BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted, StrokeSampling sampling) = 0;
+    // replays at render time (the tuning at the page's current scale).  A
+    // stroke begun with a `pressure` records one per point (pressure width).
+    virtual void BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted, StrokeSampling sampling,
+        std::optional<float> pressure) = 0;
     // App::ApplyStrokePoint writes activeStroke_->style.dotted directly
     // (App.cpp:4515-4517) when only the Space mode changed.
     virtual void SetStrokeDotted(bool dotted) = 0;
-    // One raw pointer sample, in page units.
-    virtual void AppendStrokePoint(Vec2 pagePoint, bool dotted) = 0;
+    // One raw pointer sample, in page units, with its pen pressure if any.
+    virtual void AppendStrokePoint(Vec2 pagePoint, bool dotted, std::optional<float> pressure) = 0;
     // Straight-line/oval modes replace the whole point list (App.cpp:4532-4544).
     virtual void ReplaceStrokePoints(const std::vector<Vec2>& points, bool dotted) = 0;
     virtual void CommitStroke() = 0;
@@ -349,7 +354,7 @@ public:
     // the canvas preview: App.cpp:1997 (SnapLineEndpoint), App.cpp:2013
     // (BuildOvalStrokePoints), App.cpp:2050 (InputSpacingPageUnits).  The
     // App.cpp:1958 filter/resample now replays at render time
-    // (BuildStabilizedPoints).
+    // (BuildStabilizedPath).
     [[nodiscard]] static Vec2 SnapLineEndpoint(Vec2 start, Vec2 end);
     [[nodiscard]] static std::vector<Vec2> BuildOvalStrokePoints(Vec2 start, Vec2 end, bool circle);
     [[nodiscard]] static float InputSpacingPageUnits(float pageSpacing, float pageScale);
@@ -431,6 +436,8 @@ private:
 
     InteractionHost& host_;
     InteractionTuning tuning_;
+    // Pen pressure of the sample being handled (empty for mouse input).
+    std::optional<float> samplePressure_;
     Tool tool_ = Tool::Draw;
     SelectionMode selectionMode_ = SelectionMode::Lasso;
     InteractionModifiers modifiers_;

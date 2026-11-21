@@ -147,6 +147,7 @@ void InteractionRouter::UpdateCapture() {
 }
 
 void InteractionRouter::HandlePointerPress(const PointerSample& sample) {
+    samplePressure_ = sample.pressure;
     // MessageLoop.cpp:250-256: the middle button pans with any active tool and
     // takes precedence over the left-button routing.  It first finishes the
     // live interaction (committing it) so pan never overwrites another kind's
@@ -214,6 +215,7 @@ void InteractionRouter::BeginPressInteraction(const PointerSample& sample) {
 }
 
 void InteractionRouter::HandlePointerMove(const PointerSample& sample) {
+    samplePressure_ = sample.pressure;
     // MessageLoop.cpp:333-336: an in-flight pan (or a held middle button) wins
     // over every other active interaction.
     if (state_.kind == InteractionKind::Pan || sample.buttons.testFlag(Qt::MiddleButton)) {
@@ -248,6 +250,9 @@ void InteractionRouter::HandlePointerMove(const PointerSample& sample) {
 }
 
 void InteractionRouter::HandlePointerRelease(const PointerSample& sample) {
+    // A pen release reports zero pressure by definition (the tip has left the
+    // surface), so the release's final point keeps the last measured one.
+    //
     // MessageLoop.cpp:487-490: the middle button ends only a middle-button pan.
     if (sample.button == Qt::MiddleButton) {
         if (state_.kind == InteractionKind::Pan && state_.pan.fromMiddleButton) {
@@ -476,7 +481,7 @@ void InteractionRouter::StartStrokeSegment(const PageHit& hit, Vec2 pagePoint, b
     host_.BeginStroke(hit.pageIndex, pagePoint, dotted, StrokeSampling {
         std::clamp(tuning_.inputSmoothing, 0.05f, 0.95f),
         InputSpacingPageUnits(tuning_.inputSpacing, hit.scale),
-    });
+    }, samplePressure_);
 }
 
 void InteractionRouter::BeginStroke(const QPointF& logical) {
@@ -547,7 +552,7 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
         || !Vec2Equal(state_.stroke.freehandPoints.back(), rawPoint);
     if (pointAppended) {
         state_.stroke.freehandPoints.push_back(rawPoint);
-        host_.AppendStrokePoint(rawPoint, dottedMode);
+        host_.AppendStrokePoint(rawPoint, dottedMode, samplePressure_);
     }
 
     if (straightLineMode && !state_.stroke.freehandPoints.empty()) {

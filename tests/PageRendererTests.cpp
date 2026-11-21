@@ -255,6 +255,71 @@ int main(int argc, char** argv) {
                 + " line=" + std::to_string(lineExtent) + ")");
     }
 
+    // Pressure ink is a filled union of tapered quads, round caps and join
+    // fans.  At half pressure (width factor 1) it must cover what the
+    // constant-width round pen covers: a hole where pieces overlap at a sharp
+    // turn, a wrong radius, or antialiased piece edges stacking up along the
+    // outline (each a few percent of the ink) all show up as a difference.
+    // More pressure must draw wider ink.
+    {
+        const auto renderInk = [](const cnote::Stroke& stroke) {
+            cnote::Page page;
+            page.width = 300.0f;
+            page.height = 200.0f;
+            page.strokes = { stroke };
+            cnote::render::PageRenderParams params;
+            params.scale = 2.0f;
+            return cnote::render::RenderPageSurface(page, params);
+        };
+        const auto inkCount = [](const QImage& image) {
+            int count = 0;
+            for (int y = 0; y < image.height(); ++y) {
+                for (int x = 0; x < image.width(); ++x) {
+                    count += qGray(image.pixel(x, y)) < 128 ? 1 : 0;
+                }
+            }
+            return count;
+        };
+
+        // A hairpin V sampled every unit, so the smoothed centerline keeps a
+        // tight turn where the pieces' overlap is most complex.
+        cnote::Stroke pen;
+        pen.style.width = 16.0f;
+        pen.style.color = 0xFF000000U;
+        for (int i = 0; i <= 100; ++i) {
+            pen.points.push_back({ 50.0f + static_cast<float>(i), 170.0f - static_cast<float>(i) * 1.4f });
+        }
+        for (int i = 1; i <= 100; ++i) {
+            pen.points.push_back({ 150.0f + static_cast<float>(i) * 0.3f, 30.0f + static_cast<float>(i) * 1.4f });
+        }
+        cnote::Stroke halfPressure = pen;
+        halfPressure.pressures.assign(pen.points.size(), 0.5f);
+        const int penInk = inkCount(renderInk(pen));
+        const int outlineInk = inkCount(renderInk(halfPressure));
+        Check(penInk > 0 && std::abs(outlineInk - penInk) <= penInk / 200,
+            "half-pressure ink covers the constant-width pen (pen=" + std::to_string(penInk)
+                + " outline=" + std::to_string(outlineInk) + ")");
+
+        cnote::Stroke ramp;
+        ramp.style = pen.style;
+        for (int i = 0; i <= 200; ++i) {
+            ramp.points.push_back({ 50.0f + static_cast<float>(i), 100.0f });
+            ramp.pressures.push_back(static_cast<float>(i) / 200.0f);
+        }
+        const QImage rampSurface = renderInk(ramp);
+        const auto thicknessAt = [&rampSurface](int x) {
+            int count = 0;
+            for (int y = 0; y < rampSurface.height(); ++y) {
+                count += qGray(rampSurface.pixel(x, y)) < 128 ? 1 : 0;
+            }
+            return count;
+        };
+        const int light = thicknessAt(2 * 75);
+        const int heavy = thicknessAt(2 * 225);
+        Check(light > 0 && heavy > light * 2,
+            "pressure widens the ink (light=" + std::to_string(light) + " heavy=" + std::to_string(heavy) + ")");
+    }
+
     // --- committed text is pixel-identical to the live editor ---------------
     // The editor (CanvasWidget::ShowTextOverlay) formats its document at the
     // view zoom; Qt rounds font pixel sizes, so a commit laid out in page

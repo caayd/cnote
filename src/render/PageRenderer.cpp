@@ -13,6 +13,7 @@
 
 #include "latex/LatexEngine.h"
 #include "render/PdfBackgroundProvider.h"
+#include "selection/InkOutline.h"
 #include "selection/StrokeSmoothing.h"
 #include "text/TextLayoutQt.h"
 
@@ -22,6 +23,8 @@ namespace {
 
 constexpr float kMinimumStrokeRenderWidth = 1.25f;
 constexpr float kStrokeRenderWidthDivisor = 2.15f;
+// Largest deviation of flattened ink arcs and curves, in painter units.
+constexpr float kInkTolerance = 0.2f;
 
 QColor StrokeColor(const Stroke& stroke, float opacity) {
     QColor color = QColor::fromRgba(stroke.style.color);
@@ -277,15 +280,54 @@ float StrokeRenderPenWidth(const Stroke& stroke, float scale) {
     return std::max(kMinimumStrokeRenderWidth, stroke.style.width * scale / kStrokeRenderWidthDivisor);
 }
 
+float StrokeRenderInkDiameter(const Stroke& stroke, float scale, float pressure) {
+    return std::max(kMinimumStrokeRenderWidth,
+        stroke.style.width * scale / kStrokeRenderWidthDivisor * InkWidthFactor(pressure));
+}
+
+QPainterPath InkOutlinePath(const InkOutline& outline) {
+    QPainterPath path;
+    path.setFillRule(Qt::WindingFill);
+    std::uint32_t begin = 0;
+    for (const std::uint32_t end : outline.polygonEnds) {
+        if (end > begin) {
+            const Vec2 first = outline.vertices[begin];
+            path.moveTo(static_cast<qreal>(first.x), static_cast<qreal>(first.y));
+            for (std::uint32_t index = begin + 1U; index < end; ++index) {
+                path.lineTo(static_cast<qreal>(outline.vertices[index].x), static_cast<qreal>(outline.vertices[index].y));
+            }
+            path.closeSubpath();
+        }
+        begin = end;
+    }
+    return path;
+}
+
 void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRenderParams& params, float opacity) {
     if (stroke.points.empty()) {
         return;
     }
 
-    const std::vector<Vec2> points = BuildStrokeRenderPoints(stroke, params.strokeSmoothing);
+    const InkPath ink = BuildStrokeRenderPath(stroke, params.strokeSmoothing);
+    const std::vector<Vec2>& points = ink.points;
     const float scale = params.scale;
-    const float penWidth = StrokeRenderPenWidth(stroke, scale);
     const QColor color = StrokeColor(stroke, opacity);
+
+    if (StrokeHasPressure(stroke)) {
+        InkOutline outline;
+        AppendInkOutline(outline,
+            BuildInkCenterline(ink, scale,
+                [&stroke, scale](float pressure) { return StrokeRenderInkDiameter(stroke, scale, pressure); },
+                kInkTolerance),
+            kInkTolerance);
+        painter.save();
+        painter.setPen(Qt::NoPen);
+        painter.fillPath(InkOutlinePath(outline), color);
+        painter.restore();
+        return;
+    }
+
+    const float penWidth = StrokeRenderPenWidth(stroke, scale);
 
     QPen pen(color, penWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
     if (stroke.style.dotted) {
@@ -603,6 +645,7 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
         hash = HashFloat(hash, stroke.sampling.streamline);
         hash = HashFloat(hash, stroke.sampling.spacing);
         hash = HashValue(hash, stroke.points.size());
+        hash = HashValue(hash, stroke.pressures.size());
         hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(stroke.points.data()));
         if (!stroke.points.empty()) {
             hash = HashFloat(hash, stroke.points.front().x);

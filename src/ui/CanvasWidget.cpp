@@ -27,6 +27,7 @@
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextEdit>
+#include <QTabletEvent>
 #include <QTimer>
 #include <QWheelEvent>
 
@@ -506,10 +507,16 @@ void CanvasWidget::ResetStrokeLayer() {
     strokeLayer_ = LiveStrokeLayer {};
 }
 
-bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const std::vector<Vec2>& points, const CanvasPageView& view) {
+bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const InkPath& path, const CanvasPageView& view) {
     const float devicePixelRatio = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
     const float smoothing = StrokeRenderSmoothing(stroke, controller_.InputSettings().strokeSmoothing);
+    const std::vector<Vec2>& points = path.points;
     const std::size_t count = points.size();
+    // Pressure ink composites filled outlines instead of pen segments.
+    const bool pressure = StrokeHasPressure(stroke) && path.pressures.size() == count;
+    const auto pressureAt = [&path, pressure](std::size_t index) {
+        return pressure ? path.pressures[index] : 0.0f;
+    };
     LiveStrokeLayer& layer = strokeLayer_;
 
     // The layer continues only for a pure append: same page, view scale,
@@ -523,6 +530,7 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const std::vector<Vec2>
         && layer.style.dotted == stroke.style.dotted
         && std::abs(layer.style.width - stroke.style.width) < 0.0001f
         && std::abs(layer.smoothing - smoothing) < 0.0001f
+        && layer.pressure == pressure
         && count >= layer.consumedRaw
         && Vec2Equal(points.front(), layer.firstPoint)
         && Vec2Equal(points[layer.consumedRaw - 1U], layer.consumedLast);
@@ -540,22 +548,28 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const std::vector<Vec2>
         layer.devicePixelRatio = devicePixelRatio;
         layer.style = stroke.style;
         layer.smoothing = smoothing;
+        layer.pressure = pressure;
         layer.smoother.Reset(smoothing);
         layer.smoothed.push_back(points.front());
+        layer.smoothedPressures.push_back(pressureAt(0));
         layer.firstPoint = points.front();
         layer.rawLast = points.front();
         layer.lastEnd = points.front();
+        layer.lastEndPressure = pressureAt(0);
         layer.consumedRaw = 1;
         layer.consumedLast = points.front();
         Vec2 ignored;
-        static_cast<void>(layer.smoother.Feed(points.front(), &ignored));
+        static_cast<void>(layer.smoother.Feed(points.front(), pressureAt(0), &ignored, nullptr));
     } else if (stroke.style.dotted) {
         return false;
     }
 
     const float deviceScale = layer.scale * layer.devicePixelRatio;
     const float penWidth = render::StrokeRenderPenWidth(stroke, layer.scale) * layer.devicePixelRatio;
-    const float margin = layer.style.width * 0.5f + 2.0f;    // page units
+    const auto inkRadius = [&stroke, &layer](float value) {
+        return 0.5f * render::StrokeRenderInkDiameter(stroke, layer.scale, value) * layer.devicePixelRatio;
+    };
+    const float margin = layer.style.width * 0.5f + 2.0f;    // page units; covers 1.6x pressure ink too
     const QColor color = QColor::fromRgba(layer.style.color);
 
     // Ensures the image covers `rect` (page units, snapped to device pixels).
@@ -616,41 +630,74 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const std::vector<Vec2>
     // Newly stable smoothed points composite as the quad chain
     // quadTo(s_{k-1}, mid(s_{k-1}, s_k)) that PaintStrokePreview's whole-path
     // build emits.  Batching them into one path keeps the joins interior
-    // (round joins, no caps) instead of drawing a cap seam per point.
+    // (round joins, no caps; one nonzero-filled outline for pressure ink)
+    // instead of drawing a seam per point.
     std::vector<Vec2> pendingControls;
     std::vector<Vec2> pendingEnds;
+    std::vector<float> pendingControlPressures;
+    std::vector<float> pendingEndPressures;
     Vec2 batchStart {};              // lastEnd when the first pending segment was queued
+    float batchStartPressure = 0.0f;
     const auto flush = [&]() {
         if (pendingControls.empty() || layer.image.isNull()) {
             pendingControls.clear();
             pendingEnds.clear();
+            pendingControlPressures.clear();
+            pendingEndPressures.clear();
             return;
-        }
-        QPainterPath path;
-        path.moveTo(toDevice(batchStart));
-        for (std::size_t i = 0; i < pendingControls.size(); ++i) {
-            path.quadTo(toDevice(pendingControls[i]), toDevice(pendingEnds[i]));
         }
         QPainter ink(&layer.image);
         ink.setRenderHint(QPainter::Antialiasing, true);
-        ink.setPen(QPen(color, static_cast<qreal>(penWidth), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        ink.setBrush(Qt::NoBrush);
-        ink.drawPath(path);
+        if (layer.pressure) {
+            constexpr float kDeviceInkTolerance = 0.25f;
+            const auto device = [&toDevice](Vec2 point) {
+                const QPointF mapped = toDevice(point);
+                return Vec2 { static_cast<float>(mapped.x()), static_cast<float>(mapped.y()) };
+            };
+            InkCenterline centerline;
+            Vec2 start = batchStart;
+            float startPressure = batchStartPressure;
+            for (std::size_t i = 0; i < pendingControls.size(); ++i) {
+                AppendInkQuadratic(centerline, device(start), inkRadius(startPressure),
+                    device(pendingControls[i]), inkRadius(pendingControlPressures[i]),
+                    device(pendingEnds[i]), inkRadius(pendingEndPressures[i]), kDeviceInkTolerance);
+                start = pendingEnds[i];
+                startPressure = pendingEndPressures[i];
+            }
+            InkOutline outline;
+            AppendInkOutline(outline, centerline, kDeviceInkTolerance);
+            ink.setPen(Qt::NoPen);
+            ink.fillPath(render::InkOutlinePath(outline), color);
+        } else {
+            QPainterPath path;
+            path.moveTo(toDevice(batchStart));
+            for (std::size_t i = 0; i < pendingControls.size(); ++i) {
+                path.quadTo(toDevice(pendingControls[i]), toDevice(pendingEnds[i]));
+            }
+            ink.setPen(QPen(color, static_cast<qreal>(penWidth), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            ink.setBrush(Qt::NoBrush);
+            ink.drawPath(path);
+        }
         ink.end();
         pendingControls.clear();
         pendingEnds.clear();
+        pendingControlPressures.clear();
+        pendingEndPressures.clear();
     };
 
     while (layer.consumedRaw < count) {
         const Vec2 raw = points[layer.consumedRaw];
         Vec2 candidate;
-        if (layer.smoother.Feed(raw, &candidate)
+        float candidatePressure = 0.0f;
+        if (layer.smoother.Feed(raw, pressureAt(layer.consumedRaw), &candidate, &candidatePressure)
             && DistanceSquared(candidate, layer.smoothed.back()) >= 0.05f) {
             const Vec2 control = layer.smoothed.back();
+            const float controlPressure = layer.smoothedPressures.back();
             const Vec2 end {
                 (control.x + candidate.x) * 0.5f,
                 (control.y + candidate.y) * 0.5f,
             };
+            const float endPressure = (controlPressure + candidatePressure) * 0.5f;
             const QRectF needed = QRectF(
                 QPointF(std::min({ layer.lastEnd.x, control.x, candidate.x }) - margin,
                     std::min({ layer.lastEnd.y, control.y, candidate.y }) - margin),
@@ -664,11 +711,16 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const std::vector<Vec2>
             }
             if (pendingControls.empty()) {
                 batchStart = layer.lastEnd;
+                batchStartPressure = layer.lastEndPressure;
             }
             pendingControls.push_back(control);
             pendingEnds.push_back(end);
+            pendingControlPressures.push_back(controlPressure);
+            pendingEndPressures.push_back(endPressure);
             layer.smoothed.push_back(candidate);
+            layer.smoothedPressures.push_back(candidatePressure);
             layer.lastEnd = end;
+            layer.lastEndPressure = endPressure;
         }
         layer.rawLast = raw;
         layer.consumedLast = raw;
@@ -678,21 +730,53 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const std::vector<Vec2>
     return true;
 }
 
-void CanvasWidget::PaintStrokeTail(QPainter& painter, const Stroke& stroke, const std::vector<Vec2>& points,
+void CanvasWidget::PaintStrokeTail(QPainter& painter, const Stroke& stroke, const InkPath& path,
     const CanvasPageView& view) {
     const LiveStrokeLayer& layer = strokeLayer_;
     const float scale = view.scale;
     const float penWidth = render::StrokeRenderPenWidth(stroke, scale);
     const QColor color = QColor::fromRgba(stroke.style.color);
+    const std::vector<Vec2>& points = path.points;
 
     // The provisional tail mirrors PaintStrokePreview's path over
     // smoothed[m-1..] plus the raw tail point (emitted or not by the same
-    // 0.01 squared-distance clamp BuildSmoothedPoints uses).
+    // 0.01 squared-distance clamp BuildSmoothedPath uses).
     Vec2 tail {};
     const bool hasTail = !points.empty()
         && layer.smoother.TailPoint(points.back(), layer.smoothed.back(), &tail);
     const std::size_t k = layer.smoothed.size() + (hasTail ? 1U : 0U);
     const Vec2 end = hasTail ? tail : layer.smoothed.back();
+
+    if (layer.pressure) {
+        // The same pieces as a filled outline, radii from the smoothed
+        // pressures and the raw tail's.
+        constexpr float kInkTolerance = 0.2f;
+        const auto at = [scale](Vec2 point) { return Vec2 { point.x * scale, point.y * scale }; };
+        const auto radius = [&stroke, scale](float value) {
+            return 0.5f * render::StrokeRenderInkDiameter(stroke, scale, value);
+        };
+        const float tailPressure = path.pressures.empty() ? 0.0f : path.pressures.back();
+        const float endPressure = hasTail ? tailPressure : layer.smoothedPressures.back();
+        InkCenterline centerline;
+        if (k <= 1U) {
+            centerline.Add(at(layer.smoothed.front()), radius(layer.smoothedPressures.front()));
+        } else if (k == 2U || !hasTail) {
+            centerline.Add(at(layer.lastEnd), radius(layer.lastEndPressure));
+            centerline.Add(at(end), radius(endPressure));
+        } else {
+            const Vec2 control = layer.smoothed.back();
+            const float controlPressure = layer.smoothedPressures.back();
+            const Vec2 middle { (control.x + tail.x) * 0.5f, (control.y + tail.y) * 0.5f };
+            AppendInkQuadratic(centerline, at(layer.lastEnd), radius(layer.lastEndPressure), at(control),
+                radius(controlPressure), at(middle), radius((controlPressure + tailPressure) * 0.5f), kInkTolerance);
+            centerline.Add(at(tail), radius(tailPressure));
+        }
+        InkOutline outline;
+        AppendInkOutline(outline, centerline, kInkTolerance);
+        painter.setPen(Qt::NoPen);
+        painter.fillPath(render::InkOutlinePath(outline), color);
+        return;
+    }
 
     painter.setBrush(Qt::NoBrush);
     if (k <= 1U) {
@@ -715,17 +799,17 @@ void CanvasWidget::PaintStrokeTail(QPainter& painter, const Stroke& stroke, cons
         painter.drawLine(from, to);
         return;
     }
-    QPainterPath path;
-    path.moveTo(from);
+    QPainterPath line;
+    line.moveTo(from);
     if (hasTail) {
         const Vec2 control = layer.smoothed.back();
-        path.quadTo(
+        line.quadTo(
             QPointF(static_cast<qreal>(control.x * scale), static_cast<qreal>(control.y * scale)),
             QPointF(static_cast<qreal>((control.x + tail.x) * 0.5f * scale),
                 static_cast<qreal>((control.y + tail.y) * 0.5f * scale)));
     }
-    path.lineTo(to);
-    painter.drawPath(path);
+    line.lineTo(to);
+    painter.drawPath(line);
 }
 
 void CanvasWidget::BeginGestureOverlay(std::size_t pageIndex, bool transform) {
@@ -1240,7 +1324,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
             if (const Stroke* pending = controller_.PendingStroke(); pending != nullptr) {
                 painter.save();
                 painter.translate(view.rect.topLeft());
-                if (SyncStrokeLayer(*pending, liveStrokePoints_, view)) {
+                if (SyncStrokeLayer(*pending, liveStroke_, view)) {
                     // Stabilized ink is composited in the layer raster; only
                     // the provisional tail (two segments at most) is drawn
                     // live, so a paint no longer costs O(stroke points).
@@ -1256,7 +1340,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                             static_cast<qreal>(strokeLayer_.image.width() / dpr),
                             static_cast<qreal>(strokeLayer_.image.height() / dpr)),
                         strokeLayer_.image);
-                    PaintStrokeTail(painter, *pending, liveStrokePoints_, view);
+                    PaintStrokeTail(painter, *pending, liveStroke_, view);
                 } else {
                     render::PaintStrokePreview(painter, *pending, RenderParamsFor(view), 1.0f);
                 }
@@ -1962,6 +2046,37 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
     event->accept();
 }
 
+void CanvasWidget::tabletEvent(QTabletEvent* event) {
+    PointerSample sample;
+    sample.position = event->position();
+    sample.button = event->button();
+    sample.buttons = event->buttons();
+    sample.modifiers = event->modifiers();
+    sample.timestamp = static_cast<quint64>(event->timestamp());
+    sample.pressure = static_cast<float>(event->pressure());
+    switch (event->type()) {
+    case QEvent::TabletPress:
+        setFocus(Qt::MouseFocusReason);
+        lastPointerPosition_ = event->position();
+        HandlePointerPress(sample);
+        break;
+    case QEvent::TabletMove:
+        lastPointerPosition_ = event->position();
+        HandlePointerMove(sample);
+        RefreshCursor();
+        break;
+    case QEvent::TabletRelease:
+        lastPointerPosition_ = event->position();
+        HandlePointerRelease(sample);
+        break;
+    default:
+        // Proximity and other tablet events fall through to Qt's defaults.
+        event->ignore();
+        return;
+    }
+    event->accept();
+}
+
 void CanvasWidget::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Escape) {
         CancelActiveEdit();
@@ -2626,13 +2741,17 @@ void CanvasWidget::SetPointerCapture(bool captured) {
     }
 }
 
-void CanvasWidget::BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted, StrokeSampling sampling) {
+void CanvasWidget::BeginStroke(std::size_t pageIndex, Vec2 pagePoint, bool dotted, StrokeSampling sampling,
+    std::optional<float> pressure) {
     ResetStrokeLayer();
-    controller_.BeginStroke(pageIndex, pagePoint, sampling);
+    controller_.BeginStroke(pageIndex, pagePoint, sampling, pressure);
     controller_.SetPendingStrokeDotted(dotted);
-    liveStabilizer_.Reset(sampling);
-    liveStrokePoints_.clear();
-    liveStabilizer_.Feed(pagePoint, liveStrokePoints_);
+    // The live path replays the controller's stored (clamped) pressures.
+    const Stroke* stored = controller_.PendingStroke();
+    const bool storesPressure = stored != nullptr && !stored->pressures.empty();
+    liveStabilizer_.Reset(sampling, storesPressure);
+    liveStroke_ = InkPath {};
+    liveStabilizer_.Feed(pagePoint, storesPressure ? stored->pressures.back() : 0.0f, liveStroke_);
     // The press only inks the initial dot: repaint its bounds inflated by the
     // pen half-width and the smoothing lookahead margin.
     const Stroke* begun = controller_.PendingStroke();
@@ -2661,13 +2780,16 @@ void CanvasWidget::SetStrokeDotted(bool dotted) {
     update();
 }
 
-void CanvasWidget::AppendStrokePoint(Vec2 pagePoint, bool dotted) {
+void CanvasWidget::AppendStrokePoint(Vec2 pagePoint, bool dotted, std::optional<float> pressure) {
     const std::size_t pageIndex = controller_.PendingStrokePage();
-    controller_.ExtendStroke(pagePoint);
+    controller_.ExtendStroke(pagePoint, pressure);
     controller_.SetPendingStrokeDotted(dotted);
-    const std::size_t before = liveStrokePoints_.size();
-    liveStabilizer_.Feed(pagePoint, liveStrokePoints_);
-    if (liveStrokePoints_.size() == before || before == 0U) {
+    const Stroke* stored = controller_.PendingStroke();
+    const float storedPressure = stored != nullptr && !stored->pressures.empty() ? stored->pressures.back() : 0.0f;
+    const std::vector<Vec2>& live = liveStroke_.points;
+    const std::size_t before = live.size();
+    liveStabilizer_.Feed(pagePoint, storedPressure, liveStroke_);
+    if (live.size() == before || before == 0U) {
         // A sample the stabilization dropped changes no ink.
         return;
     }
@@ -2679,17 +2801,18 @@ void CanvasWidget::AppendStrokePoint(Vec2 pagePoint, bool dotted) {
     // QRectF(point, 0x0) is empty and united() drops empty operands, so the
     // span must accumulate explicit min/max rather than union point rects.
     const std::size_t first = before >= 3U ? before - 3U : 0U;
-    float minX = liveStrokePoints_[first].x, minY = liveStrokePoints_[first].y;
+    float minX = live[first].x, minY = live[first].y;
     float maxX = minX, maxY = minY;
-    for (std::size_t index = first + 1U; index < liveStrokePoints_.size(); ++index) {
-        const Vec2 p = liveStrokePoints_[index];
+    for (std::size_t index = first + 1U; index < live.size(); ++index) {
+        const Vec2 p = live[index];
         minX = std::min(minX, p.x);
         minY = std::min(minY, p.y);
         maxX = std::max(maxX, p.x);
         maxY = std::max(maxY, p.y);
     }
-    const Stroke* pending = controller_.PendingStroke();
-    const float penWidth = pending != nullptr ? pending->style.width : 3.0f;
+    // style.width / 2 page units also covers pressure ink at 1.6x
+    // (StrokeRenderInkDiameter is width / 2.15 times the factor).
+    const float penWidth = stored != nullptr ? stored->style.width : 3.0f;
     const float margin = penWidth * 0.5f + kStrokeDirtyMarginPixels;
     MarkTransientDirty(PageRegionDirtyRect(pageIndex,
         QRectF(minX, minY, maxX - minX, maxY - minY)
@@ -2700,9 +2823,10 @@ void CanvasWidget::ReplaceStrokePoints(const std::vector<Vec2>& points, bool dot
     const std::size_t pageIndex = controller_.PendingStrokePage();
     ResetStrokeLayer();
     controller_.ReplacePendingStrokePoints(points, dotted);
-    // Exact line/oval geometry renders with the identity sampling.
-    liveStabilizer_.Reset({});
-    liveStrokePoints_ = points;
+    // Exact line/oval geometry renders with the identity sampling at
+    // constant width.
+    liveStabilizer_.Reset({}, false);
+    liveStroke_ = InkPath { points, {} };
     const CanvasPageView view = CalculatePageView(pageIndex);
     if (view.valid) {
         update(view.rect.toAlignedRect());

@@ -33,6 +33,8 @@
 #include <QEventLoop>
 #include <QImage>
 #include <QMouseEvent>
+#include <QPointingDevice>
+#include <QTabletEvent>
 #include <QPixmap>
 #include <QPlainTextEdit>
 #include <QTextEdit>
@@ -408,6 +410,52 @@ int main(int argc, char** argv) {
                   freehandCommittedBox.count, freehandPreviewBox.count, std::max(64, freehandPreviewBox.count / 10));
         Check(controller.Undo(), "undo removes the freehand stroke at zoom " + std::to_string(zoom));
         QCoreApplication::processEvents();
+
+        // (c3) Pen ink: tablet samples carry their pressure into the stroke,
+        // which renders as a filled pressure-width outline; the live layer's
+        // incremental outline must land on the committed pixels too.
+        {
+            static const QPointingDevice stylus(QStringLiteral("geometry test stylus"), 4242,
+                QInputDevice::DeviceType::Stylus, QPointingDevice::PointerType::Pen,
+                QInputDevice::Capability::Position | QInputDevice::Capability::Pressure, 1, 3);
+            const auto sendTablet = [&canvas](QEvent::Type type, const QPointF& position, qreal pressure,
+                                        Qt::MouseButton button, Qt::MouseButtons buttons) {
+                QTabletEvent event(type, &stylus, position, canvas.mapToGlobal(position), pressure,
+                    0.0f, 0.0f, 0.0f, 0.0, 0.0f, Qt::NoModifier, button, buttons);
+                QApplication::sendEvent(&canvas, &event);
+                return event.isAccepted();
+            };
+            const QPointF penStart = center + QPointF(-0.3 * span, 0.0);
+            bool accepted = sendTablet(QEvent::TabletPress, penStart, 0.1, Qt::LeftButton, Qt::LeftButton);
+            QPointF penPoint = penStart;
+            for (int step = 1; step <= 40; ++step) {
+                penPoint = penStart + QPointF(0.015 * span * step, 0.06 * span * std::sin(step * 0.35));
+                accepted = sendTablet(QEvent::TabletMove, penPoint, 0.1 + (0.85 * step / 40.0), Qt::NoButton,
+                    Qt::LeftButton) && accepted;
+            }
+            QCoreApplication::processEvents();
+            const QImage penPreview = canvas.grab().toImage();
+            accepted = sendTablet(QEvent::TabletRelease, penPoint, 0.0, Qt::LeftButton, Qt::NoButton) && accepted;
+            QCoreApplication::processEvents();
+            const QImage penCommitted = canvas.grab().toImage();
+
+            const cnote::Page& penPage = controller.DocumentRef().PageAt(0);
+            Check(accepted, "the canvas accepts tablet events at zoom " + std::to_string(zoom));
+            Check(penPage.strokes.size() == 1U && !penPage.strokes.front().pressures.empty()
+                    && penPage.strokes.front().pressures.size() == penPage.strokes.front().points.size(),
+                "a pen stroke stores a pressure per point at zoom " + std::to_string(zoom));
+            const InkBox penPreviewBox = RedInk(penPreview);
+            const InkBox penCommittedBox = RedInk(penCommitted);
+            std::printf("PEN zoom=%.2f preview=%s committed=%s\n",
+                        zoom, FormatBox(penPreviewBox).c_str(), FormatBox(penCommittedBox).c_str());
+            Check(BoxNear(penPreviewBox, penCommittedBox, static_cast<int>(std::lround(toleranceDevice))),
+                  "committed pen stroke lands on the preview pixels at zoom " + std::to_string(zoom));
+            CheckNear(std::abs(penPreviewBox.count - penCommittedBox.count) <= std::max(64, penPreviewBox.count / 10),
+                      "committed pen ink area matches the preview at zoom " + std::to_string(zoom),
+                      penCommittedBox.count, penPreviewBox.count, std::max(64, penPreviewBox.count / 10));
+            Check(controller.Undo(), "undo removes the pen stroke at zoom " + std::to_string(zoom));
+            QCoreApplication::processEvents();
+        }
 
         // (d) text edit overlay position vs the committed object's page rect.
         canvas.SetTool(ui::Tool::Text);

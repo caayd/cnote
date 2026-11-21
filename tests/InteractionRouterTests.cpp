@@ -92,6 +92,8 @@ public:
     bool beginTransformSucceeds = true;
     std::vector<ui::ObjectRef> eraseTargets;
     StrokeSampling lastSampling {};
+    std::optional<float> beginPressure;
+    std::vector<std::optional<float>> appendPressures;
 
     std::optional<ui::PageHit> HitTestPage(const QPointF& logical) const override { return hitPage(logical); }
     Vec2 ScreenToPage(const QPointF& logical, bool clampToPage) const override { return screenToPage(logical, clampToPage); }
@@ -120,12 +122,15 @@ public:
     void SetCursor(ui::CursorKind cursor) override { ops.push_back("SetCursor(" + std::to_string(static_cast<int>(cursor)) + ")"); }
     void InvalidateCanvas() override { ++invalidateCount; }
 
-    void BeginStroke(std::size_t pageIndex, Vec2 point, bool dotted, StrokeSampling sampling) override {
+    void BeginStroke(std::size_t pageIndex, Vec2 point, bool dotted, StrokeSampling sampling,
+        std::optional<float> pressure) override {
         lastSampling = sampling;
+        beginPressure = pressure;
         ops.push_back("BeginStroke(page=" + std::to_string(pageIndex) + ",point=" + Format(point) + ",dotted=" + (dotted ? "1" : "0") + ")");
     }
     void SetStrokeDotted(bool dotted) override { ops.push_back("SetStrokeDotted(" + std::string(dotted ? "1" : "0") + ")"); }
-    void AppendStrokePoint(Vec2 point, bool dotted) override {
+    void AppendStrokePoint(Vec2 point, bool dotted, std::optional<float> pressure) override {
+        appendPressures.push_back(pressure);
         ops.push_back("AppendStrokePoint(" + Format(point) + ",dotted=" + (dotted ? "1" : "0") + ")");
     }
     void ReplaceStrokePoints(const std::vector<Vec2>& points, bool dotted) override {
@@ -440,6 +445,37 @@ void TestStrokeRawSamplesAndSampling() {
     host.Reset();
     router.HandlePointerRelease(Release(400.0, 0.0));
     Check(host.CountOp("CommitStroke") == 1, "the raw stroke commits once");
+}
+
+// Pen pressure rides every stroke sample; a mouse stroke carries none.  The
+// pen's release reports zero pressure (the tip left the surface), so the
+// release's final point keeps the last measured pressure instead.
+void TestStrokePenPressure() {
+    RecordingHost host;
+    ui::InteractionRouter router(host);
+    router.SetTool(ui::Tool::Draw);
+    router.HandlePointerPress(Press(0.0, 0.0));
+    router.HandlePointerMove(Move(100.0, 0.0));
+    router.HandlePointerRelease(Release(100.0, 0.0));
+    Check(!host.beginPressure.has_value() && host.appendPressures.size() == 1U && !host.appendPressures.front().has_value(),
+        "a mouse stroke carries no pressure");
+
+    RecordingHost pen;
+    ui::InteractionRouter penRouter(pen);
+    penRouter.SetTool(ui::Tool::Draw);
+    ui::PointerSample press = Press(0.0, 0.0);
+    press.pressure = 0.25f;
+    penRouter.HandlePointerPress(press);
+    ui::PointerSample move = Move(100.0, 0.0);
+    move.pressure = 0.75f;
+    penRouter.HandlePointerMove(move);
+    ui::PointerSample release = Release(200.0, 0.0);
+    release.pressure = 0.0f;
+    penRouter.HandlePointerRelease(release);
+    Check(pen.beginPressure.has_value() && Near(*pen.beginPressure, 0.25), "the pen press starts the stroke with its pressure");
+    Check(pen.appendPressures.size() == 2U && pen.appendPressures[0].has_value() && Near(*pen.appendPressures[0], 0.75)
+            && pen.appendPressures[1].has_value() && Near(*pen.appendPressures[1], 0.75),
+        "pen moves carry their pressure and the release keeps the last one\n" + pen.Dump());
 }
 
 // App.cpp:1981-2006 and 4532-4544: 'A' switches to a straight line, Shift snaps
@@ -1202,6 +1238,7 @@ int main() {
     TestPanToolDeltas();
     TestStrokePageSegmentation();
     TestStrokeRawSamplesAndSampling();
+    TestStrokePenPressure();
     TestStrokeStraightLineSnapAndOval();
     TestStrokeDottedModifierWithoutMotion();
     TestStrokeReleaseOutsideCanvas();

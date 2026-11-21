@@ -412,6 +412,7 @@ add_library(cnote_services
     src/latex/LatexCompletion.cpp
     src/render/PageRenderer.cpp
     src/selection/StrokeSmoothing.cpp
+    src/selection/InkOutline.cpp
     src/PdfBackend.cpp
     src/render/PdfExportQt.cpp
     src/render/PdfiumBackgroundProvider.cpp

@@ -384,7 +384,7 @@ int main(int argc, char** argv) {
         CheckNear(mapped.y, 40.0, "map.zeroFrom.y");
     }
 
-    // Render-time stabilization (cnote::BuildStabilizedPoints).
+    // Render-time stabilization (cnote::BuildStabilizedPath).
     {
         using cnote::Vec2;
         const auto same = [](const std::vector<Vec2>& a, const std::vector<Vec2>& b) {
@@ -402,21 +402,26 @@ int main(int argc, char** argv) {
         // Strokes saved before raw points stored stabilized points: the zero
         // sampling must hand them back untouched, sub-spacing gaps included.
         const std::vector<Vec2> stored { { 0.0f, 0.0f }, { 0.01f, 0.0f }, { 5.0f, 3.0f } };
-        Check(same(cnote::BuildStabilizedPoints(stored, cnote::StrokeSampling {}), stored),
+        Check(same(cnote::BuildStabilizedPath(stored, {}, cnote::StrokeSampling {}).points, stored),
             "stabilize.identity: the zero sampling keeps stored points");
 
         // The reference follow/spacing (App.cpp:1958-1979) at the defaults:
         // follow 0.7, spacing 1.75.  The 1-unit sample pulls 0.7 and is
         // dropped; the 4-unit one pulls to 2.8, resampled in ceil(2.8/1.75)=2.
-        const std::vector<Vec2> pulled = cnote::BuildStabilizedPoints(
-            { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 4.0f, 0.0f } }, cnote::StrokeSampling { 0.3f, 1.75f });
-        Check(same(pulled, { { 0.0f, 0.0f }, { 1.4f, 0.0f }, { 2.8f, 0.0f } }),
+        // Pressure rides the same pulls: 0.2 -> lerp(0.2, 1.0, 0.7) = 0.76,
+        // resampled through 0.48.
+        const cnote::InkPath pulled = cnote::BuildStabilizedPath(
+            { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 4.0f, 0.0f } }, { 0.2f, 0.6f, 1.0f }, cnote::StrokeSampling { 0.3f, 1.75f });
+        Check(same(pulled.points, { { 0.0f, 0.0f }, { 1.4f, 0.0f }, { 2.8f, 0.0f } }),
             "stabilize.reference: sub-spacing pulls drop, long pulls resample");
+        Check(pulled.pressures.size() == 3U && Near(pulled.pressures[0], 0.2, 1e-5)
+                && Near(pulled.pressures[1], 0.48, 1e-5) && Near(pulled.pressures[2], 0.76, 1e-5),
+            "stabilize.pressure: pressure follows the same pulls as the points");
 
         // Without streamline only the spacing applies: a 4-unit gap splits
         // into four 1-unit steps ending exactly on the sample.
-        const std::vector<Vec2> spaced = cnote::BuildStabilizedPoints(
-            { { 0.0f, 0.0f }, { 0.5f, 0.0f }, { 4.0f, 0.0f } }, cnote::StrokeSampling { 0.0f, 1.0f });
+        const std::vector<Vec2> spaced = cnote::BuildStabilizedPath(
+            { { 0.0f, 0.0f }, { 0.5f, 0.0f }, { 4.0f, 0.0f } }, {}, cnote::StrokeSampling { 0.0f, 1.0f }).points;
         Check(same(spaced, { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 2.0f, 0.0f }, { 3.0f, 0.0f }, { 4.0f, 0.0f } }),
             "stabilize.spacing: drops below the spacing, resamples above it");
     }

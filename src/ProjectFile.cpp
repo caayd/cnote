@@ -45,7 +45,8 @@ constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
 // 17: strokes store raw pointer samples plus their StrokeSampling; earlier
 // versions stored stabilized points and read back with the identity sampling.
-constexpr std::uint32_t kProjectVersion = 17;
+// 18: strokes end with their pen pressures (count 0 or the point count).
+constexpr std::uint32_t kProjectVersion = 18;
 constexpr std::uint32_t kProjectFlagHasPdf = 1U << 0U;
 constexpr std::uint32_t kProjectFlagInheritPageSize = 1U << 1U;
 constexpr std::uint32_t kPageFlagHasRaster = 1U << 0U;
@@ -259,6 +260,11 @@ void AppendStroke(std::vector<std::uint8_t>& output, const Stroke& stroke) {
         AppendValue(output, point.x);
         AppendValue(output, point.y);
     }
+    const auto pressureCount = static_cast<std::uint32_t>(stroke.pressures.size());
+    AppendValue(output, pressureCount);
+    for (const float pressure : stroke.pressures) {
+        AppendValue(output, pressure);
+    }
 }
 
 bool ReadStroke(ByteReader& reader, std::uint32_t version, Stroke& stroke) {
@@ -290,6 +296,19 @@ bool ReadStroke(ByteReader& reader, std::uint32_t version, Stroke& stroke) {
             return false;
         }
         stroke.points.push_back(point);
+    }
+    if (version >= 18U) {
+        std::uint32_t pressureCount = 0;
+        if (!reader.Read(pressureCount) || (pressureCount != 0U && pressureCount != pointCount)
+            || pressureCount > reader.Remaining() / 4U) {
+            return false;
+        }
+        stroke.pressures.resize(pressureCount);
+        for (float& pressure : stroke.pressures) {
+            if (!reader.Read(pressure)) {
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -602,7 +621,7 @@ std::optional<Document> LoadProjectPayload(
         if (!reader.Read(imageCount)) return std::nullopt;
 
         const std::size_t minimumStrokeBytes = 12U + (version >= 9U ? 1U : 0U)
-            + (version >= 10U ? 4U : 0U) + (version >= 17U ? 8U : 0U);
+            + (version >= 10U ? 4U : 0U) + (version >= 17U ? 8U : 0U) + (version >= 18U ? 4U : 0U);
         if (strokeCount > reader.Remaining() / minimumStrokeBytes) return std::nullopt;
         page.strokes.reserve(strokeCount);
         for (std::uint32_t strokeIndex = 0; strokeIndex < strokeCount; ++strokeIndex) {
