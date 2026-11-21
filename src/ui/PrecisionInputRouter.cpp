@@ -14,61 +14,79 @@ void PrecisionInputRouter::SetNativeAdapterAvailable(bool available) {
     if (!available) {
         // Without the native adapter there are no native frames to duplicate,
         // and any in-flight native gesture state is meaningless.
-        suppressDuplicates_ = false;
-        gestureActive_ = false;
-        gestureAccepted_ = false;
-        gestureIgnored_ = false;
-        inertiaActive_ = false;
+        FinishGesture();
     }
 }
 
 void PrecisionInputRouter::NoteNativeFrameConsumed() {
     if (nativeAvailable_) {
-        suppressDuplicates_ = true;
-        lastConsumedFrame_.start();
+        suppression_.armed = true;
+        suppression_.since.start();
     }
 }
 
 bool PrecisionInputRouter::SuppressionFresh() const {
-    return suppressDuplicates_
-        && lastConsumedFrame_.isValid()
-        && lastConsumedFrame_.elapsed() <= kDuplicateSuppressionWindowMs;
-}
-
-bool PrecisionInputRouter::ShouldDropWheelDuplicate() const {
-    return nativeAvailable_ && SuppressionFresh();
+    return suppression_.armed
+        && suppression_.since.isValid()
+        && suppression_.since.elapsed() <= kDuplicateSuppressionWindowMs;
 }
 
 bool PrecisionInputRouter::NativeGestureIsDuplicate() const {
     return nativeAvailable_ && SuppressionFresh();
 }
 
-bool PrecisionInputRouter::AcceptGestureAt(const QPoint& globalPosition) {
-    if (gestureAccepted_) {
-        return true;
-    }
-    if (sink_.RoutePrecisionInput(globalPosition) != PrecisionInputRoute::Canvas) {
-        gestureIgnored_ = true;
+bool PrecisionInputRouter::LiveGestureDuplicate() const {
+    return nativeAvailable_ && phase_ != GesturePhase::Idle && SuppressionFresh();
+}
+
+bool PrecisionInputRouter::ShouldDropWheelDuplicate() const {
+    return LiveGestureDuplicate();
+}
+
+bool PrecisionInputRouter::BeginGesture(GestureSource source, const QPoint& globalPosition) {
+    if (phase_ != GesturePhase::Idle) {
+        // A begin while any gesture is live, whatever its source, is not a new
+        // gesture: the native touchpad must not steal Qt's touch gesture and a
+        // repeated native Begin must not emit a second BeginPrecisionGesture.
         return false;
     }
-    gestureAccepted_ = true;
-    gestureIgnored_ = false;
+    source_ = source;
+    phase_ = GesturePhase::Tracking;
+    gestureScale_ = 1.0;
+    lastTouchCentroid_ = QPointF();
+    touchStartDistance_ = 0.0;
+    // A new gesture never inherits a trailing frame's suppression.
+    suppression_ = Suppression {};
+    return AcceptGestureAt(globalPosition);
+}
+
+bool PrecisionInputRouter::AcceptGestureAt(const QPoint& globalPosition) {
+    if (phase_ == GesturePhase::Accepted) {
+        return true;
+    }
+    if (phase_ == GesturePhase::Idle) {
+        return false;
+    }
+    if (sink_.RoutePrecisionInput(globalPosition) != PrecisionInputRoute::Canvas) {
+        return false;
+    }
+    phase_ = GesturePhase::Accepted;
     gestureScale_ = 1.0;
     sink_.BeginPrecisionGesture();
     return true;
 }
 
 void PrecisionInputRouter::FinishGesture() {
-    if (gestureAccepted_) {
+    if (phase_ == GesturePhase::Accepted) {
         sink_.EndPrecisionGesture();
     }
-    gestureActive_ = false;
-    gestureIgnored_ = false;
-    gestureAccepted_ = false;
+    phase_ = GesturePhase::Idle;
+    source_ = GestureSource::None;
+    inertiaActive_ = false;
     gestureScale_ = 1.0;
-    // The native touchpad gesture is over; Qt's own events are in charge again
-    // until the next consumed frame starts suppressing duplicates.
-    suppressDuplicates_ = false;
+    lastTouchCentroid_ = QPointF();
+    touchStartDistance_ = 0.0;
+    suppression_ = Suppression {};
 }
 
 void PrecisionInputRouter::ApplyZoom(qreal cumulativeScale, const QPoint& globalAnchor) {
@@ -92,17 +110,15 @@ void PrecisionInputRouter::HandleTouchpadSample(const TouchpadGestureSample& sam
     }
     switch (sample.phase) {
     case TouchpadGestureSample::Phase::Begin:
-        gestureActive_ = true;
-        gestureAccepted_ = false;
-        gestureIgnored_ = false;
-        gestureScale_ = 1.0;
+        if (!BeginGesture(GestureSource::NativeTouchpad, sample.screenAnchor)) {
+            return;
+        }
         if (sample.inertiaActive) {
             SetInertiaActive(true);
         }
-        AcceptGestureAt(sample.screenAnchor);
         return;
     case TouchpadGestureSample::Phase::Update:
-        if (!gestureActive_) {
+        if (phase_ == GesturePhase::Idle) {
             // Inertia frames keep arriving after the manipulation ended; they
             // pan the canvas exactly like the reference front end.  Without an
             // active manipulation (and without inertia) nothing is applied.
@@ -113,6 +129,9 @@ void PrecisionInputRouter::HandleTouchpadSample(const TouchpadGestureSample& sam
             ApplyPan(static_cast<qreal>(sample.translationX), static_cast<qreal>(sample.translationY));
             return;
         }
+        if (source_ != GestureSource::NativeTouchpad) {
+            return;
+        }
         if (!AcceptGestureAt(sample.screenAnchor)) {
             return;
         }
@@ -120,11 +139,23 @@ void PrecisionInputRouter::HandleTouchpadSample(const TouchpadGestureSample& sam
         ApplyPan(static_cast<qreal>(sample.translationX), static_cast<qreal>(sample.translationY));
         SetInertiaActive(sample.inertiaActive);
         return;
-    case TouchpadGestureSample::Phase::End:
-        SetInertiaActive(sample.inertiaActive);
+    case TouchpadGestureSample::Phase::End: {
+        if (phase_ != GesturePhase::Idle && source_ != GestureSource::NativeTouchpad) {
+            // A native touchpad End must not finish a Qt gesture.
+            return;
+        }
+        const bool inertia = sample.inertiaActive;
         FinishGesture();
+        // Inertia deliberately outlives the manipulation: FinishGesture resets
+        // the gesture bookkeeping, then the native frame's inertia state is
+        // re-applied for the coasting phase.
+        SetInertiaActive(inertia);
         return;
+    }
     case TouchpadGestureSample::Phase::Cancel:
+        if (phase_ != GesturePhase::Idle && source_ != GestureSource::NativeTouchpad) {
+            return;
+        }
         SetInertiaActive(false);
         FinishGesture();
         return;
@@ -132,24 +163,24 @@ void PrecisionInputRouter::HandleTouchpadSample(const TouchpadGestureSample& sam
 }
 
 bool PrecisionInputRouter::HandleNativeGestureBegin(const QPoint& globalPosition) {
-    if (NativeGestureIsDuplicate()) {
+    if (LiveGestureDuplicate()) {
+        // A begin that is a duplicate of the adapter's live gesture.
         return true;
     }
-    if (gestureActive_) {
+    if (!BeginGesture(GestureSource::NativeGesture, globalPosition)) {
         return false;
     }
-    gestureActive_ = true;
-    gestureAccepted_ = false;
-    gestureIgnored_ = false;
-    gestureScale_ = 1.0;
-    return AcceptGestureAt(globalPosition);
+    return true;
 }
 
 bool PrecisionInputRouter::HandleNativeGestureZoom(qreal value, const QPoint& globalPosition) {
     if (NativeGestureIsDuplicate()) {
         return true;
     }
-    if (!gestureActive_ || !AcceptGestureAt(globalPosition)) {
+    if (phase_ == GesturePhase::Idle || source_ != GestureSource::NativeGesture) {
+        return false;
+    }
+    if (!AcceptGestureAt(globalPosition)) {
         return false;
     }
     const qreal cumulative = gestureScale_ * (1.0 + value);
@@ -161,7 +192,10 @@ bool PrecisionInputRouter::HandleNativeGesturePan(const QPointF& delta, const QP
     if (NativeGestureIsDuplicate()) {
         return true;
     }
-    if (!gestureActive_ || !AcceptGestureAt(globalPosition)) {
+    if (phase_ == GesturePhase::Idle || source_ != GestureSource::NativeGesture) {
+        return false;
+    }
+    if (!AcceptGestureAt(globalPosition)) {
         return false;
     }
     ApplyPan(delta.x(), delta.y());
@@ -173,13 +207,13 @@ bool PrecisionInputRouter::HandleNativeGestureEnd() {
         // Qt's copy of a gesture the native adapter already owns: consume it so
         // nothing applies a second pan/zoom, and stop suppressing.  The native
         // side finishes its own bookkeeping from the adapter's end callback.
-        suppressDuplicates_ = false;
+        suppression_ = Suppression {};
         return true;
     }
-    if (!gestureActive_) {
+    if (phase_ == GesturePhase::Idle || source_ != GestureSource::NativeGesture) {
         return false;
     }
-    const bool accepted = gestureAccepted_;
+    const bool accepted = phase_ == GesturePhase::Accepted;
     FinishGesture();
     return accepted;
 }
@@ -205,50 +239,58 @@ PrecisionInputRouter::TouchMetrics PrecisionInputRouter::ComputeTouchMetrics(con
     return metrics;
 }
 
-bool PrecisionInputRouter::HandleTouchBegin(const QPoint& globalCentroid) {
-    if (gestureActive_) {
+bool PrecisionInputRouter::HandleTouchBegin(const TouchMetrics& metrics) {
+    if (phase_ != GesturePhase::Idle) {
         return false;
     }
-    gestureActive_ = true;
-    touchActive_ = true;
-    lastTouchCentroid_ = QPointF(globalCentroid);
-    gestureAccepted_ = false;
-    gestureIgnored_ = false;
-    gestureScale_ = 1.0;
-    return AcceptGestureAt(globalCentroid);
+    BeginGesture(GestureSource::Touch, metrics.centroid.toPoint());
+    lastTouchCentroid_ = metrics.centroid;
+    touchStartDistance_ = metrics.distance;
+    return phase_ == GesturePhase::Accepted;
 }
 
-bool PrecisionInputRouter::HandleTouchUpdate(const QPoint& globalCentroid, qreal cumulativeScale) {
-    if (!gestureActive_ || !touchActive_) {
+bool PrecisionInputRouter::HandleTouchUpdate(const TouchMetrics& metrics) {
+    if (phase_ == GesturePhase::Idle || source_ != GestureSource::Touch) {
         return false;
     }
+    const QPoint globalCentroid = metrics.centroid.toPoint();
     if (!AcceptGestureAt(globalCentroid)) {
         return false;
     }
-    const QPointF centroid(globalCentroid);
-    const QPointF delta = centroid - lastTouchCentroid_;
-    lastTouchCentroid_ = centroid;
+    const QPointF delta = metrics.centroid - lastTouchCentroid_;
+    lastTouchCentroid_ = metrics.centroid;
     ApplyPan(delta.x(), delta.y());
-    ApplyZoom(cumulativeScale, globalCentroid);
+    const qreal scale = touchStartDistance_ > 0.0 ? metrics.distance / touchStartDistance_ : 1.0;
+    ApplyZoom(scale, globalCentroid);
     return true;
 }
 
 bool PrecisionInputRouter::HandleTouchEnd() {
-    if (!gestureActive_ || !touchActive_) {
+    if (phase_ == GesturePhase::Idle || source_ != GestureSource::Touch) {
         return false;
     }
-    const bool accepted = gestureAccepted_;
-    touchActive_ = false;
+    const bool accepted = phase_ == GesturePhase::Accepted;
     FinishGesture();
     return accepted;
 }
 
+bool PrecisionInputRouter::HandleTouchCancel() {
+    if (phase_ == GesturePhase::Idle || source_ != GestureSource::Touch) {
+        return false;
+    }
+    // Cancel ends the touch gesture and leaves the router idle: no source or
+    // touch metric may survive into the next TouchBegin.
+    FinishGesture();
+    return true;
+}
+
 void PrecisionInputRouter::SetInertiaActive(bool active) {
     inertiaActive_ = active;
-    if (!active && !gestureActive_) {
-        // Inertia ended with no live gesture: Qt's own events are authoritative
-        // again, so stale suppression must not outlive it.
-        suppressDuplicates_ = false;
+    if (!active) {
+        // Inertia ended: Qt's own events are authoritative again, so stale
+        // suppression must not outlive it (also when it coasted past the
+        // manipulation's End).
+        suppression_ = Suppression {};
     }
 }
 

@@ -82,6 +82,14 @@ PrecisionTouchpadApi LoadPrecisionTouchpadApi(HMODULE user32, HMODULE ninput) {
 }  // namespace
 
 struct PrecisionTouchpad::State {
+    enum class Phase {
+        Disabled,
+        Idle,
+        Routing,
+        Manipulating,
+        Inertia,
+    };
+
     State(PrecisionTouchpadGestureCallback gestureCallbackIn, PrecisionTouchpadRouteCallback routeCallbackIn, void* clientDataIn)
         : gestureCallback(gestureCallbackIn), routeCallback(routeCallbackIn), clientData(clientDataIn) {
         HMODULE user32 = GetModuleHandleW(L"user32.dll");
@@ -101,14 +109,15 @@ struct PrecisionTouchpad::State {
     }
 
     void Shutdown() {
-        StopInertia(false);
-        canvasGestureActive = false;
-        manipulationActive = false;
+        const bool wasEnabled = phase != Phase::Disabled;
+        // TransitionTo reports the inertia stop to the system before the
+        // window is forgotten, so Shutdown never leaves the OS believing the
+        // window is still coasting.
+        TransitionTo(Phase::Disabled);
         const PrecisionTouchpadApi& loadedApi = api;
-        if (enabled && window != nullptr && loadedApi.registerTouchpadCapableWindow != nullptr) {
+        if (wasEnabled && window != nullptr && loadedApi.registerTouchpadCapableWindow != nullptr) {
             static_cast<void>(loadedApi.registerTouchpadCapableWindow(window, FALSE));
         }
-        enabled = false;
         if (interactionContext != nullptr && loadedApi.destroyInteractionContext != nullptr) {
             static_cast<void>(loadedApi.destroyInteractionContext(interactionContext));
             interactionContext = nullptr;
@@ -116,23 +125,24 @@ struct PrecisionTouchpad::State {
         window = nullptr;
     }
 
-    void StopInertia(bool reportToSystem) {
-        if (!inertiaActive) {
+    // Single owner of every phase change, including the system-visible content
+    // inertia report.  Cancel is only ever emitted from Manipulating (see
+    // HandleOutput), so the flag soup cannot desynchronise from the real state.
+    void TransitionTo(Phase next) {
+        if (phase == next) {
             return;
         }
-        inertiaActive = false;
-        if (reportToSystem && api.reportWindowContentInertia != nullptr && window != nullptr) {
+        if (phase == Phase::Inertia && api.reportWindowContentInertia != nullptr && window != nullptr) {
             static_cast<void>(api.reportWindowContentInertia(window, FALSE));
         }
-    }
-
-    void StopManipulation() {
-        canvasGestureActive = false;
-        manipulationActive = false;
+        if (next == Phase::Inertia && api.reportWindowContentInertia != nullptr && window != nullptr) {
+            static_cast<void>(api.reportWindowContentInertia(window, TRUE));
+        }
+        phase = next;
     }
 
     void Emit(PrecisionTouchpadGesture gesture) {
-        gesture.inertiaActive = inertiaActive;
+        gesture.inertiaActive = phase == Phase::Inertia;
         if (gestureCallback != nullptr) {
             gestureCallback(clientData, gesture);
         }
@@ -146,37 +156,43 @@ struct PrecisionTouchpad::State {
     }
 
     void HandleOutput(const INTERACTION_CONTEXT_OUTPUT& output) {
-        if (output.interactionId != INTERACTION_ID_MANIPULATION) {
+        if (output.interactionId != INTERACTION_ID_MANIPULATION || phase == Phase::Disabled) {
             return;
         }
 
-        if ((output.interactionFlags & INTERACTION_FLAG_BEGIN) != 0) {
-            manipulationActive = true;
-        }
-        if ((output.interactionFlags & INTERACTION_FLAG_CANCEL) != 0) {
-            StopManipulation();
-            StopInertia(true);
-            Emit(PrecisionTouchpadGesture {
-                .phase = PrecisionTouchpadGesture::Phase::Cancel,
-                .cancel = true,
-            });
-            return;
-        }
+        const bool begin = (output.interactionFlags & INTERACTION_FLAG_BEGIN) != 0;
+        const bool end = (output.interactionFlags & INTERACTION_FLAG_END) != 0;
+        const bool cancel = (output.interactionFlags & INTERACTION_FLAG_CANCEL) != 0;
+        const bool inertia = (output.interactionFlags & INTERACTION_FLAG_INERTIA) != 0;
 
-        if ((output.interactionFlags & INTERACTION_FLAG_INERTIA) != 0) {
-            if (!inertiaActive) {
-                inertiaActive = true;
-                if (api.reportWindowContentInertia != nullptr && window != nullptr) {
-                    static_cast<void>(api.reportWindowContentInertia(window, TRUE));
-                }
+        if (cancel) {
+            // Cancel is only meaningful for a manipulation that actually
+            // began; a stray context cancel must not surface as a sink Cancel
+            // without a matching Begin.  Transitioning away from Inertia still
+            // reports the inertia stop to the system.
+            const bool wasManipulating = phase == Phase::Manipulating;
+            TransitionTo(Phase::Idle);
+            if (wasManipulating) {
+                Emit(PrecisionTouchpadGesture {
+                    .phase = PrecisionTouchpadGesture::Phase::Cancel,
+                    .cancel = true,
+                });
             }
-        } else if (inertiaActive) {
-            StopInertia(true);
+            return;
+        }
+
+        if (begin && phase != Phase::Manipulating) {
+            TransitionTo(Phase::Manipulating);
+        }
+        if (inertia) {
+            if (phase != Phase::Inertia) {
+                TransitionTo(Phase::Inertia);
+            }
+        } else if (phase == Phase::Inertia) {
+            TransitionTo(Phase::Idle);
         }
 
         const INTERACTION_ARGUMENTS_MANIPULATION& manipulation = output.arguments.manipulation;
-        const bool begin = (output.interactionFlags & INTERACTION_FLAG_BEGIN) != 0;
-        const bool end = (output.interactionFlags & INTERACTION_FLAG_END) != 0;
         PrecisionTouchpadGesture gesture {
             .phase = end
                 ? PrecisionTouchpadGesture::Phase::End
@@ -192,17 +208,16 @@ struct PrecisionTouchpad::State {
             .end = end,
         };
 
-        if ((output.interactionFlags & INTERACTION_FLAG_END) != 0) {
-            StopManipulation();
-            if ((output.interactionFlags & INTERACTION_FLAG_INERTIA) == 0) {
-                StopInertia(true);
-            }
+        if (end) {
+            // Finish the manipulation, but keep coasting in Inertia when the
+            // same frame carries inertia frames.
+            TransitionTo(inertia ? Phase::Inertia : Phase::Idle);
         }
         Emit(gesture);
     }
 
     bool HandlePointerMessage(UINT message, WPARAM wParam) {
-        if (!enabled || interactionContext == nullptr) {
+        if (phase == Phase::Disabled || interactionContext == nullptr) {
             return false;
         }
 
@@ -214,11 +229,17 @@ struct PrecisionTouchpad::State {
 
         POINT cursor = pointerInfo.ptPixelLocation;
         ScreenToClient(window, &cursor);
-        if (message == WM_POINTERDOWN || (pointerInfo.pointerFlags & POINTER_FLAG_NEW) != 0 || !canvasGestureActive) {
-            canvasGestureActive = routeCallback != nullptr && routeCallback(clientData, cursor);
-        }
-        if (!canvasGestureActive) {
-            return false;
+        if (message == WM_POINTERDOWN || (pointerInfo.pointerFlags & POINTER_FLAG_NEW) != 0 || phase == Phase::Idle) {
+            const bool routed = routeCallback != nullptr && routeCallback(clientData, cursor);
+            if (!routed) {
+                if (phase == Phase::Routing) {
+                    TransitionTo(Phase::Idle);
+                }
+                return false;
+            }
+            if (phase == Phase::Idle) {
+                TransitionTo(Phase::Routing);
+            }
         }
 
         UINT32 entriesCount = 0;
@@ -255,14 +276,16 @@ struct PrecisionTouchpad::State {
                 pointerCount,
                 typeInfo.data()))) {
             if ((pointerInfo.pointerFlags & POINTER_FLAG_UP) != 0 || message == WM_POINTERUP) {
-                StopManipulation();
+                if (phase == Phase::Routing || phase == Phase::Manipulating) {
+                    TransitionTo(Phase::Idle);
+                }
             }
             return false;
         }
 
         static_cast<void>(SkipPointerFrameMessages(pointerId));
-        if ((pointerInfo.pointerFlags & POINTER_FLAG_UP) != 0 && !manipulationActive && !inertiaActive) {
-            canvasGestureActive = false;
+        if ((pointerInfo.pointerFlags & POINTER_FLAG_UP) != 0 && phase == Phase::Routing) {
+            TransitionTo(Phase::Idle);
         }
         return true;
     }
@@ -276,10 +299,7 @@ struct PrecisionTouchpad::State {
     HINTERACTIONCONTEXT interactionContext = nullptr;
     std::vector<POINTER_TOUCH_INFO> touchInfo {};
     std::vector<POINTER_TYPE_INFO> typeInfo {};
-    bool enabled = false;
-    bool canvasGestureActive = false;
-    bool manipulationActive = false;
-    bool inertiaActive = false;
+    Phase phase = Phase::Disabled;
 };
 
 PrecisionTouchpad::PrecisionTouchpad(
@@ -358,7 +378,7 @@ PrecisionTouchpad::~PrecisionTouchpad() = default;
         return false;
     }
 
-    state.enabled = true;
+    state.TransitionTo(State::Phase::Idle);
     return true;
 
 }
@@ -372,12 +392,16 @@ bool PrecisionTouchpad::HandlePointerMessage(UINT message, WPARAM wParam) {
 
 bool PrecisionTouchpad::ProcessInertia() {
     State& state = *state_;
-    if (!state.inertiaActive || state.interactionContext == nullptr || state.api.processInertiaInteractionContext == nullptr) {
-        state.StopInertia(false);
+    if (state.phase != State::Phase::Inertia
+        || state.interactionContext == nullptr
+        || state.api.processInertiaInteractionContext == nullptr) {
+        if (state.phase == State::Phase::Inertia) {
+            state.TransitionTo(State::Phase::Idle);
+        }
         return false;
     }
     if (FAILED(state.api.processInertiaInteractionContext(state.interactionContext))) {
-        state.StopInertia(true);
+        state.TransitionTo(State::Phase::Idle);
         return false;
     }
     return true;
