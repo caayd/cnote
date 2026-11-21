@@ -88,6 +88,7 @@ public:
     std::optional<std::size_t> pdfTextPage;
     std::optional<ui::SelectionHit> selectionObject;
     std::optional<ui::TransformRequest> selectionHandle;
+    bool beginTransformSucceeds = true;
     std::vector<ui::ObjectRef> eraseTargets;
 
     std::optional<ui::PageHit> HitTestPage(const QPointF& logical) const override { return hitPage(logical); }
@@ -134,6 +135,7 @@ public:
     void UpdateSelectionOverlay(const QPointF&, const QPointF&, bool lasso, const std::vector<QPointF>& lassoPoints) override {
         ops.push_back("UpdateSelectionOverlay(lasso=" + std::string(lasso ? "1" : "0") + ",points=" + std::to_string(lassoPoints.size()) + ")");
     }
+    void CancelSelectionOverlay() override { ops.push_back("CancelSelectionOverlay"); }
     void CommitSelection(const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click) override {
         ops.push_back("CommitSelection(anchor=" + Format(anchor.x()) + "," + Format(anchor.y()) + ",current=" + Format(current.x())
             + "," + Format(current.y()) + ",lasso=" + (lasso ? "1" : "0") + ",boxOverride=" + (boxOverride ? "1" : "0")
@@ -146,13 +148,16 @@ public:
     void BeginCloneMoveSelection(std::size_t pageIndex) override { ops.push_back("BeginCloneMoveSelection(" + std::to_string(pageIndex) + ")"); }
     void UpdateMoveSelection(const QPointF& delta) override { ops.push_back("UpdateMoveSelection(" + Format(delta.x()) + "," + Format(delta.y()) + ")"); }
     void CommitMoveSelection() override { ops.push_back("CommitMoveSelection"); }
+    void CancelMoveSelection() override { ops.push_back("CancelMoveSelection"); }
 
-    void BeginTransform(const ui::TransformRequest& request) override {
+    bool BeginTransform(const ui::TransformRequest& request) override {
         ops.push_back("BeginTransform(target=" + std::to_string(static_cast<int>(request.target)) + ",page=" + std::to_string(request.pageIndex)
             + ",index=" + std::to_string(request.objectIndex) + ",handle=" + std::to_string(static_cast<int>(request.handle)) + ")");
+        return beginTransformSucceeds;
     }
     void UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers) override { ops.push_back("UpdateTransform(" + Format(logical.x()) + "," + Format(logical.y()) + ")"); }
     void CommitTransform() override { ops.push_back("CommitTransform"); }
+    void CancelTransform() override { ops.push_back("CancelTransform"); }
 
     void UpdatePendingErase(const std::vector<ui::ObjectRef>& pending) override {
         ops.push_back("UpdatePendingErase(" + std::to_string(pending.size()) + ")");
@@ -898,6 +903,185 @@ void TestFinishInteractionIdempotent() {
         "a normal gesture captures and releases once\n" + second.Dump());
 }
 
+// A middle press during a live interaction finishes it before panning: it
+// must not overwrite the other kind's state, and the finished gesture must not
+// be cancelled by whatever happens next.
+void TestMiddlePressFinishesLiveInteraction() {
+    {
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Select);
+        router.SetSelectionMode(ui::SelectionMode::Box);
+        router.HandlePointerPress(Press(100.0, 100.0));
+        router.HandlePointerMove(Move(140.0, 160.0));
+        host.Reset();
+
+        router.HandlePointerPress(Press(50.0, 50.0, Qt::MiddleButton));
+        Check(host.CountOp("CommitSelection") == 1, "a middle press commits the live selection gesture\n" + host.Dump());
+        Check(host.IndexOfOp("CommitSelection") < host.IndexOfOp("SetCursor("),
+            "the selection finishes before the pan takes the cursor\n" + host.Dump());
+        Check(router.ActiveInteraction() == ui::InteractionKind::Pan, "the middle press then starts a pan");
+        Check(host.capture, "the pan keeps pointer capture");
+
+        router.HandlePointerRelease(Release(50.0, 50.0, Qt::MiddleButton));
+        host.Reset();
+        // A later gesture starts fresh: the finished selection is not live any
+        // more, so it cannot be committed or cancelled twice.
+        router.HandlePointerPress(Press(100.0, 100.0));
+        Check(host.CountOp("CommitSelection") == 0 && host.CountOp("CancelSelectionOverlay") == 0,
+            "a later gesture does not re-finish the committed selection\n" + host.Dump());
+        Check(router.ActiveInteraction() == ui::InteractionKind::Select, "the later gesture starts a new selection");
+    }
+    {
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Select);
+        host.hasSelection = true;
+        host.cursorInteractsWithSelection = true;
+        host.selectionHandle = ui::TransformRequest { ui::TransformTarget::Stroke, 0U, 0U, ui::TransformHandle::TopLeft };
+        router.HandlePointerPress(Press(50.0, 50.0));
+        Check(router.ActiveInteraction() == ui::InteractionKind::Transform, "the handle press starts a transform");
+        host.Reset();
+
+        router.HandlePointerPress(Press(60.0, 60.0, Qt::MiddleButton));
+        Check(host.CountOp("CommitTransform") == 1, "a middle press commits the live transform\n" + host.Dump());
+        Check(host.CountOp("CancelTransform") == 0, "finishing a transform never cancels it");
+        Check(host.IndexOfOp("CommitTransform") < host.IndexOfOp("SetCursor("),
+            "the transform finishes before the pan takes the cursor\n" + host.Dump());
+        Check(router.ActiveInteraction() == ui::InteractionKind::Pan, "the middle press then starts a pan");
+
+        router.HandlePointerRelease(Release(60.0, 60.0, Qt::MiddleButton));
+        host.Reset();
+        router.HandlePointerPress(Press(50.0, 50.0));
+        Check(host.CountOp("BeginTransform") == 1, "a later press starts a fresh transform\n" + host.Dump());
+        Check(host.CountOp("CommitTransform") == 0, "the old transform is not visible any more");
+    }
+}
+
+// Escape / lost grab abandons the interaction: strokes are discarded, pending
+// erase marks cleared, page gestures cancelled and overlays hidden.
+void TestCancelInteraction() {
+    {
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        router.HandlePointerPress(Press(50.0, 50.0));
+        router.HandlePointerMove(Move(400.0, 50.0));
+        host.Reset();
+
+        router.CancelInteraction();
+        Check(host.CountOp("DiscardStroke") == 1, "cancelling a stroke discards it\n" + host.Dump());
+        Check(host.CountOp("CommitStroke") == 0, "cancelling a stroke never commits it");
+        Check(host.CountOp("SetPointerCapture(0)") == 1, "cancelling a stroke releases capture");
+        Check(!router.IsInteractionActive(), "no interaction stays active after cancelling");
+
+        host.Reset();
+        router.CancelInteraction();
+        Check(host.ops.empty(), "a repeated cancel emits nothing\n" + host.Dump());
+    }
+    {
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Erase);
+        host.eraseTargets = { ui::ObjectRef { 0U, ui::ObjectKind::Stroke, 3U } };
+        router.HandlePointerPress(Press(50.0, 50.0));
+        host.Reset();
+
+        router.CancelInteraction();
+        Check(host.HasOp("UpdatePendingErase(0)"), "cancelling an erase clears the pending marks\n" + host.Dump());
+        Check(host.CountOp("CommitErase(") == 0, "cancelling an erase never commits it");
+    }
+    {
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Select);
+        router.SetSelectionMode(ui::SelectionMode::Box);
+        router.HandlePointerPress(Press(100.0, 100.0));
+        router.HandlePointerMove(Move(140.0, 160.0));
+        host.Reset();
+        router.CancelInteraction();
+        Check(host.CountOp("CancelSelectionOverlay") == 1, "cancelling a selection hides the overlay\n" + host.Dump());
+        Check(host.CountOp("CommitSelection") == 0, "cancelling a selection never commits it");
+    }
+    {
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Select);
+        host.hasSelection = true;
+        host.cursorInteractsWithSelection = true;
+        router.HandlePointerPress(Press(50.0, 50.0));
+        Check(router.ActiveInteraction() == ui::InteractionKind::MoveSelection, "the press starts a move");
+        host.Reset();
+        router.CancelInteraction();
+        Check(host.CountOp("CancelMoveSelection") == 1, "cancelling a move rolls the page gesture back\n" + host.Dump());
+        Check(host.CountOp("CommitMoveSelection") == 0, "cancelling a move never commits it");
+    }
+    {
+        RecordingHost host;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Select);
+        host.hasSelection = true;
+        host.cursorInteractsWithSelection = true;
+        host.selectionHandle = ui::TransformRequest { ui::TransformTarget::Stroke, 0U, 0U, ui::TransformHandle::Rotate };
+        router.HandlePointerPress(Press(50.0, 50.0));
+        Check(router.ActiveInteraction() == ui::InteractionKind::Transform, "the handle press starts a transform");
+        host.Reset();
+        router.CancelInteraction();
+        Check(host.CountOp("CancelTransform") == 1, "cancelling a transform rolls the page gesture back\n" + host.Dump());
+        Check(host.CountOp("CommitTransform") == 0, "cancelling a transform never commits it");
+    }
+}
+
+// A dotted stroke keeps its style across a page crossing, and the crossing
+// must not release/regrab capture or end the interaction.
+void TestDottedStrokeSurvivesPageBoundary() {
+    RecordingHost host;
+    host.hitPage = [](const QPointF& logical) -> std::optional<ui::PageHit> {
+        return ui::PageHit { logical.x() < 100.0 ? 0U : 1U, 1.0f };
+    };
+    ui::InteractionRouter router(host);
+    router.SetTool(ui::Tool::Draw);
+    ui::InteractionModifiers modifiers;
+    modifiers.dotted = true;
+    router.SetModifiers(modifiers);
+    router.HandlePointerPress(Press(50.0, 50.0));
+    host.Reset();
+
+    router.HandlePointerMove(Move(150.0, 50.0));
+    Check(host.HasOp("BeginStroke(page=1,point=(1.500,0.500),dotted=1)"),
+        "the new page segment keeps the dotted style\n" + host.Dump());
+    Check(host.CountOp("SetPointerCapture") == 0,
+        "a page crossing does not release or re-acquire capture\n" + host.Dump());
+    Check(router.ActiveInteraction() == ui::InteractionKind::Stroke, "the stroke stays live across the boundary");
+
+    host.Reset();
+    router.HandlePointerRelease(Release(160.0, 50.0));
+    Check(host.CountOp("CommitStroke") == 1, "the second segment commits on release");
+    Check(!host.HasOp("SetStrokeDotted(0)"), "the crossing never clears the dotted style");
+}
+
+// A host that cannot start the transform must not leave the router in
+// Transform, and the release must not commit a page gesture.
+void TestFailedBeginTransformDoesNotCommit() {
+    RecordingHost host;
+    ui::InteractionRouter router(host);
+    router.SetTool(ui::Tool::Select);
+    host.hasSelection = true;
+    host.cursorInteractsWithSelection = true;
+    host.selectionHandle = ui::TransformRequest { ui::TransformTarget::Stroke, 0U, 0U, ui::TransformHandle::TopLeft };
+    host.beginTransformSucceeds = false;
+    router.HandlePointerPress(Press(50.0, 50.0));
+
+    Check(host.CountOp("BeginTransform") == 1, "the router probes the host transform\n" + host.Dump());
+    Check(router.ActiveInteraction() == ui::InteractionKind::MoveSelection,
+        "a failed transform falls through instead of entering Transform\n" + host.Dump());
+
+    host.Reset();
+    router.HandlePointerRelease(Release(50.0, 50.0));
+    Check(host.CountOp("CommitTransform") == 0, "a failed transform commits nothing\n" + host.Dump());
+    Check(host.CountOp("CommitMoveSelection") == 1, "the fallback gesture commits normally");
+}
+
 // MessageLoop.cpp:492-540 wheel routing: ctrl zooms at the cursor, plain wheel
 // scrolls with three 18-px lines per notch, horizontal wheel scrolls sideways.
 void TestWheelIntents() {
@@ -1029,6 +1213,10 @@ int main() {
     TestTextClickVersusDrag();
     TestAltCloneMove();
     TestFinishInteractionIdempotent();
+    TestMiddlePressFinishesLiveInteraction();
+    TestCancelInteraction();
+    TestDottedStrokeSurvivesPageBoundary();
+    TestFailedBeginTransformDoesNotCommit();
     TestWheelIntents();
     TestPortedReferenceValues();
 

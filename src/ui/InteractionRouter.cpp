@@ -164,17 +164,18 @@ void InteractionRouter::SetTuning(InteractionTuning tuning) {
 bool InteractionRouter::IsInteractionActive() const {
     // History.cpp:275 App::IsDocumentInteractionActive, plus the LaTeX transform
     // that Session.cpp:121 adds on top of it.
-    return active_ != InteractionKind::None;
+    return state_.kind != InteractionKind::None;
 }
 
-void InteractionRouter::SetActive(InteractionKind kind) {
-    active_ = kind;
+void InteractionRouter::ResetInteraction() {
+    state_ = InteractionState {};
+    UpdateCapture();
 }
 
 void InteractionRouter::UpdateCapture() {
     // App::UpdateCaptureState (App.cpp:5843-5861): the reference held capture
     // exactly while one of these interactions was live.
-    const bool shouldCapture = active_ != InteractionKind::None;
+    const bool shouldCapture = state_.kind != InteractionKind::None;
     if (shouldCapture == pointerCaptured_) {
         return;
     }
@@ -184,8 +185,11 @@ void InteractionRouter::UpdateCapture() {
 
 void InteractionRouter::HandlePointerPress(const PointerSample& sample) {
     // MessageLoop.cpp:250-256: the middle button pans with any active tool and
-    // takes precedence over the left-button routing.
+    // takes precedence over the left-button routing.  It first finishes the
+    // live interaction (committing it) so pan never overwrites another kind's
+    // state.
     if (sample.button == Qt::MiddleButton) {
+        FinishInteraction();
         BeginPan(sample.position, true);
         return;
     }
@@ -194,7 +198,7 @@ void InteractionRouter::HandlePointerPress(const PointerSample& sample) {
         // widget handles that band before offering the event to the router.
         return;
     }
-    if (active_ != InteractionKind::None) {
+    if (state_.kind != InteractionKind::None) {
         // A second press cannot arrive for the same pointer while one is active;
         // ignore rather than stacking interactions.
         return;
@@ -249,12 +253,12 @@ void InteractionRouter::BeginPressInteraction(const PointerSample& sample) {
 void InteractionRouter::HandlePointerMove(const PointerSample& sample) {
     // MessageLoop.cpp:333-336: an in-flight pan (or a held middle button) wins
     // over every other active interaction.
-    if (active_ == InteractionKind::Pan || sample.buttons.testFlag(Qt::MiddleButton)) {
+    if (state_.kind == InteractionKind::Pan || sample.buttons.testFlag(Qt::MiddleButton)) {
         UpdatePan(sample.position);
         return;
     }
 
-    switch (active_) {
+    switch (state_.kind) {
     case InteractionKind::Select:
         ExtendSelection(sample);
         return;
@@ -275,7 +279,6 @@ void InteractionRouter::HandlePointerMove(const PointerSample& sample) {
         ExtendErase(sample.position);
         return;
     case InteractionKind::Pan:
-    case InteractionKind::ZoomWindow:
     case InteractionKind::None:
         return;
     }
@@ -284,19 +287,19 @@ void InteractionRouter::HandlePointerMove(const PointerSample& sample) {
 void InteractionRouter::HandlePointerRelease(const PointerSample& sample) {
     // MessageLoop.cpp:487-490: the middle button ends only a middle-button pan.
     if (sample.button == Qt::MiddleButton) {
-        if (active_ == InteractionKind::Pan && panFromMiddleButton_) {
+        if (state_.kind == InteractionKind::Pan && state_.pan.fromMiddleButton) {
             EndPan();
         }
         return;
     }
 
     // MessageLoop.cpp:398-485 release order.
-    switch (active_) {
+    switch (state_.kind) {
     case InteractionKind::Stroke: {
         // MessageLoop.cpp:451-458: releasing outside the canvas (or over another
         // page) still extends the active segment first.
         const std::optional<PageHit> hit = host_.HitTestPage(sample.position);
-        if (!hit.has_value() || (strokePage_.has_value() && hit->pageIndex == strokePage_->pageIndex)) {
+        if (!hit.has_value() || (state_.stroke.page.has_value() && hit->pageIndex == state_.stroke.page->pageIndex)) {
             static_cast<void>(ApplyStrokePoint(sample.position));
         }
         EndStroke();
@@ -304,8 +307,7 @@ void InteractionRouter::HandlePointerRelease(const PointerSample& sample) {
     }
     case InteractionKind::Transform:
         host_.CommitTransform();
-        SetActive(InteractionKind::None);
-        UpdateCapture();
+        ResetInteraction();
         host_.InvalidateCanvas();
         return;
     case InteractionKind::MoveSelection:
@@ -313,12 +315,9 @@ void InteractionRouter::HandlePointerRelease(const PointerSample& sample) {
         return;
     case InteractionKind::PendingTextClick: {
         // MessageLoop.cpp:467-478: the click finally opens the text editor.
-        const std::optional<std::size_t> pageIndex = pendingTextClickPage_;
-        const std::optional<std::size_t> textIndex = pendingTextClickIndex_;
-        pendingTextClickPage_.reset();
-        pendingTextClickIndex_.reset();
-        SetActive(InteractionKind::None);
-        UpdateCapture();
+        const std::optional<std::size_t> pageIndex = state_.pendingTextClick.pageIndex;
+        const std::optional<std::size_t> textIndex = state_.pendingTextClick.textIndex;
+        ResetInteraction();
         if (pageIndex.has_value() && textIndex.has_value()) {
             host_.ClearSelection();
             host_.BeginTextEdit(*pageIndex, *textIndex);
@@ -333,11 +332,10 @@ void InteractionRouter::HandlePointerRelease(const PointerSample& sample) {
         EndErase(true);
         return;
     case InteractionKind::Pan:
-        if (!panFromMiddleButton_) {
+        if (!state_.pan.fromMiddleButton) {
             EndPan();
         }
         return;
-    case InteractionKind::ZoomWindow:
     case InteractionKind::None:
         return;
     }
@@ -394,61 +392,96 @@ bool InteractionRouter::HandleWheel(const WheelSample& sample) {
 
 void InteractionRouter::FinishInteraction() {
     // Session.cpp:95-108 App::FinishDocumentInteraction, in the same order.
-    // Idempotent: every step below is a no-op once its interaction ended, so a
-    // repeated lost-grab/focus-loss notification finishes exactly once.
-    if (active_ == InteractionKind::Stroke) {
+    // Idempotent: every ending path resets the whole state, so a repeated
+    // lost-grab/focus-loss notification finishes exactly once.
+    switch (state_.kind) {
+    case InteractionKind::Stroke:
         EndStroke();
-    }
-    if (active_ == InteractionKind::Erase) {
+        return;
+    case InteractionKind::Erase:
         EndErase(true);
-    }
-    if (active_ == InteractionKind::MoveSelection) {
+        return;
+    case InteractionKind::MoveSelection:
         EndMoveSelection();
-    }
-    if (active_ == InteractionKind::Transform) {
+        return;
+    case InteractionKind::Transform:
         host_.CommitTransform();
-        SetActive(InteractionKind::None);
-    }
-    // The shell commits its text/LaTeX editors separately; the reference clears
-    // the pending click before ending the selection.
-    pendingTextClickPage_.reset();
-    pendingTextClickIndex_.reset();
-    if (active_ == InteractionKind::PendingTextClick) {
-        SetActive(InteractionKind::None);
-    }
-    if (active_ == InteractionKind::Select) {
+        ResetInteraction();
+        host_.InvalidateCanvas();
+        return;
+    case InteractionKind::PendingTextClick:
+        // The shell commits its text/LaTeX editors separately; the reference
+        // clears the pending click before ending the selection.
+        ResetInteraction();
+        host_.InvalidateCanvas();
+        return;
+    case InteractionKind::Select:
         EndSelection();
-    }
-    if (active_ == InteractionKind::Pan) {
+        return;
+    case InteractionKind::Pan:
         EndPan();
+        return;
+    case InteractionKind::None:
+        return;
     }
-    UpdateCapture();
+}
+
+void InteractionRouter::CancelInteraction() {
+    // Escape / lost grab: abandon the live interaction without committing it.
+    // Each branch must leave no overlay or page gesture behind and the reset
+    // below drops every payload, so a repeated cancel is a no-op.
+    switch (state_.kind) {
+    case InteractionKind::Stroke:
+        host_.DiscardStroke();
+        break;
+    case InteractionKind::Erase:
+        if (!state_.erase.pending.empty()) {
+            host_.UpdatePendingErase({});
+        }
+        break;
+    case InteractionKind::Select:
+        host_.CancelSelectionOverlay();
+        break;
+    case InteractionKind::MoveSelection:
+        host_.CancelMoveSelection();
+        break;
+    case InteractionKind::Transform:
+        host_.CancelTransform();
+        break;
+    case InteractionKind::PendingTextClick:
+        break;
+    case InteractionKind::Pan:
+        // Restore the tool cursor without committing anything.
+        host_.SetCursor(CursorForTool(tool_));
+        break;
+    case InteractionKind::None:
+        return;
+    }
+    ResetInteraction();
+    host_.InvalidateCanvas();
 }
 
 // ---------------------------------------------------------------- pan -------
 
 void InteractionRouter::BeginPan(const QPointF& logical, bool fromMiddleButton) {
     // App.cpp:5810-5823 BeginPan.
-    if (active_ == InteractionKind::Stroke) {
-        EndStroke();
-    }
     if (!fromMiddleButton && host_.HasSelection()) {
         host_.ClearSelection();
     }
-    SetActive(InteractionKind::Pan);
-    panFromMiddleButton_ = fromMiddleButton;
-    panLastPosition_ = logical;
+    state_.kind = InteractionKind::Pan;
+    state_.pan.fromMiddleButton = fromMiddleButton;
+    state_.pan.lastPosition = logical;
     host_.SetCursor(CursorKind::ClosedHand);
     UpdateCapture();
     host_.InvalidateCanvas();
 }
 
 void InteractionRouter::UpdatePan(const QPointF& logical) {
-    if (active_ != InteractionKind::Pan) {
+    if (state_.kind != InteractionKind::Pan) {
         return;
     }
-    const QPointF delta(logical.x() - panLastPosition_.x(), logical.y() - panLastPosition_.y());
-    panLastPosition_ = logical;
+    const QPointF delta(logical.x() - state_.pan.lastPosition.x(), logical.y() - state_.pan.lastPosition.y());
+    state_.pan.lastPosition = logical;
     if (delta.isNull()) {
         return;
     }
@@ -456,21 +489,33 @@ void InteractionRouter::UpdatePan(const QPointF& logical) {
 }
 
 void InteractionRouter::EndPan() {
-    SetActive(InteractionKind::None);
-    panFromMiddleButton_ = false;
+    if (state_.kind != InteractionKind::Pan) {
+        return;
+    }
+    ResetInteraction();
     // The pan's closed hand is replaced by whatever the active tool shows
     // (MessageLoop.cpp:643-647 puts the SizeAll cursor back only for the pan
     // states; every other tool falls through to its own cursor).
     host_.SetCursor(CursorForTool(tool_));
-    UpdateCapture();
     host_.InvalidateCanvas();
 }
 
 // -------------------------------------------------------------- stroke -----
 
+void InteractionRouter::StartStrokeSegment(const PageHit& hit, Vec2 pagePoint, bool dotted) {
+    state_.stroke.page = hit;
+    state_.stroke.points.clear();
+    state_.stroke.points.push_back(pagePoint);
+    state_.stroke.freehandPoints = state_.stroke.points;
+    state_.stroke.dotted = dotted;
+    state_.kind = InteractionKind::Stroke;
+    UpdateCapture();
+    host_.BeginStroke(hit.pageIndex, pagePoint, dotted);
+}
+
 void InteractionRouter::BeginStroke(const QPointF& logical) {
     // App.cpp:4453-4466 BeginStroke.
-    if (active_ == InteractionKind::Pan || active_ == InteractionKind::Erase) {
+    if (state_.kind == InteractionKind::Pan || state_.kind == InteractionKind::Erase) {
         return;
     }
     const std::optional<PageHit> hit = host_.HitTestPage(logical);
@@ -482,40 +527,29 @@ void InteractionRouter::BeginStroke(const QPointF& logical) {
     }
     host_.SetViewPage(hit->pageIndex);
 
-    strokePage_ = hit;
-    strokeDotted_ = modifiers_.dotted;
-    strokePoints_.clear();
-    strokePoints_.push_back(host_.ScreenToPage(logical, true));
-    freehandPoints_ = strokePoints_;
-    SetActive(InteractionKind::Stroke);
-    UpdateCapture();
-    host_.BeginStroke(hit->pageIndex, strokePoints_.front(), strokeDotted_);
+    StartStrokeSegment(*hit, host_.ScreenToPage(logical, true), modifiers_.dotted);
     host_.InvalidateCanvas();
 }
 
 bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
     // App.cpp:4476-4560 ApplyStrokePoint.
-    if (active_ != InteractionKind::Stroke || !strokePage_.has_value()) {
+    if (state_.kind != InteractionKind::Stroke || !state_.stroke.page.has_value()) {
         return false;
     }
-    const float pageScale = strokePage_->scale;
+    const float pageScale = state_.stroke.page->scale;
     if (pageScale <= 0.0f) {
         return false;
     }
 
     // Page-boundary segmentation: finish the current page's stroke and start a
-    // new segment on the page under the pointer (App.cpp:4490-4496).
+    // new segment on the page under the pointer (App.cpp:4490-4496).  The
+    // interaction stays live: capture is not released and the dotted mode
+    // carries into the new segment.
     const std::optional<PageHit> hit = host_.HitTestPage(logical);
-    if (hit.has_value() && hit->pageIndex != strokePage_->pageIndex) {
-        EndStroke();
+    if (hit.has_value() && hit->pageIndex != state_.stroke.page->pageIndex) {
+        host_.CommitStroke();
         host_.SetViewPage(hit->pageIndex);
-        strokePage_ = hit;
-        strokePoints_.clear();
-        strokePoints_.push_back(host_.ScreenToPage(logical, true));
-        freehandPoints_ = strokePoints_;
-        SetActive(InteractionKind::Stroke);
-        UpdateCapture();
-        host_.BeginStroke(hit->pageIndex, strokePoints_.front(), strokeDotted_);
+        StartStrokeSegment(*hit, host_.ScreenToPage(logical, true), state_.stroke.dotted);
         host_.InvalidateCanvas();
         return true;
     }
@@ -526,75 +560,71 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
     // instead; the point simply clamps to that page's edge.
     const Vec2 rawPoint = hit.has_value()
         ? host_.ScreenToPage(logical, true)
-        : host_.ScreenToPageOnPage(strokePage_->pageIndex, logical, true);
+        : host_.ScreenToPageOnPage(state_.stroke.page->pageIndex, logical, true);
     const float inputSpacing = InputSpacingPageUnits(tuning_.inputSpacing, pageScale);
     const bool straightLineMode = modifiers_.straightLine;
 
-    if (freehandPoints_.empty()) {
-        freehandPoints_ = strokePoints_;
+    if (state_.stroke.freehandPoints.empty()) {
+        state_.stroke.freehandPoints = state_.stroke.points;
     }
 
     const bool dottedMode = modifiers_.dotted;
-    const bool styleChanged = strokeDotted_ != dottedMode;
-    strokeDotted_ = dottedMode;
+    const bool styleChanged = state_.stroke.dotted != dottedMode;
+    state_.stroke.dotted = dottedMode;
     if (styleChanged) {
         host_.SetStrokeDotted(dottedMode);
     }
 
     bool pointAppended = true;
     Vec2 filteredPoint = rawPoint;
-    if (!freehandPoints_.empty()) {
+    if (!state_.stroke.freehandPoints.empty()) {
         const float followAmount = std::clamp(1.0f - tuning_.inputSmoothing, 0.05f, 0.95f);
-        filteredPoint = LerpPoint(freehandPoints_.back(), rawPoint, followAmount);
-        if (SquaredDistance(filteredPoint, freehandPoints_.back()) < (inputSpacing * inputSpacing)) {
+        filteredPoint = LerpPoint(state_.stroke.freehandPoints.back(), rawPoint, followAmount);
+        if (SquaredDistance(filteredPoint, state_.stroke.freehandPoints.back()) < (inputSpacing * inputSpacing)) {
             pointAppended = false;
         }
     }
 
     if (pointAppended) {
-        const std::size_t previousCount = freehandPoints_.size();
-        AppendStrokePointWithResampling(freehandPoints_, filteredPoint, inputSpacing);
-        for (std::size_t index = previousCount; index < freehandPoints_.size(); ++index) {
-            host_.AppendStrokePoint(freehandPoints_[index], dottedMode);
+        const std::size_t previousCount = state_.stroke.freehandPoints.size();
+        AppendStrokePointWithResampling(state_.stroke.freehandPoints, filteredPoint, inputSpacing);
+        for (std::size_t index = previousCount; index < state_.stroke.freehandPoints.size(); ++index) {
+            host_.AppendStrokePoint(state_.stroke.freehandPoints[index], dottedMode);
         }
     }
 
-    if (straightLineMode && !freehandPoints_.empty()) {
-        const Vec2 startPoint = freehandPoints_.front();
+    if (straightLineMode && !state_.stroke.freehandPoints.empty()) {
+        const Vec2 startPoint = state_.stroke.freehandPoints.front();
         if (modifiers_.oval) {
-            strokePoints_ = BuildOvalStrokePoints(startPoint, rawPoint, modifiers_.snapLine);
+            state_.stroke.points = BuildOvalStrokePoints(startPoint, rawPoint, modifiers_.snapLine);
         } else {
             const Vec2 endPoint = modifiers_.snapLine ? SnapLineEndpoint(startPoint, rawPoint) : rawPoint;
-            strokePoints_.clear();
-            strokePoints_.push_back(startPoint);
-            strokePoints_.push_back(endPoint);
+            state_.stroke.points.clear();
+            state_.stroke.points.push_back(startPoint);
+            state_.stroke.points.push_back(endPoint);
         }
-        host_.ReplaceStrokePoints(strokePoints_, dottedMode);
+        host_.ReplaceStrokePoints(state_.stroke.points, dottedMode);
         return true;
     }
 
     if (!pointAppended && !styleChanged) {
         return false;
     }
-    strokePoints_ = freehandPoints_;
+    state_.stroke.points = state_.stroke.freehandPoints;
     return true;
 }
 
 void InteractionRouter::EndStroke() {
     // App.cpp:4794-4870: one committed stroke segment, unless nothing was drawn.
-    if (active_ == InteractionKind::Stroke) {
-        if (strokePoints_.empty()) {
-            host_.DiscardStroke();
-        } else {
-            host_.CommitStroke();
-        }
+    if (state_.kind != InteractionKind::Stroke) {
+        return;
     }
-    SetActive(InteractionKind::None);
-    strokePage_.reset();
-    strokePoints_.clear();
-    freehandPoints_.clear();
-    strokeDotted_ = false;
-    UpdateCapture();
+    if (state_.stroke.points.empty()) {
+        host_.DiscardStroke();
+    } else {
+        host_.CommitStroke();
+    }
+    ResetInteraction();
     host_.InvalidateCanvas();
 }
 
@@ -602,7 +632,7 @@ void InteractionRouter::EndStroke() {
 
 void InteractionRouter::BeginErase(const QPointF& logical) {
     // App.cpp:5539-5552 BeginErase.
-    if (active_ == InteractionKind::Pan) {
+    if (state_.kind == InteractionKind::Pan) {
         return;
     }
     if (!host_.HitTestPage(logical).has_value()) {
@@ -611,9 +641,9 @@ void InteractionRouter::BeginErase(const QPointF& logical) {
     if (host_.HasSelection()) {
         host_.ClearSelection();
     }
-    pendingErase_.clear();
-    eraseLastPageIndex_.reset();
-    SetActive(InteractionKind::Erase);
+    state_.erase.pending.clear();
+    state_.erase.lastPageIndex.reset();
+    state_.kind = InteractionKind::Erase;
     UpdateCapture();
     ExtendErase(logical);
 }
@@ -623,51 +653,48 @@ void InteractionRouter::ExtendErase(const QPointF& logical) {
     // previous sample to this one, so a fast brush cannot skip objects between
     // mouse-move events.  The pending set renders at kPendingEraseOpacity until
     // one commit.
-    if (active_ != InteractionKind::Erase) {
+    if (state_.kind != InteractionKind::Erase) {
         return;
     }
     const std::optional<PageHit> hit = host_.HitTestPage(logical);
     if (!hit.has_value()) {
-        eraseLastPageIndex_.reset();
+        state_.erase.lastPageIndex.reset();
         return;
     }
-    if (!eraseLastPageIndex_.has_value() || *eraseLastPageIndex_ != hit->pageIndex) {
+    if (!state_.erase.lastPageIndex.has_value() || *state_.erase.lastPageIndex != hit->pageIndex) {
         host_.SetViewPage(hit->pageIndex);
     }
     const Vec2 center = host_.ScreenToPage(logical, true);
-    const Vec2 start = eraseLastPageIndex_.has_value() && *eraseLastPageIndex_ == hit->pageIndex
-        ? eraseLastPagePoint_
+    const Vec2 start = state_.erase.lastPageIndex.has_value() && *state_.erase.lastPageIndex == hit->pageIndex
+        ? state_.erase.lastPagePoint
         : center;
 
     bool changed = false;
     for (const ObjectRef& target : host_.EraseTargetsAt(hit->pageIndex, start, center)) {
-        if (std::find(pendingErase_.begin(), pendingErase_.end(), target) == pendingErase_.end()) {
-            pendingErase_.push_back(target);
+        if (std::find(state_.erase.pending.begin(), state_.erase.pending.end(), target) == state_.erase.pending.end()) {
+            state_.erase.pending.push_back(target);
             changed = true;
         }
     }
-    eraseLastPageIndex_ = hit->pageIndex;
-    eraseLastPagePoint_ = center;
+    state_.erase.lastPageIndex = hit->pageIndex;
+    state_.erase.lastPagePoint = center;
     if (changed) {
-        host_.UpdatePendingErase(pendingErase_);
+        host_.UpdatePendingErase(state_.erase.pending);
         host_.InvalidateCanvas();
     }
 }
 
 void InteractionRouter::EndErase(bool commit) {
     // App.cpp:5639-5720 EndErase: one history action for the whole drag.
-    if (active_ != InteractionKind::Erase) {
+    if (state_.kind != InteractionKind::Erase) {
         return;
     }
-    if (commit && !pendingErase_.empty()) {
-        host_.CommitErase(pendingErase_);
-    } else if (!pendingErase_.empty()) {
+    if (commit && !state_.erase.pending.empty()) {
+        host_.CommitErase(state_.erase.pending);
+    } else if (!state_.erase.pending.empty()) {
         host_.UpdatePendingErase({});
     }
-    pendingErase_.clear();
-    eraseLastPageIndex_.reset();
-    SetActive(InteractionKind::None);
-    UpdateCapture();
+    ResetInteraction();
     host_.InvalidateCanvas();
 }
 
@@ -675,54 +702,55 @@ void InteractionRouter::EndErase(bool commit) {
 
 void InteractionRouter::BeginSelection(const QPointF& logical, bool boxOverride) {
     // Selection.cpp:1221-1246 BeginSelection.
-    if (active_ == InteractionKind::Pan) {
+    if (state_.kind == InteractionKind::Pan) {
         return;
     }
     if (!host_.IsPointInCanvas(logical)) {
         host_.ClearSelection();
-        selectionBoxOverride_ = false;
         host_.InvalidateCanvas();
         return;
     }
 
-    selectionAnchor_ = logical;
-    selectionCurrent_ = logical;
-    selectionLassoPoints_.clear();
-    selectionLassoPoints_.push_back(logical);
-    selectionBoxOverride_ = boxOverride;
-    SetActive(InteractionKind::Select);
+    state_.select.anchor = logical;
+    state_.select.current = logical;
+    state_.select.lassoPoints.clear();
+    state_.select.lassoPoints.push_back(logical);
+    state_.select.boxOverride = boxOverride;
+    state_.kind = InteractionKind::Select;
     if (const std::optional<PageHit> hit = host_.HitTestPage(logical); hit.has_value()) {
         host_.SetViewPage(hit->pageIndex);
     }
     UpdateCapture();
-    host_.UpdateSelectionOverlay(selectionAnchor_, selectionCurrent_, !boxOverride && selectionMode_ == SelectionMode::Lasso, selectionLassoPoints_);
+    host_.UpdateSelectionOverlay(state_.select.anchor, state_.select.current,
+        !boxOverride && selectionMode_ == SelectionMode::Lasso, state_.select.lassoPoints);
     host_.InvalidateCanvas();
 }
 
 void InteractionRouter::ExtendSelection(const PointerSample& sample) {
     // Selection.cpp:1250-1262 ExtendSelection.
-    if (active_ != InteractionKind::Select) {
+    if (state_.kind != InteractionKind::Select) {
         return;
     }
-    selectionCurrent_ = sample.position;
+    state_.select.current = sample.position;
     if (selectionMode_ == SelectionMode::Lasso) {
-        if (selectionLassoPoints_.empty()
-            || SquaredDistance(selectionCurrent_, selectionLassoPoints_.back())
+        if (state_.select.lassoPoints.empty()
+            || SquaredDistance(state_.select.current, state_.select.lassoPoints.back())
                 >= (kLassoPointSpacing * kLassoPointSpacing)) {
-            selectionLassoPoints_.push_back(selectionCurrent_);
+            state_.select.lassoPoints.push_back(state_.select.current);
         }
     }
-    host_.UpdateSelectionOverlay(selectionAnchor_, selectionCurrent_, !selectionBoxOverride_ && selectionMode_ == SelectionMode::Lasso, selectionLassoPoints_);
+    host_.UpdateSelectionOverlay(state_.select.anchor, state_.select.current,
+        !state_.select.boxOverride && selectionMode_ == SelectionMode::Lasso, state_.select.lassoPoints);
     host_.InvalidateCanvas();
 }
 
 void InteractionRouter::EndSelection() {
     // Selection.cpp:1268-1275 and the click-versus-marquee threshold at 1269.
-    if (active_ != InteractionKind::Select) {
+    if (state_.kind != InteractionKind::Select) {
         return;
     }
-    const bool lasso = !selectionBoxOverride_ && selectionMode_ == SelectionMode::Lasso;
-    bool click = SquaredDistance(selectionAnchor_, selectionCurrent_)
+    const bool lasso = !state_.select.boxOverride && selectionMode_ == SelectionMode::Lasso;
+    bool click = SquaredDistance(state_.select.anchor, state_.select.current)
         <= (kSelectionClickRadius * kSelectionClickRadius);
     if (lasso) {
         // Selection.cpp:1269: a lasso is a click only while its whole path stays
@@ -730,8 +758,8 @@ void InteractionRouter::EndSelection() {
         // closed loop that travels away and returns as a click, and a click
         // commits a rectangle around the anchor instead of the polygon.
         click = true;
-        for (const QPointF& point : selectionLassoPoints_) {
-            if (SquaredDistance(selectionAnchor_, point) > (kSelectionClickRadius * kSelectionClickRadius)) {
+        for (const QPointF& point : state_.select.lassoPoints) {
+            if (SquaredDistance(state_.select.anchor, point) > (kSelectionClickRadius * kSelectionClickRadius)) {
                 click = false;
                 break;
             }
@@ -740,17 +768,16 @@ void InteractionRouter::EndSelection() {
         // (Selection.cpp:1252), so keep it in the polygon.  Publishing the
         // overlay before the commit (the EndErase ordering) hands the appended
         // point to the canvas, which builds the polygon from its overlay copy.
-        if (!selectionLassoPoints_.empty()
-            && SquaredDistance(selectionCurrent_, selectionLassoPoints_.back()) > 1.0f) {
-            selectionLassoPoints_.push_back(selectionCurrent_);
-            host_.UpdateSelectionOverlay(selectionAnchor_, selectionCurrent_, true, selectionLassoPoints_);
+        if (!state_.select.lassoPoints.empty()
+            && SquaredDistance(state_.select.current, state_.select.lassoPoints.back()) > 1.0f) {
+            state_.select.lassoPoints.push_back(state_.select.current);
+            host_.UpdateSelectionOverlay(state_.select.anchor, state_.select.current, true,
+                state_.select.lassoPoints);
         }
     }
-    host_.CommitSelection(selectionAnchor_, selectionCurrent_, lasso, selectionBoxOverride_, click);
-    selectionLassoPoints_.clear();
-    selectionBoxOverride_ = false;
-    SetActive(InteractionKind::None);
-    UpdateCapture();
+    host_.CommitSelection(state_.select.anchor, state_.select.current, lasso,
+        state_.select.boxOverride, click);
+    ResetInteraction();
     host_.InvalidateCanvas();
 }
 
@@ -776,13 +803,18 @@ void InteractionRouter::BeginMoveSelection(const PointerSample& sample) {
     }
     const std::size_t pageIndex = hit->pageIndex;
 
-    if (const std::optional<TransformRequest> handle = host_.HitTestSelectionHandle(logical);
-        handle.has_value() && handle->pageIndex == pageIndex) {
-        SetActive(InteractionKind::Transform);
-        host_.BeginTransform(*handle);
-        UpdateCapture();
-        host_.InvalidateCanvas();
-        return;
+    if (const std::optional<TransformRequest> probe = host_.HitTestSelectionHandle(logical);
+        probe.has_value() && probe->pageIndex == pageIndex) {
+        TransformRequest request = *probe;
+        request.pressLogical = logical;
+        // Enter Transform only when the host could actually start the session;
+        // otherwise fall through so the press is not swallowed.
+        if (host_.BeginTransform(request)) {
+            state_.kind = InteractionKind::Transform;
+            UpdateCapture();
+            host_.InvalidateCanvas();
+            return;
+        }
     }
 
     const std::optional<SelectionHit> objectHit = host_.HitTestSelectionObject(logical, pageIndex);
@@ -791,9 +823,8 @@ void InteractionRouter::BeginMoveSelection(const PointerSample& sample) {
             // No object under the cursor but the press is inside the selection
             // frame: the reference moves the whole selection instead of
             // starting a new one (Selection.cpp:1553-1582).
-            SetActive(InteractionKind::MoveSelection);
-            movePageIndex_ = pageIndex;
-            moveLastPosition_ = logical;
+            state_.kind = InteractionKind::MoveSelection;
+            state_.move.lastPosition = logical;
             UpdateCapture();
             if (clone) {
                 host_.BeginCloneMoveSelection(pageIndex);
@@ -821,17 +852,16 @@ void InteractionRouter::BeginMoveSelection(const PointerSample& sample) {
         // the pointer travels past kTextEditDragThreshold (Selection.cpp:1605-1613
         // and 1650-1687). Alt presses clone instead, so they skip the pending
         // click entirely.
-        pendingTextClickPage_ = pageIndex;
-        pendingTextClickIndex_ = objectHit->objectIndex;
-        pendingTextClickPosition_ = logical;
-        SetActive(InteractionKind::PendingTextClick);
+        state_.pendingTextClick.pageIndex = pageIndex;
+        state_.pendingTextClick.textIndex = objectHit->objectIndex;
+        state_.pendingTextClick.position = logical;
+        state_.kind = InteractionKind::PendingTextClick;
         UpdateCapture();
         return;
     }
 
-    SetActive(InteractionKind::MoveSelection);
-    movePageIndex_ = pageIndex;
-    moveLastPosition_ = logical;
+    state_.kind = InteractionKind::MoveSelection;
+    state_.move.lastPosition = logical;
     UpdateCapture();
     if (clone) {
         host_.BeginCloneMoveSelection(pageIndex);
@@ -844,27 +874,25 @@ void InteractionRouter::BeginMoveSelection(const PointerSample& sample) {
 void InteractionRouter::UpdateMoveSelection(const PointerSample& sample) {
     // Selection.cpp:1650-1700 UpdateMoveSelection, including the pending
     // text-click drag threshold that promotes the click to a move.
-    if (active_ == InteractionKind::PendingTextClick) {
-        if (SquaredDistance(sample.position, pendingTextClickPosition_)
+    if (state_.kind == InteractionKind::PendingTextClick) {
+        if (SquaredDistance(sample.position, state_.pendingTextClick.position)
                 < (kTextEditDragThreshold * kTextEditDragThreshold)
-            || !pendingTextClickPage_.has_value()) {
+            || !state_.pendingTextClick.pageIndex.has_value()) {
             return;
         }
-        const std::size_t pageIndex = *pendingTextClickPage_;
-        const QPointF startPosition = pendingTextClickPosition_;
-        pendingTextClickPage_.reset();
-        pendingTextClickIndex_.reset();
+        const std::size_t pageIndex = *state_.pendingTextClick.pageIndex;
+        const QPointF startPosition = state_.pendingTextClick.position;
+        state_.pendingTextClick.pageIndex.reset();
+        state_.pendingTextClick.textIndex.reset();
 
         const std::optional<PageHit> hit = host_.HitTestPage(startPosition);
         if (!hit.has_value()) {
-            SetActive(InteractionKind::None);
-            UpdateCapture();
+            ResetInteraction();
             return;
         }
 
-        SetActive(InteractionKind::MoveSelection);
-        movePageIndex_ = pageIndex;
-        moveLastPosition_ = startPosition;
+        state_.kind = InteractionKind::MoveSelection;
+        state_.move.lastPosition = startPosition;
         UpdateCapture();
         host_.BeginMoveSelection(pageIndex);
         const QPointF delta(sample.position.x() - startPosition.x(), sample.position.y() - startPosition.y());
@@ -873,27 +901,25 @@ void InteractionRouter::UpdateMoveSelection(const PointerSample& sample) {
         return;
     }
 
-    if (active_ != InteractionKind::MoveSelection) {
+    if (state_.kind != InteractionKind::MoveSelection) {
         return;
     }
-    if (sample.position == moveLastPosition_) {
+    if (sample.position == state_.move.lastPosition) {
         return;
     }
-    const QPointF delta(sample.position.x() - moveLastPosition_.x(), sample.position.y() - moveLastPosition_.y());
-    moveLastPosition_ = sample.position;
+    const QPointF delta(sample.position.x() - state_.move.lastPosition.x(), sample.position.y() - state_.move.lastPosition.y());
+    state_.move.lastPosition = sample.position;
     host_.UpdateMoveSelection(delta);
     host_.InvalidateCanvas();
 }
 
 void InteractionRouter::EndMoveSelection() {
     // Selection.cpp:1706 EndMoveSelection.
-    if (active_ != InteractionKind::MoveSelection) {
+    if (state_.kind != InteractionKind::MoveSelection) {
         return;
     }
     host_.CommitMoveSelection();
-    movePageIndex_.reset();
-    SetActive(InteractionKind::None);
-    UpdateCapture();
+    ResetInteraction();
     host_.InvalidateCanvas();
 }
 
@@ -903,7 +929,6 @@ void InteractionRouter::BeginTextTool(const QPointF& logical) {
     // TextEditing.cpp:1111-1156 BeginTextToolInteraction.
     if (const std::optional<std::pair<std::size_t, std::size_t>> hitText = host_.HitTestText(logical); hitText.has_value()) {
         host_.SetViewPage(hitText->first);
-        SetActive(InteractionKind::None);
         // The editor replaces the selection frame: clear it the same way the
         // outside-canvas branch below does so the box never overlaps the caret.
         host_.ClearSelection();
@@ -919,7 +944,6 @@ void InteractionRouter::BeginTextTool(const QPointF& logical) {
         return;
     }
     host_.SetViewPage(hit->pageIndex);
-    SetActive(InteractionKind::None);
     host_.ClearSelection();
     host_.CreateTextAt(hit->pageIndex, host_.ScreenToPage(logical, true));
     host_.InvalidateCanvas();
@@ -929,7 +953,6 @@ void InteractionRouter::BeginLatexTool(const QPointF& logical) {
     // LatexEditing.cpp:806-843 BeginLatexToolInteraction.
     if (const std::optional<std::pair<std::size_t, std::size_t>> hitLatex = host_.HitTestLatex(logical); hitLatex.has_value()) {
         host_.SetViewPage(hitLatex->first);
-        SetActive(InteractionKind::None);
         // Same rule as BeginTextTool: an editor opening hides the selection.
         host_.ClearSelection();
         host_.BeginLatexEdit(hitLatex->first, hitLatex->second);
@@ -944,7 +967,6 @@ void InteractionRouter::BeginLatexTool(const QPointF& logical) {
         return;
     }
     host_.SetViewPage(hit->pageIndex);
-    SetActive(InteractionKind::None);
     host_.ClearSelection();
     host_.CreateLatexAt(hit->pageIndex, host_.ScreenToPage(logical, true));
     host_.InvalidateCanvas();

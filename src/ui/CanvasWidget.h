@@ -161,15 +161,18 @@ public:
     void DiscardStroke() override;
     void ClearSelection() override;
     void UpdateSelectionOverlay(const QPointF& anchor, const QPointF& current, bool lasso, const std::vector<QPointF>& lassoPoints) override;
+    void CancelSelectionOverlay() override;
     void CommitSelection(const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click) override;
     void AddObjectToSelection(ObjectRef object) override;
     void BeginMoveSelection(std::size_t pageIndex) override;
     void BeginCloneMoveSelection(std::size_t pageIndex) override;
     void UpdateMoveSelection(const QPointF& logicalDelta) override;
     void CommitMoveSelection() override;
-    void BeginTransform(const TransformRequest& request) override;
+    void CancelMoveSelection() override;
+    bool BeginTransform(const TransformRequest& request) override;
     void UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers modifiers) override;
     void CommitTransform() override;
+    void CancelTransform() override;
     void UpdatePendingErase(const std::vector<ObjectRef>& pending) override;
     void CommitErase(const std::vector<ObjectRef>& pending) override;
     void BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) override;
@@ -371,7 +374,7 @@ private:
     [[nodiscard]] QRect SelectionDirtyRect(std::size_t pageIndex) const;
     void PruneSurfaces(const std::vector<std::size_t>& visiblePages);
 
-    // Wheel-notch smooth scroll: notches accumulate onto scrollTarget_ and a
+    // Wheel-notch smooth scroll: notches accumulate onto the target and a
     // frame-rate-independent exponential chase moves the pan toward it, so a
     // fast flick travels its full distance instead of capping at one notch
     // per animation restart.
@@ -384,6 +387,10 @@ private:
     // settings at the widget's device pixel ratio and cached until either
     // changes.
     void ApplyCursor();
+    // Recomputes the wanted cursor from the live interaction/tool and the
+    // PDF-text hover at `lastPointerPosition_`, then applies it.  The single
+    // entry point keeps the hover flag from desynchronising from the tool.
+    void RefreshCursor();
     [[nodiscard]] QCursor BuildDrawCursor() const;
     [[nodiscard]] QCursor BuildEraserCursor() const;
 
@@ -449,11 +456,13 @@ private:
     // Zoom session: while the wheel zoom is in flight, pages that have no
     // surface at the exact scale reuse their newest raster (the zoom snapshot)
     // instead of re-rendering; the settle timer re-renders exactly once.
-    bool zoomSessionActive_ = false;
-    bool zoomAnchorValid_ = false;
-    std::size_t zoomAnchorPageIndex_ = 0;
-    Vec2 zoomAnchorPage_ {};
-    QPointF zoomAnchorCursor_ {};
+    struct ZoomSession {
+        bool anchorValid = false;
+        std::size_t anchorPageIndex = 0;
+        Vec2 anchorPage {};
+        QPointF anchorCursor {};
+    };
+    std::optional<ZoomSession> zoomSession_;
     QTimer* zoomSettleTimer_ = nullptr;
 
     // Constructed in the constructor body: the router's constructor queries the
@@ -465,11 +474,14 @@ private:
     // expose its tool back to the host).
     Tool tool_ = Tool::Draw;
 
-    // Wheel-notch scroll chase (accumulating target, exponential approach).
+    // Wheel-notch scroll chase: notches accumulate onto the target and a
+    // frame-rate-independent exponential approach moves the pan toward it.
+    struct SmoothScroll {
+        QPointF target {};
+        QElapsedTimer clock {};
+    };
+    std::optional<SmoothScroll> smoothScroll_;
     QTimer* scrollTimer_ = nullptr;
-    QElapsedTimer scrollClock_;
-    QPointF scrollTarget_ {};
-    bool scrolling_ = false;
     qreal precisionStartZoom_ = 1.0;
 
     // Cursor: the kind the current interaction/tool wants, the drawing cursor
@@ -488,31 +500,36 @@ private:
     std::optional<QCursor> eraserCursor_ {};
     qreal eraserCursorDevicePixelRatio_ = 0.0;
 
-    // Transient selection/erase overlay state (never part of cache signatures).
-    bool selectionOverlayActive_ = false;
-    QPointF selectionAnchor_ {};
-    QPointF selectionCurrent_ {};
-    bool selectionOverlayLasso_ = false;
-    std::vector<QPointF> lassoPoints_;
-    // PDF text drag (Selection.cpp:1360-1452): while a lasso selection anchored
-    // on PDF text is in flight the marquee is suppressed and the covered
-    // characters highlight instead. Index of the page the anchor hit; reset
-    // when the overlay ends.
-    std::optional<std::size_t> pdfTextDragPage_ {};
-    // I-beam while the pointer rests on PDF text under the Move/Select tools
-    // (MessageLoop.cpp:667/679 CursorHitsPdfText branches).
-    bool pdfTextHoverActive_ = false;
+    // Transient selection gesture: the canvas owns the one live gesture and
+    // CommitSelection consumes it, so the marquee/PDF drag has a single source
+    // of truth.  PDF text drags suppress the marquee and highlight characters.
+    struct SelectionGesture {
+        enum class Mode {
+            None,
+            Box,
+            Lasso,
+            PdfText,
+        };
+        Mode mode = Mode::None;
+        QPointF anchor {};
+        QPointF current {};
+        std::vector<QPointF> lassoPoints;
+        std::optional<std::size_t> pdfPage {};
+        [[nodiscard]] bool Active() const { return mode != Mode::None; }
+    };
+    SelectionGesture selection_;
     std::vector<ObjectRef> pendingErase_;
 
-    // Transform gesture state: the handle being dragged, the selection bounds
-    // captured at BeginTransform and the logical press position (rotation
-    // measures the pointer's start angle from it).  Cleared on commit.
-    std::optional<TransformHandle> transformHandle_ {};
-    SelectionBounds transformFrom_ {};
-    QPointF transformPressLogical_ {};
-    // Position of the last HitTestSelectionHandle probe: BeginTransform runs
-    // right after it and captures the press point this way.
-    mutable QPointF lastHandleProbeLogical_ {};
+    // Transform gesture session: the handle being dragged, the selection
+    // bounds captured at BeginTransform and the logical press position
+    // (rotation measures the pointer's start angle from it).  Cleared on
+    // commit and cancel.
+    struct TransformSession {
+        TransformHandle handle = TransformHandle::Move;
+        SelectionBounds from {};
+        QPointF pressLogical {};
+    };
+    std::optional<TransformSession> transformSession_;
 
     InlineMathTextEdit* textEditor_ = nullptr;
     QPlainTextEdit* latexEditor_ = nullptr;
@@ -523,9 +540,23 @@ private:
     // source (e.g. a fresh "\frac{}{}") does not parse; the source box keeps
     // its place below the last drawable formula instead of jumping up.
     latex::FormulaMetrics latexPreviewMetrics_ {};
-    std::optional<std::size_t> overlayPageIndex_ {};
-    std::optional<std::size_t> overlayTextIndex_ {};
-    std::optional<std::size_t> overlayLatexIndex_ {};
+    // The overlay the canvas is showing, refreshed atomically from the
+    // controller.  EditOverlayActive() queries the controller instead of this
+    // cache; the cache is only for placement and painting.
+    struct EditOverlayKey {
+        enum class Kind {
+            Text,
+            Latex,
+        };
+        Kind kind = Kind::Text;
+        std::size_t page = 0;
+        std::size_t index = 0;
+
+        friend bool operator==(const EditOverlayKey& a, const EditOverlayKey& b) {
+            return a.kind == b.kind && a.page == b.page && a.index == b.index;
+        }
+    };
+    std::optional<EditOverlayKey> editOverlay_;
     // View scale the text editor's fonts were last formatted at; the editor is
     // the live preview, so its glyphs must match the canvas render size.
     float textEditScale_ = 1.0f;
