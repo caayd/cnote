@@ -19,6 +19,7 @@
 #include <QTextLayout>
 #include <QTextOption>
 
+#include "latex/LatexEngine.h"
 #include "text/TextEditingQt.h"
 
 namespace cnote::text {
@@ -127,6 +128,9 @@ constexpr std::size_t kMaxCachedLayouts = 128;
 
 std::uint64_t TextLayoutSignature(const PageText& text, float pageWidth) {
     std::uint64_t hash = 14695981039346656037ULL;
+    // Inline formulas are laid out into the document, so the layout identity
+    // includes the engine lifetime it was produced in.
+    hash = HashValue(hash, latex::EngineGeneration());
     hash = HashValue(hash, std::bit_cast<std::uint32_t>(pageWidth));
     hash = HashValue(hash, std::bit_cast<std::uint32_t>(text.width));
     hash = HashValue(hash, std::bit_cast<std::uint32_t>(text.height));
@@ -154,10 +158,13 @@ std::uint64_t TextLayoutSignature(const PageText& text, float pageWidth) {
 }
 
 QtTextLayout LayoutPageTextQt(const PageText& text, float pageWidth) {
-    const std::uint64_t signature = TextLayoutSignature(text, pageWidth);
+    // TextLayoutSignature includes the engine generation, so a layout built
+    // while the engine was down (formulas shown as source) is unreachable
+    // after a recovery or re-initialization.
+    const std::uint64_t key = TextLayoutSignature(text, pageWidth);
     std::deque<CacheEntry>& cache = LayoutCache();
     const auto existing = std::find_if(cache.begin(), cache.end(), [&](const CacheEntry& entry) {
-        return entry.signature == signature;
+        return entry.signature == key;
     });
     if (existing != cache.end()) {
         CacheEntry entry = std::move(*existing);
@@ -209,7 +216,7 @@ QtTextLayout LayoutPageTextQt(const PageText& text, float pageWidth) {
         static_cast<int>(std::ceil(document.size().height())),
     });
 
-    cache.push_back({ signature, layout });
+    cache.push_back({ key, layout });
     if (cache.size() > kMaxCachedLayouts) {
         cache.pop_front();
     }

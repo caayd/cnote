@@ -43,15 +43,28 @@ using FormulaHandle = std::shared_ptr<Formula>;
 
 // Must be called once after the platform graphics stack is up (QApplication
 // exists and its font database is usable), before any Parse/Draw call. resRoot is the directory containing MicroTeX's resource
-// tree (latex-res) and its `.clatexmath-res_root` marker.
+// tree (latex-res) and its `.clatexmath-res_root` marker. Returns false and
+// leaves the engine Failed (so Parse returns nullptr) when the root is missing
+// or the backend cannot initialize; a later call may still succeed.
 bool Initialize(const std::filesystem::path& resRoot);
+// Makes the engine Uninitialized (Parse returns nullptr) and invalidates
+// cached formulae and generation-keyed layouts. The process-wide MicroTeX
+// backend stays loaded, so a later Initialize can make the engine Ready again.
 void Shutdown();
+// True only while the engine is Ready.
 bool IsInitialized();
+
+// Monotonic engine-lifetime counter: advanced by every Initialize attempt and
+// every Shutdown. Caches that consume engine output (formulae, text layouts)
+// include it so results from a previous or failed engine lifetime are never
+// reused after recovery.
+std::uint64_t EngineGeneration();
 
 // Parses and lays out an equation. fontSize is in page units. display=true
 // wraps the source as display math (\[ ... \]) unless it already is; display
-// equations take their natural width. Parsed formulae are cached (LRU) keyed
-// by source+fontSize+display; color is applied at draw time, not parse time.
+// equations take their natural width. Returns nullptr unless the engine is
+// Ready. Parsed formulae are cached (LRU) keyed by source+fontSize+display+
+// generation; color is applied at draw time, not parse time.
 [[nodiscard]] FormulaHandle Parse(std::u16string_view source, float fontSize, bool display);
 
 [[nodiscard]] FormulaMetrics Measure(const FormulaHandle& formula);

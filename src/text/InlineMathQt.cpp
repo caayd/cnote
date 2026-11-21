@@ -122,8 +122,18 @@ void RegisterInlineMathHandler(QTextDocument& document) {
 void MakeInlineMathFormat(QTextCharFormat& format, std::u16string_view source, float displayScale) {
     // The run's text size, captured before the placeholder font is touched.
     const PageTextStyle style = StyleForCharFormat(format, PageTextStyle {}, displayScale);
+    const QString formulaSource =
+        QString::fromUtf16(source.data(), static_cast<qsizetype>(source.size()));
+    // Parse before turning the run into an object. A failed parse (the engine
+    // is uninitialized or failed) leaves the run unchanged instead of
+    // installing a zero-size object whose formula-less layout Qt would cache
+    // and reuse after the engine recovers.
+    const MathPlacement placement = MeasureInlineMath(formulaSource, style.fontSize, displayScale);
+    if (placement.formula == nullptr) {
+        return;
+    }
     format.setObjectType(kInlineMathObjectType);
-    format.setProperty(kInlineMathSourceProperty, QString::fromUtf16(source.data(), static_cast<qsizetype>(source.size())));
+    format.setProperty(kInlineMathSourceProperty, formulaSource);
     format.setProperty(kInlineMathScaleProperty, static_cast<double>(displayScale));
     format.setProperty(kInlineMathFontSizeProperty, static_cast<double>(style.fontSize));
     format.setVerticalAlignment(QTextCharFormat::AlignBaseline);
@@ -132,10 +142,9 @@ void MakeInlineMathFormat(QTextCharFormat& format, std::u16string_view source, f
     // subscripts) would hang into the next line.  The placeholder draws no
     // glyph, so its font only reserves line space: grow it until its descent
     // covers the formula's depth.
-    const MathPlacement placement = PlaceInlineMath(format);
     QFont font = format.font();
     qreal descent = QFontMetricsF(font).descent();
-    for (int attempt = 0; attempt < 8 && placement.formula != nullptr && descent < placement.depth; ++attempt) {
+    for (int attempt = 0; attempt < 8 && descent < placement.depth; ++attempt) {
         font.setPointSizeF(font.pointSizeF() * std::max(1.02, placement.depth / std::max(descent, 0.5)));
         descent = QFontMetricsF(font).descent();
     }
