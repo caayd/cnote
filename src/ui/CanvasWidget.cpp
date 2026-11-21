@@ -2662,11 +2662,12 @@ QCursor CanvasWidget::BuildDrawCursor() const {
 }
 
 QCursor CanvasWidget::BuildEraserCursor() const {
-    // Reference App::EraserCursorForCurrentSize (App.cpp:7459-7468):
-    // CreateSquareBrushCursor(diameter, RGB(255,255,255)) (App.cpp:579-691) is a
-    // white-filled square with an inset black kEraserOutlinePixels outline and a
-    // centred hotspot, where the diameter is App::EraserDiameterPixels
-    // (App.cpp:7430-7432): max(3.5, eraseBrushSize * 4) * 2 logical pixels.
+    // A white-filled disc with an inset black kEraserOutlinePixels outline and
+    // a centred hotspot, the diameter of the erase hit test (EraseTargetsAt
+    // sweeps a disc) and of the eraser trail's head: max(3.5, eraseBrushSize
+    // * 4) * 2 logical pixels (App::EraserDiameterPixels, App.cpp:7430-7432).
+    // The reference drew a square (CreateSquareBrushCursor, App.cpp:579-691),
+    // whose corners promised erasing the disc never does.
     constexpr int kMarginPixels = 1;          // antialiasing bleed room, device px
     const qreal ratio = devicePixelRatioF();
     const qreal logicalSide =
@@ -2689,7 +2690,7 @@ QCursor CanvasWidget::BuildEraserCursor() const {
         painter.setPen(QPen(Qt::black, penWidth));
         // Same half-pen inset as the brush disc: the outline's outer edge lands
         // exactly on the eraser diameter.
-        painter.drawRect(outer.adjusted(penWidth * 0.5, penWidth * 0.5, -penWidth * 0.5, -penWidth * 0.5));
+        painter.drawEllipse(outer.adjusted(penWidth * 0.5, penWidth * 0.5, -penWidth * 0.5, -penWidth * 0.5));
         painter.end();
     }
 
@@ -2723,9 +2724,9 @@ void CanvasWidget::ApplyCursor() {
         setCursor(Qt::SizeAllCursor);
         return;
     case CursorKind::Eraser: {
-        // Reference App::EraserCursorForCurrentSize (App.cpp:7459-7468): the
-        // erase tool shows the brush-sized white square rather than a system
-        // cursor, so the user can see what the erase radius will hit.
+        // The erase tool shows the brush-sized white disc rather than a
+        // system cursor, so the user can see what the erase radius will hit
+        // (App::EraserCursorForCurrentSize, App.cpp:7459-7468, drew a square).
         const qreal ratio = devicePixelRatioF();
         if (!eraserCursor_.has_value() || eraserCursorDevicePixelRatio_ != ratio) {
             eraserCursor_ = BuildEraserCursor();

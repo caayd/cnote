@@ -490,37 +490,37 @@ void ConfiguredCursorIsShown(ui::CanvasWidget& canvas) {
     canvas.SetDrawCursorSettings(cnote::settings::DrawCursorKind::Dot, 8.0f, kCursorColor);
     Check(!canvas.cursor().pixmap().isNull(), "switching back to the dot rebuilds the pixmap");
 
-    // Eraser: App::EraserCursorForCurrentSize (App.cpp:7459-7468) builds
-    // CreateSquareBrushCursor(diameter, RGB(255,255,255)) - a white square with a
-    // black outline, side EraserDiameterPixels() = max(3.5, eraseBrushSize * 4)
-    // * 2 logical pixels (App.cpp:7426-7432) - instead of the system cross.
+    // Eraser: a white disc with a black outline, diameter EraserDiameterPixels()
+    // = max(3.5, eraseBrushSize * 4) * 2 logical pixels (App.cpp:7426-7432) -
+    // the disc the erase hit test sweeps - instead of the system cross.  (The
+    // reference App::EraserCursorForCurrentSize drew a square.)
     canvas.SetEraseBrushSize(3.0f);
     canvas.SetTool(ui::Tool::Erase);
-    Check(!canvas.cursor().pixmap().isNull(), "the eraser tool shows the reference square cursor");
+    Check(!canvas.cursor().pixmap().isNull(), "the eraser tool shows its brush cursor");
     const QImage eraserImage = canvas.cursor().pixmap().toImage();
     const CursorShape eraser = MeasureCursorShape(canvas.cursor());
     const double eraserSide = std::max(3.5, 3.0 * 4.0) * 2.0 * ratio;
     std::printf("CURSOR eraser logical=24.0 device=%dx%d opaque=%s\n",
         eraser.width, eraser.height,
         (std::to_string(eraser.opaqueRight - eraser.opaqueLeft + 1) + "x" + std::to_string(eraser.opaqueBottom - eraser.opaqueTop + 1)).c_str());
-    // The image keeps a 1px transparent margin, so "square" means the opaque
-    // bounding box's own corner is filled - a disc's would be transparent.
-    Check(qAlpha(eraserImage.pixel(eraser.opaqueLeft, eraser.opaqueTop)) >= 32,
-        "the eraser cursor is a square, not a disc");
-    CheckNear(static_cast<double>(eraser.opaqueRight - eraser.opaqueLeft + 1), eraserSide, 2.0, "the eraser square's side is max(3.5, eraseBrushSize * 4) * 2 logical px (App.cpp:7430-7432)");
-    CheckNear(static_cast<double>(eraser.opaqueBottom - eraser.opaqueTop + 1), eraserSide, 2.0, "the eraser square's height matches its side");
+    // The image keeps a 1px transparent margin; a disc leaves its opaque
+    // bounding box's corners transparent where a square would fill them.
+    Check(qAlpha(eraserImage.pixel(eraser.opaqueLeft, eraser.opaqueTop)) < 32,
+        "the eraser cursor is a disc, not a square");
+    CheckNear(static_cast<double>(eraser.opaqueRight - eraser.opaqueLeft + 1), eraserSide, 2.0, "the eraser disc's diameter is max(3.5, eraseBrushSize * 4) * 2 logical px (App.cpp:7430-7432)");
+    CheckNear(static_cast<double>(eraser.opaqueBottom - eraser.opaqueTop + 1), eraserSide, 2.0, "the eraser disc's height matches its width");
     const QRgb eraserCentre = eraserImage.pixel(eraserImage.width() / 2, eraserImage.height() / 2);
     Check(qAlpha(eraserCentre) == 255 && qRed(eraserCentre) > 240 && qGreen(eraserCentre) > 240 && qBlue(eraserCentre) > 240,
-        "the eraser square is filled white");
+        "the eraser disc is filled white");
     const QRgb eraserEdge = eraserImage.pixel((eraser.opaqueLeft + eraser.opaqueRight) / 2, eraser.opaqueTop);
     Check(qAlpha(eraserEdge) >= 32 && qRed(eraserEdge) < 96 && qGreen(eraserEdge) < 96 && qBlue(eraserEdge) < 96,
-        "the eraser square is outlined in black");
+        "the eraser disc is outlined in black");
     // The same setter also feeds the erase hit test's radius, so a size change
     // must resize the cursor.
     canvas.SetEraseBrushSize(6.0f);
     const CursorShape biggerEraser = MeasureCursorShape(canvas.cursor());
     CheckNear(static_cast<double>(biggerEraser.opaqueRight - biggerEraser.opaqueLeft + 1), std::max(3.5, 6.0 * 4.0) * 2.0 * ratio, 2.0,
-        "the erase brush size resizes the eraser square");
+        "the erase brush size resizes the eraser disc");
     canvas.SetEraseBrushSize(3.0f);
     canvas.SetTool(ui::Tool::Draw);
     Check(!canvas.cursor().pixmap().isNull(), "the draw tool shows its disc again after erasing");

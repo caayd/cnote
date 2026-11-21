@@ -126,7 +126,7 @@ public:
     // drawing tool is active.
     void SetDrawCursorSettings(settings::DrawCursorKind kind, float logicalPixels, std::uint32_t argbColor);
     // Eraser brush size from the application settings (eraseBrushSize,
-    // App::EraserRadiusPixels App.cpp:7426-7428).  It sizes both the square
+    // App::EraserRadiusPixels App.cpp:7426-7428).  It sizes both the round
     // erase cursor and the erase hit-test radius.
     void SetEraseBrushSize(float brushSize);
     // Builds the sample the Qt event handlers feed to the router.
