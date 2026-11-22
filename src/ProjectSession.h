@@ -13,8 +13,9 @@ enum class HistoryActionType {
     AddPages,
     RemovePages,
     ReplacePages,
-    // Page `index` moved to `pageIndex` (Document::MovePage); undo moves it back.
-    MovePage,
+    // Document::ReorderPages with `pageIndices` as the order; undo applies
+    // its inverse.
+    ReorderPages,
     AddLatex,
     RemoveLatex,
     UpdateLatex,

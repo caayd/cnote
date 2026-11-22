@@ -115,9 +115,18 @@ public:
     [[nodiscard]] std::size_t VisibleThumbnailCount() const;
     [[nodiscard]] bool PageJumpEditing() const { return pageJump_.active; }
     [[nodiscard]] QString PageIndicatorLabel() const;
+    // Shift-click selects the range from the anchor (the last plain-clicked
+    // page, else the current page) to the clicked page.  Empty while at most
+    // the current page is highlighted; sorted otherwise.
+    [[nodiscard]] const std::vector<std::size_t>& SelectedPages() const { return selectedPages_; }
+    // Selects `count` pages from `first` (a moved block after a drop); the
+    // first becomes the shift-click anchor.
+    void SelectPages(std::size_t first, std::size_t count);
+    void ClearPageSelection();
     // Drag-to-reorder: true once a pressed thumbnail moved past the drag
-    // distance.  The drop slot is the gap (0..PageCount) the page would land
-    // in, nullopt while dropping would not move it (its own gaps).
+    // distance.  Dragging a page of a multi-page selection drags them all.
+    // The drop slot is the gap (0..PageCount) the pages would land in,
+    // nullopt while dropping would not move any page.
     [[nodiscard]] bool PageDragActive() const { return pageDrag_.has_value() && pageDrag_->active; }
     [[nodiscard]] std::optional<std::size_t> DropSlot() const;
     // Widget-space y of the drop indicator line for `slot`: centred in the
@@ -139,9 +148,9 @@ signals:
     // menu (copy/cut/paste/delete).  The page is activated first, so the
     // actions always target the page under the cursor.
     void PageContextMenuRequested(std::size_t pageIndex, const QPoint& globalPosition);
-    // A thumbnail was dragged and dropped elsewhere: move page `from` so it
-    // ends up at index `to`.
-    void PageMoveRequested(std::size_t from, std::size_t to);
+    // Thumbnails were dragged and dropped elsewhere: move `pages` (sorted) as
+    // one block, in order, to gap `slot` (counted before the move).
+    void PagesMoveRequested(const std::vector<std::size_t>& pages, std::size_t slot);
     void OpenChanged(bool open);
     void SlideProgressChanged(qreal progress);
     void ScrollChanged(int scrollY);
@@ -196,11 +205,19 @@ private:
 
     InlineEdit pageJump_ {};
 
+    std::vector<std::size_t> selectedPages_ {};
+    std::optional<std::size_t> selectionAnchor_ {};
+
     struct PageDrag {
-        std::size_t page = 0;
+        std::size_t pressedPage = 0;
+        std::vector<std::size_t> pages {};  // what the drag moves, sorted
         QPoint pressPosition {};
         QPoint position {};
         bool active = false;
+        // A plain press on a page of the multi-selection keeps the selection
+        // so it can be dragged; released without a drag, it selects only
+        // that page.
+        bool collapseOnClick = false;
         std::optional<std::size_t> dropSlot {};
     };
     std::optional<PageDrag> pageDrag_ {};

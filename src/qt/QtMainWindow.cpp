@@ -643,14 +643,19 @@ void QtMainWindow::CreateChrome() {
     connect(sidebar_, &ui::SidebarWidget::PageJumpRequested, this, [this](std::size_t pageIndex) {
         FocusPage(pageIndex);
     });
-    connect(sidebar_, &ui::SidebarWidget::PageMoveRequested, this, [this](std::size_t from, std::size_t to) {
-        // The move settles an open edit first; its overlay must follow.
-        const bool moved = controller_.MovePage(from, to);
-        canvas_->SyncEditOverlay();
-        if (moved) {
-            FocusPage(to);  // keep the moved page in view where it landed
-        }
-    });
+    connect(sidebar_, &ui::SidebarWidget::PagesMoveRequested, this,
+        [this](const std::vector<std::size_t>& pages, std::size_t slot) {
+            // The move settles an open edit first; its overlay must follow.
+            const std::optional<std::size_t> landed = controller_.MovePages(pages, slot);
+            canvas_->SyncEditOverlay();
+            if (!landed.has_value()) {
+                return;
+            }
+            FocusPage(*landed);  // keep the moved pages in view where they landed
+            if (pages.size() > 1U) {
+                sidebar_->SelectPages(*landed, pages.size());  // so the block can be dragged again
+            }
+        });
     connect(sidebar_, &ui::SidebarWidget::AddPageRequested, this, &QtMainWindow::AddPage);
     connect(sidebar_, &ui::SidebarWidget::NewPageSettingsRequested, this, &QtMainWindow::OpenNewPageSettings);
     connect(sidebar_, &ui::SidebarWidget::PageContextMenuRequested, this,

@@ -145,10 +145,12 @@ public:
     // focuses the inserted page and records one AddPages undo step; false
     // when the page clipboard is empty.
     bool PastePage(std::size_t index);
-    // Moves page `from` to index `to` (sidebar drag reorder) as one MovePage
-    // undo step; per-page selections move with their pages.  False when
-    // either index is out of range or they are equal.
-    bool MovePage(std::size_t from, std::size_t to);
+    // Moves `pages` (sorted, unique) as one block, in their current order, to
+    // gap `slot` (0..PageCount, counted before the move; sidebar drag reorder)
+    // as one ReorderPages undo step; per-page selections move with their
+    // pages.  Returns the block's new first index, or nullopt when an index is
+    // out of range or the move would leave every page where it is.
+    std::optional<std::size_t> MovePages(const std::vector<std::size_t>& pages, std::size_t slot);
     // Rotates page `index` clockwise by quarter turns (1 = 90°, 2 = 180°,
     // 3 = 90° counter-clockwise): every object coordinate and the stored
     // raster transform with it, the page frame swaps dims for odd turns and

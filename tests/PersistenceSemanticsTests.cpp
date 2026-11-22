@@ -1046,12 +1046,13 @@ void SetCurrentPageIndexIsSerialized() {
         "the viewed page is what the project serializes");
 }
 
-void MovePageUndoRedoKeepsOrderAndViewedPage() {
+void MovePagesUndoRedoKeepsOrderAndViewedPage() {
     cnote::AppManager manager;
     cnote::qt::QtDocumentController controller(manager);
     controller.AttachSession(std::make_shared<cnote::ProjectSession>());
     controller.InsertPages(1, 1, cnote::ui::NewPageDraft { 200.0f, 300.0f, 0xFFFFFFFFU, {} });
     controller.InsertPages(2, 1, cnote::ui::NewPageDraft { 400.0f, 500.0f, 0xFFFFFFFFU, {} });
+    controller.InsertPages(3, 1, cnote::ui::NewPageDraft { 600.0f, 700.0f, 0xFFFFFFFFU, {} });
     const auto widths = [&]() {
         std::vector<float> result;
         for (std::size_t index = 0; index < controller.DocumentRef().PageCount(); ++index) {
@@ -1060,10 +1061,13 @@ void MovePageUndoRedoKeepsOrderAndViewedPage() {
         return result;
     };
     const std::vector<float> original = widths();
+    const std::vector<float> moved { original[1], original[3], original[0], original[2] };
     controller.SetCurrentPageIndex(1);  // the 200-wide page
 
-    Check(controller.MovePage(0, 2), "moving the first page to the end succeeds");
-    Check(widths() == std::vector<float> { original[1], original[2], original[0] }, "the first page now sits last");
+    // Two non-adjacent pages dragged to the end land there together, in order.
+    const std::optional<std::size_t> landed = controller.MovePages({ 0, 2 }, 4);
+    Check(landed == std::optional<std::size_t>(2U), "the moved block starts at index 2");
+    Check(widths() == moved, "pages 0 and 2 now follow the unmoved pages, in their old order");
     Check(controller.CurrentPageIndex() == 0U, "the viewed page follows its page (index 1 -> 0)");
     Check(controller.Dirty(), "a move dirties the session");
 
@@ -1071,10 +1075,13 @@ void MovePageUndoRedoKeepsOrderAndViewedPage() {
     Check(widths() == original, "undo restores the original order");
     Check(controller.CurrentPageIndex() == 1U, "undo keeps the viewed page on the same page");
     Check(controller.Redo(), "the move redoes");
-    Check(widths() == std::vector<float> { original[1], original[2], original[0] }, "redo reapplies the move");
+    Check(widths() == moved, "redo reapplies the move");
 
-    Check(!controller.MovePage(1, 1), "moving a page onto itself is refused");
-    Check(!controller.MovePage(0, 3), "moving past the last page is refused");
+    Check(!controller.MovePages({ 1, 2 }, 2).has_value(), "dropping a contiguous block inside itself is refused");
+    Check(!controller.MovePages({ 0 }, 1).has_value(), "dropping a page into its own gap is refused");
+    Check(!controller.MovePages({ 4 }, 0).has_value(), "moving a page past the last one is refused");
+    Check(!controller.MovePages({ 2, 1 }, 0).has_value(), "unsorted pages are refused");
+    Check(widths() == moved, "refused moves change nothing");
 }
 
 // Version 18 strokes store raw samples, the StrokeSampling they render with
@@ -1182,7 +1189,7 @@ int main(int argc, char** argv) {
     RemoteCommitCancelsTransientState();
     SaveToRefusesPdfContainer();
     SetCurrentPageIndexIsSerialized();
-    MovePageUndoRedoKeepsOrderAndViewedPage();
+    MovePagesUndoRedoKeepsOrderAndViewedPage();
     StrokeFormatRoundTripsAndLegacyReads();
 
     if (gFailures != 0) {

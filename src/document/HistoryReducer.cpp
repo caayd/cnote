@@ -172,9 +172,20 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
         }
         return true;
     }
-    case HistoryActionType::MovePage:
-        return undo ? document.MovePage(action.pageIndex, action.index)
-                    : document.MovePage(action.index, action.pageIndex);
+    case HistoryActionType::ReorderPages: {
+        if (!undo) {
+            return document.ReorderPages(action.pageIndices);
+        }
+        // order[new] = old, so the inverse puts each page back at its old index.
+        std::vector<std::size_t> inverse(action.pageIndices.size(), 0U);
+        for (std::size_t index = 0; index < action.pageIndices.size(); ++index) {
+            if (action.pageIndices[index] >= inverse.size()) {
+                return false;
+            }
+            inverse[action.pageIndices[index]] = index;
+        }
+        return document.ReorderPages(inverse);
+    }
     }
     return false;
 }

@@ -64,8 +64,9 @@ void CheckNear(bool condition, const std::string& what, double actual, double ex
     }
 }
 
-void SendMouse(QWidget& widget, QEvent::Type type, const QPointF& position, Qt::MouseButton button, Qt::MouseButtons buttons) {
-    QMouseEvent event(type, position, widget.mapToGlobal(position.toPoint()), button, buttons, Qt::NoModifier);
+void SendMouse(QWidget& widget, QEvent::Type type, const QPointF& position, Qt::MouseButton button, Qt::MouseButtons buttons,
+    Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+    QMouseEvent event(type, position, widget.mapToGlobal(position.toPoint()), button, buttons, modifiers);
     QApplication::sendEvent(&widget, &event);
 }
 
@@ -869,9 +870,9 @@ void TestSidebarDragReorder() {
     QApplication::processEvents();
     Check(WaitFor([&]() { return sidebar.SlideProgress() >= 0.999; }, 3000), "sidebar opens before drag test");
 
-    std::vector<std::pair<std::size_t, std::size_t>> moves;
-    QObject::connect(&sidebar, &cnote::ui::SidebarWidget::PageMoveRequested,
-        [&](std::size_t from, std::size_t to) { moves.emplace_back(from, to); });
+    std::vector<std::pair<std::vector<std::size_t>, std::size_t>> moves;
+    QObject::connect(&sidebar, &cnote::ui::SidebarWidget::PagesMoveRequested,
+        [&](const std::vector<std::size_t>& pages, std::size_t slot) { moves.emplace_back(pages, slot); });
     const QRect page0 = *sidebar.PageItemRect(0);
     const QRect page1 = *sidebar.PageItemRect(1);
     const QPointF start(page0.center());
@@ -904,8 +905,8 @@ void TestSidebarDragReorder() {
             "the indicator line is painted in the accent colour");
     }
     SendMouse(sidebar, QEvent::MouseButtonRelease, belowPage1, Qt::LeftButton, Qt::NoButton);
-    Check(moves.size() == 1U && moves.back() == std::make_pair(std::size_t { 0 }, std::size_t { 1 }),
-        "dropping page 0 between pages 1 and 2 moves it to index 1");
+    Check(moves.size() == 1U && moves.back().first == std::vector<std::size_t> { 0 } && moves.back().second == 2U,
+        "dropping page 0 between pages 1 and 2 moves it to gap 2");
     Check(!sidebar.PageDragActive(), "the drop ends the drag");
 
     // Dragging upward to the first gap, then Escape: nothing moves.
@@ -919,6 +920,69 @@ void TestSidebarDragReorder() {
     Check(!sidebar.PageDragActive(), "Escape cancels the drag");
     SendMouse(sidebar, QEvent::MouseButtonRelease, abovePage0, Qt::LeftButton, Qt::NoButton);
     Check(moves.size() == 1U, "a cancelled drag does not move a page");
+}
+
+void TestSidebarMultiSelectDrag() {
+    QWidget host;
+    host.resize(1400, 900);
+    cnote::ui::SidebarWidget sidebar(&host);
+    const cnote::Document document = BuildDocument(4);
+    sidebar.SetDocument(&document, nullptr);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    sidebar.SetOpen(true);
+    host.show();
+    QApplication::processEvents();
+    Check(WaitFor([&]() { return sidebar.SlideProgress() >= 0.999; }, 3000), "sidebar opens before multi-select test");
+
+    std::vector<std::pair<std::vector<std::size_t>, std::size_t>> moves;
+    QObject::connect(&sidebar, &cnote::ui::SidebarWidget::PagesMoveRequested,
+        [&](const std::vector<std::size_t>& pages, std::size_t slot) { moves.emplace_back(pages, slot); });
+    const auto center = [&](std::size_t index) { return QPointF(sidebar.PageItemRect(index)->center()); };
+    const auto click = [&](std::size_t index, Qt::KeyboardModifiers modifiers) {
+        SendMouse(sidebar, QEvent::MouseButtonPress, center(index), Qt::LeftButton, Qt::LeftButton, modifiers);
+        SendMouse(sidebar, QEvent::MouseButtonRelease, center(index), Qt::LeftButton, Qt::NoButton, modifiers);
+    };
+    using Pages = std::vector<std::size_t>;
+
+    click(1, Qt::NoModifier);
+    Check(sidebar.SelectedPages().empty(), "a plain click selects no range");
+    click(3, Qt::ShiftModifier);
+    Check(sidebar.SelectedPages() == Pages { 1, 2, 3 }, "shift-click selects from the clicked page to the shift-clicked one");
+    click(2, Qt::NoModifier);
+    Check(sidebar.SelectedPages().empty(), "a plain click on a selected page collapses the range");
+    click(3, Qt::ShiftModifier);
+    Check(sidebar.SelectedPages() == Pages { 2, 3 }, "the collapsing click became the new anchor");
+
+    // Inside the block (between its pages) nothing would move.
+    const QPointF startDrag = center(2);
+    SendMouse(sidebar, QEvent::MouseButtonPress, startDrag, Qt::LeftButton, Qt::LeftButton);
+    SendMouse(sidebar, QEvent::MouseMove, QPointF(startDrag.x(), sidebar.PageItemRect(3)->top() + 4), Qt::NoButton, Qt::LeftButton);
+    Check(sidebar.PageDragActive(), "dragging a selected page starts a drag");
+    Check(!sidebar.DropSlot().has_value(), "a gap inside the contiguous block is not a drop target");
+    Check(sidebar.SelectedPages() == Pages { 2, 3 }, "pressing a selected page keeps the selection for the drag");
+
+    // Above page 0 the whole block goes to the front.
+    const QPointF abovePage0(startDrag.x(), sidebar.PageItemRect(0)->top() + 4);
+    SendMouse(sidebar, QEvent::MouseMove, abovePage0, Qt::NoButton, Qt::LeftButton);
+    Check(sidebar.DropSlot() == std::optional<std::size_t>(0U), "above page 0 the drop slot is the first gap");
+    SendMouse(sidebar, QEvent::MouseButtonRelease, abovePage0, Qt::LeftButton, Qt::NoButton);
+    Check(moves.size() == 1U && moves.back().first == Pages { 2, 3 } && moves.back().second == 0U,
+        "dropping moves every selected page to gap 0");
+
+    // Dragging an unselected page drags only that page and drops the range.
+    click(3, Qt::ShiftModifier);
+    SendMouse(sidebar, QEvent::MouseButtonPress, center(0), Qt::LeftButton, Qt::LeftButton);
+    Check(sidebar.SelectedPages().empty(), "pressing an unselected page clears the range");
+    SendMouse(sidebar, QEvent::MouseMove, QPointF(center(0).x(), center(3).y() + 4), Qt::NoButton, Qt::LeftButton);
+    SendMouse(sidebar, QEvent::MouseButtonRelease, QPointF(center(0).x(), center(3).y() + 4), Qt::LeftButton, Qt::NoButton);
+    Check(moves.size() == 2U && moves.back().first == Pages { 0 } && moves.back().second == 4U,
+        "an unselected page moves alone");
+
+    // The host reselects a moved block; any document change clears it.
+    sidebar.SelectPages(0, 2);
+    Check(sidebar.SelectedPages() == Pages { 0, 1 }, "SelectPages selects the landed block");
+    sidebar.NotifyDocumentChanged();
+    Check(sidebar.SelectedPages().empty(), "a document change clears the selection");
 }
 
 void TestToolbarAutoHide() {
@@ -1095,6 +1159,7 @@ int main(int argc, char** argv) {
     TestSidebarEnsureVisibleFromScrolled();
     TestSidebarSlideState();
     TestSidebarDragReorder();
+    TestSidebarMultiSelectDrag();
     TestSidebarThumbnailCacheInvalidation();
     TestToolbarAutoHide();
     TestOverlayDismissalConsumesPaletteMenu();

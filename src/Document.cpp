@@ -189,37 +189,61 @@ std::size_t Document::RemovePage(std::size_t index) {
     return currentPageIndex_;
 }
 
-bool Document::MovePage(std::size_t from, std::size_t to) {
-    if (from >= pages_.size() || to >= pages_.size() || from == to) {
+bool Document::ReorderPages(const std::vector<std::size_t>& order) {
+    if (order.size() != pages_.size()) {
         return false;
     }
-    const auto rotateRange = [from, to](auto& items) {
-        const auto first = items.begin();
-        if (from < to) {
-            std::rotate(first + static_cast<std::ptrdiff_t>(from), first + static_cast<std::ptrdiff_t>(from + 1U),
-                first + static_cast<std::ptrdiff_t>(to + 1U));
-        } else {
-            std::rotate(first + static_cast<std::ptrdiff_t>(to), first + static_cast<std::ptrdiff_t>(from),
-                first + static_cast<std::ptrdiff_t>(from + 1U));
+    std::vector<bool> seen(order.size(), false);
+    bool identity = true;
+    for (std::size_t index = 0; index < order.size(); ++index) {
+        if (order[index] >= order.size() || seen[order[index]]) {
+            return false;
         }
-    };
-    rotateRange(pages_);
-    rotateRange(pageEpochs_);
-    currentPageIndex_ = MovedPageIndex(currentPageIndex_, from, to);
+        seen[order[index]] = true;
+        identity = identity && order[index] == index;
+    }
+    if (identity) {
+        return false;
+    }
+
+    std::vector<Page> pages;
+    std::vector<std::uint64_t> epochs;
+    pages.reserve(order.size());
+    epochs.reserve(order.size());
+    std::size_t current = currentPageIndex_;
+    for (std::size_t index = 0; index < order.size(); ++index) {
+        pages.push_back(std::move(pages_[order[index]]));
+        epochs.push_back(pageEpochs_[order[index]]);
+        if (order[index] == currentPageIndex_) {
+            current = index;
+        }
+    }
+    pages_ = std::move(pages);
+    pageEpochs_ = std::move(epochs);
+    currentPageIndex_ = current;
     return true;
 }
 
-std::size_t Document::MovedPageIndex(std::size_t index, std::size_t from, std::size_t to) noexcept {
-    if (index == from) {
-        return to;
+std::vector<std::size_t> Document::MovedPageOrder(
+    std::size_t pageCount, const std::vector<std::size_t>& pages, std::size_t slot) {
+    std::vector<std::size_t> order;
+    order.reserve(pageCount);
+    std::size_t moved = 0;  // cursor into the sorted `pages`
+    const auto insertMoved = [&]() { order.insert(order.end(), pages.begin(), pages.end()); };
+    for (std::size_t index = 0; index < pageCount; ++index) {
+        if (index == slot) {
+            insertMoved();
+        }
+        if (moved < pages.size() && pages[moved] == index) {
+            ++moved;
+            continue;
+        }
+        order.push_back(index);
     }
-    if (from < to && index > from && index <= to) {
-        return index - 1U;
+    if (slot >= pageCount) {
+        insertMoved();
     }
-    if (to < from && index >= to && index < from) {
-        return index + 1U;
-    }
-    return index;
+    return order;
 }
 
 void Document::SetFilePath(std::filesystem::path filePath) {

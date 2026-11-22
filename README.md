@@ -107,7 +107,7 @@ decorations, so the band there never draws the in-client window buttons.
 - `Ctrl+Y` redo
 - `Ctrl+O` open
 - `Ctrl+S` save `.cnote`
-- `Ctrl+B` toggle PDF sidebar; drag a page thumbnail to reorder pages (a line marks the drop gap, `Escape` cancels)
+- `Ctrl+B` toggle PDF sidebar; drag a page thumbnail to reorder pages (a line marks the drop gap, `Escape` cancels); `Shift`+click selects a range of pages to drag together
 - `Ctrl+W` quick popup: brush size for pen tools, text formatting for the Text tool and while editing text
 - `Enter` inserts a new line while editing text
 - `Ctrl+Enter` or `Escape` commits the active text or LaTeX edit (an emptied text is removed)
