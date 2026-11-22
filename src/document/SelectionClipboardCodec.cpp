@@ -142,7 +142,9 @@ std::vector<std::uint8_t> EncodeSelectionClipboard(const SelectionClipboardData&
         AppendFloat(bytes, text.x);
         AppendFloat(bytes, text.y);
         AppendFloat(bytes, text.width);
-        AppendFloat(bytes, text.height);
+        // Retired stored height (the box fits its content); the slot stays
+        // for builds that still read it.
+        AppendFloat(bytes, 0.0f);
         AppendFloat(bytes, text.rotationDegrees);
         AppendFloat(bytes, text.fontSize);
         AppendUint32(bytes, text.color);
@@ -308,9 +310,8 @@ std::optional<SelectionClipboardData> DecodeSelectionClipboard(std::span<const s
             text.width = 0.0f;
         }
         if (ok && hasTextHeight) {
-            ok = reader.ReadFloat(text.height);
-        } else {
-            text.height = 0.0f;
+            float retiredHeight = 0.0f;
+            ok = reader.ReadFloat(retiredHeight);
         }
         if (ok && hasObjectRotation) {
             ok = reader.ReadFloat(text.rotationDegrees);

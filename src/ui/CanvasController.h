@@ -120,12 +120,17 @@ public:
     [[nodiscard]] virtual std::size_t EditingPageIndex() const = 0;
     [[nodiscard]] virtual std::optional<std::size_t> EditingTextIndex() const = 0;
     [[nodiscard]] virtual std::optional<std::size_t> EditingLatexIndex() const = 0;
+    // Re-fits the edited text's box to the overlay's content and spans
+    // (text::FitTextBox): an auto-width text keeps its alignment's anchor
+    // and starts wrapping once it outgrows `maxAutoWidth` (page units).
+    virtual void FitEditingText(const PageText& edited, float maxAutoWidth) = 0;
     virtual void CommitTextEdit(PageText edited) = 0;
     virtual void CancelTextEdit() = 0;
     virtual void CommitLatexEdit(const QString& source) = 0;
     virtual void CancelLatexEdit() = 0;
     // Object creation from the text/LaTeX tools (the host positions the object).
-    virtual std::size_t AddTextObject(std::size_t pageIndex, Vec2 topLeft, float fontSize) = 0;
+    // A text `width` of 0 grows with its content, anything else wraps there.
+    virtual std::size_t AddTextObject(std::size_t pageIndex, Vec2 topLeft, float fontSize, float width) = 0;
     virtual std::size_t AddLatexObject(std::size_t pageIndex, Vec2 topLeft, float fontSize) = 0;
 
     // --- selection, gestures and erase (ui::InteractionHost effects) --------

@@ -197,7 +197,7 @@ bool SameSelection(const SelectionClipboardData& a, const SelectionClipboardData
         const PageText& left = a.texts[i];
         const PageText& right = b.texts[i];
         if (!SameFloat(left.x, right.x) || !SameFloat(left.y, right.y) || !SameFloat(left.width, right.width)
-            || !SameFloat(left.height, right.height) || !SameFloat(left.fontSize, right.fontSize)
+            || !SameFloat(left.fontSize, right.fontSize)
             || !SameFloat(left.rotationDegrees, right.rotationDegrees)
             || left.color != right.color || left.alignment != right.alignment
             || left.fontFamily != right.fontFamily || left.bold != right.bold || left.italic != right.italic
@@ -275,7 +275,6 @@ SelectionClipboardData MakeSelection() {
     text.x = 10.0f;
     text.y = 20.0f;
     text.width = 180.0f;
-    text.height = 60.0f;
     text.fontSize = 18.5f;
     text.rotationDegrees = 17.0f;
     text.color = 0xFF102030U;

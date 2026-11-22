@@ -30,6 +30,7 @@
 // replaced only after a successful write) and are called out in the report.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -62,6 +63,7 @@
 #include "settings/SettingsStoreQt.h"
 #include "render/PageRenderer.h"
 #include "shell/AppManager.h"
+#include "text/TextLayoutQt.h"
 #include "ui/NewPageDialogQt.h"
 #include "ui/SettingsDialogQt.h"
 
@@ -135,7 +137,6 @@ cnote::Document MakeProject(std::u16string_view marker) {
     text.x = 12.0f;
     text.y = 24.0f;
     text.width = 200.0f;
-    text.height = 32.0f;
     text.fontSize = 15.0f;
     text.content = std::u16string(marker);
     document.CurrentPage().texts.push_back(text);
@@ -844,7 +845,6 @@ cnote::PageText MakeText(std::uint64_t id, std::u16string_view content) {
     text.x = 10.0f;
     text.y = 20.0f;
     text.width = 120.0f;
-    text.height = 30.0f;
     text.content = std::u16string(content);
     return text;
 }
@@ -892,6 +892,30 @@ void EditSessionCommitsAndUndoKeepsTheObject() {
     Check(!controller.EditingText() && session->document.CurrentPage().texts.size() == 1U
             && session->document.CurrentPage().texts.front().content == u"original",
         "finishing without a content source cancels instead of erasing");
+}
+
+// A page turn carries a text with the page: its box (stored width, laid-out
+// height) is re-centred on the turned centre and keeps the width it wraps at.
+void RotatedPageKeepsTextBox() {
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    cnote::Page& page = controller.Session()->document.CurrentPage();
+    page.texts.push_back(MakeText(7, u"a text that wraps over lines"));
+    const float pageWidth = page.width;
+    const float pageHeight = page.height;
+    const cnote::text::QtTextBounds before = cnote::text::MeasurePageTextBoundsQt(page.texts.front(), pageWidth);
+    const cnote::Vec2 expected = cnote::RotatePointQuarterTurn(
+        { (before.left + before.right) * 0.5f, (before.top + before.bottom) * 0.5f }, pageWidth, pageHeight, 1);
+
+    Check(controller.RotatePage(0, 1), "turn the page a quarter clockwise");
+    const cnote::PageText& turned = controller.DocumentRef().PageAt(0).texts.front();
+    const cnote::text::QtTextBounds after = cnote::text::MeasurePageTextBoundsQt(turned, pageHeight);
+    Check(turned.width == 120.0f, "a turned page keeps the text's wrap width");
+    Check(std::abs((after.left + after.right) * 0.5f - expected.x) < 0.01f
+            && std::abs((after.top + after.bottom) * 0.5f - expected.y) < 0.01f,
+        "the text's box centre turns with the page");
+    Check(turned.rotationDegrees == 90.0f, "the text turns with the page");
 }
 
 void RemoteCommitCancelsTransientState() {
@@ -1078,6 +1102,7 @@ int main(int argc, char** argv) {
     CancelledUnsavedPromptKeepsWindowAlive();
 
     EditSessionCommitsAndUndoKeepsTheObject();
+    RotatedPageKeepsTextBox();
     RemoteCommitCancelsTransientState();
     SaveToRefusesPdfContainer();
     SetCurrentPageIndexIsSerialized();

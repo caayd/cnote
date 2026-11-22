@@ -347,7 +347,6 @@ bool PageTextEqual(const PageText& a, const PageText& b) {
         && a.x == b.x
         && a.y == b.y
         && a.width == b.width
-        && a.height == b.height
         && a.fontSize == b.fontSize
         && a.color == b.color
         && a.alignment == b.alignment
@@ -505,7 +504,8 @@ void RotatePageContents(Page& page, int quarterTurns) {
         image.rotationDegrees = normalizeDegrees(image.rotationDegrees + static_cast<float>(turns) * 90.0f);
     }
     for (PageText& text : page.texts) {
-        rotateCenteredRect(text.x, text.y, text.width, text.height);
+        // Like LaTeX, the box's height comes from its layout, so callers
+        // remap (x,y) by the measured bounds centre.
         text.rotationDegrees = normalizeDegrees(text.rotationDegrees + static_cast<float>(turns) * 90.0f);
     }
     for (PageLatex& latex : page.latexes) {

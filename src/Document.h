@@ -105,12 +105,18 @@ struct PageTextStyleSpan {
     PageTextStyle style {};
 };
 
+// The narrowest a fixed-width text wraps at, in page units (Excalidraw's
+// getMinTextElementWidth: an empty line plus its 5-unit padding each side).
+inline constexpr float kMinTextWidth = 10.0f;
+
+// x/y is the top-left of the text's box in page units.  The box's height is
+// always its laid-out content's; only the width is stored: 0 grows with the
+// content and never wraps, anything else wraps the content at that width.
 struct PageText {
     std::uint64_t id = 0;
     float x = 0.0f;
     float y = 0.0f;
     float width = 0.0f;
-    float height = 0.0f;
     float fontSize = 24.0f;
     std::uint32_t color = 0xFF111827;
     TextAlignment alignment = TextAlignment::Left;
@@ -187,10 +193,11 @@ enum class DocumentKind : std::uint8_t {
 
 // Rotates every page coordinate-bearing object clockwise by quarter turns
 // about the page frame and swaps width/height for odd turns.  Strokes,
-// images (rotation accumulated), texts (box rotated, rotation accumulated),
-// LaTeX (bounds rotated, rotation accumulated) and the stored raster move
-// with the page; Page::rotationDegrees accumulates.  PDF source pages keep
-// their source indices - their background rotates at draw time.
+// images (rotation accumulated) and the stored raster move with the page;
+// texts and LaTeX only accumulate their rotation, because their boxes come
+// from layout: the caller re-centres them on their measured bounds.
+// Page::rotationDegrees accumulates.  PDF source pages keep their source
+// indices - their background rotates at draw time.
 void RotatePageContents(Page& page, int quarterTurns);
 
 struct Page {

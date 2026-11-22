@@ -196,7 +196,8 @@ public:
     // --- object creation and editing -------------------------------------
     // Inserts an empty object at the given page position and starts editing it;
     // an empty commit removes it again, exactly like the reference frontend.
-    std::size_t AddTextObject(std::size_t pageIndex, Vec2 topLeft, float fontSize) override;
+    // A text `width` of 0 grows with its content, anything else wraps there.
+    std::size_t AddTextObject(std::size_t pageIndex, Vec2 topLeft, float fontSize, float width) override;
     std::size_t AddLatexObject(std::size_t pageIndex, Vec2 topLeft, float fontSize) override;
 
     [[nodiscard]] bool BeginTextEdit(std::size_t pageIndex, std::size_t textIndex);
@@ -208,16 +209,21 @@ public:
     [[nodiscard]] bool EditingLatex() const {
         return edit_.has_value() && edit_->kind == EditSession::Kind::LaTeX;
     }
-    // Object snapshot taken when the edit began; the overlay fills itself from
-    // it and converts back through cnote::text helpers on commit.  The object
-    // itself is always located by id (see EditSession), never by a stored
-    // index: a page insert or another view's commit can move it.
+    // The object under edit: the snapshot taken when the edit began, with the
+    // box FitEditingText has fitted to the content since.  The overlay fills
+    // itself from it and converts back through cnote::text helpers on commit.
+    // The object itself is always located by id (see EditSession), never by a
+    // stored index: a page insert or another view's commit can move it.
     [[nodiscard]] const PageText* EditingTextObject() const;
     [[nodiscard]] const PageLatex* EditingLatexObject() const;
     [[nodiscard]] std::size_t EditingPageIndex() const;
     [[nodiscard]] std::optional<std::size_t> EditingTextIndex() const;
     [[nodiscard]] std::optional<std::size_t> EditingLatexIndex() const;
 
+    // Re-fits the edited text's box to `edited` (the overlay's content and
+    // spans; see text::FitTextBox): an auto-width text keeps its alignment's
+    // anchor and starts wrapping once it outgrows `maxAutoWidth`.
+    void FitEditingText(const PageText& edited, float maxAutoWidth);
     // Commits the edited object; the caller passes the overlay's converted
     // content and spans. Nothing is recorded when the object is unchanged.
     void CommitTextEdit(PageText edited);
@@ -242,9 +248,10 @@ private:
     // cnote::ApplyHistoryAction uses - never by a stored index: a page insert,
     // a page rotation or a remote commit can move it, and committing through a
     // stale index would rename or erase the wrong object.  The `*Before`
-    // snapshot is the undo base and what the overlay is filled with; `creates`
-    // marks the placeholder AddTextObject/AddLatexObject pushed before editing,
-    // which an empty commit removes without history.
+    // snapshot is the undo base; `text` is the live object, whose box follows
+    // the content as it is typed.  `creates` marks the placeholder
+    // AddTextObject/AddLatexObject pushed before editing, which an empty
+    // commit removes without history.
     struct EditSession {
         enum class Kind { Text, LaTeX };
         Kind kind = Kind::Text;
@@ -252,6 +259,7 @@ private:
         std::uint64_t objectId = 0;
         bool creates = false;
         PageText textBefore {};
+        PageText text {};
         PageLatex latexBefore {};
     };
 

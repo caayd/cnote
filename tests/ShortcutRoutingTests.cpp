@@ -754,7 +754,6 @@ void TextObjectsCopyPasteThroughShortcuts() {
     cnote::PageText text;
     text.content = u"Copy \U0001F600\nrich text";
     text.width = 180.0f;
-    text.height = 70.0f;
     text.fontSize = 23.5f;
     text.rotationDegrees = 17.0f;
     text.color = 0xFF123456U;
@@ -767,7 +766,7 @@ void TextObjectsCopyPasteThroughShortcuts() {
         cnote::TextFontFamily::Sans, false, true, false } });
     payload.texts.push_back(text);
     payload.maxX = text.width;
-    payload.maxY = text.height;
+    payload.maxY = 70.0f;
     Check(harness.window->Controller().PastePayload(0U, { 200.0f, 200.0f }, payload),
         "the source rich-text object is inserted and selected");
     const cnote::PageText source = harness.window->Controller().DocumentRef().PageAt(0U).texts.front();
@@ -783,9 +782,8 @@ void TextObjectsCopyPasteThroughShortcuts() {
     const cnote::PageText& pasted = texts.back();
     Check(pasted.id != source.id && pasted.content == source.content,
         "pasted text has a fresh identity and preserves Unicode and line breaks");
-    Check(pasted.width == source.width && pasted.height == source.height
-            && pasted.rotationDegrees == source.rotationDegrees,
-        "pasted text preserves dimensions and rotation");
+    Check(pasted.width == source.width && pasted.rotationDegrees == source.rotationDegrees,
+        "pasted text preserves its width and rotation");
     Check(pasted.fontSize == source.fontSize && pasted.color == source.color
             && pasted.alignment == source.alignment && pasted.fontFamily == source.fontFamily
             && pasted.bold == source.bold && pasted.italic == source.italic

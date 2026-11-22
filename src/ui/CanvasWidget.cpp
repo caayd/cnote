@@ -1401,6 +1401,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
         painter.fillPath(render::InkOutlinePath(outline), QColor(0, 0, 0, kEraserTrailAlpha));
         painter.restore();
     }
+    PaintTextCreatePreview(painter);
     PaintSelectionOverlay(painter);
     PositionOverlays();
 }
@@ -1580,7 +1581,7 @@ void CanvasWidget::EnsureTextEditor() {
     textEditor_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     textEditor_->installEventFilter(this);
     textEditor_->hide();
-    connect(textEditor_, &QTextEdit::textChanged, this, [this]() { PositionOverlays(); });
+    connect(textEditor_, &QTextEdit::textChanged, this, [this]() { FitTextEditor(); });
 }
 
 void CanvasWidget::EnsureLatexEditor() {
@@ -1612,6 +1613,22 @@ void CanvasWidget::ShowTextOverlay(const PageText& text) {
         : CanvasPageView {};
     textEditScale_ = view.valid ? view.scale : 1.0f;
     textEditor_->document()->setDocumentMargin(0.0);
+    ApplyTextEditorWrap(text);
+    {
+        // Typing continues the style of the text before the caret (the end of
+        // the object), like any editor; an empty object types in its own
+        // style through the block char format LoadPageText applies.
+        QSignalBlocker blocker(textEditor_);
+        textEditor_->LoadPageText(text, textEditScale_);
+    }
+    textEditor_->show();
+    textEditor_->raise();
+    textEditor_->setFocus(Qt::OtherFocusReason);
+    PositionOverlays();
+    update();
+}
+
+void CanvasWidget::ApplyTextEditorWrap(const PageText& text) {
     // Match the canvas renderer's text option (TextLayoutQt BuildDocument):
     // same wrap mode and paragraph alignment so the live preview wraps and
     // aligns exactly like the committed object.
@@ -1632,18 +1649,62 @@ void CanvasWidget::ShowTextOverlay(const PageText& text) {
     if (text.width > 0.0f) {
         textEditor_->setLineWrapColumnOrWidth(text::TextWrapWidthPx(text, textEditScale_));
     }
-    {
-        // Typing continues the style of the text before the caret (the end of
-        // the object), like any editor; an empty object types in its own
-        // style through the block char format LoadPageText applies.
-        QSignalBlocker blocker(textEditor_);
-        textEditor_->LoadPageText(text, textEditScale_);
+}
+
+void CanvasWidget::FitTextEditor() {
+    const PageText* object = controller_.EditingTextObject();
+    if (textEditor_ == nullptr || object == nullptr || !editOverlay_.has_value()) {
+        return;
     }
-    textEditor_->show();
-    textEditor_->raise();
-    textEditor_->setFocus(Qt::OtherFocusReason);
+    const float widthBefore = object->width;
+    controller_.FitEditingText(textEditor_->CapturePageText(), MaxAutoTextWidth(editOverlay_->page));
+    // Excalidraw's autoResize flip: the text stopped growing and wraps from
+    // here on, in the editor as on the page, and is scrolled into view.
+    if (const PageText* fitted = controller_.EditingTextObject(); fitted != nullptr && fitted->width != widthBefore) {
+        ApplyTextEditorWrap(*fitted);
+        RevealEditedText(*fitted);
+    }
     PositionOverlays();
-    update();
+}
+
+void CanvasWidget::RevealEditedText(const PageText& text) {
+    // scrollBoundsIntoView(tooLarge: "leave"): pans the box between the
+    // padded canvas edges, on each axis only if it fits there.
+    const CanvasPageView view = CalculatePageView(editOverlay_->page);
+    if (!view.valid) {
+        return;
+    }
+    const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, 0.0f);
+    const qreal scale = static_cast<qreal>(view.scale);
+    const QRectF box(
+        view.rect.left() + (static_cast<qreal>(bounds.left) * scale),
+        view.rect.top() + (static_cast<qreal>(bounds.top) * scale),
+        static_cast<qreal>(bounds.right - bounds.left) * scale,
+        static_cast<qreal>(bounds.bottom - bounds.top) * scale);
+    const qreal padding = static_cast<qreal>(text::kTextViewportPaddingPx);
+    const QRectF room = VisibleCanvasRect().adjusted(padding, padding, -padding, -padding);
+    // A text that just started wrapping is exactly as wide as the room (both
+    // come from the same view width), give or take float rounding.
+    const auto shift = [](qreal low, qreal high, qreal roomLow, qreal roomHigh) -> qreal {
+        if (high - low > roomHigh - roomLow + 1.0) {
+            return 0.0;
+        }
+        if (low < roomLow) {
+            return roomLow - low;
+        }
+        return high > roomHigh ? roomHigh - high : 0.0;
+    };
+    const QPointF delta(
+        shift(box.left(), box.right(), room.left(), room.right()),
+        shift(box.top(), box.bottom(), room.top(), room.bottom()));
+    if (!delta.isNull()) {
+        PanBy(delta);
+    }
+}
+
+float CanvasWidget::MaxAutoTextWidth(std::size_t pageIndex) const {
+    const CanvasPageView view = CalculatePageView(pageIndex);
+    return text::MaxAutoTextWidth(static_cast<float>(VisibleCanvasRect().width()), view.valid ? view.scale : 1.0f);
 }
 
 void CanvasWidget::ShowLatexOverlay(const PageLatex& object) {
@@ -1708,12 +1769,22 @@ void CanvasWidget::PositionOverlays() {
             QSignalBlocker blocker(textEditor_);
             textEditor_->SetDisplayScale(view.scale);
         }
-        const qreal left = view.rect.left() + (static_cast<qreal>(object.x) * view.scale);
+        // The editor sits on the box the committed text lays out in.  A
+        // growing text's editor does not wrap, and QTextEdit then aligns its
+        // lines within the whole viewport: the caret room is added on the side
+        // the alignment leaves free, so the lines land where the committed
+        // render puts them.  A wrapping editor aligns within its wrap width.
+        // Trailing blanks count in the editor but not in the box; the editor
+        // still makes room for them so it never scrolls its own content.
+        constexpr qreal kCaretRoom = 4.0;
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(object, 0.0f);
+        const bool grows = object.width <= 0.0f;
+        const qreal alignmentShare = !grows ? 0.0
+            : (object.alignment == TextAlignment::Center ? 0.5 : (object.alignment == TextAlignment::Right ? 1.0 : 0.0));
+        const qreal boxWidth = static_cast<qreal>(bounds.right - bounds.left) * view.scale;
+        const qreal left = view.rect.left() + (static_cast<qreal>(object.x) * view.scale) - (kCaretRoom * alignmentShare);
         const qreal top = view.rect.top() + (static_cast<qreal>(object.y) * view.scale);
-        const qreal width = std::max<qreal>(40.0,
-            object.width > 0.0f
-                ? static_cast<qreal>(object.width) * view.scale
-                : textEditor_->document()->idealWidth() + 4.0);
+        const qreal width = (grows ? std::max(boxWidth, textEditor_->document()->idealWidth()) : boxWidth) + kCaretRoom;
         const qreal height = std::max<qreal>(8.0, textEditor_->document()->size().height() + 4.0);
         const QRect geometry(QPoint(static_cast<int>(std::lround(left)), static_cast<int>(std::lround(top))),
                              QSize(static_cast<int>(std::lround(width)), static_cast<int>(std::lround(height))));
@@ -3439,12 +3510,30 @@ void CanvasWidget::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) {
     }
 }
 
-void CanvasWidget::CreateTextAt(std::size_t pageIndex, Vec2 pagePoint) {
+void CanvasWidget::CreateTextAt(std::size_t pageIndex, Vec2 pagePoint, float width) {
     // Static text size: the selected small/medium/large preset is stored in
     // page units, so the new text scales with the page at any zoom.
     const ui::CanvasInputSettings input = controller_.InputSettings();
-    controller_.AddTextObject(pageIndex, pagePoint, std::max(1.0f, input.textFontSize));
+    controller_.AddTextObject(pageIndex, pagePoint, std::max(1.0f, input.textFontSize), width);
     SyncEditOverlay();
+}
+
+void CanvasWidget::UpdateTextCreatePreview(std::optional<TextBoxPreview> preview) {
+    const QRect before = TextCreatePreviewRect().toAlignedRect();
+    if (preview.has_value() && !textCreatePreview_.has_value()) {
+        // One empty line in the pending style: what the created text opens as.
+        const ui::CanvasInputSettings input = controller_.InputSettings();
+        PageText line;
+        line.fontSize = std::max(1.0f, input.textFontSize);
+        line.fontFamily = input.textFontFamily;
+        line.bold = input.textBold;
+        line.italic = input.textItalic;
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(line, 0.0f);
+        textCreatePreviewHeight_ = bounds.bottom - bounds.top;
+    }
+    textCreatePreview_ = preview;
+    const QRect after = TextCreatePreviewRect().toAlignedRect();
+    MarkTransientDirty(before.isEmpty() ? after : (after.isEmpty() ? before : before.united(after)));
 }
 
 void CanvasWidget::BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex) {
@@ -3724,6 +3813,36 @@ QRect CanvasWidget::OverlayDirtyRect() const {
     }
     return QRectF(selection_.anchor, selection_.current).normalized()
         .adjusted(-2.0, -2.0, 2.0, 2.0).toAlignedRect().intersected(rect());
+}
+
+QRectF CanvasWidget::TextCreatePreviewRect() const {
+    if (!textCreatePreview_.has_value()) {
+        return {};
+    }
+    const CanvasPageView view = CalculatePageView(textCreatePreview_->pageIndex);
+    if (!view.valid) {
+        return {};
+    }
+    return QRectF(
+        view.rect.left() + (static_cast<qreal>(textCreatePreview_->topLeft.x) * view.scale),
+        view.rect.top() + (static_cast<qreal>(textCreatePreview_->topLeft.y) * view.scale),
+        static_cast<qreal>(textCreatePreview_->width) * view.scale,
+        static_cast<qreal>(textCreatePreviewHeight_) * view.scale)
+        .adjusted(-2.0, -2.0, 2.0, 2.0);
+}
+
+void CanvasWidget::PaintTextCreatePreview(QPainter& painter) {
+    const QRectF frame = TextCreatePreviewRect().adjusted(2.0, 2.0, -2.0, -2.0);
+    if (frame.isEmpty()) {
+        return;
+    }
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    // The selection frame's dashed outline: the box the new text wraps in.
+    painter.setPen(QPen(QColor(59, 130, 246), 1.0, Qt::DashLine));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawRect(frame);
+    painter.restore();
 }
 
 std::optional<SelectionBounds> CanvasWidget::SelectionBoundsForPage(std::size_t pageIndex) const {

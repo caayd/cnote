@@ -133,7 +133,6 @@ std::uint64_t TextLayoutSignature(const PageText& text, float pageWidth) {
     hash = HashValue(hash, latex::EngineGeneration());
     hash = HashValue(hash, std::bit_cast<std::uint32_t>(pageWidth));
     hash = HashValue(hash, std::bit_cast<std::uint32_t>(text.width));
-    hash = HashValue(hash, std::bit_cast<std::uint32_t>(text.height));
     hash = HashValue(hash, std::bit_cast<std::uint32_t>(text.fontSize));
     hash = HashValue(hash, text.color);
     hash = HashValue(hash, static_cast<std::uint64_t>(text.alignment));
@@ -229,12 +228,66 @@ QtTextBounds MeasurePageTextBoundsQt(const PageText& text, float pageWidth) {
         text.x,
         text.y,
         text.x + ResolvedTextWidth(text, pageWidth),
-        text.y + std::max(static_cast<float>(layout.height), text.height),
+        text.y + static_cast<float>(layout.height),
     };
 }
 
 int TextWrapWidthPx(const PageText& text, float layoutScale) {
     return std::max(1, static_cast<int>(std::lround(text.width * layoutScale)));
+}
+
+float MeasureUnwrappedTextWidth(const PageText& text) {
+    PageText unwrapped = text;
+    unwrapped.width = 0.0f;
+    return ResolvedTextWidth(unwrapped, 0.0f);
+}
+
+float MaxAutoTextWidth(float viewWidthPx, float scale) {
+    if (scale <= 0.0f) {
+        return kTextMaxWrapWidth;
+    }
+    const float viewWidth = viewWidthPx - 2.0f * kTextViewportPaddingPx;
+    const float capped = scale < 1.0f
+        ? std::min(kTextMaxWrapWidth / scale, kTextMaxWrapWidthZoomedOut)
+        : kTextMaxWrapWidth;
+    return std::max(kMinTextWidth, viewWidth > 0.0f ? std::min(viewWidth / scale, capped) : capped);
+}
+
+PageText FitTextBox(const PageText& current, PageText next, float maxAutoWidth) {
+    const QtTextBounds before = MeasurePageTextBoundsQt(current, 0.0f);
+    const float beforeWidth = before.right - before.left;
+    const float beforeHeight = before.bottom - before.top;
+    // A text already wider than the limit (zoomed in since it grew) keeps
+    // growing, as in Excalidraw's refreshTextDimensions.
+    if (current.width <= 0.0f && next.width <= 0.0f && maxAutoWidth > 0.0f
+        && beforeWidth <= maxAutoWidth && MeasureUnwrappedTextWidth(next) > maxAutoWidth) {
+        next.width = std::max(kMinTextWidth, maxAutoWidth);
+    }
+    const QtTextBounds after = MeasurePageTextBoundsQt(next, 0.0f);
+    const float afterWidth = after.right - after.left;
+    const float afterHeight = after.bottom - after.top;
+
+    // The anchor is the point of the top edge the alignment pins: left end,
+    // middle or right end.  The text rotates about its box centre, which
+    // moves as the box grows, so the anchor is held fixed on the page (in
+    // rotated space) and the new top-left solved from it.
+    const float ratio = next.alignment == TextAlignment::Center ? 0.5f
+        : (next.alignment == TextAlignment::Right ? 1.0f : 0.0f);
+    const float radians = next.rotationDegrees * 0.017453292519943295f;
+    const float cosine = std::cos(radians);
+    const float sine = std::sin(radians);
+    const auto rotate = [cosine, sine](float x, float y) {
+        return Vec2 { x * cosine - y * sine, x * sine + y * cosine };
+    };
+    const Vec2 beforeOffset = rotate(beforeWidth * (ratio - 0.5f), -beforeHeight * 0.5f);
+    const Vec2 anchor {
+        current.x + beforeWidth * 0.5f + beforeOffset.x,
+        current.y + beforeHeight * 0.5f + beforeOffset.y,
+    };
+    const Vec2 afterOffset = rotate(afterWidth * (ratio - 0.5f), -afterHeight * 0.5f);
+    next.x = anchor.x - afterOffset.x - afterWidth * 0.5f;
+    next.y = anchor.y - afterOffset.y - afterHeight * 0.5f;
+    return next;
 }
 
 void DrawPageTextQt(QPainter& painter, const PageText& text, float pageWidth, float scale, float pixelRatio,
