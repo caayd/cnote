@@ -23,6 +23,7 @@ class PdfBackgroundProvider;
 }
 
 class QFocusEvent;
+class QTimer;
 class QVariantAnimation;
 
 namespace cnote::ui {
@@ -114,6 +115,14 @@ public:
     [[nodiscard]] std::size_t VisibleThumbnailCount() const;
     [[nodiscard]] bool PageJumpEditing() const { return pageJump_.active; }
     [[nodiscard]] QString PageIndicatorLabel() const;
+    // Drag-to-reorder: true once a pressed thumbnail moved past the drag
+    // distance.  The drop slot is the gap (0..PageCount) the page would land
+    // in, nullopt while dropping would not move it (its own gaps).
+    [[nodiscard]] bool PageDragActive() const { return pageDrag_.has_value() && pageDrag_->active; }
+    [[nodiscard]] std::optional<std::size_t> DropSlot() const;
+    // Widget-space y of the drop indicator line for `slot`: centred in the
+    // gap above page `slot`, or below the last page.
+    [[nodiscard]] std::optional<int> DropIndicatorY(std::size_t slot) const;
 
     // Reference page-jump input (App.cpp:2840 PageIndicatorLabel,
     // ToolbarState.cpp:265-296 BeginPageJumpInput/ApplyPageJumpInput).
@@ -130,6 +139,9 @@ signals:
     // menu (copy/cut/paste/delete).  The page is activated first, so the
     // actions always target the page under the cursor.
     void PageContextMenuRequested(std::size_t pageIndex, const QPoint& globalPosition);
+    // A thumbnail was dragged and dropped elsewhere: move page `from` so it
+    // ends up at index `to`.
+    void PageMoveRequested(std::size_t from, std::size_t to);
     void OpenChanged(bool open);
     void SlideProgressChanged(qreal progress);
     void ScrollChanged(int scrollY);
@@ -138,6 +150,8 @@ protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     bool event(QEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
@@ -154,6 +168,9 @@ private:
     [[nodiscard]] int ItemWidth() const;
     [[nodiscard]] QRect ContentRect() const;
     [[nodiscard]] int ItemTop(std::size_t index) const;
+    void UpdatePageDrag(const QPoint& position);
+    void CancelPageDrag();
+    void AutoScrollPageDrag();
 
     const Document* document_ = nullptr;
     render::PdfBackgroundProvider* pdfBackground_ = nullptr;
@@ -178,6 +195,17 @@ private:
     QVariantAnimation* scrollAnimation_ = nullptr;
 
     InlineEdit pageJump_ {};
+
+    struct PageDrag {
+        std::size_t page = 0;
+        QPoint pressPosition {};
+        QPoint position {};
+        bool active = false;
+        std::optional<std::size_t> dropSlot {};
+    };
+    std::optional<PageDrag> pageDrag_ {};
+    // Scrolls the list while a drag hovers near the content band's edges.
+    QTimer* dragScrollTimer_ = nullptr;
 
     // Everything a cached thumbnail depends on.  `document` is the identity,
     // `pageEpoch` the content revision, and the pixel size the raster the

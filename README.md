@@ -107,7 +107,7 @@ decorations, so the band there never draws the in-client window buttons.
 - `Ctrl+Y` redo
 - `Ctrl+O` open
 - `Ctrl+S` save `.cnote`
-- `Ctrl+B` toggle PDF sidebar
+- `Ctrl+B` toggle PDF sidebar; drag a page thumbnail to reorder pages (a line marks the drop gap, `Escape` cancels)
 - `Ctrl+W` quick popup: brush size for pen tools, text formatting for the Text tool and while editing text
 - `Enter` inserts a new line while editing text
 - `Ctrl+Enter` or `Escape` commits the active text or LaTeX edit (an emptied text is removed)
@@ -415,6 +415,8 @@ wait MS                           let timers and animations run
 move X Y                          move the pointer (hover)
 click X Y [BUTTON] [MODS]         press and release; BUTTON left|right|middle
 doubleclick X Y [BUTTON] [MODS]
+press X Y [BUTTON] [MODS]         press and hold; `move` steps then drag
+release X Y [BUTTON] [MODS]
 drag X1 Y1 X2 Y2 [STEPS] [BUTTON] [MODS]   press, STEPS moves (16), release
 wheel X Y NOTCHES [MODS]          positive scrolls up
 key SEQUENCE                      Ctrl+W, Escape, Ctrl+Shift+S, "Ctrl+K, Ctrl+C"

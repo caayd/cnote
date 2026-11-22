@@ -284,6 +284,13 @@ public:
     bool SetCurrentPageIndex(std::size_t index);
     std::size_t InsertPage(std::size_t index, Page page);
     std::size_t RemovePage(std::size_t index);
+    // Moves page `from` so it ends up at index `to`; the pages in between shift
+    // by one toward `from`.  Epochs travel with their pages and the current
+    // page index keeps pointing at the same page.  False when either index is
+    // out of range or they are equal.
+    bool MovePage(std::size_t from, std::size_t to);
+    // Where the page at `index` sits after MovePage(from, to).
+    [[nodiscard]] static std::size_t MovedPageIndex(std::size_t index, std::size_t from, std::size_t to) noexcept;
     void SetFilePath(std::filesystem::path filePath);
     void SetNewPageDefaults(PageDefaults pageDefaults);
     void ResetToBlank();

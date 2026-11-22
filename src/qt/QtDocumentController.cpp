@@ -1712,6 +1712,33 @@ bool QtDocumentController::PastePage(std::size_t index) {
     return true;
 }
 
+bool QtDocumentController::MovePage(std::size_t from, std::size_t to) {
+    if (session_ == nullptr) {
+        return false;
+    }
+    // An open edit or stroke addresses its page by index: settle it first.
+    AbortTransientState();
+    if (!session_->document.MovePage(from, to)) {
+        return false;
+    }
+
+    if (!selection_.empty()) {
+        std::map<std::size_t, ui::PageSelection> remapped;
+        for (auto& entry : selection_) {
+            remapped[Document::MovedPageIndex(entry.first, from, to)] = std::move(entry.second);
+        }
+        selection_ = std::move(remapped);
+        emit SelectionChanged();
+    }
+
+    HistoryAction action {};
+    action.type = HistoryActionType::MovePage;
+    action.index = from;
+    action.pageIndex = to;
+    RecordCommit(std::move(action));
+    return true;
+}
+
 bool QtDocumentController::RotatePage(std::size_t pageIndex, int quarterTurns) {
     const int turns = ((quarterTurns % 4) + 4) % 4;
     if (session_ == nullptr || turns == 0 || pageIndex >= session_->document.PageCount()) {

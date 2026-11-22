@@ -145,6 +145,10 @@ public:
     // focuses the inserted page and records one AddPages undo step; false
     // when the page clipboard is empty.
     bool PastePage(std::size_t index);
+    // Moves page `from` to index `to` (sidebar drag reorder) as one MovePage
+    // undo step; per-page selections move with their pages.  False when
+    // either index is out of range or they are equal.
+    bool MovePage(std::size_t from, std::size_t to);
     // Rotates page `index` clockwise by quarter turns (1 = 90°, 2 = 180°,
     // 3 = 90° counter-clockwise): every object coordinate and the stored
     // raster transform with it, the page frame swaps dims for odd turns and

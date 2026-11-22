@@ -643,6 +643,14 @@ void QtMainWindow::CreateChrome() {
     connect(sidebar_, &ui::SidebarWidget::PageJumpRequested, this, [this](std::size_t pageIndex) {
         FocusPage(pageIndex);
     });
+    connect(sidebar_, &ui::SidebarWidget::PageMoveRequested, this, [this](std::size_t from, std::size_t to) {
+        // The move settles an open edit first; its overlay must follow.
+        const bool moved = controller_.MovePage(from, to);
+        canvas_->SyncEditOverlay();
+        if (moved) {
+            FocusPage(to);  // keep the moved page in view where it landed
+        }
+    });
     connect(sidebar_, &ui::SidebarWidget::AddPageRequested, this, &QtMainWindow::AddPage);
     connect(sidebar_, &ui::SidebarWidget::NewPageSettingsRequested, this, &QtMainWindow::OpenNewPageSettings);
     connect(sidebar_, &ui::SidebarWidget::PageContextMenuRequested, this,
