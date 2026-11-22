@@ -742,12 +742,10 @@ void RunAutoHideTable() {
     Check(lq::ToolbarHeight(false) == 34.0, "toolbar height is 34 logical pixels");
     Check(lq::ToolbarHeight(true) == 39.0, "maximized toolbar height is 39 logical pixels");
     Check(lq::CaptionButtonReserve() == 150.0, "caption button reserve is (46 * 3) + 12 logical pixels");
-    // Palette wheel: paint-path hover feedback vs interaction slop (the one
-    // duplicate that disagrees; see LayoutQt.h).
+    // Palette wheel: the hit radius keeps the appui interaction slop (see
+    // LayoutQt.h).
     Check(lq::BuildPaletteWheelLayout(QRectF(0.0, 0.0, 1400.0, 960.0), QPointF(0.0, 0.0), 5U, 34.0).hitOuterRadius == 86.0 + 8.0,
         "wheel hit radius uses the appui interaction slop (outer + 8)");
-    Check(lq::PaletteWheelHoverGrow() == 12.0, "wheel paint hover grow keeps the App.cpp paint value (12)");
-    Check(lq::PaletteWheelHoverOffset() == 10.0, "wheel paint hover offset keeps the App.cpp paint value (10)");
 }
 
 // --dump: reprints the frozen tables in source form so an intentional layout

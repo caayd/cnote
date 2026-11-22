@@ -23,14 +23,14 @@ constexpr qreal kTitleBarButtonHeight = 34.0;               // Layout.cpp:23 (Bu
 constexpr qreal kPaletteWheelShadowInsetDip = 6.0;          // Layout.cpp:25 (BuildPaletteWheelLayout)
 // Palette-wheel interaction slop: the appui interaction copy
 // (src/ui/Layout.cpp:26) used by App::UpdatePaletteWheelHover
-// (ToolbarState.cpp:202) and MessageLoop.cpp:415.  The App.cpp paint copy uses
-// 12 for its hover feedback; see PaletteWheelHoverGrow() below.
+// (ToolbarState.cpp:202) and MessageLoop.cpp:415.  The paint path lifts a
+// hovered slice by its own amount; see PaletteWheelHoverGrow() below.
 constexpr qreal kPaletteWheelHoverGrowDip = 8.0;
 constexpr qreal kPaletteWheelSelectedStrokeDip = 3.0;       // Layout.cpp:27 (BuildPaletteWheelLayout)
-// Paint-only hover feedback from the App.cpp paint copy (App.cpp:158-159).
+// Paint-only hover lift of the floating-slice wheel (ToolbarWidget.cpp).
 constexpr qreal kPaletteWheelPaintHoverGrowDip = 12.0;
-constexpr qreal kPaletteWheelPaintHoverOffsetDip = 10.0;
-constexpr qreal kPaletteWheelPaintIconHalfDip = 20.0;
+constexpr qreal kPaletteWheelPaintHoverOffsetDip = 4.0;
+constexpr qreal kPaletteWheelPaintIconHalfDip = 12.0;
 // Toolbar auto-hide reveal bands (App.cpp:2465-2467
 // App::UpdateToolbarAutoHide).
 constexpr qreal kMaximizedRevealHeight = 22.0;
