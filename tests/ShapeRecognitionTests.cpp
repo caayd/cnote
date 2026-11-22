@@ -42,8 +42,6 @@ const char* KindName(std::optional<RecognizedShape> shape) {
     case RecognizedShapeKind::Circle: return "circle";
     case RecognizedShapeKind::Triangle: return "triangle";
     case RecognizedShapeKind::Rectangle: return "rectangle";
-    case RecognizedShapeKind::Quadrilateral: return "quadrilateral";
-    case RecognizedShapeKind::Polygon: return "polygon";
     }
     return "?";
 }
@@ -259,13 +257,23 @@ int main() {
     });
     CheckEverySeed("a triangle is a triangle", RecognizedShapeKind::Triangle, triangleIdeal, 1.5f);
 
+    // Any four-sided outline is squared: a trapezoid becomes a level rectangle.
     const std::vector<Vec2> skewedIdeal =
         Polyline({ { 150.0f, 300.0f }, { 350.0f, 300.0f }, { 300.0f, 180.0f }, { 200.0f, 180.0f }, { 150.0f, 300.0f } });
-    CheckEverySeed("a skewed four-sided outline is a quadrilateral", RecognizedShapeKind::Quadrilateral, skewedIdeal, 1.5f);
+    CheckEverySeed("a skewed four-sided outline is a rectangle", RecognizedShapeKind::Rectangle, skewedIdeal, 1.5f);
+    {
+        const std::optional<RecognizedShape> rectangle = RecognizeShape(HandDrawn(skewedIdeal, 1.5f, 3U));
+        bool onBox = Is(rectangle, RecognizedShapeKind::Rectangle) && Closed(*rectangle);
+        const Bounds b = onBox ? BoundsOf(rectangle->points) : Bounds {};
+        for (const Vec2 p : onBox ? rectangle->points : std::vector<Vec2> {}) {
+            onBox = onBox
+                && (std::abs(p.x - b.minX) < 0.01f || std::abs(p.x - b.maxX) < 0.01f
+                    || std::abs(p.y - b.minY) < 0.01f || std::abs(p.y - b.maxY) < 0.01f);
+        }
+        Check(onBox, "the skewed outline snaps to right-angle corners without Shift");
+    }
 
-    // --- Shift: squared corners ---------------------------------------------
-    CheckEverySeed("Shift squares a skewed four-sided outline into a rectangle", RecognizedShapeKind::Rectangle,
-        skewedIdeal, 1.5f, true);
+    // --- Shift: perfected triangles -----------------------------------------
     {
         // Angles of about 59.5, 59.5 and 61 degrees: equilateral, base level.
         const std::optional<RecognizedShape> triangle = RecognizeShape(HandDrawn(triangleIdeal, 1.5f, 6U), true);
@@ -295,13 +303,10 @@ int main() {
             "Shift squares the widest corner of a triangle and keeps its legs' lengths");
     }
 
-    // A hexagon must not read as a circle, nor a shaky circle as a hexagon.
-    std::vector<Vec2> hexagon;
-    for (int corner = 0; corner <= 6; ++corner) {
-        const float angle = (static_cast<float>(corner % 6) * kPi / 3.0f) + 0.2f;
-        hexagon.push_back({ center.x + (90.0f * std::cos(angle)), center.y + (90.0f * std::sin(angle)) });
-    }
-    CheckEverySeed("a hexagon is a polygon", RecognizedShapeKind::Polygon, Polyline(hexagon), 1.5f);
+    // A narrow, shaky oval stays an ellipse: five or more corners are never a
+    // polygon (seed 9 used to snap to one).
+    CheckEverySeed("a narrow shaky oval is an ellipse", RecognizedShapeKind::Ellipse,
+        Arc(center, 120.0f, 36.0f, 0.3f, 1.0f, 2.0f * kPi + 0.2f), 3.5f);
     CheckEverySeed("a shaky circle is still a circle", RecognizedShapeKind::Circle,
         Arc(center, 70.0f, 70.0f, 0.0f, 2.0f, 2.0f * kPi + 0.2f), 3.5f);
 

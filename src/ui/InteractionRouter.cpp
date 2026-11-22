@@ -123,7 +123,7 @@ void InteractionRouter::SetModifiers(InteractionModifiers modifiers) {
     const bool constrainChanged = modifiers.snapLine != modifiers_.snapLine;
     modifiers_ = modifiers;
     // Shift pressed or released over a held snapped shape re-snaps it with
-    // (or without) squared corners.
+    // (or without) the circle and triangle constraints.
     if (constrainChanged && state_.kind == InteractionKind::Stroke && state_.stroke.snapped) {
         static_cast<void>(ApplyShapeSnap());
     }

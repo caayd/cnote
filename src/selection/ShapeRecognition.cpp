@@ -42,7 +42,6 @@ constexpr float kMinIntersectionSine = 0.25f;
 // Snapping to the ideal shape.
 constexpr float kCircleAxisRatio = 0.85f;
 constexpr float kAxisSnapAngle = 8.0f * kDegrees;
-constexpr float kRightAngleTolerance = 15.0f * kDegrees;
 constexpr float kSquareSideRatio = 0.9f;
 // Constrained (Shift) triangles: equilateral when every angle is this close
 // to 60 degrees.
@@ -439,17 +438,9 @@ std::optional<Candidate> FitEllipse(std::span<const Vec2> samples, float diagona
     return candidate;
 }
 
-// Four corners become an exact rectangle (the sides' mean orientation and the
-// corners' mean extents) when they are within kRightAngleTolerance of square,
-// or always when `constrained`.
-std::optional<std::vector<Vec2>> SnapRectangle(std::span<const Vec2> corners, bool constrained) {
-    for (std::size_t index = 0; index < 4U && !constrained; ++index) {
-        const Vec2 corner = corners[index];
-        const float angle = AngleBetween(Sub(corners[(index + 3U) % 4U], corner), Sub(corners[(index + 1U) % 4U], corner));
-        if (std::abs(angle - (0.5f * kPi)) > kRightAngleTolerance) {
-            return std::nullopt;
-        }
-    }
+// Four corners become an exact rectangle: the sides' mean orientation and the
+// corners' mean extents.
+std::vector<Vec2> SnapRectangle(std::span<const Vec2> corners) {
     // Side directions modulo 90 degrees, averaged on the 4x angle circle.
     Vec2 sum {};
     Vec2 center {};
@@ -562,7 +553,7 @@ std::optional<Candidate> FitPolygon(std::span<const Vec2> samples, float diagona
     corners.push_back(farthest);
     Simplify(samples, farthest, count, tolerance, corners);
     DropWeakCorners(samples, corners, true);
-    if (corners.size() < 3U || corners.size() > 6U) {
+    if (corners.size() < 3U || corners.size() > 4U) {
         return std::nullopt;
     }
 
@@ -603,18 +594,14 @@ std::optional<Candidate> FitPolygon(std::span<const Vec2> samples, float diagona
         return std::nullopt;
     }
 
-    RecognizedShapeKind kind = RecognizedShapeKind::Polygon;
+    RecognizedShapeKind kind = RecognizedShapeKind::Rectangle;
     if (sides == 3U) {
         kind = RecognizedShapeKind::Triangle;
         if (constrained) {
             vertices = SnapTriangle(vertices);
         }
-    } else if (sides == 4U) {
-        kind = RecognizedShapeKind::Quadrilateral;
-        if (std::optional<std::vector<Vec2>> rectangle = SnapRectangle(vertices, constrained)) {
-            kind = RecognizedShapeKind::Rectangle;
-            vertices = std::move(*rectangle);
-        }
+    } else {
+        vertices = SnapRectangle(vertices);
     }
     return Candidate { { kind, ClosedOutline(vertices) }, error.mean };
 }

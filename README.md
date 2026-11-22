@@ -96,7 +96,7 @@ decorations, so the band there never draws the in-client window buttons.
 ## Default Controls
 
 - `D` draw
-- While drawing, hold the pen still for half a second before lifting to snap the stroke to a shape: line, one-stroke arrow, circle, ellipse, triangle, rectangle or square, other four-sided shapes, and five- or six-sided polygons. Near-level ellipses and rectangles snap level. The original stroke stays faded under the shape until you lift the pen, then fades out. A stroke that fits no shape stays as drawn, and movement after the snap doesn't change the shape. Hold `Shift` (before the snap or while still holding) to perfect the shape: ellipses become circles, four-sided shapes become rectangles, and triangles become equilateral when nearly so, else right triangles
+- While drawing, hold the pen still for half a second before lifting to snap the stroke to a shape: line, one-stroke arrow, circle, ellipse, triangle, or rectangle or square (any four-sided stroke snaps to one with right-angle corners). Strokes with more corners are not snapped to polygons. Near-level ellipses and rectangles snap level. The original stroke stays faded under the shape until you lift the pen, then fades out. A stroke that fits no shape stays as drawn, and movement after the snap doesn't change the shape. Hold `Shift` (before the snap or while still holding) to perfect the shape: ellipses become circles, and triangles become equilateral when nearly so, else right triangles
 - `E` erase
 - `S` select
 - `M` move

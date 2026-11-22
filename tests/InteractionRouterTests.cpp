@@ -523,42 +523,45 @@ void TestStrokeSnapToShape() {
         Check(!router.SnapStrokeToShape() && host.ops.empty(), "the straight-line mode owns its stroke: no snap");
     }
     {
-        // Shift toggled over a held snapped trapezoid squares it into an
-        // axis-aligned rectangle; releasing Shift restores the fitted shape.
+        // Shift toggled over a held snapped ellipse perfects it into a circle;
+        // releasing Shift restores the fitted ellipse.
         RecordingHost host;
         host.screenToPage = pageUnits;
         ui::InteractionRouter router(host);
         router.SetTool(ui::Tool::Draw);
-        const QPointF corners[] = { { 150.0, 300.0 }, { 350.0, 300.0 }, { 300.0, 180.0 }, { 200.0, 180.0 }, { 150.0, 300.0 } };
-        router.HandlePointerPress(Press(corners[0].x(), corners[0].y()));
-        for (std::size_t side = 1; side < std::size(corners); ++side) {
-            for (int step = 1; step <= 50; ++step) {
-                const QPointF point = corners[side - 1] + ((corners[side] - corners[side - 1]) * (step / 50.0));
-                router.HandlePointerMove(Move(point.x(), point.y()));
-            }
+        const auto ellipsePoint = [](int step) {
+            const double angle = static_cast<double>(step) * 2.0 * 3.14159265358979323846 / 120.0;
+            return QPointF(300.0 + (120.0 * std::cos(angle)), 300.0 + (60.0 * std::sin(angle)));
+        };
+        router.HandlePointerPress(Press(ellipsePoint(0).x(), ellipsePoint(0).y()));
+        for (int step = 1; step <= 120; ++step) {
+            router.HandlePointerMove(Move(ellipsePoint(step).x(), ellipsePoint(step).y()));
         }
-        Check(router.SnapStrokeToShape(), "a held trapezoid snaps");
+        Check(router.SnapStrokeToShape(), "a held ellipse snaps");
         const std::vector<Vec2> fitted = host.replacedPoints;
         host.Reset();
         ui::InteractionModifiers shift;
         shift.snapLine = true;
         router.SetModifiers(shift);
-        float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
-        for (const Vec2 p : host.replacedPoints) {
-            minX = std::min(minX, p.x);
-            minY = std::min(minY, p.y);
-            maxX = std::max(maxX, p.x);
-            maxY = std::max(maxY, p.y);
+        const std::vector<Vec2>& circle = host.replacedPoints;
+        bool round = host.CountOp("ReplaceStrokePoints") == 1 && circle.size() > 2U;
+        double cx = 0.0, cy = 0.0;
+        for (std::size_t index = 0; round && index + 1U < circle.size(); ++index) {
+            cx += circle[index].x / static_cast<double>(circle.size() - 1U);
+            cy += circle[index].y / static_cast<double>(circle.size() - 1U);
         }
-        bool onBox = host.CountOp("ReplaceStrokePoints") == 1;
-        for (const Vec2 p : host.replacedPoints) {
-            onBox = onBox && (Near(p.x, minX) || Near(p.x, maxX) || Near(p.y, minY) || Near(p.y, maxY));
+        const double radius = round ? std::hypot(circle.front().x - cx, circle.front().y - cy) : 0.0;
+        for (const Vec2 p : circle) {
+            round = round && Near(std::hypot(p.x - cx, p.y - cy), radius, 0.01);
         }
-        Check(onBox, "pressing Shift re-snaps the held shape to a rectangle\n" + host.Dump());
+        Check(round && radius > 60.0 && radius < 120.0, "pressing Shift re-snaps the held ellipse to a circle\n" + host.Dump());
         host.Reset();
         router.SetModifiers({});
-        Check(host.CountOp("ReplaceStrokePoints") == 1 && host.replacedPoints.size() == fitted.size(),
-            "releasing Shift restores the fitted trapezoid");
+        bool restored = host.CountOp("ReplaceStrokePoints") == 1 && host.replacedPoints.size() == fitted.size();
+        for (std::size_t index = 0; restored && index < fitted.size(); ++index) {
+            restored = Near(host.replacedPoints[index].x, fitted[index].x) && Near(host.replacedPoints[index].y, fitted[index].y);
+        }
+        Check(restored, "releasing Shift restores the fitted ellipse");
     }
 }
 
