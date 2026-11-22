@@ -25,6 +25,7 @@
 #include <QTextEdit>
 #include <QVBoxLayout>
 #include <QWindow>
+#include <qpa/qwindowsysteminterface.h>
 
 #include "Unicode.h"
 #include "document/SelectionClipboardQt.h"
@@ -1820,10 +1821,60 @@ bool QtMainWindow::HandleNativeChromeMessage(void* message, qintptr* result) {
         // band: still inside the band keeps it, anywhere else hides it.
         UpdateToolbarAutoHideAtBoundary();
         return false;
+    case WM_NCPOINTERDOWN:
+    case WM_NCPOINTERUPDATE:
+    case WM_POINTERDOWN:
+    case WM_POINTERUPDATE:
+    case WM_POINTERLEAVE:
+        SyncPenClientArea(msg->message, msg->wParam, msg->lParam);
+        return false;
     default:
         break;
     }
     return false;
+}
+
+void QtMainWindow::SyncPenClientArea(unsigned int message, quintptr wParam, qintptr lParam) {
+    POINTER_INPUT_TYPE type = PT_POINTER;
+    if (GetPointerType(GET_POINTERID_WPARAM(wParam), &type) == FALSE || type != PT_PEN) {
+        return;
+    }
+    QWindow* window = windowHandle();
+    switch (message) {
+    case WM_NCPOINTERDOWN:
+    case WM_NCPOINTERUPDATE:
+        // Qt's pen enter/leave follows the window rectangle (WM_POINTERENTER /
+        // WM_POINTERLEAVE), not the client area the mouse path tracks.  Over the
+        // caption strip and the resize edges DefWindowProc shows its own arrow
+        // or resize cursor, and with no leave Qt never re-applies the widget
+        // cursor when the pen comes back.  Leave here like the mouse does, and
+        // deliver it now so the enter below cannot be merged with it.
+        if (penInClient_) {
+            penInClient_ = false;
+            penLeftForFrame_ = true;
+            QWindowSystemInterface::handleLeaveEvent(window);
+            QWindowSystemInterface::flushWindowSystemEvents();
+        }
+        return;
+    case WM_POINTERDOWN:
+    case WM_POINTERUPDATE:
+        if (penLeftForFrame_) {
+            penLeftForFrame_ = false;
+            // Native coordinates: the physical screen point the message carries.
+            const QPoint global(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            POINT client { global.x(), global.y() };
+            ScreenToClient(reinterpret_cast<HWND>(winId()), &client);
+            QWindowSystemInterface::handleEnterEvent(window, QPointF(client.x, client.y), QPointF(global));
+        }
+        penInClient_ = true;
+        return;
+    default:
+        // WM_POINTERLEAVE: Qt sends its own leave, and its own enter when the
+        // pen comes back into the window.
+        penInClient_ = false;
+        penLeftForFrame_ = false;
+        return;
+    }
 }
 
 void QtMainWindow::CompleteCaptionButtonCycle(ui::ToolbarControl released) {
