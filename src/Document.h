@@ -192,12 +192,13 @@ enum class DocumentKind : std::uint8_t {
 [[nodiscard]] RasterImage RotateRasterQuarterTurn(const RasterImage& raster, int quarterTurns);
 
 // Rotates every page coordinate-bearing object clockwise by quarter turns
-// about the page frame and swaps width/height for odd turns.  Strokes,
-// images (rotation accumulated) and the stored raster move with the page;
-// texts and LaTeX only accumulate their rotation, because their boxes come
-// from layout: the caller re-centres them on their measured bounds.
-// Page::rotationDegrees accumulates.  PDF source pages keep their source
-// indices - their background rotates at draw time.
+// about the page frame and swaps the page's width/height for odd turns.
+// Strokes and the stored raster move with the page; images keep their box
+// and turn about its centre (rotation accumulated); texts and LaTeX only
+// accumulate their rotation, because their boxes come from layout: the
+// caller re-centres them on their measured bounds.  Page::rotationDegrees
+// accumulates.  PDF source pages keep their source indices - their
+// background rotates at draw time.
 void RotatePageContents(Page& page, int quarterTurns);
 
 struct Page {

@@ -124,6 +124,9 @@ public:
     // (text::FitTextBox): an auto-width text keeps its alignment's anchor
     // and starts wrapping once it outgrows `maxAutoWidth` (page units).
     virtual void FitEditingText(const PageText& edited, float maxAutoWidth) = 0;
+    // Changes the alignment of the object under edit (one per object; the
+    // commit records it).  Its box stays where it is.
+    virtual void SetEditingTextAlignment(TextAlignment alignment) = 0;
     virtual void CommitTextEdit(PageText edited) = 0;
     virtual void CancelTextEdit() = 0;
     virtual void CommitLatexEdit(const QString& source) = 0;

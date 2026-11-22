@@ -955,6 +955,8 @@ add_test(NAME xpress_codec COMMAND cnote_xpress_codec_tests)
 add_executable(cnote_persistence_tests tests/PersistenceSemanticsTests.cpp)
 target_include_directories(cnote_persistence_tests PRIVATE src)
 target_compile_features(cnote_persistence_tests PRIVATE cxx_std_20)
+target_compile_definitions(cnote_persistence_tests PRIVATE
+    CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
 target_compile_options(cnote_persistence_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
 )

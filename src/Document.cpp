@@ -487,20 +487,18 @@ void RotatePageContents(Page& page, int quarterTurns) {
             point = RotatePointQuarterTurn(point, width, height, turns);
         }
     }
-    const auto rotateCenteredRect = [width, height, turns](float& x, float& y, float& rectWidth, float& rectHeight) {
-        const Vec2 center = RotatePointQuarterTurn({ x + rectWidth * 0.5f, y + rectHeight * 0.5f }, width, height, turns);
-        if (turns % 2 != 0) {
-            std::swap(rectWidth, rectHeight);
-        }
-        x = center.x - rectWidth * 0.5f;
-        y = center.y - rectHeight * 0.5f;
-    };
     const auto normalizeDegrees = [](float value) {
         const float wrapped = std::fmod(value, 360.0f);
         return wrapped < 0.0f ? wrapped + 360.0f : wrapped;
     };
     for (PageImage& image : page.images) {
-        rotateCenteredRect(image.x, image.y, image.width, image.height);
+        // The image draws into its own width x height box rotated about the
+        // box centre, so a turn moves the centre and adds to the rotation;
+        // swapping the box's sides as well stretched the pixels.
+        const Vec2 center = RotatePointQuarterTurn(
+            { image.x + image.width * 0.5f, image.y + image.height * 0.5f }, width, height, turns);
+        image.x = center.x - image.width * 0.5f;
+        image.y = center.y - image.height * 0.5f;
         image.rotationDegrees = normalizeDegrees(image.rotationDegrees + static_cast<float>(turns) * 90.0f);
     }
     for (PageText& text : page.texts) {

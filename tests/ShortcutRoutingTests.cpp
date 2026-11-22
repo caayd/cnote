@@ -1040,6 +1040,55 @@ void PendingTextFormatSeedsNewObjects() {
     }
 }
 
+// The popup's alignment while a text is edited aligns the whole object and
+// is committed with it; it used to align only the editor's paragraph and
+// never reach the model.
+void AlignmentChangedWhileEditingIsCommitted() {
+    Harness harness;
+    harness.window->AddTextObject();
+    QApplication::processEvents();
+    QTextEdit* editor = harness.canvas->TextEditor();
+    Check(editor != nullptr, "AddTextObject opens the editor for the alignment check");
+    if (editor == nullptr) {
+        return;
+    }
+    editor->setFocus(Qt::OtherFocusReason);
+    for (const char character : std::string("ab")) {
+        QTest::keyClick(harness.window->windowHandle(), character);
+    }
+    QTest::keyClick(harness.window->windowHandle(), Qt::Key_Return);
+    QTest::keyClick(harness.window->windowHandle(), 'c');
+    QApplication::processEvents();
+    const std::size_t pageIndex = harness.window->Controller().EditingPageIndex();
+    const std::size_t textIndex = harness.window->Controller().EditingTextIndex().value_or(0U);
+    const cnote::TextAlignment before = harness.window->Controller().EditingTextObject()->alignment;
+
+    emit harness.toolbar->TextAlignCycleRequested();
+    QApplication::processEvents();
+    const cnote::TextAlignment expected = before == cnote::TextAlignment::Left ? cnote::TextAlignment::Center
+        : (before == cnote::TextAlignment::Center ? cnote::TextAlignment::Right : cnote::TextAlignment::Left);
+    Check(harness.window->Controller().EditingTextObject()->alignment == expected,
+        "the alignment command aligns the object under edit");
+    const Qt::Alignment shown = editor->document()->defaultTextOption().alignment();
+    Check((expected == cnote::TextAlignment::Center && (shown & Qt::AlignHCenter))
+            || (expected == cnote::TextAlignment::Right && (shown & Qt::AlignRight))
+            || (expected == cnote::TextAlignment::Left && !(shown & (Qt::AlignHCenter | Qt::AlignRight))),
+        "the editor shows every paragraph with the new alignment");
+
+    harness.canvas->CommitActiveEdit();
+    QApplication::processEvents();
+    const cnote::PageText& committed = harness.window->Controller().DocumentRef().PageAt(pageIndex).texts[textIndex];
+    Check(committed.alignment == expected && committed.content == u"ab\nc",
+        "the commit keeps the alignment chosen while editing");
+
+    // Restore the pending alignment the command persisted (the cycle has three steps).
+    for (int step = 0; step < 3 && harness.toolbar->Settings().textAlignment != before; ++step) {
+        emit harness.toolbar->TextAlignCycleRequested();
+        QApplication::processEvents();
+    }
+    Check(harness.toolbar->Settings().textAlignment == before, "the pending alignment is restored");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1061,6 +1110,7 @@ int main(int argc, char** argv) {
     QuickActionsFireEverywhere();
     QuickPopupIsTextFormattingWhileEditing();
     PendingTextFormatSeedsNewObjects();
+    AlignmentChangedWhileEditingIsCommitted();
     FormatCommandsChangeOnlyTheirProperty();
     EditorKeepsCtrlBWhileEditingText();
     SelectionEnablesCopyAndCutImmediately();

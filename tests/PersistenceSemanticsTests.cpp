@@ -59,11 +59,13 @@
 #include "ProjectSession.h"
 #include "Unicode.h"
 #include "qt/QtDocumentController.h"
+#include "latex/LatexEngine.h"
 #include "qt/QtMainWindow.h"
 #include "settings/SettingsStoreQt.h"
 #include "render/PageRenderer.h"
 #include "shell/AppManager.h"
 #include "text/TextLayoutQt.h"
+#include "ui/SelectionMath.h"
 #include "ui/NewPageDialogQt.h"
 #include "ui/SettingsDialogQt.h"
 
@@ -894,28 +896,71 @@ void EditSessionCommitsAndUndoKeepsTheObject() {
         "finishing without a content source cancels instead of erasing");
 }
 
-// A page turn carries a text with the page: its box (stored width, laid-out
-// height) is re-centred on the turned centre and keeps the width it wraps at.
-void RotatedPageKeepsTextBox() {
+// A page turn carries every object with the page: its box (a text's stored
+// width and laid-out height, a formula's measured size, an image's stored
+// size) keeps its size and is re-centred on the turned centre, and the
+// object turns about that centre.  LaTeX used to be offset by half the
+// difference of its sides, and images had their sides swapped (stretched).
+void RotatedPageKeepsObjectBoxes() {
+    Check(cnote::latex::IsInitialized()
+            || cnote::latex::Initialize(std::filesystem::path(CNOTE_LATEX_RES_ROOT)),
+        "the LaTeX engine starts for the page-turn check");
     cnote::AppManager manager;
     cnote::qt::QtDocumentController controller(manager);
     controller.AttachSession(std::make_shared<cnote::ProjectSession>());
     cnote::Page& page = controller.Session()->document.CurrentPage();
     page.texts.push_back(MakeText(7, u"a text that wraps over lines"));
+    cnote::PageLatex latex {};
+    latex.id = 8;
+    latex.x = 300.0f;
+    latex.y = 400.0f;
+    latex.content = u"x^2 + y^2 + z^2 = r^2";
+    page.latexes.push_back(latex);
+    cnote::PageImage image {};
+    image.x = 50.0f;
+    image.y = 600.0f;
+    image.width = 160.0f;
+    image.height = 40.0f;
+    page.images.push_back(image);
     const float pageWidth = page.width;
     const float pageHeight = page.height;
-    const cnote::text::QtTextBounds before = cnote::text::MeasurePageTextBoundsQt(page.texts.front(), pageWidth);
-    const cnote::Vec2 expected = cnote::RotatePointQuarterTurn(
-        { (before.left + before.right) * 0.5f, (before.top + before.bottom) * 0.5f }, pageWidth, pageHeight, 1);
+
+    const auto turnedCentre = [&](float left, float top, float right, float bottom) {
+        return cnote::RotatePointQuarterTurn({ (left + right) * 0.5f, (top + bottom) * 0.5f }, pageWidth, pageHeight, 1);
+    };
+    const auto same = [](float a, float b) { return std::abs(a - b) < 0.01f; };
+    const cnote::text::QtTextBounds textBefore = cnote::text::MeasurePageTextBoundsQt(page.texts.front(), pageWidth);
+    const cnote::Vec2 textExpected = turnedCentre(textBefore.left, textBefore.top, textBefore.right, textBefore.bottom);
+    const cnote::ui::LatexBounds latexBefore = cnote::ui::MeasurePageLatexBounds(page.latexes.front(), pageWidth);
+    Check(latexBefore.right - latexBefore.left > 2.0f * (latexBefore.bottom - latexBefore.top),
+        "the formula is much wider than tall, so a swapped box would show");
+    const cnote::Vec2 latexExpected = turnedCentre(latexBefore.left, latexBefore.top, latexBefore.right, latexBefore.bottom);
+    const cnote::Vec2 imageExpected = turnedCentre(image.x, image.y, image.x + image.width, image.y + image.height);
 
     Check(controller.RotatePage(0, 1), "turn the page a quarter clockwise");
-    const cnote::PageText& turned = controller.DocumentRef().PageAt(0).texts.front();
-    const cnote::text::QtTextBounds after = cnote::text::MeasurePageTextBoundsQt(turned, pageHeight);
-    Check(turned.width == 120.0f, "a turned page keeps the text's wrap width");
-    Check(std::abs((after.left + after.right) * 0.5f - expected.x) < 0.01f
-            && std::abs((after.top + after.bottom) * 0.5f - expected.y) < 0.01f,
+    const cnote::Page& turnedPage = controller.DocumentRef().PageAt(0);
+
+    const cnote::PageText& text = turnedPage.texts.front();
+    const cnote::text::QtTextBounds textAfter = cnote::text::MeasurePageTextBoundsQt(text, pageHeight);
+    Check(text.width == 120.0f, "a turned page keeps the text's wrap width");
+    Check(same((textAfter.left + textAfter.right) * 0.5f, textExpected.x)
+            && same((textAfter.top + textAfter.bottom) * 0.5f, textExpected.y),
         "the text's box centre turns with the page");
-    Check(turned.rotationDegrees == 90.0f, "the text turns with the page");
+    Check(text.rotationDegrees == 90.0f, "the text turns with the page");
+
+    const cnote::ui::LatexBounds latexAfter = cnote::ui::MeasurePageLatexBounds(turnedPage.latexes.front(), pageHeight);
+    Check(same((latexAfter.left + latexAfter.right) * 0.5f, latexExpected.x)
+            && same((latexAfter.top + latexAfter.bottom) * 0.5f, latexExpected.y),
+        "the formula's box centre turns with the page");
+    Check(turnedPage.latexes.front().rotationDegrees == 90.0f, "the formula turns with the page");
+
+    const cnote::PageImage& turnedImage = turnedPage.images.front();
+    Check(turnedImage.width == 160.0f && turnedImage.height == 40.0f,
+        "the image keeps its box, so its pixels are not stretched");
+    Check(same(turnedImage.x + turnedImage.width * 0.5f, imageExpected.x)
+            && same(turnedImage.y + turnedImage.height * 0.5f, imageExpected.y),
+        "the image's centre turns with the page");
+    Check(turnedImage.rotationDegrees == 90.0f, "the image turns with the page");
 }
 
 void RemoteCommitCancelsTransientState() {
@@ -1102,7 +1147,7 @@ int main(int argc, char** argv) {
     CancelledUnsavedPromptKeepsWindowAlive();
 
     EditSessionCommitsAndUndoKeepsTheObject();
-    RotatedPageKeepsTextBox();
+    RotatedPageKeepsObjectBoxes();
     RemoteCommitCancelsTransientState();
     SaveToRefusesPdfContainer();
     SetCurrentPageIndexIsSerialized();

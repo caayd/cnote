@@ -217,6 +217,8 @@ public:
     // The widest a text typed or pasted on `pageIndex` grows to before it
     // wraps (page units), for the canvas as it is now: text::MaxAutoTextWidth.
     [[nodiscard]] float MaxAutoTextWidth(std::size_t pageIndex) const;
+    // Aligns the text under edit (the whole object, as the model stores it).
+    void SetTextEditAlignment(TextAlignment alignment);
     // Applies a style to the text overlay's current selection.
     void ApplyTextFormatToSelection(const PageTextStyle& style);
 
