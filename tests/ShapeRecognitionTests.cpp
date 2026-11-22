@@ -38,6 +38,7 @@ const char* KindName(std::optional<RecognizedShape> shape) {
     switch (shape->kind) {
     case RecognizedShapeKind::Line: return "line";
     case RecognizedShapeKind::Arrow: return "arrow";
+    case RecognizedShapeKind::Brace: return "brace";
     case RecognizedShapeKind::Ellipse: return "ellipse";
     case RecognizedShapeKind::Circle: return "circle";
     case RecognizedShapeKind::Triangle: return "triangle";
@@ -116,6 +117,25 @@ std::vector<Vec2> Arc(Vec2 center, float a, float b, float rotation, float start
             center.y + (x * std::sin(rotation)) + (y * std::cos(rotation)),
         });
     }
+    return points;
+}
+
+// A hand-drawn-style curly brace from `start` to `end`, its tip `depth` off
+// the chord's middle on the left of the start-to-end direction: each arm
+// leaves its end steeply and settles `arm` off the chord, and a pointed bump
+// in the middle reaches out to the tip.  Not the recognizer's own outline.
+std::vector<Vec2> Brace(Vec2 start, Vec2 end, float depth, float arm, float curl = 6.0f) {
+    const float length = Distance(start, end);
+    const Vec2 along { (end.x - start.x) / length, (end.y - start.y) / length };
+    const Vec2 normal { -along.y, along.x };
+    std::vector<Vec2> points;
+    for (float u = 0.0f; u <= length; u += 0.25f) {
+        const float rise = 1.0f - std::exp(-std::min(u, length - u) / curl);
+        const float bump = std::max(0.0f, 1.0f - (std::abs(u - (0.5f * length)) / 25.0f));
+        const float v = (arm * rise) + ((depth - arm) * bump * bump);
+        points.push_back({ start.x + (along.x * u) + (normal.x * v), start.y + (along.y * u) + (normal.y * v) });
+    }
+    points.push_back(end);
     return points;
 }
 
@@ -323,6 +343,44 @@ int main() {
         }
         Check(reachesTip && Distance(arrow->points.front(), { 100.0f, 400.0f }) < 4.0f,
             "the arrow starts at the tail and reaches the tip");
+    }
+
+    // --- braces -------------------------------------------------------------
+    // A "{" drawn top to bottom (tip on the left), a "}" drawn bottom to top,
+    // a brace under something and one at an angle.
+    const std::vector<Vec2> leftBrace = Brace({ 300.0f, 100.0f }, { 300.0f, 320.0f }, 45.0f, 20.0f);
+    CheckEverySeed("a { is a brace", RecognizedShapeKind::Brace, leftBrace, 1.0f);
+    CheckEverySeed("a } drawn upward is a brace", RecognizedShapeKind::Brace,
+        Brace({ 300.0f, 320.0f }, { 300.0f, 100.0f }, 40.0f, 18.0f), 1.0f);
+    CheckEverySeed("an underbrace is a brace", RecognizedShapeKind::Brace,
+        Brace({ 100.0f, 300.0f }, { 400.0f, 300.0f }, 40.0f, 18.0f), 1.0f);
+    CheckEverySeed("a tilted brace is a brace", RecognizedShapeKind::Brace,
+        Brace({ 100.0f, 100.0f }, { 280.0f, 220.0f }, 40.0f, 18.0f), 1.0f);
+    CheckEverySeed("a small brace is a brace", RecognizedShapeKind::Brace,
+        Brace({ 300.0f, 100.0f }, { 300.0f, 200.0f }, 22.0f, 10.0f, 4.0f), 1.0f);
+    CheckEverySeed("a lazily curled, shaky brace is a brace", RecognizedShapeKind::Brace,
+        Brace({ 300.0f, 100.0f }, { 300.0f, 320.0f }, 45.0f, 20.0f, 12.0f), 2.0f);
+    {
+        // Slightly off vertical: the snapped brace stands level between the
+        // drawn ends, its tip on the left at the drawn depth.
+        const std::optional<RecognizedShape> brace =
+            RecognizeShape(HandDrawn(Brace({ 300.0f, 100.0f }, { 310.0f, 320.0f }, 45.0f, 20.0f), 1.0f, 4U));
+        const Bounds b = Is(brace, RecognizedShapeKind::Brace) ? BoundsOf(brace->points) : Bounds {};
+        Check(Is(brace, RecognizedShapeKind::Brace) && std::abs(brace->points.front().x - brace->points.back().x) < 0.01f
+                && Distance(brace->points.front(), { 305.0f, 100.0f }) < 5.0f
+                && Distance(brace->points.back(), { 305.0f, 320.0f }) < 5.0f
+                && std::abs((brace->points.front().x - b.minX) - 45.0f) < 5.0f && b.maxX - brace->points.front().x < 0.01f,
+            "the brace snaps level, keeps its ends and tip depth and opens toward its ends");
+    }
+    {
+        // A "<" also turns sharply at its middle, but leaves its ends along
+        // the chord.
+        int braces = 0;
+        for (int seed = 1; seed <= kSeeds; ++seed) {
+            const std::vector<Vec2> chevron = Polyline({ { 300.0f, 100.0f }, { 255.0f, 210.0f }, { 300.0f, 320.0f } });
+            braces += Is(RecognizeShape(HandDrawn(chevron, 1.0f, static_cast<std::uint32_t>(seed))), RecognizedShapeKind::Brace) ? 1 : 0;
+        }
+        Check(braces == 0, "a < is not a brace: " + std::to_string(braces) + "/" + std::to_string(kSeeds));
     }
 
     // --- not shapes ---------------------------------------------------------

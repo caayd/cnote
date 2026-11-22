@@ -51,6 +51,18 @@ constexpr float kMinBarbAngle = 10.0f * kDegrees;
 constexpr float kMaxBarbAngle = 80.0f * kDegrees;
 constexpr float kMinBarbRatio = 0.05f;
 constexpr float kMaxBarbRatio = 0.6f;
+// Curly brace, measured against the chord between the stroke's ends: the tip
+// (the point farthest from the chord) lies within this fraction of the
+// chord's middle and this far out, relative to the chord; the stroke turns
+// at least this sharply at the tip and leaves both ends at least this steeply
+// off the chord (a "<" leaves along it).
+constexpr float kBraceTipCenterTolerance = 0.15f;
+constexpr float kMinBraceDepth = 0.08f;
+constexpr float kMaxBraceDepth = 0.5f;
+constexpr float kMinBraceTipTurn = 50.0f * kDegrees;
+constexpr float kMinBraceEndAngle = 35.0f * kDegrees;
+// Samples either side of the tip and from each end the turns are measured over.
+constexpr std::size_t kBraceTangentSpan = 4;
 // Output density: straight edges are subdivided at this spacing (page units),
 // ellipses drawn with this many segments.
 constexpr float kOutlineSpacing = 1.5f;
@@ -279,6 +291,13 @@ void DropWeakCorners(std::span<const Vec2> samples, std::vector<std::size_t>& co
     }
 }
 
+// The rotation that brings `angle` onto the nearest `offset + k * period`
+// when it is within kAxisSnapAngle of it, else 0.
+float AxisSnapDelta(float angle, float period, float offset) {
+    const float target = offset + (std::round((angle - offset) / period) * period);
+    return std::abs(target - angle) <= kAxisSnapAngle ? target - angle : 0.0f;
+}
+
 // ---------------------------------------------------------------- open -----
 
 std::optional<RecognizedShape> FitStraightLine(std::span<const Vec2> samples, float length) {
@@ -356,19 +375,115 @@ std::optional<RecognizedShape> FitArrow(std::span<const Vec2> samples, float dia
     return shape;
 }
 
+// Appends the arc of `radius` about `center` from angle `from` to `to`
+// (either direction), subdivided at kOutlineSpacing; `out` ends at its start.
+void AppendArc(std::vector<Vec2>& out, Vec2 center, float radius, float from, float to) {
+    const int steps = std::max(1, static_cast<int>(std::ceil(radius * std::abs(to - from) / kOutlineSpacing)));
+    for (int step = 1; step <= steps; ++step) {
+        const float angle = from + ((to - from) * static_cast<float>(step) / static_cast<float>(steps));
+        out.push_back(Add(center, Scale(Vec2 { std::cos(angle), std::sin(angle) }, radius)));
+    }
+}
+
+// The brace from `start` to `end` with its tip `depth` off the chord's middle
+// and its arms `arm` off the chord, on the side of `normal` (unit, square to
+// the chord).  Each half curls out of its end with radius `arm`, runs
+// parallel to the chord and curls into the tip with radius `depth - arm`.
+std::vector<Vec2> BraceOutline(Vec2 start, Vec2 end, Vec2 normal, float depth, float arm) {
+    const float length = Distance(start, end);
+    const Vec2 along = Normalized(Sub(end, start));
+    const float half = 0.5f * length;
+    const float tipRadius = depth - arm;
+    // Arcs are built in the chord frame (u along the chord, v toward the tip)
+    // and mapped out point by point.
+    std::vector<Vec2> local { { 0.0f, 0.0f } };
+    AppendArc(local, { arm, 0.0f }, arm, kPi, 0.5f * kPi);
+    AppendEdge(local, local.back(), { half - tipRadius, arm });
+    AppendArc(local, { half - tipRadius, depth }, tipRadius, -0.5f * kPi, 0.0f);
+    AppendArc(local, { half + tipRadius, depth }, tipRadius, kPi, 1.5f * kPi);
+    AppendEdge(local, local.back(), { length - arm, arm });
+    AppendArc(local, { length - arm, 0.0f }, arm, 0.5f * kPi, 0.0f);
+    std::vector<Vec2> points;
+    points.reserve(local.size());
+    for (const Vec2 p : local) {
+        points.push_back(Add(start, Add(Scale(along, p.x), Scale(normal, p.y))));
+    }
+    points.back() = end;
+    return points;
+}
+
+// A curly brace in any orientation, opening either way: the tip's depth and
+// the arms' mean offset from the chord are measured, the drawn stroke must
+// lie near the brace they describe, and the snapped brace is symmetric about
+// the chord's middle.  A near-level chord snaps level.
+std::optional<RecognizedShape> FitBrace(std::span<const Vec2> samples, float diagonal) {
+    const std::size_t count = samples.size();
+    const Vec2 start = samples.front();
+    const Vec2 end = samples.back();
+    const float length = Distance(start, end);
+    if (length < kMinStrokeLength || count <= 2U * kBraceTangentSpan) {
+        return std::nullopt;
+    }
+    const Vec2 along = Scale(Sub(end, start), 1.0f / length);
+    std::size_t tip = 0;
+    for (std::size_t index = 1; index < count; ++index) {
+        if (std::abs(Cross(along, Sub(samples[index], start))) > std::abs(Cross(along, Sub(samples[tip], start)))) {
+            tip = index;
+        }
+    }
+    const float signedDepth = Cross(along, Sub(samples[tip], start));
+    const float depth = std::abs(signedDepth);
+    const float tipAlong = Dot(along, Sub(samples[tip], start)) / length;
+    if (depth < kMinBraceDepth * length || depth > kMaxBraceDepth * length
+        || std::abs(tipAlong - 0.5f) > kBraceTipCenterTolerance || tip < kBraceTangentSpan
+        || tip + kBraceTangentSpan >= count) {
+        return std::nullopt;
+    }
+    if (AngleBetween(Sub(samples[tip], samples[tip - kBraceTangentSpan]), Sub(samples[tip + kBraceTangentSpan], samples[tip]))
+        < kMinBraceTipTurn) {
+        return std::nullopt;
+    }
+    const float minEndSine = std::sin(kMinBraceEndAngle);
+    const Vec2 leaving = Normalized(Sub(samples[kBraceTangentSpan], start));
+    const Vec2 arriving = Normalized(Sub(end, samples[count - 1U - kBraceTangentSpan]));
+    if (std::abs(Cross(along, leaving)) < minEndSine || std::abs(Cross(along, arriving)) < minEndSine) {
+        return std::nullopt;
+    }
+
+    // The arms: the mean offset of the samples a sixth to a third of the way
+    // in from either end, kept clear of the curls' degenerate extremes.
+    const float side = signedDepth > 0.0f ? 1.0f : -1.0f;
+    float armSum = 0.0f;
+    int armCount = 0;
+    for (const Vec2 sample : samples) {
+        const float t = Dot(along, Sub(sample, start)) / length;
+        if ((t >= 1.0f / 6.0f && t <= 1.0f / 3.0f) || (t >= 2.0f / 3.0f && t <= 5.0f / 6.0f)) {
+            armSum += side * Cross(along, Sub(sample, start));
+            ++armCount;
+        }
+    }
+    if (armCount == 0) {
+        return std::nullopt;
+    }
+    const float arm = std::clamp(armSum / static_cast<float>(armCount), 0.25f * depth, 0.75f * depth);
+    const Vec2 normal = Scale(Vec2 { -along.y, along.x }, side);
+    if (!Acceptable(PolylineError(samples, BraceOutline(start, end, normal, depth, arm)), diagonal)) {
+        return std::nullopt;
+    }
+
+    const Vec2 middle = Lerp(start, end, 0.5f);
+    const float level = AxisSnapDelta(std::atan2(along.y, along.x), 0.5f * kPi, 0.0f);
+    return RecognizedShape { RecognizedShapeKind::Brace,
+        BraceOutline(Add(middle, Rotate(Sub(start, middle), level)), Add(middle, Rotate(Sub(end, middle), level)),
+            Rotate(normal, level), depth, arm) };
+}
+
 // -------------------------------------------------------------- closed -----
 
 struct Candidate {
     RecognizedShape shape;
     float meanError = 0.0f;
 };
-
-// The rotation that brings `angle` onto the nearest `offset + k * period`
-// when it is within kAxisSnapAngle of it, else 0.
-float AxisSnapDelta(float angle, float period, float offset) {
-    const float target = offset + (std::round((angle - offset) / period) * period);
-    return std::abs(target - angle) <= kAxisSnapAngle ? target - angle : 0.0f;
-}
 
 // Least-squares ellipse: centroid and principal axes from the samples, then
 // the semi-axes solving min sum (A x^2 + B y^2 - 1)^2 in the axis frame.  A
@@ -653,10 +768,16 @@ std::optional<RecognizedShape> RecognizeShape(const std::vector<Vec2>& points, b
         return std::nullopt;
     }
 
+    // A shallow brace is also nearly straight, so it is tested first; its
+    // pointed middle and steep ends rule out a wobbly line.
+    const float diagonal = Diagonal(samples);
+    if (std::optional<RecognizedShape> brace = FitBrace(samples, diagonal)) {
+        return brace;
+    }
     if (std::optional<RecognizedShape> line = FitStraightLine(samples, length)) {
         return line;
     }
-    return FitArrow(samples, Diagonal(samples));
+    return FitArrow(samples, diagonal);
 }
 
 }  // namespace cnote

@@ -15,14 +15,15 @@ namespace cnote {
 // There is no classifier: the fit itself yields the exact geometry the snapped
 // stroke is drawn with, and a stroke nothing fits well is left alone.
 //
-// Open strokes are tested as a line or a one-stroke arrow (shaft, one barb,
-// back to the tip, the other barb).  Closed strokes are tested as an ellipse
-// and as a polygon of 3 or 4 corners; the lower error wins.  An outline with
-// more corners is only ever an ellipse, so a lumpy oval never snaps to a
-// many-sided polygon.
+// Open strokes are tested as a line, a one-stroke arrow (shaft, one barb,
+// back to the tip, the other barb) or a curly brace.  Closed strokes are
+// tested as an ellipse and as a polygon of 3 or 4 corners; the lower error
+// wins.  An outline with more corners is only ever an ellipse, so a lumpy
+// oval never snaps to a many-sided polygon.
 enum class RecognizedShapeKind : std::uint8_t {
     Line,
     Arrow,
+    Brace,      // a curly brace in any orientation, opening either way
     Ellipse,
     Circle,
     Triangle,
