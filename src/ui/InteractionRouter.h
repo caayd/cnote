@@ -365,8 +365,8 @@ public:
     // back and marquee/lasso overlays are hidden.  Idempotent.
     void CancelInteraction();
     // Hold-to-snap: replaces the live freehand stroke with the shape
-    // RecognizeShape fits to it, with squared corners while Shift (snapLine)
-    // is held.  The canvas calls this once the pointer has rested mid-stroke;
+    // RecognizeShape fits to it, perfecting circles and triangles while Shift
+    // (snapLine) is held.  The canvas calls this once the pointer has rested mid-stroke;
     // returns false (stroke unchanged) when no stroke is live, the
     // straight-line/oval mode owns it, it already snapped, or no shape fits.
     // A snapped stroke ignores further movement until release; toggling

@@ -17,16 +17,16 @@ namespace cnote {
 //
 // Open strokes are tested as a line or a one-stroke arrow (shaft, one barb,
 // back to the tip, the other barb).  Closed strokes are tested as an ellipse
-// and as a polygon of 3 to 6 corners; the lower error wins.
+// and as a polygon of 3 or 4 corners; the lower error wins.  An outline with
+// more corners is only ever an ellipse, so a lumpy oval never snaps to a
+// many-sided polygon.
 enum class RecognizedShapeKind : std::uint8_t {
     Line,
     Arrow,
     Ellipse,
     Circle,
     Triangle,
-    Rectangle,      // rectangles and squares, rotated or not
-    Quadrilateral,  // four corners that are not a rectangle
-    Polygon,        // five or six corners
+    Rectangle,  // any four corners, squared into a rectangle or square, rotated or not
 };
 
 struct RecognizedShape {
@@ -39,8 +39,8 @@ struct RecognizedShape {
 };
 
 // `constrained` (Shift held) perfects the shape: an ellipse becomes a circle,
-// any four-sided shape a rectangle, and a triangle equilateral when its angles
-// are all near 60 degrees, else a right triangle squared at its widest corner.
+// and a triangle equilateral when its angles are all near 60 degrees, else a
+// right triangle squared at its widest corner.  Four corners always square up.
 [[nodiscard]] std::optional<RecognizedShape> RecognizeShape(const std::vector<Vec2>& points, bool constrained = false);
 
 }  // namespace cnote
