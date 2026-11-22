@@ -495,7 +495,10 @@ public:
         setObjectName(QStringLiteral("cnoteTextFormatPopup"));
         setAttribute(Qt::WA_TranslucentBackground);
         setAttribute(Qt::WA_NoSystemBackground);
-        setFocusPolicy(Qt::StrongFocus);
+        // Mouse-only and opened over a live text edit: clicking a button must
+        // leave the keyboard with the editor (typing, Ctrl+Enter, Escape), as
+        // Excalidraw's property panel leaves it with its textarea.
+        setFocusPolicy(Qt::NoFocus);
         setMouseTracking(true);
     }
 

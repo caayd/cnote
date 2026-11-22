@@ -499,6 +499,37 @@ void QuickPopupIsTextFormattingWhileEditing() {
     Check(!harness.toolbar->QuickSizePopupVisible(), "Ctrl+W while editing text does not open the brush popup");
 }
 
+// Clicking the text-format popup used to move the keyboard focus to the
+// popup, which then hid with Ctrl+W and left focus nowhere: typing,
+// Ctrl+Enter and Escape did nothing until the text was clicked again.
+void TextFormatPopupLeavesFocusWithEditor() {
+    Harness harness;
+    harness.window->AddTextObject();
+    QApplication::processEvents();
+    QTextEdit* editor = harness.canvas->TextEditor();
+    Check(editor != nullptr, "AddTextObject opens the editor for the popup focus check");
+    if (editor == nullptr) {
+        return;
+    }
+    editor->setFocus(Qt::OtherFocusReason);
+    harness.Press(Qt::Key_A);
+    harness.Press(Qt::Key_W, Qt::ControlModifier);
+    Check(harness.toolbar->TextFormatPopupVisible(), "Ctrl+W opens the text-format popup over the edit");
+
+    QTest::mouseClick(harness.window->windowHandle(), Qt::LeftButton, Qt::NoModifier,
+        harness.toolbar->TextFormatPopupBounds().center());
+    QApplication::processEvents();
+    Check(QApplication::focusWidget() == editor, "clicking the popup leaves the keyboard with the editor");
+
+    harness.Press(Qt::Key_W, Qt::ControlModifier);
+    Check(!harness.toolbar->TextFormatPopupVisible(), "Ctrl+W closes the popup again");
+    Check(QApplication::focusWidget() == editor, "the editor keeps the keyboard once the popup closes");
+    harness.Press(Qt::Key_B);
+    Check(harness.canvas->CaptureEditedText().content == u"ab", "typing after the popup goes into the text");
+    harness.Press(Qt::Key_Return, Qt::ControlModifier);
+    Check(!harness.canvas->EditOverlayActive(), "Ctrl+Enter after the popup commits the edit");
+}
+
 void EditorKeepsCtrlBWhileEditingText() {
     // Reference precedence (TextEditProc, MessageLoop.cpp): ctrl+B inside a text
     // edit is the editor's bold command, so the sidebar toggle must not steal it.
@@ -1109,6 +1140,7 @@ int main(int argc, char** argv) {
     PageNavigationIsGatedWhileEditing();
     QuickActionsFireEverywhere();
     QuickPopupIsTextFormattingWhileEditing();
+    TextFormatPopupLeavesFocusWithEditor();
     PendingTextFormatSeedsNewObjects();
     AlignmentChangedWhileEditingIsCommitted();
     FormatCommandsChangeOnlyTheirProperty();
