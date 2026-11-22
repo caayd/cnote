@@ -118,6 +118,7 @@ enum class InteractionKind {
     MoveSelection,
     Transform,
     PendingTextClick,
+    TextCreate,
 };
 
 enum class CancelReason {
@@ -165,6 +166,13 @@ struct PageHit {
     float scale = 1.0f;
 };
 
+// The fixed-width text box a text-tool drag would create, in page units.
+struct TextBoxPreview {
+    std::size_t pageIndex = 0;
+    Vec2 topLeft {};
+    float width = 0.0f;
+};
+
 struct TransformRequest {
     TransformTarget target = TransformTarget::Stroke;
     std::size_t pageIndex = 0;
@@ -189,6 +197,10 @@ struct SelectionHit {
 inline constexpr double kSelectionClickRadius = 18.0;   // Selection.cpp:1269
 inline constexpr double kLassoPointSpacing = 6.0;       // Selection.cpp:1252 (36.0 squared)
 inline constexpr double kTextEditDragThreshold = 5.0;   // Selection.cpp:1652 (25.0 squared)
+// Excalidraw TEXT_AUTOWRAP_THRESHOLD: how far a text-tool press must travel
+// sideways before it sizes a wrapping text instead of creating a growing one
+// (wider than a click's jitter, so fast clicks don't make narrow texts).
+inline constexpr double kTextAutowrapThreshold = 36.0;
 inline constexpr float kPendingEraseOpacity = 0.5f;     // App.cpp:172
 inline constexpr int kWheelScrollLines = 3;             // MessageLoop.cpp:54 fallback
 inline constexpr int kWheelScrollUnitPixels = 18;       // MessageLoop.cpp:57
@@ -306,7 +318,11 @@ public:
 
     // --- editing sessions -------------------------------------------------
     virtual void BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) = 0;
-    virtual void CreateTextAt(std::size_t pageIndex, Vec2 pagePoint) = 0;
+    // `width` 0 creates a text that grows with its content; anything else a
+    // text that wraps at that width.
+    virtual void CreateTextAt(std::size_t pageIndex, Vec2 pagePoint, float width) = 0;
+    // The box a text-tool drag is sizing; nullopt drops it.
+    virtual void UpdateTextCreatePreview(std::optional<TextBoxPreview> preview) = 0;
     virtual void BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex) = 0;
     virtual void CreateLatexAt(std::size_t pageIndex, Vec2 pagePoint) = 0;
 };
@@ -383,6 +399,8 @@ private:
     void UpdatePan(const QPointF& logical);
     void EndPan();
     void BeginTextTool(const QPointF& logical);
+    void UpdateTextCreate(const QPointF& logical);
+    void EndTextCreate(bool create);
     void BeginLatexTool(const QPointF& logical);
     void UpdateCapture();
     // The only transition back to None: forgets every payload, so no ending
@@ -424,6 +442,18 @@ private:
             std::optional<std::size_t> textIndex;
             QPointF position {};
         };
+        // A text-tool press on the page, decided on release: a click creates a
+        // growing text at `anchor`; a drag past kTextAutowrapThreshold sizes a
+        // wrapping one from `anchor` towards the pointer (Excalidraw's
+        // dragNewTextElement, which never turns back into a growing one).
+        struct TextCreateData {
+            std::size_t pageIndex = 0;
+            QPointF origin {};
+            Vec2 anchor {};
+            bool sized = false;
+            Vec2 topLeft {};
+            float width = 0.0f;
+        };
 
         InteractionKind kind = InteractionKind::None;
         PanData pan;
@@ -432,6 +462,7 @@ private:
         SelectData select;
         MoveData move;
         PendingTextClickData pendingTextClick;
+        TextCreateData textCreate;
     };
 
     InteractionHost& host_;

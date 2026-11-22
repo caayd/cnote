@@ -3,6 +3,7 @@
 // Exercises the UTF-16 <-> QTextDocument offset mapping, style conversion,
 // commit normalization and LaTeX editing decisions with the plan's real cases.
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -38,12 +39,93 @@ cnote::PageText MakeUnicodeText() {
     text.x = 10.0f;
     text.y = 20.0f;
     text.width = 180.0f;
-    text.height = 60.0f;
     text.fontSize = 20.0f;
     text.color = 0xFF0000FFU;
     text.content = u"A\U0001F600B\r\n\u03B1";
     text.styleSpans.push_back({ 3U, 1U, { 20.0f, 0xFFFF0000U, cnote::TextFontFamily::Sans, false, false, false } });
     return text;
+}
+
+float BoxWidth(const cnote::PageText& text) {
+    const cnote::text::QtTextBounds bounds = cnote::text::MeasurePageTextBoundsQt(text, 0.0f);
+    return bounds.right - bounds.left;
+}
+
+float BoxHeight(const cnote::PageText& text) {
+    const cnote::text::QtTextBounds bounds = cnote::text::MeasurePageTextBoundsQt(text, 0.0f);
+    return bounds.bottom - bounds.top;
+}
+
+cnote::PageText Typed(cnote::PageText text, std::u16string content) {
+    text.content = std::move(content);
+    return text;
+}
+
+// Excalidraw's free-text sizing (refreshTextDimensions, getMaxTextWidth).
+void TestTextBoxFit() {
+    using cnote::text::FitTextBox;
+    cnote::PageText start {};
+    start.x = 100.0f;
+    start.y = 50.0f;
+    start.fontSize = 20.0f;
+    start.content = u"short";
+
+    const cnote::PageText grown = FitTextBox(start, Typed(start, u"a longer line"), 1000.0f);
+    Check(grown.width == 0.0f && grown.x == 100.0f && grown.y == 50.0f,
+        "a left-aligned text below the limit keeps growing rightwards from its left edge");
+
+    const float limit = BoxWidth(start) + 20.0f;
+    const cnote::PageText wrapped = FitTextBox(start, Typed(start, u"short words that run far past the limit"), limit);
+    Check(wrapped.width == limit, "a text outgrowing the limit starts wrapping at the limit");
+    Check(BoxWidth(wrapped) == limit && BoxHeight(wrapped) > BoxHeight(start),
+        "the wrapped text is as wide as the limit and taller by its wrapped lines");
+    Check(wrapped.x == 100.0f && wrapped.y == 50.0f, "starting to wrap keeps a left-aligned text's top-left");
+
+    cnote::PageText wide = start;
+    wide.content = u"already wider than the limit";
+    const cnote::PageText kept = FitTextBox(wide, Typed(wide, u"already wider than the limit, still typing"), BoxWidth(start));
+    Check(kept.width == 0.0f, "a text already wider than the limit keeps growing instead of wrapping");
+
+    cnote::PageText centred = start;
+    centred.alignment = cnote::TextAlignment::Center;
+    const cnote::PageText centredGrown = FitTextBox(centred, Typed(centred, u"short and longer"), 0.0f);
+    Check(std::abs((centredGrown.x + BoxWidth(centredGrown) * 0.5f) - (centred.x + BoxWidth(centred) * 0.5f)) < 0.001f
+            && centredGrown.x < centred.x,
+        "a centred text grows on both sides of its centre");
+
+    cnote::PageText right = start;
+    right.alignment = cnote::TextAlignment::Right;
+    const cnote::PageText rightGrown = FitTextBox(right, Typed(right, u"short and longer"), 0.0f);
+    Check(std::abs((rightGrown.x + BoxWidth(rightGrown)) - (right.x + BoxWidth(right))) < 0.001f,
+        "a right-aligned text grows leftwards from its right edge");
+
+    // Rotated about its box centre: a new line moves the centre, so the box
+    // is moved to keep the anchor (the rotated top-left corner) on the page.
+    cnote::PageText rotated = start;
+    rotated.rotationDegrees = 90.0f;
+    const cnote::PageText rotatedGrown = FitTextBox(rotated, Typed(rotated, u"short\nsecond line here"), 0.0f);
+    const auto topLeftOnPage = [](const cnote::PageText& text) {
+        const float w = BoxWidth(text);
+        const float h = BoxHeight(text);
+        const float radians = text.rotationDegrees * 0.017453292519943295f;
+        const float dx = -w * 0.5f;
+        const float dy = -h * 0.5f;
+        return cnote::Vec2 {
+            text.x + w * 0.5f + dx * std::cos(radians) - dy * std::sin(radians),
+            text.y + h * 0.5f + dx * std::sin(radians) + dy * std::cos(radians),
+        };
+    };
+    const cnote::Vec2 anchorBefore = topLeftOnPage(rotated);
+    const cnote::Vec2 anchorAfter = topLeftOnPage(rotatedGrown);
+    Check(std::abs(anchorBefore.x - anchorAfter.x) < 0.01f && std::abs(anchorBefore.y - anchorAfter.y) < 0.01f,
+        "a rotated text keeps its anchor in place as it grows");
+
+    Check(cnote::text::MaxAutoTextWidth(1400.0f, 2.0f) == 680.0f,
+        "the limit is the padded visible canvas in page units when that is narrower");
+    Check(cnote::text::MaxAutoTextWidth(3000.0f, 1.0f) == 800.0f, "the limit caps at 800 page units at scale 1");
+    Check(cnote::text::MaxAutoTextWidth(3000.0f, 0.5f) == 1600.0f,
+        "zoomed out, the cap is 800 on screen");
+    Check(cnote::text::MaxAutoTextWidth(9000.0f, 0.25f) == 2000.0f, "zoomed far out, the cap stops at 2000 page units");
 }
 
 }  // namespace
@@ -346,6 +428,8 @@ int main(int argc, char** argv) {
         Check(!recoveredLayout.lines.empty(), "the recovered layout keeps its content");
         cnote::latex::Shutdown();
     }
+
+    TestTextBoxFit();
 
     std::printf(g_failures == 0 ? "ALL TEXT EDITING CHECKS PASSED\n" : "%d TEXT EDITING CHECK(S) FAILED\n", g_failures);
     return g_failures == 0 ? 0 : 1;

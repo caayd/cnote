@@ -177,8 +177,13 @@ public:
     void BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) override {
         ops.push_back("BeginTextEdit(" + std::to_string(pageIndex) + "," + std::to_string(textIndex) + ")");
     }
-    void CreateTextAt(std::size_t pageIndex, Vec2 pagePoint) override {
-        ops.push_back("CreateTextAt(" + std::to_string(pageIndex) + "," + Format(pagePoint) + ")");
+    void CreateTextAt(std::size_t pageIndex, Vec2 pagePoint, float width) override {
+        ops.push_back("CreateTextAt(" + std::to_string(pageIndex) + "," + Format(pagePoint) + "," + Format(width) + ")");
+    }
+    void UpdateTextCreatePreview(std::optional<ui::TextBoxPreview> preview) override {
+        ops.push_back(preview.has_value()
+            ? "UpdateTextCreatePreview(" + Format(preview->topLeft) + "," + Format(preview->width) + ")"
+            : std::string("UpdateTextCreatePreview(none)"));
     }
     void BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex) override {
         ops.push_back("BeginLatexEdit(" + std::to_string(pageIndex) + "," + std::to_string(latexIndex) + ")");
@@ -311,7 +316,9 @@ void TestToolRouting() {
         ui::InteractionRouter router(host);
         router.SetTool(ui::Tool::Text);
         router.HandlePointerPress(Press(50.0, 50.0));
-        Check(host.HasOp("CreateTextAt(0,(0.500,0.500))"), "text tool creates a text box on the page\n" + host.Dump());
+        Check(!host.HasOp("CreateTextAt"), "the text tool waits for the release before creating\n" + host.Dump());
+        router.HandlePointerRelease(Release(50.0, 50.0));
+        Check(host.HasOp("CreateTextAt(0,(0.500,0.500),0.000)"), "a text-tool click creates a growing text on the page\n" + host.Dump());
         const int clear = host.IndexOfOp("ClearSelection");
         const int create = host.IndexOfOp("CreateTextAt");
         Check(clear >= 0 && clear < create, "creating a text clears the selection frame first\n" + host.Dump());
@@ -1074,6 +1081,20 @@ void TestCancelInteraction() {
         Check(host.CountOp("CancelTransform") == 1, "cancelling a transform rolls the page gesture back\n" + host.Dump());
         Check(host.CountOp("CommitTransform") == 0, "cancelling a transform never commits it");
     }
+    {
+        RecordingHost host;
+        host.screenToPage = [](const QPointF& logical, bool) {
+            return Vec2 { static_cast<float>(logical.x()), static_cast<float>(logical.y()) };
+        };
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Text);
+        router.HandlePointerPress(Press(50.0, 50.0));
+        router.HandlePointerMove(Move(250.0, 60.0));
+        host.Reset();
+        router.CancelInteraction();
+        Check(host.HasOp("UpdateTextCreatePreview(none)"), "cancelling a text drag drops its preview\n" + host.Dump());
+        Check(!host.HasOp("CreateTextAt"), "cancelling a text drag creates nothing");
+    }
 }
 
 // A dotted stroke keeps its style across a page crossing, and the crossing
@@ -1191,6 +1212,75 @@ void TestWheelIntents() {
     Check(!router.HandleWheel(empty), "an empty wheel event is not consumed");
 }
 
+// Excalidraw's text tool: a click makes a text that grows with its content; a
+// sideways drag past TEXT_AUTOWRAP_THRESHOLD sizes one that wraps, away from
+// the press, and stays sized even if the pointer comes back.
+void TestTextToolDragSizesWidth() {
+    const auto identity = [](const QPointF& logical, bool) {
+        return Vec2 { static_cast<float>(logical.x()), static_cast<float>(logical.y()) };
+    };
+    {
+        RecordingHost host;
+        host.screenToPage = identity;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Text);
+        router.HandlePointerPress(Press(100.0, 50.0));
+        router.HandlePointerMove(Move(130.0, 80.0));
+        router.HandlePointerRelease(Release(130.0, 80.0));
+        Check(host.HasOp("CreateTextAt(0,(100.000,50.000),0.000)"),
+            "a drag within the autowrap threshold still creates a growing text at the press\n" + host.Dump());
+        Check(!host.HasOp("UpdateTextCreatePreview"), "no box is previewed below the threshold\n" + host.Dump());
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = identity;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Text);
+        router.HandlePointerPress(Press(100.0, 50.0));
+        router.HandlePointerMove(Move(300.0, 90.0));
+        Check(host.HasOp("UpdateTextCreatePreview((100.000,50.000),200.000)"),
+            "a rightward drag previews a box from the press to the pointer\n" + host.Dump());
+        router.HandlePointerRelease(Release(300.0, 90.0));
+        Check(host.HasOp("CreateTextAt(0,(100.000,50.000),200.000)"),
+            "releasing creates a text wrapping at the dragged width\n" + host.Dump());
+        Check(host.IndexOfOp("UpdateTextCreatePreview(none)") < host.IndexOfOp("CreateTextAt"),
+            "the preview goes before the editor opens\n" + host.Dump());
+        Check(!router.IsInteractionActive(), "the release ends the interaction");
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = identity;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Text);
+        router.HandlePointerPress(Press(300.0, 50.0));
+        router.HandlePointerRelease(Release(150.0, 50.0));
+        Check(host.HasOp("CreateTextAt(0,(150.000,50.000),150.000)"),
+            "a leftward drag keeps the box's right edge at the press\n" + host.Dump());
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = identity;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Text);
+        router.HandlePointerPress(Press(100.0, 50.0));
+        router.HandlePointerMove(Move(200.0, 50.0));
+        router.HandlePointerRelease(Release(103.0, 50.0));
+        Check(host.HasOp("CreateTextAt(0,(100.000,50.000),10.000)"),
+            "a drag that comes back keeps a fixed width, at least the minimum\n" + host.Dump());
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = identity;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Text);
+        router.HandlePointerPress(Press(100.0, 50.0));
+        router.HandlePointerMove(Move(300.0, 50.0));
+        router.FinishInteraction();
+        Check(host.HasOp("UpdateTextCreatePreview(none)") && !host.HasOp("CreateTextAt"),
+            "losing the pointer mid-drag drops the preview and opens no editor\n" + host.Dump());
+    }
+}
+
 // The reference values the router carries, asserted directly: these are the
 // quantities that would drift silently if someone edited a constant.
 void TestPortedReferenceValues() {
@@ -1248,6 +1338,7 @@ int main() {
     TestSelectionLassoClickVersusLoop();
     TestSelectionPrecedence();
     TestTextClickVersusDrag();
+    TestTextToolDragSizesWidth();
     TestAltCloneMove();
     TestFinishInteractionIdempotent();
     TestMiddlePressFinishesLiveInteraction();

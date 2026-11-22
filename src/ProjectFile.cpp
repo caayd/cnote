@@ -358,7 +358,9 @@ void AppendText(std::vector<std::uint8_t>& output, const PageText& text) {
     AppendValue(output, text.x);
     AppendValue(output, text.y);
     AppendValue(output, text.width);
-    AppendValue(output, text.height);
+    // Retired stored height: the box is always as tall as its content.  The
+    // slot stays so older builds still read the file (0 there means "fit").
+    AppendValue(output, 0.0f);
     AppendValue(output, text.fontSize);
     AppendValue(output, text.rotationDegrees);
     AppendValue(output, text.color);
@@ -408,12 +410,13 @@ bool ReadText(ByteReader& reader, std::uint32_t version, PageText& text) {
     std::uint8_t fontFamily = 0;
     std::uint8_t styleFlags = 0;
     std::uint8_t reserved = 0;
+    float retiredHeight = 0.0f;
     const bool hasId = version < 13U || reader.Read(text.id);
     const bool ok = hasId
         && reader.Read(text.x)
         && reader.Read(text.y)
         && reader.Read(text.width)
-        && reader.Read(text.height)
+        && reader.Read(retiredHeight)
         && reader.Read(text.fontSize)
         && (version < 15U || reader.Read(text.rotationDegrees))
         && reader.Read(text.color)
@@ -641,10 +644,11 @@ std::optional<Document> LoadProjectPayload(
                     return std::nullopt;
                 }
             } else if (version >= 7U) {
+                float retiredHeight = 0.0f;
                 if (!reader.Read(text.x)
                     || !reader.Read(text.y)
                     || !reader.Read(text.width)
-                    || !reader.Read(text.height)
+                    || !reader.Read(retiredHeight)
                     || !reader.Read(text.fontSize)
                     || !reader.Read(text.color)
                     || !reader.ReadString(text.content)) {
@@ -659,7 +663,6 @@ std::optional<Document> LoadProjectPayload(
                     || !reader.ReadString(text.content)) {
                     return std::nullopt;
                 }
-                text.height = 0.0f;
             } else {
                 if (!reader.Read(text.x)
                     || !reader.Read(text.y)
@@ -669,7 +672,6 @@ std::optional<Document> LoadProjectPayload(
                     return std::nullopt;
                 }
                 text.width = 0.0f;
-                text.height = 0.0f;
             }
             if (version >= 13U) {
                 page.texts.push_back(std::move(text));

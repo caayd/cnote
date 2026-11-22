@@ -1230,10 +1230,13 @@ void QtMainWindow::PasteSelection() {
             }
             const std::size_t page = controller_.CurrentPageIndex();
             const Vec2 target = canvas_->ScreenToPage(canvas_->rect().center(), true);
-            const std::size_t index = controller_.AddTextObject(page, target, 24.0f);
+            const std::size_t index = controller_.AddTextObject(page, target, 24.0f, 0.0f);
             PageText text = *controller_.EditingTextObject();
             text.content = Utf8ToUtf16(content.text.toUtf8().toStdString());
             text.styleSpans.clear();
+            // A pasted text wraps where a typed one would (Excalidraw's paste
+            // uses the same getMaxTextWidth).
+            controller_.FitEditingText(text, canvas_->MaxAutoTextWidth(page));
             controller_.CommitTextEdit(text);
             (void)index;
             canvas_->NotifyDocumentChanged();
@@ -1461,7 +1464,7 @@ void QtMainWindow::AddTextObject() {
     // Static text size like the text tool's CreateTextAt: the pending preset
     // (page units) is stored verbatim, no zoom scaling.
     controller_.AddTextObject(pageIndex, point,
-        std::max(1.0f, controller_.InputSettings().textFontSize));
+        std::max(1.0f, controller_.InputSettings().textFontSize), 0.0f);
     canvas_->SyncEditOverlay();
     UpdateChrome();
 }

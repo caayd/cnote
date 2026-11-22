@@ -610,7 +610,6 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
         hash = HashFloat(hash, text.x);
         hash = HashFloat(hash, text.y);
         hash = HashFloat(hash, text.width);
-        hash = HashFloat(hash, text.height);
         hash = HashFloat(hash, text.rotationDegrees);
     }
 

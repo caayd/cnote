@@ -235,6 +235,9 @@ void InteractionRouter::HandlePointerMove(const PointerSample& sample) {
     case InteractionKind::PendingTextClick:
         UpdateMoveSelection(sample);
         return;
+    case InteractionKind::TextCreate:
+        UpdateTextCreate(sample.position);
+        return;
     case InteractionKind::Stroke:
         if (ApplyStrokePoint(sample.position)) {
             host_.InvalidateCanvas();
@@ -293,6 +296,10 @@ void InteractionRouter::HandlePointerRelease(const PointerSample& sample) {
         host_.InvalidateCanvas();
         return;
     }
+    case InteractionKind::TextCreate:
+        UpdateTextCreate(sample.position);
+        EndTextCreate(true);
+        return;
     case InteractionKind::Select:
         EndSelection();
         return;
@@ -383,6 +390,10 @@ void InteractionRouter::FinishInteraction() {
         ResetInteraction();
         host_.InvalidateCanvas();
         return;
+    case InteractionKind::TextCreate:
+        // Like the pending click above: losing the pointer opens no editor.
+        EndTextCreate(false);
+        return;
     case InteractionKind::Select:
         EndSelection();
         return;
@@ -417,6 +428,9 @@ void InteractionRouter::CancelInteraction() {
         host_.CancelTransform();
         break;
     case InteractionKind::PendingTextClick:
+        break;
+    case InteractionKind::TextCreate:
+        host_.UpdateTextCreatePreview(std::nullopt);
         break;
     case InteractionKind::Pan:
         // Restore the tool cursor without committing anything.
@@ -907,7 +921,44 @@ void InteractionRouter::BeginTextTool(const QPointF& logical) {
     }
     host_.SetViewPage(hit->pageIndex);
     host_.ClearSelection();
-    host_.CreateTextAt(hit->pageIndex, host_.ScreenToPage(logical, true));
+    // Excalidraw's text tool: the release decides between a click, which
+    // creates a text that grows with its content, and a sideways drag, which
+    // sizes one that wraps (UpdateTextCreate).
+    state_.kind = InteractionKind::TextCreate;
+    state_.textCreate.pageIndex = hit->pageIndex;
+    state_.textCreate.origin = logical;
+    state_.textCreate.anchor = host_.ScreenToPage(logical, true);
+    UpdateCapture();
+    host_.InvalidateCanvas();
+}
+
+void InteractionRouter::UpdateTextCreate(const QPointF& logical) {
+    InteractionState::TextCreateData& create = state_.textCreate;
+    const double offset = logical.x() - create.origin.x();
+    if (std::abs(offset) > kTextAutowrapThreshold) {
+        create.sized = true;
+    }
+    if (!create.sized) {
+        return;
+    }
+    // Only ever sized sideways, growing away from where the drag started;
+    // the width follows the pointer in page units, never below the minimum.
+    const float originX = host_.ScreenToPageOnPage(create.pageIndex, create.origin, false).x;
+    const float pointerX = host_.ScreenToPageOnPage(create.pageIndex, logical, false).x;
+    create.width = std::max(kMinTextWidth, std::abs(pointerX - originX));
+    create.topLeft = { offset < 0.0 ? create.anchor.x - create.width : create.anchor.x, create.anchor.y };
+    host_.UpdateTextCreatePreview(TextBoxPreview { create.pageIndex, create.topLeft, create.width });
+}
+
+void InteractionRouter::EndTextCreate(bool create) {
+    const InteractionState::TextCreateData ended = state_.textCreate;
+    ResetInteraction();
+    if (ended.sized) {
+        host_.UpdateTextCreatePreview(std::nullopt);
+    }
+    if (create) {
+        host_.CreateTextAt(ended.pageIndex, ended.sized ? ended.topLeft : ended.anchor, ended.sized ? ended.width : 0.0f);
+    }
     host_.InvalidateCanvas();
 }
 

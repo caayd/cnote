@@ -114,7 +114,6 @@ cnote::Document BuildSyntheticDocument() {
     text.x = 20.0f;
     text.y = 40.0f;
     text.width = 160.0f;
-    text.height = 40.0f;
     text.fontSize = 20.0f;
     text.color = 0xFF000000U;
     text.content = u"colored page text";
@@ -272,7 +271,6 @@ int main(int argc, char** argv) {
         overlayText.x = 20.0f;
         overlayText.y = 40.0f;
         overlayText.width = 160.0f;
-        overlayText.height = 40.0f;
         overlayText.fontSize = 20.0f;
         overlayText.content = u"overlay";
         pdfDocument->PageAt(0).texts.push_back(overlayText);

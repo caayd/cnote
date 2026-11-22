@@ -178,7 +178,8 @@ public:
     void UpdatePendingErase(const std::vector<ObjectRef>& pending) override;
     void CommitErase(const std::vector<ObjectRef>& pending) override;
     void BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) override;
-    void CreateTextAt(std::size_t pageIndex, Vec2 pagePoint) override;
+    void CreateTextAt(std::size_t pageIndex, Vec2 pagePoint, float width) override;
+    void UpdateTextCreatePreview(std::optional<TextBoxPreview> preview) override;
     void BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex) override;
     void CreateLatexAt(std::size_t pageIndex, Vec2 pagePoint) override;
 
@@ -213,6 +214,9 @@ public:
     // page-unit font sizes and the editor's point sizes with it.
     [[nodiscard]] float TextEditScale() const { return textEditScale_; }
     [[nodiscard]] QPlainTextEdit* LatexEditor() const { return latexEditor_; }
+    // The widest a text typed or pasted on `pageIndex` grows to before it
+    // wraps (page units), for the canvas as it is now: text::MaxAutoTextWidth.
+    [[nodiscard]] float MaxAutoTextWidth(std::size_t pageIndex) const;
     // Applies a style to the text overlay's current selection.
     void ApplyTextFormatToSelection(const PageTextStyle& style);
 
@@ -414,6 +418,9 @@ private:
     [[nodiscard]] std::optional<ObjectRef> TopmostObjectAt(const QPointF& logical, bool includeStrokes) const;
     [[nodiscard]] bool EditOverlayOwnsPoint(const QPointF& logical) const;
     void PaintSelectionOverlay(QPainter& painter);
+    // The text-tool drag's box: its logical rect, and the dashed outline.
+    [[nodiscard]] QRectF TextCreatePreviewRect() const;
+    void PaintTextCreatePreview(QPainter& painter);
     // Per-kind pending-erase index sets for one page; the renderer fades them
     // (App.cpp:5572-5628 pendingErase*Indices_).
     [[nodiscard]] render::PendingEraseIndices PendingEraseFor(std::size_t pageIndex) const;
@@ -447,6 +454,15 @@ private:
     void EnsureTextEditor();
     void EnsureLatexEditor();
     void ShowTextOverlay(const PageText& text);
+    // Wraps the editor like the committed text: at the object's width, or
+    // not at all for one that grows with its content.
+    void ApplyTextEditorWrap(const PageText& text);
+    // textChanged: fits the edited object's box to the typed content (and
+    // switches the editor to wrapping when it stops growing), then places it.
+    void FitTextEditor();
+    // Pans the edited text's box into the visible canvas (Excalidraw does so
+    // when a typed text starts wrapping).
+    void RevealEditedText(const PageText& text);
     void ShowLatexOverlay(const PageLatex& object);
     void HideOverlays();
     void PositionOverlays();
@@ -581,6 +597,10 @@ private:
     // View scale the text editor's fonts were last formatted at; the editor is
     // the live preview, so its glyphs must match the canvas render size.
     float textEditScale_ = 1.0f;
+    // The box a text-tool drag is sizing, and the height it previews at
+    // (one line in the pending text style, page units).
+    std::optional<TextBoxPreview> textCreatePreview_;
+    float textCreatePreviewHeight_ = 0.0f;
 
     std::unordered_map<std::size_t, PageSurfaces> surfaces_;
     GestureSurface gesture_ {};

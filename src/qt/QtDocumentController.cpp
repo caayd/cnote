@@ -578,7 +578,7 @@ bool QtDocumentController::Redo() {
 
 // --- object creation and text editing ---------------------------------------
 
-std::size_t QtDocumentController::AddTextObject(std::size_t pageIndex, Vec2 topLeft, float fontSize) {
+std::size_t QtDocumentController::AddTextObject(std::size_t pageIndex, Vec2 topLeft, float fontSize, float width) {
     AbortTransientState();
     Page* page = PageAt(pageIndex);
     if (page == nullptr) {
@@ -589,6 +589,7 @@ std::size_t QtDocumentController::AddTextObject(std::size_t pageIndex, Vec2 topL
     text.id = NextObjectId();
     text.x = topLeft.x;
     text.y = topLeft.y;
+    text.width = width > 0.0f ? std::max(kMinTextWidth, width) : 0.0f;
     text.fontSize = fontSize;
     text.color = input_.objectColor;
     // Pending style from the text-format popup (CanvasInputSettings): every
@@ -645,6 +646,7 @@ bool QtDocumentController::BeginTextEdit(std::size_t pageIndex, std::size_t text
     edit.pageIndex = pageIndex;
     edit.objectId = page->texts[textIndex].id;
     edit.textBefore = page->texts[textIndex];
+    edit.text = edit.textBefore;
     edit_ = std::move(edit);
     SetCurrentPageIndex(pageIndex);
     emit EditStateChanged();
@@ -655,7 +657,17 @@ const PageText* QtDocumentController::EditingTextObject() const {
     if (!EditingText()) {
         return nullptr;
     }
-    return &edit_->textBefore;
+    return &edit_->text;
+}
+
+void QtDocumentController::FitEditingText(const PageText& edited, float maxAutoWidth) {
+    if (!EditingText()) {
+        return;
+    }
+    PageText next = edit_->text;
+    next.content = edited.content;
+    next.styleSpans = edited.styleSpans;
+    edit_->text = text::FitTextBox(edit_->text, std::move(next), maxAutoWidth);
 }
 
 bool QtDocumentController::BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex) {
@@ -727,14 +739,16 @@ void QtDocumentController::CommitTextEdit(PageText edited) {
     }
     const std::size_t textIndex = *located;
 
-    // The overlay owns the model's identity and position; only content and spans
-    // come from the edit.
+    // The session owns the box (FitEditingText grew it while it was typed);
+    // the edit brings content and spans, and the box is fitted to them once
+    // more so content that changed since the last fit keeps the anchor.
     PageText& stored = page->texts[textIndex];
     if (edited.id == 0U) {
         edited.id = stored.id;
     }
-    edited.x = stored.x;
-    edited.y = stored.y;
+    edited.x = session.text.x;
+    edited.y = session.text.y;
+    edited.width = session.text.width;
 
     HistoryAction action {};
     bool changed = false;
@@ -749,7 +763,7 @@ void QtDocumentController::CommitTextEdit(PageText edited) {
             changed = true;
         }
     } else {
-        edited = text::NormalizeCommittedText(edited);
+        edited = text::FitTextBox(session.text, text::NormalizeCommittedText(edited), 0.0f);
         session_->document.TouchPage(session.pageIndex);
         page->texts[textIndex] = edited;
         if (session.creates) {
@@ -1397,37 +1411,28 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
                     span.style.fontSize = std::max(1.0f, span.style.fontSize * textScale);
                 }
                 if (text.width > 0.0f) {
-                    text.width = std::max(1.0f, text.width * textScale);
-                }
-                if (text.height > 0.0f) {
-                    text.height = std::max(1.0f, text.height * textScale);
+                    text.width = std::max(kMinTextWidth, text.width * textScale);
                 }
             }
             MarkGestureChanged();
             continue;
         }
 
-        // Box resize (App::UpdateTextTransform non-shift path, App.cpp:5045-5125):
-        // the text box follows the mapped bounds so the user chooses where
-        // wrapping happens. A pure vertical drag keeps the wrap width; a
-        // horizontal drag rewrites text.width (auto-width text becomes
-        // explicit) and resets the height to auto, exactly like the reference.
+        // Box resize (Excalidraw's e/w text handles): the box's left edge
+        // follows the mapped bounds and a horizontal drag sets the width the
+        // text wraps at (an auto-width text starts wrapping).  The height is
+        // never set: it is always the wrapped content's, so a vertical drag
+        // only carries the text along with the rest of the selection.
         const Vec2 mappedTopLeft = ui::MapSelectionTransformPoint(
             { bounds.left, bounds.top }, transform.from, transform.to, 0.0f);
         const Vec2 mappedBottomRight = ui::MapSelectionTransformPoint(
             { bounds.right, bounds.bottom }, transform.from, transform.to, 0.0f);
         const bool widthChanged = transform.to.left != transform.from.left
             || transform.to.right != transform.from.right;
-        const bool heightChanged = transform.to.top != transform.from.top
-            || transform.to.bottom != transform.from.bottom;
         text.x += mappedTopLeft.x - bounds.left;
         text.y += mappedTopLeft.y - bounds.top;
         if (widthChanged) {
-            text.width = std::max(1.0f, mappedBottomRight.x - mappedTopLeft.x);
-            text.height = 0.0f;
-        }
-        if (heightChanged) {
-            text.height = std::max(1.0f, mappedBottomRight.y - mappedTopLeft.y);
+            text.width = std::max(kMinTextWidth, mappedBottomRight.x - mappedTopLeft.x);
         }
         MarkGestureChanged();
     }
@@ -1734,8 +1739,24 @@ bool QtDocumentController::RotatePage(std::size_t pageIndex, int quarterTurns) {
     for (const PageLatex& latex : page.latexes) {
         latexBounds.push_back(ui::MeasurePageLatexBounds(latex, width));
     }
+    // Text boxes are as tall as their layout, so they map the same way: the
+    // bounds centre follows the page and the box (whose size the turn does
+    // not change) is re-centred on it, rotating with its accumulated angle.
+    std::vector<text::QtTextBounds> textBounds;
+    textBounds.reserve(page.texts.size());
+    for (const PageText& text : page.texts) {
+        textBounds.push_back(text::MeasurePageTextBoundsQt(text, width));
+    }
 
     RotatePageContents(page, turns);
+
+    for (std::size_t index = 0; index < page.texts.size(); ++index) {
+        const text::QtTextBounds& bounds = textBounds[index];
+        const Vec2 mapped = RotatePointQuarterTurn(
+            { (bounds.left + bounds.right) * 0.5f, (bounds.top + bounds.bottom) * 0.5f }, width, height, turns);
+        page.texts[index].x = mapped.x - (bounds.right - bounds.left) * 0.5f;
+        page.texts[index].y = mapped.y - (bounds.bottom - bounds.top) * 0.5f;
+    }
 
     for (std::size_t index = 0; index < page.latexes.size(); ++index) {
         const Vec2 mapped = RotatePointQuarterTurn(latexCenters[index], width, height, turns);
@@ -1902,8 +1923,9 @@ bool QtDocumentController::BuildSelectionPayload(cnote::SelectionClipboardData& 
                 continue;
             }
             const PageText& text = page.texts[index];
-            growPoint(text.x, text.y);
-            growPoint(text.x + text.width, text.y + text.height);
+            const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page.width);
+            growPoint(bounds.left, bounds.top);
+            growPoint(bounds.right, bounds.bottom);
             data.texts.push_back(text);
             any = true;
         }

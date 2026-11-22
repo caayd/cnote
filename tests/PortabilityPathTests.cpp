@@ -68,7 +68,6 @@ cnote::Document MakeProject(std::u16string_view marker) {
     text.x = 12.0f;
     text.y = 24.0f;
     text.width = 200.0f;
-    text.height = 32.0f;
     text.fontSize = 15.0f;
     text.content = std::u16string(marker);
     document.CurrentPage().texts.push_back(text);

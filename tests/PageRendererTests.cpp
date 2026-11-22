@@ -101,7 +101,6 @@ cnote::Document BuildDocument() {
     text.x = 10.0f;
     text.y = 60.0f;
     text.width = 180.0f;
-    text.height = 60.0f;
     text.fontSize = 20.0f;
     text.color = 0xFF0000FFU;
     text.content = u"Red\U0001F600Blue\r\nsecond \u03B1 line";
@@ -210,7 +209,7 @@ int main(int argc, char** argv) {
 
     // Geometry stability: rendering never rewrites model values.
     Check(page.width == 200.0f && page.height == 200.0f
-            && text.x == 10.0f && text.y == 60.0f && text.width == 180.0f && text.height == 60.0f
+            && text.x == 10.0f && text.y == 60.0f && text.width == 180.0f
             && text.content == u"Red\U0001F600Blue\r\nsecond \u03B1 line"
             && text.styleSpans.size() == 1U && text.styleSpans.front().start == 0U && text.styleSpans.front().length == 3U,
         "model geometry and text are unchanged after rendering");
