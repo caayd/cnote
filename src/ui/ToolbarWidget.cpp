@@ -54,8 +54,7 @@ constexpr int kMaxPaletteMenuColumns = 4;        // Layout.cpp:377
 constexpr std::uint32_t kWheelUnselectedFill = 0xF5202934U;   // App.cpp:6855 (245,32,41,52)
 constexpr std::uint32_t kWheelSelectedFill = 0xFF3D76A4U;     // App.cpp:6853 (255,61,118,164)
 constexpr std::uint32_t kWheelSliceEdge = 0x30FFFFFFU;        // hairline so dark slices read on dark chrome
-constexpr std::uint32_t kWheelSelectedDotFill = 0xFFFFFFFFU;
-constexpr std::uint32_t kWheelSelectedDotRing = 0x59000000U;
+constexpr std::uint32_t kWheelSelectionTab = kChromeAccent;   // selected-colour arc outside the slice
 constexpr std::uint32_t kWheelToolIconTint = 0xFFE8EEF5U;     // App.cpp:6892 RGB(232,238,245)
 constexpr std::uint32_t kWheelSelectedIconTint = 0xFFFFFFFFU;  // App.cpp:6892
 constexpr std::uint32_t kWheelCenterFill = 0xFF121820U;       // App.cpp:7022 (255,18,24,32)
@@ -64,7 +63,8 @@ constexpr std::uint32_t kWheelZoomCenterBorder = 0xEB84BFFFU;  // App.cpp:7036 (
 constexpr qreal kPaletteWheelSliceGapDip = 5.0;               // even gap between neighbouring slices
 constexpr qreal kPaletteWheelRingGapDip = 6.0;                // gap between the centre disc and the slices
 constexpr qreal kPaletteWheelCornerDip = 7.0;                 // slice corner radius (outer corners)
-constexpr qreal kPaletteWheelSelectedDotDip = 4.5;
+constexpr qreal kPaletteWheelTabGapDip = 5.0;                 // slice outer edge to the tab's centre line
+constexpr qreal kPaletteWheelTabWidthDip = 3.5;
 constexpr qreal kPaletteWheelHoverIconScale = 0.15;           // extra icon scale at full lift
 constexpr qreal kPaletteWheelOpenScale = 0.9;                 // wheel scale at the start of the open animation
 constexpr int kPaletteWheelHoverMs = 140;
@@ -920,7 +920,13 @@ protected:
             painter.setPen(QPen(ChromeColor(kWheelSliceEdge), 1.0));
             painter.setBrush(FillColor(index));
             painter.drawPath(path);
-            PaintGlyph(painter, index, Polar(sliceOrigin(index), (ringInner + outer + (qt::PaletteWheelHoverGrow() * lift(index))) * 0.5, bisector(index)), lift(index), dpr);
+            const qreal glyphRadius = (ringInner + outer + (qt::PaletteWheelHoverGrow() * lift(index))) * 0.5;
+            PaintGlyph(painter, index, Polar(sliceOrigin(index), glyphRadius, bisector(index)), lift(index), dpr);
+            if (IsColorEntry(index) && IsSelectedEntry(index)) {
+                PaintSelectionTab(painter, sliceOrigin(index), outer + (qt::PaletteWheelHoverGrow() * lift(index)),
+                    AngleAt(static_cast<qreal>(index) / static_cast<qreal>(entries)),
+                    AngleAt(static_cast<qreal>(index + 1U) / static_cast<qreal>(entries)));
+            }
         }
 
         const bool zoomToggleEnabled = HasZoomEntry();
@@ -1115,14 +1121,30 @@ private:
         painter.restore();
     }
 
-    // Tool icon, zoom-preset label or the selected-colour dot at `glyph`.
+    // Selected colour: a rounded accent arc just outside the slice's outer
+    // edge, inset past the slice's rounded corners.  It sits on the backdrop,
+    // so it reads the same on every palette colour, and it follows the lift.
+    static void PaintSelectionTab(QPainter& painter, const QPointF& origin, qreal sliceOuter, qreal start, qreal end) {
+        constexpr qreal kDegrees = 180.0 / kWheelPi;
+        const qreal radius = sliceOuter + kPaletteWheelTabGapDip;
+        const qreal inset = ((kPaletteWheelSliceGapDip * 0.5) + kPaletteWheelCornerDip) / radius;
+        const qreal from = start + inset;
+        const qreal to = end - inset;
+        if (to <= from) {
+            return;
+        }
+        const QRectF circle(origin.x() - radius, origin.y() - radius, radius * 2.0, radius * 2.0);
+        QPainterPath arc;
+        arc.arcMoveTo(circle, -from * kDegrees);
+        arc.arcTo(circle, -from * kDegrees, -(to - from) * kDegrees);
+        painter.setPen(QPen(ChromeColor(kWheelSelectionTab), kPaletteWheelTabWidthDip, Qt::SolidLine, Qt::RoundCap));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPath(arc);
+    }
+
+    // Tool icon or zoom-preset label at `glyph`; colour slices carry none.
     void PaintGlyph(QPainter& painter, std::size_t index, const QPointF& glyph, qreal lift, qreal dpr) const {
         if (IsColorEntry(index)) {
-            if (IsSelectedEntry(index)) {
-                painter.setPen(QPen(ChromeColor(kWheelSelectedDotRing), 1.5));
-                painter.setBrush(ChromeColor(kWheelSelectedDotFill));
-                painter.drawEllipse(glyph, kPaletteWheelSelectedDotDip, kPaletteWheelSelectedDotDip);
-            }
             return;
         }
         if (zoomPresetMode_) {
