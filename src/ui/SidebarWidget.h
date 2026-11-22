@@ -145,8 +145,9 @@ signals:
     void AddPageRequested();
     void NewPageSettingsRequested();
     // Right-click on a page thumbnail: the host shows the page-management
-    // menu (copy/cut/paste/delete).  The page is activated first, so the
-    // actions always target the page under the cursor.
+    // menu (copy/cut/paste/delete).  The page is activated first.  On a page
+    // of the multi-page selection the selection stays (SelectedPages), so the
+    // menu can act on all of it; elsewhere the selection is dropped.
     void PageContextMenuRequested(std::size_t pageIndex, const QPoint& globalPosition);
     // Thumbnails were dragged and dropped elsewhere: move `pages` (sorted) as
     // one block, in order, to gap `slot` (counted before the move).

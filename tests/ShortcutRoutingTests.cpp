@@ -1014,6 +1014,39 @@ void FocusedPageFollowsViewport() {
     Check(harness.sidebar->CurrentPage() == 1U, "the sidebar follows the scroll");
 }
 
+void SidebarPageKeysActOnTheSelection() {
+    // With the sidebar owning the keyboard, Delete/Ctrl+C/Ctrl+V act on its
+    // multi-page selection, not just the current page.
+    Harness harness;
+    harness.window->AddPage();
+    harness.window->AddPage();
+    harness.window->AddPage();
+    harness.sidebar->SetOpen(true);
+    QApplication::processEvents();
+    auto& controller = harness.window->Controller();
+    Check(controller.DocumentRef().PageCount() == 4U, "four pages to work on");
+    harness.sidebar->setFocus(Qt::OtherFocusReason);
+    QApplication::processEvents();
+
+    harness.sidebar->SelectPages(1, 2);
+    harness.Press(Qt::Key_Delete);
+    std::printf("Delete with pages 2-3 selected: %zu pages\n", controller.DocumentRef().PageCount());
+    Check(controller.DocumentRef().PageCount() == 2U, "Delete removes every selected page");
+    Check(controller.Undo(), "the delete undoes in one step");
+    Check(controller.DocumentRef().PageCount() == 4U, "undo restores both pages");
+
+    harness.sidebar->SelectPages(1, 2);
+    harness.Press(Qt::Key_C, Qt::ControlModifier);
+    harness.Press(Qt::Key_V, Qt::ControlModifier);
+    std::printf("Ctrl+C, Ctrl+V with pages 2-3 selected: %zu pages\n", controller.DocumentRef().PageCount());
+    Check(controller.DocumentRef().PageCount() == 6U, "Ctrl+C then Ctrl+V duplicates both selected pages");
+    Check(harness.sidebar->SelectedPages() == std::vector<std::size_t> { 3, 4 },
+        "the pasted pages land after the selection and stay selected");
+
+    harness.Press(Qt::Key_X, Qt::ControlModifier);
+    Check(controller.DocumentRef().PageCount() == 4U, "Ctrl+X cuts the selected (pasted) pages");
+}
+
 // --- 5. a remapped binding from the settings store ---------------------------
 
 void RemappedBindingIsHonoured() {
@@ -1236,6 +1269,7 @@ int main(int argc, char** argv) {
     ToolKeysRecoverAfterEditorCloses();
     PageNavigationIsGatedWhileEditing();
     FocusedPageFollowsViewport();
+    SidebarPageKeysActOnTheSelection();
     QuickActionsFireEverywhere();
     QuickPopupIsTextFormattingWhileEditing();
     TextFormatPopupLeavesFocusWithEditor();

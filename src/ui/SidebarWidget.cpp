@@ -158,6 +158,9 @@ void SidebarWidget::SetDocument(const Document* document, render::PdfBackgroundP
     pdfBackground_ = pdfBackground;
     documentPageCount_ = pageCount;
     InvalidateThumbnails();
+    // Removed pages shorten the list: keep the scroll inside it.  Whichever of
+    // SetDocument/NotifyDocumentChanged sees the new page count first clamps.
+    SetScrollY(scrollY_);
     UpdateVisibility();
     update();
 }
@@ -172,6 +175,8 @@ void SidebarWidget::NotifyDocumentChanged() {
         CancelPageJumpEdit();
         CancelPageDrag();
         InvalidateThumbnails();
+        // Removed pages shorten the list: keep the scroll inside it.
+        SetScrollY(scrollY_);
     }
     // Any commit (an undo included) may have moved the selected pages; the
     // host reselects a block it just moved (SelectPages).
@@ -835,9 +840,12 @@ void SidebarWidget::mousePressEvent(QMouseEvent* event) {
     CancelPageDrag();
     if (event->button() == Qt::RightButton) {
         if (const auto page = PageAtWidgetPosition(event->position().toPoint()); page.has_value()) {
-            // The page menu acts on one page: drop a multi-selection first.
-            ClearPageSelection();
-            selectionAnchor_ = *page;
+            // A right-click inside the multi-page selection keeps it, so the
+            // page menu acts on every selected page; elsewhere it drops it.
+            if (!std::binary_search(selectedPages_.begin(), selectedPages_.end(), *page)) {
+                ClearPageSelection();
+                selectionAnchor_ = *page;
+            }
             emit PageActivated(*page);
             emit PageContextMenuRequested(*page, event->globalPosition().toPoint());
         }

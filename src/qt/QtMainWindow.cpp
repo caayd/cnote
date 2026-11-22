@@ -660,26 +660,39 @@ void QtMainWindow::CreateChrome() {
     connect(sidebar_, &ui::SidebarWidget::NewPageSettingsRequested, this, &QtMainWindow::OpenNewPageSettings);
     connect(sidebar_, &ui::SidebarWidget::PageContextMenuRequested, this,
         [this](std::size_t pageIndex, const QPoint& globalPosition) {
+            // A right-click inside the multi-page selection targets all of
+            // it; elsewhere the sidebar has already dropped the selection.
+            const std::vector<std::size_t>& selected = sidebar_->SelectedPages();
+            const std::vector<std::size_t> targets
+                = std::binary_search(selected.begin(), selected.end(), pageIndex) ? selected
+                                                                                 : std::vector<std::size_t> { pageIndex };
+            const auto label = [](const QString& verb, std::size_t count) {
+                return count > 1U ? QStringLiteral("%1 %2 Pages").arg(verb).arg(count)
+                                  : QStringLiteral("%1 Page").arg(verb);
+            };
             QMenu menu(this);
-            QAction* copy = menu.addAction(QStringLiteral("Copy Page"));
-            QAction* cut = menu.addAction(QStringLiteral("Cut Page"));
-            QAction* paste = menu.addAction(QStringLiteral("Paste Page"));
-            QAction* deletePage = menu.addAction(QStringLiteral("Delete Page"));
+            QAction* copy = menu.addAction(label(QStringLiteral("Copy"), targets.size()));
+            QAction* cut = menu.addAction(label(QStringLiteral("Cut"), targets.size()));
+            QAction* paste = menu.addAction(label(QStringLiteral("Paste"), manager_.ClipboardPages().size()));
+            QAction* deletePage = menu.addAction(label(QStringLiteral("Delete"), targets.size()));
             menu.addSeparator();
             QAction* rotateCw = menu.addAction(QStringLiteral("Rotate 90° Clockwise"));
             QAction* rotateCcw = menu.addAction(QStringLiteral("Rotate 90° Counterclockwise"));
             QAction* rotate180 = menu.addAction(QStringLiteral("Rotate 180°"));
-            paste->setEnabled(manager_.HasClipboardPage());
-            deletePage->setEnabled(controller_.DocumentRef().PageCount() > 1U);
+            paste->setEnabled(manager_.HasClipboardPages());
+            // At least one page must stay.
+            const bool removable = targets.size() < controller_.DocumentRef().PageCount();
+            cut->setEnabled(removable);
+            deletePage->setEnabled(removable);
             QAction* chosen = menu.exec(globalPosition);
             if (chosen == copy) {
-                static_cast<void>(controller_.CopyPage(pageIndex));
+                static_cast<void>(controller_.CopyPages(targets));
             } else if (chosen == cut) {
-                static_cast<void>(controller_.CutPage(pageIndex));
+                static_cast<void>(controller_.CutPages(targets));
             } else if (chosen == paste) {
-                static_cast<void>(controller_.PastePage(pageIndex));
+                static_cast<void>(PasteSidebarPages(targets.back()));
             } else if (chosen == deletePage) {
-                static_cast<void>(controller_.RemovePage(pageIndex));
+                static_cast<void>(controller_.RemovePages(targets));
             } else if (chosen == rotateCw) {
                 static_cast<void>(controller_.RotatePage(pageIndex, 1));
             } else if (chosen == rotateCcw) {
@@ -938,6 +951,25 @@ void QtMainWindow::FocusPage(std::size_t pageIndex) {
         sidebar_->SetCurrentPage(pageIndex);
     }
     UpdateChrome();
+}
+
+std::vector<std::size_t> QtMainWindow::SidebarTargetPages() const {
+    if (sidebar_ != nullptr && !sidebar_->SelectedPages().empty()) {
+        return sidebar_->SelectedPages();
+    }
+    return { controller_.CurrentPageIndex() };
+}
+
+bool QtMainWindow::PasteSidebarPages(std::size_t pageIndex) {
+    const std::size_t count = manager_.ClipboardPages().size();
+    const std::optional<std::size_t> first = controller_.PastePages(pageIndex);
+    if (!first.has_value()) {
+        return false;
+    }
+    if (count > 1U && sidebar_ != nullptr) {
+        sidebar_->SelectPages(*first, count);
+    }
+    return true;
 }
 
 void QtMainWindow::PreviousPage() {
@@ -1914,8 +1946,9 @@ bool QtMainWindow::eventFilter(QObject* watched, QEvent* event) {
     // Reference SidebarOwnsKeyboardShortcuts (App.cpp:4069-4081): while the
     // pages panel owns the keyboard - the cursor is over it, or the sidebar
     // widget itself has focus (it is ClickFocus) - clipboard keys and Delete
-    // act on the current page instead of the canvas selection.  The claim
-    // happens on ShortcutOverride and the action on the key press itself.
+    // act on the sidebar's pages (SidebarTargetPages) instead of the canvas
+    // selection.  The claim happens on ShortcutOverride and the action on the
+    // key press itself.
     if ((watched == canvas_ || watched == sidebar_) && sidebar_ != nullptr && sidebar_->SidebarVisible()
         && !sidebar_->PageJumpEditing()
         && (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress)) {
@@ -1926,26 +1959,26 @@ bool QtMainWindow::eventFilter(QObject* watched, QEvent* event) {
         const bool sidebarOwnsKeys = watched == sidebar_
             || sidebar_->rect().contains(sidebar_->mapFromGlobal(ui::GlobalCursorPos()));
         if (pageKey && sidebarOwnsKeys) {
-            const std::size_t page = controller_.CurrentPageIndex();
+            const std::vector<std::size_t> pages = SidebarTargetPages();
             if (event->type() == QEvent::ShortcutOverride) {
                 // Claim C/X/Delete unconditionally (copy/cut/delete always own
                 // the key); V only when a page is actually on the clipboard,
                 // otherwise an empty page clipboard would swallow a selection
                 // paste.
-                if (key->key() != Qt::Key_V || manager_.HasClipboardPage()) {
+                if (key->key() != Qt::Key_V || manager_.HasClipboardPages()) {
                     event->accept();
                     return true;
                 }
             } else {
                 bool handled = false;
                 if (key->key() == Qt::Key_C) {
-                    handled = controller_.CopyPage(page);
+                    handled = controller_.CopyPages(pages);
                 } else if (key->key() == Qt::Key_X) {
-                    handled = controller_.CutPage(page);
+                    handled = controller_.CutPages(pages);
                 } else if (key->key() == Qt::Key_V) {
-                    handled = controller_.PastePage(page);
+                    handled = PasteSidebarPages(pages.back());
                 } else {
-                    handled = controller_.RemovePage(page);
+                    handled = controller_.RemovePages(pages);
                 }
                 if (handled || key->key() != Qt::Key_V) {
                     event->accept();

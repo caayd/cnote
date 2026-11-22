@@ -80,12 +80,12 @@ public:
     [[nodiscard]] static bool IsAutoSaveEligible(const Document& document);
 
     // In-process page clipboard for the sidebar's copy/cut/paste page
-    // management.  Process-global like the OS selection clipboard, so a page
-    // copied in one window pastes into another view of the same or a
-    // different document.
-    void SetClipboardPage(const Page& page) { clipboardPage_ = page; }
-    [[nodiscard]] const std::optional<Page>& ClipboardPage() const { return clipboardPage_; }
-    [[nodiscard]] bool HasClipboardPage() const { return clipboardPage_.has_value(); }
+    // management, holding the copied pages in document order.  Process-global
+    // like the OS selection clipboard, so pages copied in one window paste
+    // into another view of the same or a different document.
+    void SetClipboardPages(std::vector<Page> pages) { clipboardPages_ = std::move(pages); }
+    [[nodiscard]] const std::vector<Page>& ClipboardPages() const { return clipboardPages_; }
+    [[nodiscard]] bool HasClipboardPages() const { return !clipboardPages_.empty(); }
 
 private:
     struct Entry {
@@ -101,7 +101,7 @@ private:
     AutoSaveHandler autoSaveHandler_;
     std::vector<Entry> entries_;
     std::map<ProjectSession*, std::unique_ptr<QTimer>> timers_;
-    std::optional<Page> clipboardPage_;
+    std::vector<Page> clipboardPages_;
 };
 
 }  // namespace cnote

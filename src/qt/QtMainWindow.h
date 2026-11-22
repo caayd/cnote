@@ -181,6 +181,12 @@ private:
     void FocusPage(std::size_t pageIndex);
     void PreviousPage();
     void NextPage();
+    // The pages sidebar copy/cut/delete act on: the sidebar's multi-page
+    // selection when there is one, else the current page.
+    [[nodiscard]] std::vector<std::size_t> SidebarTargetPages() const;
+    // Pastes the page clipboard after `pageIndex`; a pasted block of several
+    // pages stays selected in the sidebar.  False when the clipboard is empty.
+    bool PasteSidebarPages(std::size_t pageIndex);
     // Reference App::ToggleQuickSizePopup (ToolbarState.cpp): text formatting
     // while a text edit is open, the brush-size popup for the pen tools, inert
     // otherwise.  The Ctrl+W binding is its only caller; the reference toolbar

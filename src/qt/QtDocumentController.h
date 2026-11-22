@@ -132,19 +132,20 @@ public:
     [[nodiscard]] ui::NewPageDefaults NewPageDefaults() const;
 
     // --- page clipboard (sidebar page management) ---------------------------
-    // Copies page `index` into the process-global page clipboard
-    // (AppManager::SetClipboardPage); false when the index is out of range.
-    bool CopyPage(std::size_t index);
-    // Copy + remove as one undo step; false when the page cannot be removed
-    // (out of range or the document's last page).
-    bool CutPage(std::size_t index);
-    // Removes page `index` as one RemovePages undo step; false when out of
-    // range or it is the document's last page.
-    bool RemovePage(std::size_t index);
-    // Inserts the clipboard page after `index` (clamped to the page count),
-    // focuses the inserted page and records one AddPages undo step; false
+    // Page operations take `pages` sorted and unique, every index in range.
+    // Copies `pages` into the process-global page clipboard
+    // (AppManager::SetClipboardPages); false for an invalid list.
+    bool CopyPages(const std::vector<std::size_t>& pages);
+    // Copy + remove as one undo step; false (clipboard untouched) when the
+    // pages cannot be removed: an invalid list or every page of the document.
+    bool CutPages(const std::vector<std::size_t>& pages);
+    // Removes `pages` as one RemovePages undo step; false for an invalid list
+    // or when it would leave the document without pages.
+    bool RemovePages(const std::vector<std::size_t>& pages);
+    // Inserts the clipboard pages after `index` (clamped to the page count) as
+    // one AddPages undo step.  Returns the first inserted index, or nullopt
     // when the page clipboard is empty.
-    bool PastePage(std::size_t index);
+    std::optional<std::size_t> PastePages(std::size_t index);
     // Moves `pages` (sorted, unique) as one block, in their current order, to
     // gap `slot` (0..PageCount, counted before the move; sidebar drag reorder)
     // as one ReorderPages undo step; per-page selections move with their

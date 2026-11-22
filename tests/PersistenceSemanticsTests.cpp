@@ -1046,6 +1046,51 @@ void SetCurrentPageIndexIsSerialized() {
         "the viewed page is what the project serializes");
 }
 
+void PageClipboardActsOnSeveralPages() {
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    controller.InsertPages(1, 1, cnote::ui::NewPageDraft { 200.0f, 300.0f, 0xFFFFFFFFU, {} });
+    controller.InsertPages(2, 1, cnote::ui::NewPageDraft { 400.0f, 500.0f, 0xFFFFFFFFU, {} });
+    controller.InsertPages(3, 1, cnote::ui::NewPageDraft { 600.0f, 700.0f, 0xFFFFFFFFU, {} });
+    const auto widths = [&]() {
+        std::vector<float> result;
+        for (std::size_t index = 0; index < controller.DocumentRef().PageCount(); ++index) {
+            result.push_back(controller.DocumentRef().PageAt(index).width);
+        }
+        return result;
+    };
+    const std::vector<float> original = widths();
+
+    // Deleting two non-adjacent pages is one undo step.
+    Check(controller.RemovePages({ 0, 2 }), "two non-adjacent pages delete");
+    Check(widths() == std::vector<float> { original[1], original[3] }, "pages 0 and 2 are gone");
+    Check(controller.Undo(), "the delete undoes in one step");
+    Check(widths() == original, "undo puts both pages back where they were");
+    Check(controller.Redo(), "the delete redoes");
+    Check(widths() == std::vector<float> { original[1], original[3] }, "redo deletes both again");
+    Check(controller.Undo(), "back to four pages");
+
+    // Copy two pages, paste them after page 0: they land in order, as one step.
+    Check(controller.CopyPages({ 1, 3 }), "two pages copy");
+    Check(manager.ClipboardPages().size() == 2U, "the clipboard holds both pages");
+    Check(controller.PastePages(0) == std::optional<std::size_t>(1U), "the pasted block starts after page 0");
+    Check(widths() == std::vector<float> { original[0], original[1], original[3], original[1], original[2], original[3] },
+        "both copies are inserted after page 0, in order");
+    Check(controller.Undo(), "the paste undoes in one step");
+    Check(widths() == original, "undo removes both pasted pages");
+
+    // Cut needs a page left behind; a refused cut leaves the clipboard alone.
+    Check(!controller.CutPages({ 0, 1, 2, 3 }), "cutting every page is refused");
+    Check(manager.ClipboardPages().size() == 2U && widths() == original, "a refused cut changes nothing");
+    Check(!controller.RemovePages({ 0, 1, 2, 3 }), "deleting every page is refused");
+    Check(controller.CutPages({ 2, 3 }), "two trailing pages cut");
+    Check(widths() == std::vector<float> { original[0], original[1] } && manager.ClipboardPages().size() == 2U
+            && manager.ClipboardPages()[0].width == original[2],
+        "cut removes both pages and puts them on the clipboard in order");
+    Check(!controller.RemovePages({ 1, 0 }), "unsorted pages are refused");
+}
+
 void MovePagesUndoRedoKeepsOrderAndViewedPage() {
     cnote::AppManager manager;
     cnote::qt::QtDocumentController controller(manager);
@@ -1189,6 +1234,7 @@ int main(int argc, char** argv) {
     RemoteCommitCancelsTransientState();
     SaveToRefusesPdfContainer();
     SetCurrentPageIndexIsSerialized();
+    PageClipboardActsOnSeveralPages();
     MovePagesUndoRedoKeepsOrderAndViewedPage();
     StrokeFormatRoundTripsAndLegacyReads();
 
