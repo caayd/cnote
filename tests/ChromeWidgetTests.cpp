@@ -857,6 +857,70 @@ void TestSidebarThumbnailCacheInvalidation() {
     Check(!sidebar.HasThumbnail(0), "no stale thumbnail survives a page removal");
 }
 
+void TestSidebarDragReorder() {
+    QWidget host;
+    host.resize(1400, 900);
+    cnote::ui::SidebarWidget sidebar(&host);
+    const cnote::Document document = BuildDocument(4);
+    sidebar.SetDocument(&document, nullptr);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    sidebar.SetOpen(true);
+    host.show();
+    QApplication::processEvents();
+    Check(WaitFor([&]() { return sidebar.SlideProgress() >= 0.999; }, 3000), "sidebar opens before drag test");
+
+    std::vector<std::pair<std::size_t, std::size_t>> moves;
+    QObject::connect(&sidebar, &cnote::ui::SidebarWidget::PageMoveRequested,
+        [&](std::size_t from, std::size_t to) { moves.emplace_back(from, to); });
+    const QRect page0 = *sidebar.PageItemRect(0);
+    const QRect page1 = *sidebar.PageItemRect(1);
+    const QPointF start(page0.center());
+
+    // A press that barely moves stays a click: no drag, no move.
+    SendMouse(sidebar, QEvent::MouseButtonPress, start, Qt::LeftButton, Qt::LeftButton);
+    SendMouse(sidebar, QEvent::MouseMove, start + QPointF(1.0, 1.0), Qt::NoButton, Qt::LeftButton);
+    Check(!sidebar.PageDragActive(), "a sub-threshold move does not start a drag");
+    SendMouse(sidebar, QEvent::MouseButtonRelease, start + QPointF(1.0, 1.0), Qt::LeftButton, Qt::NoButton);
+    Check(moves.empty(), "a click does not move a page");
+
+    // Hovering the dragged page's own gaps shows no indicator.
+    SendMouse(sidebar, QEvent::MouseButtonPress, start, Qt::LeftButton, Qt::LeftButton);
+    SendMouse(sidebar, QEvent::MouseMove, QPointF(start.x(), page1.top() + 4), Qt::NoButton, Qt::LeftButton);
+    Check(sidebar.PageDragActive(), "dragging past the threshold starts a drag");
+    Check(!sidebar.DropSlot().has_value(), "the gap right below the dragged page is not a drop target");
+
+    // Below page 1's centre the drop goes into the gap between pages 1 and 2,
+    // and the indicator line sits inside that gap.
+    const QPointF belowPage1(start.x(), page1.center().y() + 4);
+    SendMouse(sidebar, QEvent::MouseMove, belowPage1, Qt::NoButton, Qt::LeftButton);
+    Check(sidebar.DropSlot() == std::optional<std::size_t>(2U), "past page 1's centre the drop slot is the gap before page 2");
+    const std::optional<int> lineY = sidebar.DropIndicatorY(2U);
+    Check(lineY.has_value() && *lineY > page1.bottom() && *lineY < sidebar.PageItemRect(2)->top(),
+        "the indicator sits between pages 1 and 2");
+    if (lineY.has_value()) {
+        const QImage painted = sidebar.grab().toImage();
+        const QPoint probe = (QPointF(page1.center().x(), *lineY) * painted.devicePixelRatio()).toPoint();
+        Check(painted.pixelColor(probe) == cnote::ui::ChromeColor(cnote::ui::kChromeAccent),
+            "the indicator line is painted in the accent colour");
+    }
+    SendMouse(sidebar, QEvent::MouseButtonRelease, belowPage1, Qt::LeftButton, Qt::NoButton);
+    Check(moves.size() == 1U && moves.back() == std::make_pair(std::size_t { 0 }, std::size_t { 1 }),
+        "dropping page 0 between pages 1 and 2 moves it to index 1");
+    Check(!sidebar.PageDragActive(), "the drop ends the drag");
+
+    // Dragging upward to the first gap, then Escape: nothing moves.
+    const QPointF fourth(sidebar.PageItemRect(3)->center());
+    const QPointF abovePage0(fourth.x(), page0.top() + 4);
+    SendMouse(sidebar, QEvent::MouseButtonPress, fourth, Qt::LeftButton, Qt::LeftButton);
+    SendMouse(sidebar, QEvent::MouseMove, abovePage0, Qt::NoButton, Qt::LeftButton);
+    Check(sidebar.DropSlot() == std::optional<std::size_t>(0U), "above page 0's centre the drop slot is the first gap");
+    QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QApplication::sendEvent(&sidebar, &escape);
+    Check(!sidebar.PageDragActive(), "Escape cancels the drag");
+    SendMouse(sidebar, QEvent::MouseButtonRelease, abovePage0, Qt::LeftButton, Qt::NoButton);
+    Check(moves.size() == 1U, "a cancelled drag does not move a page");
+}
+
 void TestToolbarAutoHide() {
     QWidget host;
     host.resize(1400, 900);
@@ -1030,6 +1094,7 @@ int main(int argc, char** argv) {
     TestSidebarWheelIsolation();
     TestSidebarEnsureVisibleFromScrolled();
     TestSidebarSlideState();
+    TestSidebarDragReorder();
     TestSidebarThumbnailCacheInvalidation();
     TestToolbarAutoHide();
     TestOverlayDismissalConsumesPaletteMenu();

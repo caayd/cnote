@@ -10,6 +10,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QSignalBlocker>
+#include <QTimer>
 #include <QVariantAnimation>
 #include <QWheelEvent>
 
@@ -33,6 +34,12 @@ QString FormatPageJumpLabel(std::size_t currentPage, std::size_t pageCount) {
 qreal Smoothstep(qreal linear) {
     return linear * linear * (3.0 - (2.0 * linear));
 }
+
+// Drag-to-reorder auto-scroll: the band at each end of the content area that
+// scrolls the list, and the step per 16 ms tick at the very edge.
+constexpr int kDragScrollEdge = 32;
+constexpr int kDragScrollMaxStep = 14;
+constexpr qreal kDropIndicatorThickness = 3.0;
 
 bool ContainsPixel(const QRect& rect, const QPoint& point) {
     return rect.isValid() && point.x() >= rect.left() && point.x() < rect.right()
@@ -116,6 +123,10 @@ SidebarWidget::SidebarWidget(QWidget* parent)
         }
     });
 
+    dragScrollTimer_ = new QTimer(this);
+    dragScrollTimer_->setInterval(16);
+    connect(dragScrollTimer_, &QTimer::timeout, this, &SidebarWidget::AutoScrollPageDrag);
+
     hide();
 }
 
@@ -131,6 +142,7 @@ void SidebarWidget::SetDocument(const Document* document, render::PdfBackgroundP
     if (!documentChanged && !backgroundChanged && documentPageCount_ == pageCount) {
         return;
     }
+    CancelPageDrag();
     if (documentChanged) {
         // A new document resets navigation and the scroll position; a page
         // insert/remove below only drops the caches.
@@ -156,6 +168,7 @@ void SidebarWidget::NotifyDocumentChanged() {
     if (document_ != nullptr && document_->PageCount() != documentPageCount_) {
         documentPageCount_ = document_->PageCount();
         CancelPageJumpEdit();
+        CancelPageDrag();
         InvalidateThumbnails();
     }
     update();
@@ -331,6 +344,7 @@ void SidebarWidget::SetOpen(bool open) {
     // Hiding or replacing the panel abandons a half-typed page jump; the
     // editor is owned by this widget and must not outlive its visible state.
     CancelPageJumpEdit();
+    CancelPageDrag();
     if (open == IsOpen()) {
         return;
     }
@@ -453,6 +467,9 @@ void SidebarWidget::paintEvent(QPaintEvent*) {
         const QRect labelRect(item->left(), item->bottom() - static_cast<int>(metrics.labelHeight), item->width(), static_cast<int>(metrics.labelHeight));
         const QRect thumbRect(item->left(), item->top(), item->width(), item->height() - static_cast<int>(metrics.labelHeight));
         const bool selected = pageIndex == currentPage_;
+        // The dragged page stays in place, faded, until it is dropped.
+        const bool dragged = PageDragActive() && pageDrag_->page == pageIndex;
+        painter.setOpacity(dragged ? 0.4 : 1.0);
 
         if (selected) {
             painter.fillRect(*item, ChromeColor(kChromeSidebarSelected));
@@ -478,6 +495,15 @@ void SidebarWidget::paintEvent(QPaintEvent*) {
         painter.setFont(ChromeFont(14));
         painter.setPen(ChromeColor(selected ? kChromeSidebarLabelSelected : kChromeSidebarLabel));
         painter.drawText(labelRect, Qt::AlignCenter, QString::number(pageIndex + 1U));
+    }
+    painter.setOpacity(1.0);
+    if (const std::optional<std::size_t> slot = DropSlot(); slot.has_value()) {
+        if (const std::optional<int> y = DropIndicatorY(*slot); y.has_value()) {
+            const int itemWidth = ItemWidth();
+            const qreal left = static_cast<qreal>(((rect().left() + rect().right()) - itemWidth) / 2);
+            painter.setPen(QPen(ChromeColor(kChromeAccent), kDropIndicatorThickness, Qt::SolidLine, Qt::RoundCap));
+            painter.drawLine(QPointF(left, *y), QPointF(left + itemWidth - 1, *y));
+        }
     }
     painter.restore();
 
@@ -684,7 +710,98 @@ void SidebarWidget::CommitPageJumpEdit() {
     }
 }
 
+std::optional<std::size_t> SidebarWidget::DropSlot() const {
+    return PageDragActive() ? pageDrag_->dropSlot : std::nullopt;
+}
+
+std::optional<int> SidebarWidget::DropIndicatorY(std::size_t slot) const {
+    const std::size_t pageCount = PageCount();
+    if (pageCount == 0U || slot > pageCount) {
+        return std::nullopt;
+    }
+    const int halfGap = static_cast<int>(std::lround(Metrics().itemGap / 2.0));
+    if (slot < pageCount) {
+        return PageItemRect(slot)->top() - halfGap;
+    }
+    return PageItemRect(pageCount - 1U)->bottom() + 1 + halfGap;
+}
+
+void SidebarWidget::UpdatePageDrag(const QPoint& position) {
+    if (!pageDrag_.has_value()) {
+        return;
+    }
+    pageDrag_->position = position;
+    if (!pageDrag_->active) {
+        if ((position - pageDrag_->pressPosition).manhattanLength() < QApplication::startDragDistance()) {
+            return;
+        }
+        pageDrag_->active = true;
+        setCursor(Qt::ClosedHandCursor);
+    }
+
+    // The gap above the first page whose centre is below the pointer; past
+    // the last centre, the gap after the last page.
+    const std::size_t pageCount = PageCount();
+    std::size_t slot = pageCount;
+    for (std::size_t index = 0; index < pageCount; ++index) {
+        if (position.y() < PageItemRect(index)->center().y()) {
+            slot = index;
+            break;
+        }
+    }
+    // The two gaps around the dragged page would leave it where it is.
+    const bool moves = slot != pageDrag_->page && slot != pageDrag_->page + 1U;
+    pageDrag_->dropSlot = moves ? std::optional<std::size_t>(slot) : std::nullopt;
+
+    const QRect content = ContentRect();
+    const bool nearEdge = position.y() < content.top() + kDragScrollEdge || position.y() > content.bottom() - kDragScrollEdge;
+    if (nearEdge && !dragScrollTimer_->isActive()) {
+        dragScrollTimer_->start();
+    } else if (!nearEdge) {
+        dragScrollTimer_->stop();
+    }
+    update();
+}
+
+void SidebarWidget::AutoScrollPageDrag() {
+    if (!PageDragActive()) {
+        dragScrollTimer_->stop();
+        return;
+    }
+    const QRect content = ContentRect();
+    const int y = pageDrag_->position.y();
+    int step = 0;
+    if (y < content.top() + kDragScrollEdge) {
+        const int depth = std::min(kDragScrollEdge, content.top() + kDragScrollEdge - y);
+        step = -std::max(1, (kDragScrollMaxStep * depth) / kDragScrollEdge);
+    } else if (y > content.bottom() - kDragScrollEdge) {
+        const int depth = std::min(kDragScrollEdge, y - (content.bottom() - kDragScrollEdge));
+        step = std::max(1, (kDragScrollMaxStep * depth) / kDragScrollEdge);
+    }
+    const int before = scrollY_;
+    SetScrollY(scrollY_ + step);
+    if (scrollY_ == before) {
+        dragScrollTimer_->stop();
+        return;
+    }
+    UpdatePageDrag(pageDrag_->position);
+}
+
+void SidebarWidget::CancelPageDrag() {
+    if (!pageDrag_.has_value()) {
+        return;
+    }
+    const bool wasActive = pageDrag_->active;
+    pageDrag_.reset();
+    dragScrollTimer_->stop();
+    if (wasActive) {
+        unsetCursor();
+        update();
+    }
+}
+
 void SidebarWidget::mousePressEvent(QMouseEvent* event) {
+    CancelPageDrag();
     if (event->button() == Qt::RightButton) {
         if (const auto page = PageAtWidgetPosition(event->position().toPoint()); page.has_value()) {
             emit PageActivated(*page);
@@ -717,9 +834,35 @@ void SidebarWidget::mousePressEvent(QMouseEvent* event) {
         return;
     }
     if (const auto page = PageAtWidgetPosition(position); page.has_value()) {
+        // A press may become a reorder drag once it moves far enough.
+        pageDrag_ = PageDrag { *page, position, position, false, std::nullopt };
         emit PageActivated(*page);
     }
     // The reference HandleSidebarClick consumes any click inside the sidebar.
+}
+
+void SidebarWidget::mouseMoveEvent(QMouseEvent* event) {
+    if (!pageDrag_.has_value() || !event->buttons().testFlag(Qt::LeftButton)) {
+        event->ignore();
+        return;
+    }
+    UpdatePageDrag(event->position().toPoint());
+    event->accept();
+}
+
+void SidebarWidget::mouseReleaseEvent(QMouseEvent* event) {
+    if (event->button() != Qt::LeftButton || !pageDrag_.has_value()) {
+        event->ignore();
+        return;
+    }
+    const std::size_t from = pageDrag_->page;
+    const std::optional<std::size_t> slot = DropSlot();
+    CancelPageDrag();
+    if (slot.has_value()) {
+        // Removing the page first shifts every later gap up by one.
+        emit PageMoveRequested(from, *slot > from ? *slot - 1U : *slot);
+    }
+    event->accept();
 }
 
 void SidebarWidget::wheelEvent(QWheelEvent* event) {
@@ -753,6 +896,9 @@ void SidebarWidget::wheelEvent(QWheelEvent* event) {
         scrollTarget_ = target;
         update();
         emit ScrollChanged(scrollY_);
+        if (PageDragActive()) {
+            UpdatePageDrag(pageDrag_->position);
+        }
     }
     // Sidebar-local scrolling never pans the canvas (plan step 5.3).
     event->accept();
@@ -772,10 +918,20 @@ bool SidebarWidget::event(QEvent* event) {
             return true;
         }
     }
+    // Escape cancels a page drag before any window shortcut sees it.
+    if (PageDragActive() && event->type() == QEvent::ShortcutOverride
+        && static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape) {
+        event->accept();
+        return true;
+    }
     return QWidget::event(event);
 }
 
 void SidebarWidget::keyPressEvent(QKeyEvent* event) {
+    if (PageDragActive() && event->key() == Qt::Key_Escape) {
+        CancelPageDrag();
+        return;
+    }
     if (!pageJump_.active) {
         QWidget::keyPressEvent(event);
         return;

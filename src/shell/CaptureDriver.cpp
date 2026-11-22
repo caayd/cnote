@@ -209,15 +209,23 @@ bool ParseCaptureScript(std::string_view text, std::vector<CaptureStep>* steps, 
                 return fail("expected: wait MS");
             }
             step.kind = CaptureStepKind::Wait;
-        } else if (command == "move" || command == "click" || command == "doubleclick") {
+        } else if (command == "move" || command == "click" || command == "doubleclick" || command == "press"
+                   || command == "release") {
             double values[2] {};
             const bool pointer = command != "move";
             if (!numbers(2, values) || !options(3, false, pointer) || (!pointer && tokens.size() != 3U)) {
                 return fail(pointer ? "expected: " + std::string(command) + " X Y [left|right|middle] [MODS]"
                                     : "expected: move X Y");
             }
-            step.kind = command == "move" ? CaptureStepKind::Move
-                : (command == "click" ? CaptureStepKind::Click : CaptureStepKind::DoubleClick);
+            if (command == "move") {
+                step.kind = CaptureStepKind::Move;
+            } else if (command == "click") {
+                step.kind = CaptureStepKind::Click;
+            } else if (command == "doubleclick") {
+                step.kind = CaptureStepKind::DoubleClick;
+            } else {
+                step.kind = command == "press" ? CaptureStepKind::Press : CaptureStepKind::Release;
+            }
             step.from = QPointF(values[0], values[1]);
         } else if (command == "drag") {
             double values[4] {};
@@ -513,6 +521,14 @@ CaptureDriver::ExecuteResult CaptureDriver::Execute(const CaptureStep& step) {
             const bool suspends = step.button == Qt::RightButton || PopupOpen();
             return { true, suspends };
         }
+        case CaptureStepKind::Press:
+        case CaptureStepKind::Release:
+            // Split halves of a click or drag: `move` steps in between carry
+            // the held button, so a script can capture mid-drag.
+            SendMouse(QEvent::MouseMove, step.from, Qt::NoButton, step.modifiers);
+            SendMouse(step.kind == CaptureStepKind::Press ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease,
+                step.from, step.button, step.modifiers);
+            return {};
         case CaptureStepKind::Drag:
             SendMouse(QEvent::MouseMove, step.from, Qt::NoButton, step.modifiers);
             SendMouse(QEvent::MouseButtonPress, step.from, step.button, step.modifiers);

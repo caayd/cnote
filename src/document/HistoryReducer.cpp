@@ -172,6 +172,9 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
         }
         return true;
     }
+    case HistoryActionType::MovePage:
+        return undo ? document.MovePage(action.pageIndex, action.index)
+                    : document.MovePage(action.index, action.pageIndex);
     }
     return false;
 }

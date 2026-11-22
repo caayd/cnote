@@ -54,6 +54,8 @@ enum class CaptureStepKind {
     Move,
     Click,
     DoubleClick,
+    Press,
+    Release,
     Drag,
     Wheel,
     Key,

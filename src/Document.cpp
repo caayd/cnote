@@ -189,6 +189,39 @@ std::size_t Document::RemovePage(std::size_t index) {
     return currentPageIndex_;
 }
 
+bool Document::MovePage(std::size_t from, std::size_t to) {
+    if (from >= pages_.size() || to >= pages_.size() || from == to) {
+        return false;
+    }
+    const auto rotateRange = [from, to](auto& items) {
+        const auto first = items.begin();
+        if (from < to) {
+            std::rotate(first + static_cast<std::ptrdiff_t>(from), first + static_cast<std::ptrdiff_t>(from + 1U),
+                first + static_cast<std::ptrdiff_t>(to + 1U));
+        } else {
+            std::rotate(first + static_cast<std::ptrdiff_t>(to), first + static_cast<std::ptrdiff_t>(from),
+                first + static_cast<std::ptrdiff_t>(from + 1U));
+        }
+    };
+    rotateRange(pages_);
+    rotateRange(pageEpochs_);
+    currentPageIndex_ = MovedPageIndex(currentPageIndex_, from, to);
+    return true;
+}
+
+std::size_t Document::MovedPageIndex(std::size_t index, std::size_t from, std::size_t to) noexcept {
+    if (index == from) {
+        return to;
+    }
+    if (from < to && index > from && index <= to) {
+        return index - 1U;
+    }
+    if (to < from && index >= to && index < from) {
+        return index + 1U;
+    }
+    return index;
+}
+
 void Document::SetFilePath(std::filesystem::path filePath) {
     filePath_ = std::move(filePath);
 }

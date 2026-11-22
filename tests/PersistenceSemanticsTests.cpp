@@ -1046,6 +1046,37 @@ void SetCurrentPageIndexIsSerialized() {
         "the viewed page is what the project serializes");
 }
 
+void MovePageUndoRedoKeepsOrderAndViewedPage() {
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    controller.InsertPages(1, 1, cnote::ui::NewPageDraft { 200.0f, 300.0f, 0xFFFFFFFFU, {} });
+    controller.InsertPages(2, 1, cnote::ui::NewPageDraft { 400.0f, 500.0f, 0xFFFFFFFFU, {} });
+    const auto widths = [&]() {
+        std::vector<float> result;
+        for (std::size_t index = 0; index < controller.DocumentRef().PageCount(); ++index) {
+            result.push_back(controller.DocumentRef().PageAt(index).width);
+        }
+        return result;
+    };
+    const std::vector<float> original = widths();
+    controller.SetCurrentPageIndex(1);  // the 200-wide page
+
+    Check(controller.MovePage(0, 2), "moving the first page to the end succeeds");
+    Check(widths() == std::vector<float> { original[1], original[2], original[0] }, "the first page now sits last");
+    Check(controller.CurrentPageIndex() == 0U, "the viewed page follows its page (index 1 -> 0)");
+    Check(controller.Dirty(), "a move dirties the session");
+
+    Check(controller.Undo(), "the move undoes");
+    Check(widths() == original, "undo restores the original order");
+    Check(controller.CurrentPageIndex() == 1U, "undo keeps the viewed page on the same page");
+    Check(controller.Redo(), "the move redoes");
+    Check(widths() == std::vector<float> { original[1], original[2], original[0] }, "redo reapplies the move");
+
+    Check(!controller.MovePage(1, 1), "moving a page onto itself is refused");
+    Check(!controller.MovePage(0, 3), "moving past the last page is refused");
+}
+
 // Version 18 strokes store raw samples, the StrokeSampling they render with
 // and their pen pressures.  A version-17 stroke has no pressures (constant
 // width); a version-16 one stored already-stabilized points, which must read
@@ -1151,6 +1182,7 @@ int main(int argc, char** argv) {
     RemoteCommitCancelsTransientState();
     SaveToRefusesPdfContainer();
     SetCurrentPageIndexIsSerialized();
+    MovePageUndoRedoKeepsOrderAndViewedPage();
     StrokeFormatRoundTripsAndLegacyReads();
 
     if (gFailures != 0) {
