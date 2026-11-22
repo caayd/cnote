@@ -44,6 +44,9 @@ constexpr float kCircleAxisRatio = 0.85f;
 constexpr float kAxisSnapAngle = 8.0f * kDegrees;
 constexpr float kRightAngleTolerance = 15.0f * kDegrees;
 constexpr float kSquareSideRatio = 0.9f;
+// Constrained (Shift) triangles: equilateral when every angle is this close
+// to 60 degrees.
+constexpr float kEquilateralTolerance = 15.0f * kDegrees;
 // Arrow head: barb angle against the shaft and barb length relative to it.
 constexpr float kMinBarbAngle = 10.0f * kDegrees;
 constexpr float kMaxBarbAngle = 80.0f * kDegrees;
@@ -361,6 +364,13 @@ struct Candidate {
     float meanError = 0.0f;
 };
 
+// The rotation that brings `angle` onto the nearest `offset + k * period`
+// when it is within kAxisSnapAngle of it, else 0.
+float AxisSnapDelta(float angle, float period, float offset) {
+    const float target = offset + (std::round((angle - offset) / period) * period);
+    return std::abs(target - angle) <= kAxisSnapAngle ? target - angle : 0.0f;
+}
+
 // Least-squares ellipse: centroid and principal axes from the samples, then
 // the semi-axes solving min sum (A x^2 + B y^2 - 1)^2 in the axis frame.
 std::optional<Candidate> FitEllipse(std::span<const Vec2> samples, float diagonal) {
@@ -413,14 +423,7 @@ std::optional<Candidate> FitEllipse(std::span<const Vec2> samples, float diagona
         radiusA = radiusB = 0.5f * (radiusA + radiusB);
     }
     // Near-axis-aligned ellipses snap to the axes.
-    const float tilt = std::atan2(major.y, major.x);
-    for (int quarter = -2; quarter <= 2; ++quarter) {
-        const float axisAngle = static_cast<float>(quarter) * 0.5f * kPi;
-        if (std::abs(tilt - axisAngle) <= kAxisSnapAngle) {
-            major = { std::cos(axisAngle), std::sin(axisAngle) };
-            break;
-        }
-    }
+    major = Rotate(major, AxisSnapDelta(std::atan2(major.y, major.x), 0.5f * kPi, 0.0f));
     const Vec2 minor { -major.y, major.x };
 
     Candidate candidate { { kind, {} }, error.mean };
@@ -434,10 +437,11 @@ std::optional<Candidate> FitEllipse(std::span<const Vec2> samples, float diagona
     return candidate;
 }
 
-// Four corners within kRightAngleTolerance of square become an exact
-// rectangle: the sides' mean orientation and the corners' mean extents.
-std::optional<std::vector<Vec2>> SnapRectangle(std::span<const Vec2> corners) {
-    for (std::size_t index = 0; index < 4U; ++index) {
+// Four corners become an exact rectangle (the sides' mean orientation and the
+// corners' mean extents) when they are within kRightAngleTolerance of square,
+// or always when `constrained`.
+std::optional<std::vector<Vec2>> SnapRectangle(std::span<const Vec2> corners, bool constrained) {
+    for (std::size_t index = 0; index < 4U && !constrained; ++index) {
         const Vec2 corner = corners[index];
         const float angle = AngleBetween(Sub(corners[(index + 3U) % 4U], corner), Sub(corners[(index + 1U) % 4U], corner));
         if (std::abs(angle - (0.5f * kPi)) > kRightAngleTolerance) {
@@ -455,9 +459,7 @@ std::optional<std::vector<Vec2>> SnapRectangle(std::span<const Vec2> corners) {
     }
     center = Scale(center, 0.25f);
     float orientation = 0.25f * std::atan2(sum.y, sum.x);
-    if (std::abs(orientation) <= kAxisSnapAngle) {
-        orientation = 0.0f;
-    }
+    orientation += AxisSnapDelta(orientation, 0.5f * kPi, 0.0f);
     const Vec2 u { std::cos(orientation), std::sin(orientation) };
     const Vec2 v { -u.y, u.x };
     std::array<float, 4> alongU {};
@@ -483,7 +485,63 @@ std::optional<std::vector<Vec2>> SnapRectangle(std::span<const Vec2> corners) {
     };
 }
 
-std::optional<Candidate> FitPolygon(std::span<const Vec2> samples, float diagonal) {
+// A constrained triangle: equilateral (centroid and mean circumradius) when
+// every angle is within kEquilateralTolerance of 60 degrees, else a right
+// triangle squared at its widest corner with the legs' drawn lengths.  Either
+// snaps level when a side (equilateral) or a leg (right) is near an axis.
+std::vector<Vec2> SnapTriangle(std::span<const Vec2> corners) {
+    std::array<float, 3> angles {};
+    for (std::size_t index = 0; index < 3U; ++index) {
+        const Vec2 corner = corners[index];
+        angles[index] = AngleBetween(Sub(corners[(index + 2U) % 3U], corner), Sub(corners[(index + 1U) % 3U], corner));
+    }
+    std::vector<Vec2> snapped(corners.begin(), corners.end());
+
+    const bool equilateral = std::all_of(angles.begin(), angles.end(),
+        [](float angle) { return std::abs(angle - (kPi / 3.0f)) <= kEquilateralTolerance; });
+    if (equilateral) {
+        const Vec2 center = Scale(Add(Add(corners[0], corners[1]), corners[2]), 1.0f / 3.0f);
+        float radius = 0.0f;
+        Vec2 sum {};
+        for (const Vec2 corner : corners) {
+            const Vec2 d = Sub(corner, center);
+            radius += Length(d) / 3.0f;
+            const float angle = 3.0f * std::atan2(d.y, d.x);
+            sum = Add(sum, Vec2 { std::cos(angle), std::sin(angle) });
+        }
+        // Vertex directions modulo 120 degrees; a side is level when they sit
+        // at 30 degrees modulo 60.
+        float base = std::atan2(sum.y, sum.x) / 3.0f;
+        base += AxisSnapDelta(base, kPi / 3.0f, kPi / 6.0f);
+        const float step = 2.0f * kPi / 3.0f;
+        for (std::size_t index = 0; index < 3U; ++index) {
+            const Vec2 d = Sub(corners[index], center);
+            const float angle = base + (std::round((std::atan2(d.y, d.x) - base) / step) * step);
+            snapped[index] = Add(center, Scale(Vec2 { std::cos(angle), std::sin(angle) }, radius));
+        }
+        return snapped;
+    }
+
+    const std::size_t right = static_cast<std::size_t>(std::max_element(angles.begin(), angles.end()) - angles.begin());
+    const std::size_t first = (right + 1U) % 3U;
+    const std::size_t second = (right + 2U) % 3U;
+    const Vec2 apex = corners[right];
+    const Vec2 legA = Sub(corners[first], apex);
+    const Vec2 legB = Sub(corners[second], apex);
+    // Both legs turn symmetrically about the corner's bisector to 45 degrees
+    // either side of it.
+    const Vec2 bisector = Normalized(Add(Normalized(legA), Normalized(legB)));
+    const float turn = Cross(bisector, legA) >= 0.0f ? 0.25f * kPi : -0.25f * kPi;
+    Vec2 directionA = Rotate(bisector, turn);
+    const float level = AxisSnapDelta(std::atan2(directionA.y, directionA.x), 0.5f * kPi, 0.0f);
+    directionA = Rotate(directionA, level);
+    const Vec2 directionB = Rotate(bisector, level - turn);
+    snapped[first] = Add(apex, Scale(directionA, Length(legA)));
+    snapped[second] = Add(apex, Scale(directionB, Length(legB)));
+    return snapped;
+}
+
+std::optional<Candidate> FitPolygon(std::span<const Vec2> samples, float diagonal, bool constrained) {
     // Simplify the cyclic outline from sample 0 to the sample farthest from
     // it and back (index `count` is sample 0 again).
     const std::size_t count = samples.size();
@@ -546,9 +604,12 @@ std::optional<Candidate> FitPolygon(std::span<const Vec2> samples, float diagona
     RecognizedShapeKind kind = RecognizedShapeKind::Polygon;
     if (sides == 3U) {
         kind = RecognizedShapeKind::Triangle;
+        if (constrained) {
+            vertices = SnapTriangle(vertices);
+        }
     } else if (sides == 4U) {
         kind = RecognizedShapeKind::Quadrilateral;
-        if (std::optional<std::vector<Vec2>> rectangle = SnapRectangle(vertices)) {
+        if (std::optional<std::vector<Vec2>> rectangle = SnapRectangle(vertices, constrained)) {
             kind = RecognizedShapeKind::Rectangle;
             vertices = std::move(*rectangle);
         }
@@ -579,7 +640,7 @@ std::vector<Vec2> TrimClosure(std::vector<Vec2> samples) {
 
 }  // namespace
 
-std::optional<RecognizedShape> RecognizeShape(const std::vector<Vec2>& points) {
+std::optional<RecognizedShape> RecognizeShape(const std::vector<Vec2>& points, bool constrained) {
     if (points.size() < 2U || PathLength(points) < kMinStrokeLength) {
         return std::nullopt;
     }
@@ -593,7 +654,7 @@ std::optional<RecognizedShape> RecognizeShape(const std::vector<Vec2>& points) {
         const std::vector<Vec2> outline = Resample(closedPart, kSampleCount);
         const float diagonal = Diagonal(outline);
         std::optional<Candidate> ellipse = FitEllipse(outline, diagonal);
-        std::optional<Candidate> polygon = FitPolygon(outline, diagonal);
+        std::optional<Candidate> polygon = FitPolygon(outline, diagonal, constrained);
         if (ellipse.has_value() && (!polygon.has_value() || ellipse->meanError <= polygon->meanError)) {
             return std::move(ellipse->shape);
         }

@@ -142,11 +142,12 @@ bool Closed(const RecognizedShape& shape) {
 
 // Every seed must give `kind`; reports the first mismatch.
 void CheckEverySeed(const std::string& what, RecognizedShapeKind kind,
-    const std::vector<Vec2>& ideal, float amplitude) {
+    const std::vector<Vec2>& ideal, float amplitude, bool constrained = false) {
     int hits = 0;
     std::string firstMiss;
     for (int seed = 1; seed <= kSeeds; ++seed) {
-        const std::optional<RecognizedShape> shape = RecognizeShape(HandDrawn(ideal, amplitude, static_cast<std::uint32_t>(seed)));
+        const std::optional<RecognizedShape> shape =
+            RecognizeShape(HandDrawn(ideal, amplitude, static_cast<std::uint32_t>(seed)), constrained);
         if (Is(shape, kind)) {
             ++hits;
         } else if (firstMiss.empty()) {
@@ -248,8 +249,41 @@ int main() {
     });
     CheckEverySeed("a triangle is a triangle", RecognizedShapeKind::Triangle, triangleIdeal, 1.5f);
 
-    CheckEverySeed("a skewed four-sided outline is a quadrilateral", RecognizedShapeKind::Quadrilateral,
-        Polyline({ { 150.0f, 300.0f }, { 350.0f, 300.0f }, { 300.0f, 180.0f }, { 200.0f, 180.0f }, { 150.0f, 300.0f } }), 1.5f);
+    const std::vector<Vec2> skewedIdeal =
+        Polyline({ { 150.0f, 300.0f }, { 350.0f, 300.0f }, { 300.0f, 180.0f }, { 200.0f, 180.0f }, { 150.0f, 300.0f } });
+    CheckEverySeed("a skewed four-sided outline is a quadrilateral", RecognizedShapeKind::Quadrilateral, skewedIdeal, 1.5f);
+
+    // --- Shift: squared corners ---------------------------------------------
+    CheckEverySeed("Shift squares a skewed four-sided outline into a rectangle", RecognizedShapeKind::Rectangle,
+        skewedIdeal, 1.5f, true);
+    {
+        // Angles of about 59.5, 59.5 and 61 degrees: equilateral, base level.
+        const std::optional<RecognizedShape> triangle = RecognizeShape(HandDrawn(triangleIdeal, 1.5f, 6U), true);
+        const Bounds b = Is(triangle, RecognizedShapeKind::Triangle) ? BoundsOf(triangle->points) : Bounds {};
+        const float width = b.maxX - b.minX;
+        Check(width > 150.0f && std::abs((b.maxY - b.minY) - (width * std::sqrt(3.0f) * 0.5f)) < 0.05f,
+            "Shift makes a near-equilateral triangle exactly equilateral with a level side");
+    }
+    {
+        // About 93 degrees at the bottom-left corner: squared there, the
+        // near-level leg snapped level, so the bounding box's bottom-left
+        // corner is on the outline.
+        const std::vector<Vec2> rightIdeal = Polyline({
+            { 100.0f, 300.0f }, { 300.0f, 300.0f }, { 108.0f, 140.0f }, { 100.0f, 300.0f },
+        });
+        CheckEverySeed("Shift keeps a right-ish triangle a triangle", RecognizedShapeKind::Triangle, rightIdeal, 1.5f, true);
+        const std::optional<RecognizedShape> triangle = RecognizeShape(HandDrawn(rightIdeal, 1.5f, 8U), true);
+        bool cornerOnOutline = false;
+        Bounds b {};
+        if (Is(triangle, RecognizedShapeKind::Triangle)) {
+            b = BoundsOf(triangle->points);
+            for (const Vec2 p : triangle->points) {
+                cornerOnOutline = cornerOnOutline || Distance(p, { b.minX, b.maxY }) < 0.05f;
+            }
+        }
+        Check(cornerOnOutline && std::abs((b.maxX - b.minX) - 200.0f) < 8.0f && std::abs((b.maxY - b.minY) - 160.0f) < 8.0f,
+            "Shift squares the widest corner of a triangle and keeps its legs' lengths");
+    }
 
     // A hexagon must not read as a circle, nor a shaky circle as a hexagon.
     std::vector<Vec2> hexagon;

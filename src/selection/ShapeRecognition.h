@@ -38,6 +38,9 @@ struct RecognizedShape {
     std::vector<Vec2> points;
 };
 
-[[nodiscard]] std::optional<RecognizedShape> RecognizeShape(const std::vector<Vec2>& points);
+// `constrained` (Shift held) squares corners: any four-sided shape becomes a
+// rectangle, and a triangle becomes equilateral when its angles are all near
+// 60 degrees, else a right triangle with the right angle at its widest corner.
+[[nodiscard]] std::optional<RecognizedShape> RecognizeShape(const std::vector<Vec2>& points, bool constrained = false);
 
 }  // namespace cnote

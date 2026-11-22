@@ -365,10 +365,12 @@ public:
     // back and marquee/lasso overlays are hidden.  Idempotent.
     void CancelInteraction();
     // Hold-to-snap: replaces the live freehand stroke with the shape
-    // RecognizeShape fits to it.  The canvas calls this once the pointer has
-    // rested mid-stroke; returns false (stroke unchanged) when no stroke is
-    // live, the straight-line/oval mode owns it, it already snapped, or no
-    // shape fits.  A snapped stroke ignores further movement until release.
+    // RecognizeShape fits to it, with squared corners while Shift (snapLine)
+    // is held.  The canvas calls this once the pointer has rested mid-stroke;
+    // returns false (stroke unchanged) when no stroke is live, the
+    // straight-line/oval mode owns it, it already snapped, or no shape fits.
+    // A snapped stroke ignores further movement until release; toggling
+    // Shift before then re-snaps it.
     bool SnapStrokeToShape();
 
     [[nodiscard]] bool IsInteractionActive() const;
@@ -407,6 +409,9 @@ private:
     void BeginStroke(const QPointF& logical);
     bool ApplyStrokePoint(const QPointF& logical);
     void EndStroke();
+    // Recognizes the live stroke's freehand points under the current Shift
+    // state and replaces the stroke with the shape; false when none fits.
+    bool ApplyShapeSnap();
     // Starts one stroke segment on `hit`, resetting the host preview.  The
     // interaction stays Stroke; a page crossing commits the previous segment
     // and starts this one without releasing capture.

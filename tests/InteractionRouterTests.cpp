@@ -94,6 +94,7 @@ public:
     StrokeSampling lastSampling {};
     std::optional<float> beginPressure;
     std::vector<std::optional<float>> appendPressures;
+    std::vector<Vec2> replacedPoints;
 
     std::optional<ui::PageHit> HitTestPage(const QPointF& logical) const override { return hitPage(logical); }
     Vec2 ScreenToPage(const QPointF& logical, bool clampToPage) const override { return screenToPage(logical, clampToPage); }
@@ -133,6 +134,7 @@ public:
         ops.push_back("AppendStrokePoint(" + Format(point) + ",dotted=" + (dotted ? "1" : "0") + ")");
     }
     void ReplaceStrokePoints(const std::vector<Vec2>& points, bool dotted) override {
+        replacedPoints = points;
         ops.push_back("ReplaceStrokePoints(" + std::to_string(points.size()) + ",dotted=" + (dotted ? "1" : "0") + ")");
     }
     void CommitStroke() override { ops.push_back("CommitStroke"); }
@@ -519,6 +521,44 @@ void TestStrokeSnapToShape() {
         }
         host.Reset();
         Check(!router.SnapStrokeToShape() && host.ops.empty(), "the straight-line mode owns its stroke: no snap");
+    }
+    {
+        // Shift toggled over a held snapped trapezoid squares it into an
+        // axis-aligned rectangle; releasing Shift restores the fitted shape.
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        const QPointF corners[] = { { 150.0, 300.0 }, { 350.0, 300.0 }, { 300.0, 180.0 }, { 200.0, 180.0 }, { 150.0, 300.0 } };
+        router.HandlePointerPress(Press(corners[0].x(), corners[0].y()));
+        for (std::size_t side = 1; side < std::size(corners); ++side) {
+            for (int step = 1; step <= 50; ++step) {
+                const QPointF point = corners[side - 1] + ((corners[side] - corners[side - 1]) * (step / 50.0));
+                router.HandlePointerMove(Move(point.x(), point.y()));
+            }
+        }
+        Check(router.SnapStrokeToShape(), "a held trapezoid snaps");
+        const std::vector<Vec2> fitted = host.replacedPoints;
+        host.Reset();
+        ui::InteractionModifiers shift;
+        shift.snapLine = true;
+        router.SetModifiers(shift);
+        float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+        for (const Vec2 p : host.replacedPoints) {
+            minX = std::min(minX, p.x);
+            minY = std::min(minY, p.y);
+            maxX = std::max(maxX, p.x);
+            maxY = std::max(maxY, p.y);
+        }
+        bool onBox = host.CountOp("ReplaceStrokePoints") == 1;
+        for (const Vec2 p : host.replacedPoints) {
+            onBox = onBox && (Near(p.x, minX) || Near(p.x, maxX) || Near(p.y, minY) || Near(p.y, maxY));
+        }
+        Check(onBox, "pressing Shift re-snaps the held shape to a rectangle\n" + host.Dump());
+        host.Reset();
+        router.SetModifiers({});
+        Check(host.CountOp("ReplaceStrokePoints") == 1 && host.replacedPoints.size() == fitted.size(),
+            "releasing Shift restores the fitted trapezoid");
     }
 }
 

@@ -120,7 +120,13 @@ void InteractionRouter::SetSelectionMode(SelectionMode mode) {
 }
 
 void InteractionRouter::SetModifiers(InteractionModifiers modifiers) {
+    const bool constrainChanged = modifiers.snapLine != modifiers_.snapLine;
     modifiers_ = modifiers;
+    // Shift pressed or released over a held snapped shape re-snaps it with
+    // (or without) squared corners.
+    if (constrainChanged && state_.kind == InteractionKind::Stroke && state_.stroke.snapped) {
+        static_cast<void>(ApplyShapeSnap());
+    }
 }
 
 void InteractionRouter::SetTuning(InteractionTuning tuning) {
@@ -620,7 +626,11 @@ bool InteractionRouter::SnapStrokeToShape() {
     if (state_.kind != InteractionKind::Stroke || state_.stroke.snapped || modifiers_.straightLine) {
         return false;
     }
-    std::optional<RecognizedShape> shape = RecognizeShape(state_.stroke.freehandPoints);
+    return ApplyShapeSnap();
+}
+
+bool InteractionRouter::ApplyShapeSnap() {
+    std::optional<RecognizedShape> shape = RecognizeShape(state_.stroke.freehandPoints, modifiers_.snapLine);
     if (!shape.has_value()) {
         return false;
     }

@@ -569,12 +569,32 @@ private:
     void RefreshEraserTrail();
     // Hold-to-snap: while a stroke is live, shapeHoldTimer_ restarts whenever
     // the pointer leaves kShapeHoldTolerancePixels of shapeHoldAnchor_; when
-    // it fires (the pointer rested) the router snaps the stroke to a shape.
+    // it fires (the pointer rested) SnapHeldStroke snaps it to a shape.
     QTimer* shapeHoldTimer_ = nullptr;
     QPointF shapeHoldAnchor_ {};
     // After the router handled a pointer sample at `position` (nullopt for a
     // cancel): restarts or stops the hold timer with the stroke interaction.
     void TrackShapeHold(std::optional<QPointF> position);
+    // Snaps the live stroke and keeps its freehand original as snapGhost_.
+    void SnapHeldStroke();
+
+    // The freehand stroke a snap replaced, painted faded under the shape
+    // while the pointer is down and faded out over kSnapGhostFadeMs after the
+    // release (snapGhostTimer_ animates it, snapGhostClock_ times it).
+    struct SnapGhost {
+        std::size_t pageIndex = 0;
+        Stroke stroke;
+        std::optional<std::int64_t> releasedAt;
+    };
+    std::optional<SnapGhost> snapGhost_;
+    QElapsedTimer snapGhostClock_ {};
+    QTimer* snapGhostTimer_ = nullptr;
+    [[nodiscard]] float SnapGhostOpacity() const;
+    void RepaintSnapGhost();
+    // The pointer lifted (`fade`: the shape was committed) or the stroke was
+    // cancelled (the ghost goes at once).  A ghost already fading is left be.
+    void EndSnapGhost(bool fade);
+    void RefreshSnapGhost();
 
     // Transform gesture session: the handle being dragged, the selection
     // bounds captured at BeginTransform and the logical press position
