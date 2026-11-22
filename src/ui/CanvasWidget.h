@@ -206,6 +206,8 @@ public:
     // Commits (Ctrl+Enter, Escape) or cancels the active edit.
     void CommitActiveEdit();
     void CancelActiveEdit();
+    // The keyboard commit (Escape, Ctrl+Enter): commits and selects the object.
+    void CommitActiveEditFromKeyboard();
     [[nodiscard]] bool EditOverlayActive() const;
 
     [[nodiscard]] QTextEdit* TextEditor() const { return textEditor_; }

@@ -1550,6 +1550,43 @@ void CanvasWidget::CommitActiveEdit() {
     update();
 }
 
+void CanvasWidget::CommitActiveEditFromKeyboard() {
+    // Excalidraw selects a text submitted from the keyboard (Escape,
+    // Ctrl+Enter), so it can be moved, resized or deleted next.  The object
+    // is found again by id: the commit may reorder or (emptied) remove it.
+    const std::size_t pageIndex = controller_.EditingPageIndex();
+    std::optional<std::uint64_t> textId;
+    std::optional<std::uint64_t> latexId;
+    if (const PageText* text = controller_.EditingTextObject(); text != nullptr && controller_.EditingTextIndex().has_value()) {
+        textId = text->id;
+    } else if (const PageLatex* latex = controller_.EditingLatexObject();
+               latex != nullptr && controller_.EditingLatexIndex().has_value()) {
+        latexId = latex->id;
+    }
+    CommitActiveEdit();
+
+    const Document& document = controller_.DocumentRef();
+    if (pageIndex >= document.PageCount() || (!textId.has_value() && !latexId.has_value())) {
+        return;
+    }
+    const Page& page = document.PageAt(pageIndex);
+    PageSelection selection;
+    for (std::size_t index = 0; textId.has_value() && index < page.texts.size(); ++index) {
+        if (page.texts[index].id == *textId) {
+            selection.texts.push_back(index);
+        }
+    }
+    for (std::size_t index = 0; latexId.has_value() && index < page.latexes.size(); ++index) {
+        if (page.latexes[index].id == *latexId) {
+            selection.latexes.push_back(index);
+        }
+    }
+    if (!selection.Empty()) {
+        controller_.SelectObjects(pageIndex, std::move(selection));
+        update();
+    }
+}
+
 void CanvasWidget::CancelActiveEdit() {
     const bool cancellingText = controller_.EditingTextIndex().has_value();
     const bool cancellingLatex = controller_.EditingLatexIndex().has_value();
@@ -2056,7 +2093,7 @@ bool CanvasWidget::HandleEditorKey(QObject* watched, QKeyEvent* event) {
     const bool commitChord = (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
         && event->modifiers().testFlag(Qt::ControlModifier);
     if (commitChord || event->key() == Qt::Key_Escape) {
-        CommitActiveEdit();
+        CommitActiveEditFromKeyboard();
         return true;
     }
 
@@ -2190,7 +2227,7 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
 
 void CanvasWidget::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Escape) {
-        CommitActiveEdit();
+        CommitActiveEditFromKeyboard();
         HandlePointerCancel(CancelReason::Escape);
         event->accept();
         return;
