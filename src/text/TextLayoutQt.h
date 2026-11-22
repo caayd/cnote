@@ -17,10 +17,12 @@ struct QtTextLine {
     std::uint32_t start = 0;
 };
 
+// Heights in page units: `lineHeight` is the tallest line's pitch, `height`
+// the whole laid-out text's.
 struct QtTextLayout {
     std::vector<QtTextLine> lines;
-    int lineHeight = 0;
-    int height = 0;
+    float lineHeight = 0.0f;
+    float height = 0.0f;
 };
 
 // Lays out a PageText on the fixed 96-DPI reference device: point size is the
@@ -76,11 +78,12 @@ inline constexpr float kTextMaxWrapWidthZoomedOut = 2000.0f;
 // coordinate space, scaled by `scale`. The text is laid out at
 // scale / pixelRatio (fonts and wrap width multiplied by it, exactly like the
 // live editor at that view zoom) and the painter then scales that layout by
-// exactly `pixelRatio`. Qt rounds font pixel sizes to integers, so glyph
-// advances depend on the layout scale: committed text only matches the editor
-// glyph for glyph when both lay out at the same zoom and paint at the same
-// ratio. Glyphs are painted transparently; no background rectangle is ever
-// filled.
+// exactly `pixelRatio`. Fonts are scale-linear (SetScaleLinearPointSize), so
+// line breaks and positions are the page-unit layout's at every scale; glyph
+// images still come from the font's rounded pixel size, so committed text
+// matches the editor pixel for pixel when both lay out at the same zoom and
+// paint at the same ratio. Glyphs are painted transparently; no background
+// rectangle is ever filled.
 void DrawPageTextQt(QPainter& painter, const PageText& text, float pageWidth, float scale, float pixelRatio,
     float x, float y, float opacity);
 

@@ -6,8 +6,11 @@
 #include <QColor>
 #include <QFont>
 #include <QFontDatabase>
+#include <QFontInfo>
 #include <QGuiApplication>
+#include <QHash>
 #include <QTextBlock>
+#include <QTextBlockFormat>
 #include <QTextCharFormat>
 #include <QTextCursor>
 #include <QTextDocument>
@@ -98,7 +101,7 @@ QFont FontForStyle(const PageTextStyle& style, float displayScale) {
         font.setStyleHint(QFont::SansSerif);
         break;
     }
-    font.setPointSizeF(std::max(1.0f, style.fontSize * std::max(0.01f, displayScale)) * kPointsPerPixel);
+    SetScaleLinearPointSize(font, std::max(1.0f, style.fontSize * std::max(0.01f, displayScale)) * kPointsPerPixel);
     font.setBold(style.bold);
     font.setItalic(style.italic);
     font.setUnderline(style.underline);
@@ -115,6 +118,64 @@ QTextCharFormat CharFormatForStyle(const PageTextStyle& style, float displayScal
     format.setFont(FontForStyle(style, displayScale));
     format.setForeground(QColor::fromRgba(style.color));
     return format;
+}
+
+namespace {
+
+// Requested over actual point size: the factor the rounded font's advances
+// are off by.
+double SizeRoundingFactor(const QFont& font, double pointSize) {
+    const double actual = QFontInfo(font).pointSizeF();
+    return actual > 0.0 ? pointSize / actual : 1.0;
+}
+
+// The height Qt lays one line of `font` out at.
+double LaidOutLineHeight(const QFont& font) {
+    QTextDocument document;
+    document.setDocumentMargin(0.0);
+    document.setDefaultFont(font);
+    document.setPlainText(QStringLiteral("x"));
+    static_cast<void>(document.size());
+    const QTextLayout* layout = document.begin().layout();
+    return layout != nullptr && layout->lineCount() > 0 ? layout->lineAt(0).height() : 0.0;
+}
+
+}  // namespace
+
+void SetScaleLinearPointSize(QFont& font, double pointSize) {
+    font.setPointSizeF(pointSize);
+    font.setHintingPreference(QFont::PreferNoHinting);
+    font.setLetterSpacing(QFont::PercentageSpacing, 100.0 * SizeRoundingFactor(font, pointSize));
+}
+
+void SetScaleLinearPointSize(QTextCharFormat& format, double pointSize) {
+    // The rounding depends on the size alone, not the family.
+    QFont probe;
+    probe.setPointSizeF(pointSize);
+    format.setFontPointSize(pointSize);
+    format.setFontHintingPreference(QFont::PreferNoHinting);
+    format.setFontLetterSpacingType(QFont::PercentageSpacing);
+    format.setFontLetterSpacing(100.0 * SizeRoundingFactor(probe, pointSize));
+}
+
+double ScaleLinearLineDistance(const QFont& font) {
+    // Measured once per font: every layout of the object asks again.
+    static QHash<QString, double> cache;
+    const QString key = font.key();
+    if (const auto found = cache.constFind(key); found != cache.constEnd()) {
+        return *found;
+    }
+    // A 1000 px reference rounds by at most 0.05%: scaled down, its line
+    // height is the requested size's.
+    QFont reference = font;
+    reference.setPixelSize(1000);
+    const double referencePoints = QFontInfo(reference).pointSizeF();
+    const double exact = referencePoints > 0.0
+        ? LaidOutLineHeight(reference) * font.pointSizeF() / referencePoints
+        : LaidOutLineHeight(font);
+    const double distance = exact - LaidOutLineHeight(font);
+    cache.insert(key, distance);
+    return distance;
 }
 
 PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextStyle& fallback, float displayScale) {
@@ -170,6 +231,12 @@ void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, floa
     // until the next keystroke.  The whole-document setCharFormat after it
     // relayouts every block.
     cursor.setBlockCharFormat(defaultFormat);
+    // Lines of the base font at the requested size's height (see
+    // SetScaleLinearPointSize); Enter carries the block format to new lines.
+    QTextBlockFormat lines;
+    lines.setLineHeight(ScaleLinearLineDistance(FontForStyle(defaultStyle, displayScale)),
+        QTextBlockFormat::LineDistanceHeight);
+    cursor.mergeBlockFormat(lines);
     cursor.setCharFormat(defaultFormat);
 
     const TextOffsetMap map = BuildTextOffsetMap(text, mathMode);
