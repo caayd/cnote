@@ -372,8 +372,10 @@ float AxisSnapDelta(float angle, float period, float offset) {
 }
 
 // Least-squares ellipse: centroid and principal axes from the samples, then
-// the semi-axes solving min sum (A x^2 + B y^2 - 1)^2 in the axis frame.
-std::optional<Candidate> FitEllipse(std::span<const Vec2> samples, float diagonal) {
+// the semi-axes solving min sum (A x^2 + B y^2 - 1)^2 in the axis frame.  A
+// near-round fit, or any fit when `constrained`, becomes a circle of the
+// mean semi-axis.
+std::optional<Candidate> FitEllipse(std::span<const Vec2> samples, float diagonal, bool constrained) {
     const LineFit axes = FitLine(samples);
     Vec2 major = axes.direction;
     const Vec2 center = axes.center;
@@ -418,7 +420,7 @@ std::optional<Candidate> FitEllipse(std::span<const Vec2> samples, float diagona
     }
 
     RecognizedShapeKind kind = RecognizedShapeKind::Ellipse;
-    if (std::min(radiusA, radiusB) >= kCircleAxisRatio * std::max(radiusA, radiusB)) {
+    if (constrained || std::min(radiusA, radiusB) >= kCircleAxisRatio * std::max(radiusA, radiusB)) {
         kind = RecognizedShapeKind::Circle;
         radiusA = radiusB = 0.5f * (radiusA + radiusB);
     }
@@ -653,7 +655,7 @@ std::optional<RecognizedShape> RecognizeShape(const std::vector<Vec2>& points, b
         && Distance(closedPart.front(), closedPart.back()) <= kClosedGapRatio * closedLength) {
         const std::vector<Vec2> outline = Resample(closedPart, kSampleCount);
         const float diagonal = Diagonal(outline);
-        std::optional<Candidate> ellipse = FitEllipse(outline, diagonal);
+        std::optional<Candidate> ellipse = FitEllipse(outline, diagonal, constrained);
         std::optional<Candidate> polygon = FitPolygon(outline, diagonal, constrained);
         if (ellipse.has_value() && (!polygon.has_value() || ellipse->meanError <= polygon->meanError)) {
             return std::move(ellipse->shape);

@@ -207,6 +207,16 @@ int main() {
                 && std::abs(ellipse->points[0].y - ellipse->points[36].y) < 0.01f,
             "a nearly level ellipse snaps level");
     }
+    CheckEverySeed("Shift makes a tilted ellipse a circle", RecognizedShapeKind::Circle, tiltedIdeal, 2.0f, true);
+    {
+        // A perfect circle of the mean semi-axis, (110 + 55) / 2.
+        const std::optional<RecognizedShape> circle = RecognizeShape(HandDrawn(tiltedIdeal, 2.0f, 5U), true);
+        bool round = Is(circle, RecognizedShapeKind::Circle) && Closed(*circle);
+        for (const Vec2 p : round ? circle->points : std::vector<Vec2> {}) {
+            round = round && std::abs(Distance(p, center) - 82.5f) < 4.0f;
+        }
+        Check(round, "the Shift circle keeps the ellipse's center and mean radius");
+    }
 
     // --- polygons -----------------------------------------------------------
     // Starts mid-way along the top edge, rounds its corners a little and
