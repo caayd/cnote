@@ -52,9 +52,8 @@ constexpr int kMaxPaletteMenuColumns = 4;        // Layout.cpp:377
 // shadows; the hovered one lifts (grows outward, slides off the centre and
 // casts a deeper shadow), animated together with the wheel's open fade.
 constexpr std::uint32_t kWheelUnselectedFill = 0xF5202934U;   // App.cpp:6855 (245,32,41,52)
-constexpr std::uint32_t kWheelSelectedFill = 0xFF3D76A4U;     // App.cpp:6853 (255,61,118,164)
 constexpr std::uint32_t kWheelSliceEdge = 0x30FFFFFFU;        // hairline so dark slices read on dark chrome
-constexpr std::uint32_t kWheelSelectionTab = kChromeAccent;   // selected-colour arc outside the slice
+constexpr std::uint32_t kWheelSelectionTab = kChromeAccent;   // selected-entry arc outside the slice
 constexpr std::uint32_t kWheelToolIconTint = 0xFFE8EEF5U;     // App.cpp:6892 RGB(232,238,245)
 constexpr std::uint32_t kWheelSelectedIconTint = 0xFFFFFFFFU;  // App.cpp:6892
 constexpr std::uint32_t kWheelCenterFill = 0xFF121820U;       // App.cpp:7022 (255,18,24,32)
@@ -922,7 +921,7 @@ protected:
             painter.drawPath(path);
             const qreal glyphRadius = (ringInner + outer + (qt::PaletteWheelHoverGrow() * lift(index))) * 0.5;
             PaintGlyph(painter, index, Polar(sliceOrigin(index), glyphRadius, bisector(index)), lift(index), dpr);
-            if (IsColorEntry(index) && IsSelectedEntry(index)) {
+            if (IsSelectedEntry(index)) {
                 PaintSelectionTab(painter, sliceOrigin(index), outer + (qt::PaletteWheelHoverGrow() * lift(index)),
                     AngleAt(static_cast<qreal>(index) / static_cast<qreal>(entries)),
                     AngleAt(static_cast<qreal>(index + 1U) / static_cast<qreal>(entries)));
@@ -1121,9 +1120,10 @@ private:
         painter.restore();
     }
 
-    // Selected colour: a rounded accent arc just outside the slice's outer
-    // edge, inset past the slice's rounded corners.  It sits on the backdrop,
-    // so it reads the same on every palette colour, and it follows the lift.
+    // Selected entry (colour, tool or zoom preset): a rounded accent arc just
+    // outside the slice's outer edge, inset past the slice's rounded corners.
+    // It sits on the backdrop, so it reads the same on every palette colour,
+    // and it follows the lift.
     static void PaintSelectionTab(QPainter& painter, const QPointF& origin, qreal sliceOuter, qreal start, qreal end) {
         constexpr qreal kDegrees = 180.0 / kWheelPi;
         const qreal radius = sliceOuter + kPaletteWheelTabGapDip;
@@ -1249,7 +1249,7 @@ private:
         if (IsColorEntry(index)) {
             return ChromeColor(palette_[index]);
         }
-        return ChromeColor(IsSelectedEntry(index) ? kWheelSelectedFill : kWheelUnselectedFill);
+        return ChromeColor(kWheelUnselectedFill);
     }
 
     ToolbarWidget* owner_ = nullptr;
