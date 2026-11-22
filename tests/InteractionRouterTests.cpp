@@ -143,13 +143,18 @@ public:
         ops.push_back("UpdateSelectionOverlay(lasso=" + std::string(lasso ? "1" : "0") + ",points=" + std::to_string(lassoPoints.size()) + ")");
     }
     void CancelSelectionOverlay() override { ops.push_back("CancelSelectionOverlay"); }
-    void CommitSelection(const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click) override {
+    void CommitSelection(const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click,
+        bool additive) override {
         ops.push_back("CommitSelection(anchor=" + Format(anchor.x()) + "," + Format(anchor.y()) + ",current=" + Format(current.x())
             + "," + Format(current.y()) + ",lasso=" + (lasso ? "1" : "0") + ",boxOverride=" + (boxOverride ? "1" : "0")
-            + ",click=" + (click ? "1" : "0") + ")");
+            + ",click=" + (click ? "1" : "0") + ",additive=" + (additive ? "1" : "0") + ")");
     }
     void AddObjectToSelection(ui::ObjectRef object) override {
         ops.push_back("AddObjectToSelection(kind=" + std::to_string(static_cast<int>(object.kind)) + ",index=" + std::to_string(object.objectIndex) + ")");
+    }
+    void ToggleObjectInSelection(ui::ObjectRef object) override {
+        ops.push_back("ToggleObjectInSelection(page=" + std::to_string(object.pageIndex) + ",kind="
+            + std::to_string(static_cast<int>(object.kind)) + ",index=" + std::to_string(object.objectIndex) + ")");
     }
     void BeginMoveSelection(std::size_t pageIndex) override { ops.push_back("BeginMoveSelection(" + std::to_string(pageIndex) + ")"); }
     void BeginCloneMoveSelection(std::size_t pageIndex) override { ops.push_back("BeginCloneMoveSelection(" + std::to_string(pageIndex) + ")"); }
@@ -621,7 +626,7 @@ void TestSelectionClickVersusMarquee() {
         Check(host.HasOp("UpdateSelectionOverlay(lasso=0,points=1)"), "a box selection updates the overlay");
         router.HandlePointerMove(Move(105.0, 105.0));
         router.HandlePointerRelease(Release(105.0, 105.0));
-        Check(host.HasOp("CommitSelection(anchor=100.000,100.000,current=105.000,105.000,lasso=0,boxOverride=0,click=1)"),
+        Check(host.HasOp("CommitSelection(anchor=100.000,100.000,current=105.000,105.000,lasso=0,boxOverride=0,click=1,additive=0)"),
             "a 7-px gesture is a click\n" + host.Dump());
     }
     {
@@ -632,7 +637,7 @@ void TestSelectionClickVersusMarquee() {
         router.HandlePointerPress(Press(100.0, 100.0));
         router.HandlePointerMove(Move(140.0, 160.0));
         router.HandlePointerRelease(Release(140.0, 160.0));
-        Check(host.HasOp("CommitSelection(anchor=100.000,100.000,current=140.000,160.000,lasso=0,boxOverride=0,click=0)"),
+        Check(host.HasOp("CommitSelection(anchor=100.000,100.000,current=140.000,160.000,lasso=0,boxOverride=0,click=0,additive=0)"),
             "a 72-px gesture is a marquee\n" + host.Dump());
     }
     {
@@ -660,7 +665,7 @@ void TestSelectionLassoAccumulation() {
     router.HandlePointerMove(Move(7.0, 0.0));
     Check(host.HasOp("UpdateSelectionOverlay(lasso=1,points=2)"), "a 7-px move adds a lasso point\n" + host.Dump());
     router.HandlePointerRelease(Release(7.0, 0.0));
-    Check(host.HasOp("CommitSelection(anchor=0.000,0.000,current=7.000,0.000,lasso=1,boxOverride=0,click=1)"),
+    Check(host.HasOp("CommitSelection(anchor=0.000,0.000,current=7.000,0.000,lasso=1,boxOverride=0,click=1,additive=0)"),
         "the lasso commit reports the effective mode\n" + host.Dump());
 }
 
@@ -679,7 +684,7 @@ void TestSelectionLassoClickVersusLoop() {
         // The router tracks the release position through the pointer moves.
         router.HandlePointerMove(Move(102.0, 102.0));
         router.HandlePointerRelease(Release(102.0, 102.0));
-        Check(host.HasOp("CommitSelection(anchor=100.000,100.000,current=102.000,102.000,lasso=1,boxOverride=0,click=0)"),
+        Check(host.HasOp("CommitSelection(anchor=100.000,100.000,current=102.000,102.000,lasso=1,boxOverride=0,click=0,additive=0)"),
             "a lasso loop that returns near its anchor is not a click\n" + host.Dump());
     }
     {
@@ -690,7 +695,7 @@ void TestSelectionLassoClickVersusLoop() {
         router.HandlePointerPress(Press(100.0, 100.0));
         router.HandlePointerMove(Move(104.0, 103.0));
         router.HandlePointerRelease(Release(104.0, 103.0));
-        Check(host.HasOp("CommitSelection(anchor=100.000,100.000,current=104.000,103.000,lasso=1,boxOverride=0,click=1)"),
+        Check(host.HasOp("CommitSelection(anchor=100.000,100.000,current=104.000,103.000,lasso=1,boxOverride=0,click=1,additive=0)"),
             "a lasso tap inside the click radius is still a click\n" + host.Dump());
         // The 5-px move is under the 6-px sampling spacing, so the release point
         // only reaches the polygon through the final append.
@@ -787,8 +792,76 @@ void TestSelectionPrecedence() {
         router.HandlePointerPress(Press(50.0, 50.0));
         router.HandlePointerMove(Move(200.0, 50.0));
         router.HandlePointerRelease(Release(200.0, 50.0));
-        Check(host.HasOp("CommitSelection(anchor=50.000,50.000,current=200.000,50.000,lasso=0,boxOverride=1,click=0)"),
+        Check(host.HasOp("CommitSelection(anchor=50.000,50.000,current=200.000,50.000,lasso=0,boxOverride=1,click=0,additive=0)"),
             "the empty-space move fallback is a box selection regardless of the lasso mode\n" + host.Dump());
+    }
+}
+
+// Shift multi-select: a Shift press edits the selection instead of replacing
+// or moving it.
+void TestShiftSelection() {
+    const auto shiftPress = [](double x, double y) {
+        ui::PointerSample sample = Press(x, y);
+        sample.modifiers = Qt::ShiftModifier;
+        return sample;
+    };
+    for (const ui::Tool tool : { ui::Tool::Select, ui::Tool::Move }) {
+        const std::string name = tool == ui::Tool::Select ? "Select" : "Move";
+        {
+            // On an object, even inside the selection frame: toggle, no move.
+            RecordingHost host;
+            ui::InteractionRouter router(host);
+            router.SetTool(tool);
+            host.hasSelection = true;
+            host.cursorInteractsWithSelection = true;
+            host.selectionObject = ui::SelectionHit { ui::ObjectKind::Text, 3U, true, true };
+            router.HandlePointerPress(shiftPress(50.0, 50.0));
+            Check(host.HasOp("ToggleObjectInSelection(page=0,kind=2,index=3)"),
+                name + ": Shift-click on an object toggles it\n" + host.Dump());
+            Check(host.CountOp("ClearSelection") == 0 && host.CountOp("BeginMoveSelection") == 0
+                    && host.CountOp("AddObjectToSelection") == 0,
+                name + ": Shift-click neither clears, replaces nor moves the selection\n" + host.Dump());
+            Check(router.ActiveInteraction() == ui::InteractionKind::None, name + ": the toggle is the whole gesture");
+        }
+        {
+            // On empty space: an additive marquee (box for the Move tool).
+            RecordingHost host;
+            ui::InteractionRouter router(host);
+            router.SetTool(tool);
+            router.SetSelectionMode(ui::SelectionMode::Box);
+            host.hasSelection = true;
+            router.HandlePointerPress(shiftPress(50.0, 50.0));
+            router.HandlePointerMove(Move(200.0, 120.0));
+            router.HandlePointerRelease(Release(200.0, 120.0));
+            const std::string boxOverride = tool == ui::Tool::Move ? "1" : "0";
+            Check(host.HasOp("CommitSelection(anchor=50.000,50.000,current=200.000,120.000,lasso=0,boxOverride=" + boxOverride
+                      + ",click=0,additive=1)"),
+                name + ": Shift-drag on empty space commits an additive marquee\n" + host.Dump());
+            Check(host.CountOp("ClearSelection") == 0, name + ": the additive marquee keeps the selection");
+        }
+        {
+            // On a selection handle: the transform still wins (Shift is its
+            // aspect-lock / rotation-snap key).
+            RecordingHost host;
+            ui::InteractionRouter router(host);
+            router.SetTool(tool);
+            host.hasSelection = true;
+            host.selectionObject = ui::SelectionHit { ui::ObjectKind::Stroke, 0U, true, true };
+            host.selectionHandle = ui::TransformRequest { ui::TransformTarget::Stroke, 0U, 2U, ui::TransformHandle::TopLeft };
+            router.HandlePointerPress(shiftPress(50.0, 50.0));
+            Check(host.HasOp("BeginTransform(target=0,page=0,index=2,handle=1)") && host.CountOp("ToggleObjectInSelection") == 0,
+                name + ": Shift on a handle transforms instead of toggling\n" + host.Dump());
+        }
+        {
+            // Off the pages: nothing happens and the selection stays.
+            RecordingHost host;
+            ui::InteractionRouter router(host);
+            router.SetTool(tool);
+            host.hasSelection = true;
+            router.HandlePointerPress(shiftPress(50.0, 1200.0));
+            Check(host.CountOp("ClearSelection") == 0 && router.ActiveInteraction() == ui::InteractionKind::None,
+                name + ": a Shift press off the pages keeps the selection\n" + host.Dump());
+        }
     }
 }
 
@@ -1336,6 +1409,7 @@ int main() {
     TestSelectionLassoAccumulation();
     TestSelectionLassoClickVersusLoop();
     TestSelectionPrecedence();
+    TestShiftSelection();
     TestTextClickVersusDrag();
     TestTextToolDragSizesWidth();
     TestAltCloneMove();

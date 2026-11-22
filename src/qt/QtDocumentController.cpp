@@ -908,22 +908,26 @@ void QtDocumentController::ClearSelection() {
     emit SelectionChanged();
 }
 
-void QtDocumentController::AddObjectToSelection(const ui::ObjectRef& object) {
-    ui::PageSelection& selection = selection_[object.pageIndex];
-    switch (object.kind) {
+namespace {
+
+std::vector<std::size_t>& SelectedIndices(ui::PageSelection& selection, ui::ObjectKind kind) {
+    switch (kind) {
     case ui::ObjectKind::Stroke:
-        selection.strokes.push_back(object.objectIndex);
-        break;
+        return selection.strokes;
     case ui::ObjectKind::Image:
-        selection.images.push_back(object.objectIndex);
-        break;
+        return selection.images;
     case ui::ObjectKind::Text:
-        selection.texts.push_back(object.objectIndex);
-        break;
+        return selection.texts;
     case ui::ObjectKind::Latex:
-        selection.latexes.push_back(object.objectIndex);
         break;
     }
+    return selection.latexes;
+}
+
+}  // namespace
+
+void QtDocumentController::AddObjectToSelection(const ui::ObjectRef& object) {
+    SelectedIndices(selection_[object.pageIndex], object.kind).push_back(object.objectIndex);
     emit SelectionChanged();
 }
 
@@ -932,6 +936,45 @@ void QtDocumentController::SelectObjects(std::size_t pageIndex, ui::PageSelectio
         selection_.erase(pageIndex);
     } else {
         selection_[pageIndex] = std::move(selection);
+    }
+    emit SelectionChanged();
+}
+
+void QtDocumentController::ToggleObjectInSelection(const ui::ObjectRef& object) {
+    std::erase_if(selection_, [&](const auto& entry) { return entry.first != object.pageIndex; });
+    ui::PageSelection& selection = selection_[object.pageIndex];
+    selection.pdfText.clear();  // a page never carries objects and PDF text
+    std::vector<std::size_t>& indices = SelectedIndices(selection, object.kind);
+    if (const auto found = std::find(indices.begin(), indices.end(), object.objectIndex); found != indices.end()) {
+        indices.erase(found);
+    } else {
+        // Ascending, like the indices a marquee/lasso commit produces.
+        indices.insert(std::lower_bound(indices.begin(), indices.end(), object.objectIndex), object.objectIndex);
+    }
+    if (selection.Empty()) {
+        selection_.erase(object.pageIndex);
+    }
+    emit SelectionChanged();
+}
+
+void QtDocumentController::AddToSelection(std::size_t pageIndex, ui::PageSelection selection) {
+    std::erase_if(selection_, [&](const auto& entry) { return entry.first != pageIndex; });
+    ui::PageSelection& merged = selection_[pageIndex];
+    if (!selection.pdfText.empty() || (!merged.pdfText.empty() && !selection.Empty())) {
+        merged = std::move(selection);
+    } else {
+        const auto unite = [](std::vector<std::size_t>& into, const std::vector<std::size_t>& added) {
+            into.insert(into.end(), added.begin(), added.end());
+            std::sort(into.begin(), into.end());
+            into.erase(std::unique(into.begin(), into.end()), into.end());
+        };
+        unite(merged.strokes, selection.strokes);
+        unite(merged.images, selection.images);
+        unite(merged.texts, selection.texts);
+        unite(merged.latexes, selection.latexes);
+    }
+    if (merged.Empty()) {
+        selection_.erase(pageIndex);
     }
     emit SelectionChanged();
 }

@@ -163,8 +163,10 @@ public:
     void ClearSelection() override;
     void UpdateSelectionOverlay(const QPointF& anchor, const QPointF& current, bool lasso, const std::vector<QPointF>& lassoPoints) override;
     void CancelSelectionOverlay() override;
-    void CommitSelection(const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click) override;
+    void CommitSelection(const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click,
+        bool additive) override;
     void AddObjectToSelection(ObjectRef object) override;
+    void ToggleObjectInSelection(ObjectRef object) override;
     void BeginMoveSelection(std::size_t pageIndex) override;
     void BeginCloneMoveSelection(std::size_t pageIndex) override;
     void UpdateMoveSelection(const QPointF& logicalDelta) override;

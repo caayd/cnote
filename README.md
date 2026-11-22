@@ -99,6 +99,7 @@ decorations, so the band there never draws the in-client window buttons.
 - `E` erase
 - `S` select
 - `M` move
+- With select or move, `Shift`+click adds or removes an object and `Shift`+drag adds the marquee's (or lasso's) objects to the selection, which stays on one page
 - `H` pan
 - `L` latex equation (edit source with live preview; type `\` for command suggestions, `Tab` or `Enter` completes the selected command, `Ctrl+Enter` commits)
 - LaTeX editing auto-closes `{}`, `()`, and `[]`; completing `\frac` inserts both argument slots

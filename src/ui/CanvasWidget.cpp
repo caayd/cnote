@@ -3182,7 +3182,7 @@ void CanvasWidget::CancelSelectionOverlay() {
 }
 
 void CanvasWidget::CommitSelection(
-    const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click) {
+    const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click, bool additive) {
     // Repaint where the marquee/overlay was; the new selection frame's region
     // is painted through update() below.
     MarkTransientDirty(OverlayDirtyRect());
@@ -3200,7 +3200,9 @@ void CanvasWidget::CommitSelection(
 
     const std::optional<CanvasPageView> view = HitTestPageView(commitAnchor);
     if (!view.has_value()) {
-        controller_.ClearSelection();
+        if (!additive) {
+            controller_.ClearSelection();
+        }
         update();
         return;
     }
@@ -3327,12 +3329,21 @@ void CanvasWidget::CommitSelection(
         }
     }
 
-    controller_.SelectObjects(view->pageIndex, std::move(selection));
+    if (additive) {
+        controller_.AddToSelection(view->pageIndex, std::move(selection));
+    } else {
+        controller_.SelectObjects(view->pageIndex, std::move(selection));
+    }
     update();
 }
 
 void CanvasWidget::AddObjectToSelection(ObjectRef object) {
     controller_.AddObjectToSelection(object);
+    update();
+}
+
+void CanvasWidget::ToggleObjectInSelection(ObjectRef object) {
+    controller_.ToggleObjectInSelection(object);
     update();
 }
 
