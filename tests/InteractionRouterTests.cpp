@@ -118,7 +118,6 @@ public:
         ops.push_back("ZoomByWheelSteps(" + std::to_string(steps) + "," + Format(anchor.x()) + "," + Format(anchor.y()) + ")");
     }
     void ScrollBy(const QPointF& delta) override { ops.push_back("ScrollBy(" + Format(delta.x()) + "," + Format(delta.y()) + ")"); }
-    void SetViewPage(std::size_t pageIndex) override { ops.push_back("SetViewPage(" + std::to_string(pageIndex) + ")"); }
     void SetCursor(ui::CursorKind cursor) override { ops.push_back("SetCursor(" + std::to_string(static_cast<int>(cursor)) + ")"); }
     void InvalidateCanvas() override { ++invalidateCount; }
 

@@ -510,8 +510,6 @@ void InteractionRouter::BeginStroke(const QPointF& logical) {
     if (host_.HasSelection()) {
         host_.ClearSelection();
     }
-    host_.SetViewPage(hit->pageIndex);
-
     StartStrokeSegment(*hit, host_.ScreenToPage(logical, true), modifiers_.dotted);
     host_.InvalidateCanvas();
 }
@@ -533,7 +531,6 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
     const std::optional<PageHit> hit = host_.HitTestPage(logical);
     if (hit.has_value() && hit->pageIndex != state_.stroke.page->pageIndex) {
         host_.CommitStroke();
-        host_.SetViewPage(hit->pageIndex);
         StartStrokeSegment(*hit, host_.ScreenToPage(logical, true), state_.stroke.dotted);
         host_.InvalidateCanvas();
         return true;
@@ -637,9 +634,6 @@ void InteractionRouter::ExtendErase(const QPointF& logical) {
         state_.erase.lastPageIndex.reset();
         return;
     }
-    if (!state_.erase.lastPageIndex.has_value() || *state_.erase.lastPageIndex != hit->pageIndex) {
-        host_.SetViewPage(hit->pageIndex);
-    }
     const Vec2 center = host_.ScreenToPage(logical, true);
     const Vec2 start = state_.erase.lastPageIndex.has_value() && *state_.erase.lastPageIndex == hit->pageIndex
         ? state_.erase.lastPagePoint
@@ -693,9 +687,6 @@ void InteractionRouter::BeginSelection(const QPointF& logical, bool boxOverride)
     state_.select.lassoPoints.push_back(logical);
     state_.select.boxOverride = boxOverride;
     state_.kind = InteractionKind::Select;
-    if (const std::optional<PageHit> hit = host_.HitTestPage(logical); hit.has_value()) {
-        host_.SetViewPage(hit->pageIndex);
-    }
     UpdateCapture();
     host_.UpdateSelectionOverlay(state_.select.anchor, state_.select.current,
         !boxOverride && selectionMode_ == SelectionMode::Lasso, state_.select.lassoPoints);
@@ -904,7 +895,6 @@ void InteractionRouter::EndMoveSelection() {
 void InteractionRouter::BeginTextTool(const QPointF& logical) {
     // TextEditing.cpp:1111-1156 BeginTextToolInteraction.
     if (const std::optional<std::pair<std::size_t, std::size_t>> hitText = host_.HitTestText(logical); hitText.has_value()) {
-        host_.SetViewPage(hitText->first);
         // The editor replaces the selection frame: clear it the same way the
         // outside-canvas branch below does so the box never overlaps the caret.
         host_.ClearSelection();
@@ -919,7 +909,6 @@ void InteractionRouter::BeginTextTool(const QPointF& logical) {
         host_.InvalidateCanvas();
         return;
     }
-    host_.SetViewPage(hit->pageIndex);
     host_.ClearSelection();
     // Excalidraw's text tool: the release decides between a click, which
     // creates a text that grows with its content, and a sideways drag, which
@@ -965,7 +954,6 @@ void InteractionRouter::EndTextCreate(bool create) {
 void InteractionRouter::BeginLatexTool(const QPointF& logical) {
     // LatexEditing.cpp:806-843 BeginLatexToolInteraction.
     if (const std::optional<std::pair<std::size_t, std::size_t>> hitLatex = host_.HitTestLatex(logical); hitLatex.has_value()) {
-        host_.SetViewPage(hitLatex->first);
         // Same rule as BeginTextTool: an editor opening hides the selection.
         host_.ClearSelection();
         host_.BeginLatexEdit(hitLatex->first, hitLatex->second);
@@ -979,7 +967,6 @@ void InteractionRouter::BeginLatexTool(const QPointF& logical) {
         host_.InvalidateCanvas();
         return;
     }
-    host_.SetViewPage(hit->pageIndex);
     host_.ClearSelection();
     host_.CreateLatexAt(hit->pageIndex, host_.ScreenToPage(logical, true));
     host_.InvalidateCanvas();

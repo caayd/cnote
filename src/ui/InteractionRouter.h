@@ -256,7 +256,6 @@ public:
     virtual void PanBy(const QPointF& logicalDelta) = 0;
     virtual void ZoomByWheelSteps(int steps, const QPointF& anchor) = 0;
     virtual void ScrollBy(const QPointF& logicalDelta) = 0;
-    virtual void SetViewPage(std::size_t pageIndex) = 0;
     virtual void SetCursor(CursorKind cursor) = 0;
     virtual void InvalidateCanvas() = 0;
     // App::UpdateCaptureState (App.cpp:5843-5861): the reference held capture

@@ -389,26 +389,26 @@ void QtDocumentController::SetCurrentPageIndex(std::size_t index) {
     currentPage_ = index;
 }
 
-void QtDocumentController::NoteCommitted(std::size_t pageIndex) {
+void QtDocumentController::NoteCommitted() {
     if (session_ == nullptr) {
         return;
     }
     session_->dirty = true;
     ++session_->revision;
-    const std::size_t pageCount = session_->document.PageCount();
-    if (pageCount > 0U) {
-        SetCurrentPageIndex(std::min(pageIndex, pageCount - 1U));
-    }
+    // The focused page follows the viewport (CanvasWidget::SyncFocusedPage), not
+    // the edited page; the document keeps its index on the same page across
+    // inserts and removals, so only resync to it here.
+    SetCurrentPageIndex(session_->document.CurrentPageIndex());
     NotifySessionChanged(true);
 }
 
-void QtDocumentController::RecordCommit(HistoryAction action, std::size_t pageIndex) {
+void QtDocumentController::RecordCommit(HistoryAction action) {
     if (session_ == nullptr) {
         return;
     }
     session_->undoActions.push_back(std::move(action));
     session_->redoActions.clear();
-    NoteCommitted(pageIndex);
+    NoteCommitted();
 }
 
 const Document& QtDocumentController::DocumentRef() const {
@@ -474,7 +474,6 @@ void QtDocumentController::BeginStroke(std::size_t pageIndex, Vec2 point, Stroke
         pending.stroke.pressures.push_back(ClampPressure(*pressure));
     }
     pendingStroke_ = std::move(pending);
-    SetCurrentPageIndex(pageIndex);
 }
 
 void QtDocumentController::ExtendStroke(Vec2 point, std::optional<float> pressure) {
@@ -510,7 +509,7 @@ void QtDocumentController::EndStroke() {
     action.pageIndex = finished.pageIndex;
     action.stroke = std::move(finished.stroke);
     page->strokes.push_back(action.stroke);
-    RecordCommit(std::move(action), finished.pageIndex);
+    RecordCommit(std::move(action));
 }
 
 void QtDocumentController::CancelStroke() {
@@ -551,9 +550,8 @@ bool QtDocumentController::Undo() {
         return false;
     }
 
-    const std::size_t pageIndex = action.pageIndex;
     session_->redoActions.push_back(std::move(action));
-    NoteCommitted(pageIndex);
+    NoteCommitted();
     return true;
 }
 
@@ -570,9 +568,8 @@ bool QtDocumentController::Redo() {
         return false;
     }
 
-    const std::size_t pageIndex = action.pageIndex;
     session_->undoActions.push_back(std::move(action));
-    NoteCommitted(pageIndex);
+    NoteCommitted();
     return true;
 }
 
@@ -648,7 +645,6 @@ bool QtDocumentController::BeginTextEdit(std::size_t pageIndex, std::size_t text
     edit.textBefore = page->texts[textIndex];
     edit.text = edit.textBefore;
     edit_ = std::move(edit);
-    SetCurrentPageIndex(pageIndex);
     emit EditStateChanged();
     return true;
 }
@@ -689,7 +685,6 @@ bool QtDocumentController::BeginLatexEdit(std::size_t pageIndex, std::size_t lat
     edit.objectId = page->latexes[latexIndex].id;
     edit.latexBefore = page->latexes[latexIndex];
     edit_ = std::move(edit);
-    SetCurrentPageIndex(pageIndex);
     emit EditStateChanged();
     return true;
 }
@@ -789,7 +784,7 @@ void QtDocumentController::CommitTextEdit(PageText edited) {
     }
 
     if (changed) {
-        RecordCommit(std::move(action), session.pageIndex);
+        RecordCommit(std::move(action));
     }
     emit EditStateChanged();
 }
@@ -868,7 +863,7 @@ void QtDocumentController::CommitLatexEdit(const QString& source) {
     }
 
     if (changed) {
-        RecordCommit(std::move(action), session.pageIndex);
+        RecordCommit(std::move(action));
     }
     emit EditStateChanged();
 }
@@ -1080,9 +1075,7 @@ void QtDocumentController::CommitPageGesture() {
     action.pageIndices = { pageIndex };
     action.pages = { std::move(before) };
     action.replacementPages = { *page };
-    // Keep the viewed page: a gesture on a non-current page must not steal the
-    // focus the way a sidebar page operation does.
-    RecordCommit(std::move(action), currentPage_);
+    RecordCommit(std::move(action));
 }
 
 void QtDocumentController::CancelPageGesture() {
@@ -1641,7 +1634,7 @@ std::size_t QtDocumentController::InsertPages(std::size_t index, std::size_t cou
     action.type = HistoryActionType::AddPages;
     action.pages = std::move(pages);
     action.index = insertIndex;
-    RecordCommit(std::move(action), insertIndex);
+    RecordCommit(std::move(action));
     return insertIndex;
 }
 
@@ -1687,9 +1680,8 @@ bool QtDocumentController::RemovePage(std::size_t index) {
     action.type = HistoryActionType::RemovePages;
     action.pages = { removed };
     action.index = index;
-    const std::size_t focusIndex = document.CurrentPageIndex();
     emit SelectionChanged();
-    RecordCommit(std::move(action), focusIndex);
+    RecordCommit(std::move(action));
     return true;
 }
 
@@ -1716,7 +1708,7 @@ bool QtDocumentController::PastePage(std::size_t index) {
     action.type = HistoryActionType::AddPages;
     action.pages = { pasted };
     action.index = insertIndex;
-    RecordCommit(std::move(action), insertIndex);
+    RecordCommit(std::move(action));
     return true;
 }
 
@@ -1777,7 +1769,7 @@ bool QtDocumentController::RotatePage(std::size_t pageIndex, int quarterTurns) {
     action.pageIndices = { pageIndex };
     action.pages = { std::move(before) };
     action.replacementPages = { page };
-    RecordCommit(std::move(action), currentPage_);
+    RecordCommit(std::move(action));
     return true;
 }
 
@@ -1844,7 +1836,7 @@ void QtDocumentController::ApplyNewPageDraft(const ui::NewPageDraft& draft, ui::
     action.pageIndices = indices;
     action.pages = std::move(before);
     action.replacementPages = std::move(after);
-    RecordCommit(std::move(action), currentPage_);
+    RecordCommit(std::move(action));
 }
 
 void QtDocumentController::SetNewPageDefaults(const ui::NewPageDefaults& defaults) {
@@ -1867,7 +1859,7 @@ void QtDocumentController::SetNewPageDefaults(const ui::NewPageDefaults& default
         return;
     }
     document.SetNewPageDefaults(pageDefaults);
-    NoteCommitted(currentPage_);
+    NoteCommitted();
 }
 
 ui::NewPageDefaults QtDocumentController::NewPageDefaults() const {
@@ -2018,7 +2010,7 @@ bool QtDocumentController::RemoveSelection() {
     action.replacementPages = std::move(after);
     selection_.clear();
     emit SelectionChanged();
-    RecordCommit(std::move(action), currentPage_);
+    RecordCommit(std::move(action));
     return true;
 }
 
@@ -2089,7 +2081,7 @@ bool QtDocumentController::PastePayload(
     selection_.clear();
     selection_[pageIndex] = std::move(pasted);
     emit SelectionChanged();
-    RecordCommit(std::move(action), pageIndex);
+    RecordCommit(std::move(action));
     return true;
 }
 
