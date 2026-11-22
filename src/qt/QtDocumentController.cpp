@@ -1638,87 +1638,114 @@ std::size_t QtDocumentController::InsertPages(std::size_t index, std::size_t cou
     return insertIndex;
 }
 
-bool QtDocumentController::CopyPage(std::size_t index) {
-    if (session_ == nullptr || index >= DocumentRef().PageCount()) {
+namespace {
+
+// Sorted, unique and every index below `pageCount`: the page-list contract
+// of the sidebar page operations.
+bool IsPageList(const std::vector<std::size_t>& pages, std::size_t pageCount) {
+    return !pages.empty() && std::is_sorted(pages.begin(), pages.end())
+        && std::adjacent_find(pages.begin(), pages.end()) == pages.end() && pages.back() < pageCount;
+}
+
+}  // namespace
+
+bool QtDocumentController::CopyPages(const std::vector<std::size_t>& pages) {
+    if (session_ == nullptr || !IsPageList(pages, DocumentRef().PageCount())) {
         return false;
     }
-    manager_.SetClipboardPage(DocumentRef().PageAt(index));
+    std::vector<Page> copied;
+    copied.reserve(pages.size());
+    for (const std::size_t index : pages) {
+        copied.push_back(DocumentRef().PageAt(index));
+    }
+    manager_.SetClipboardPages(std::move(copied));
     return true;
 }
 
-bool QtDocumentController::CutPage(std::size_t index) {
-    return CopyPage(index) && RemovePage(index);
+bool QtDocumentController::CutPages(const std::vector<std::size_t>& pages) {
+    if (session_ == nullptr || pages.size() >= DocumentRef().PageCount()) {
+        return false;
+    }
+    return CopyPages(pages) && RemovePages(pages);
 }
 
-bool QtDocumentController::RemovePage(std::size_t index) {
+bool QtDocumentController::RemovePages(const std::vector<std::size_t>& pages) {
     if (session_ == nullptr) {
         return false;
     }
     Document& document = session_->document;
-    if (index >= document.PageCount() || document.PageCount() <= 1U) {
+    if (!IsPageList(pages, document.PageCount()) || pages.size() >= document.PageCount()) {
         return false;
     }
 
-    const Page removed = document.PageAt(index);
-    document.RemovePage(index);
+    std::vector<Page> removed;
+    removed.reserve(pages.size());
+    for (const std::size_t index : pages) {
+        removed.push_back(document.PageAt(index));
+    }
+    for (auto index = pages.rbegin(); index != pages.rend(); ++index) {
+        document.RemovePage(*index);
+    }
 
-    // Selection indices are per-page positions: the removed page's selection
-    // dies with it and every later selection shifts down one.
+    // Selection indices are per-page positions: a removed page's selection
+    // dies with it and every later one shifts down by the removed pages
+    // before it.
     if (!selection_.empty()) {
         std::map<std::size_t, ui::PageSelection> remapped;
         for (auto& entry : selection_) {
-            if (entry.first < index) {
-                remapped[entry.first] = std::move(entry.second);
-            } else if (entry.first > index) {
-                remapped[entry.first - 1U] = std::move(entry.second);
+            if (std::binary_search(pages.begin(), pages.end(), entry.first)) {
+                continue;
             }
+            const auto removedBefore = std::lower_bound(pages.begin(), pages.end(), entry.first) - pages.begin();
+            remapped[entry.first - static_cast<std::size_t>(removedBefore)] = std::move(entry.second);
         }
         selection_ = std::move(remapped);
     }
 
     HistoryAction action {};
     action.type = HistoryActionType::RemovePages;
-    action.pages = { removed };
-    action.index = index;
+    action.pages = std::move(removed);
+    action.pageIndices = pages;
     emit SelectionChanged();
     RecordCommit(std::move(action));
     return true;
 }
 
-bool QtDocumentController::PastePage(std::size_t index) {
-    if (session_ == nullptr || !manager_.HasClipboardPage()) {
-        return false;
+std::optional<std::size_t> QtDocumentController::PastePages(std::size_t index) {
+    if (session_ == nullptr || !manager_.HasClipboardPages()) {
+        return std::nullopt;
     }
     Document& document = session_->document;
     const std::size_t insertIndex = std::min(index + 1U, document.PageCount());
 
-    const Page pasted = *manager_.ClipboardPage();
-    document.InsertPage(insertIndex, pasted);
+    const std::vector<Page> pasted = manager_.ClipboardPages();
+    for (std::size_t offset = 0; offset < pasted.size(); ++offset) {
+        document.InsertPage(insertIndex + offset, pasted[offset]);
+    }
 
     // Same per-page index shift as InsertPages.
     if (!selection_.empty()) {
         std::map<std::size_t, ui::PageSelection> remapped;
         for (auto& entry : selection_) {
-            remapped[entry.first >= insertIndex ? entry.first + 1U : entry.first] = std::move(entry.second);
+            remapped[entry.first >= insertIndex ? entry.first + pasted.size() : entry.first] = std::move(entry.second);
         }
         selection_ = std::move(remapped);
     }
 
     HistoryAction action {};
     action.type = HistoryActionType::AddPages;
-    action.pages = { pasted };
+    action.pages = pasted;
     action.index = insertIndex;
     RecordCommit(std::move(action));
-    return true;
+    return insertIndex;
 }
 
 std::optional<std::size_t> QtDocumentController::MovePages(const std::vector<std::size_t>& pages, std::size_t slot) {
-    if (session_ == nullptr || pages.empty()) {
+    if (session_ == nullptr) {
         return std::nullopt;
     }
     const std::size_t pageCount = session_->document.PageCount();
-    if (slot > pageCount || !std::is_sorted(pages.begin(), pages.end())
-        || std::adjacent_find(pages.begin(), pages.end()) != pages.end() || pages.back() >= pageCount) {
+    if (slot > pageCount || !IsPageList(pages, pageCount)) {
         return std::nullopt;
     }
     // An open edit or stroke addresses its page by index: settle it first.

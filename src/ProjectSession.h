@@ -10,7 +10,9 @@ enum class HistoryActionType {
     AddText,
     RemoveText,
     UpdateText,
+    // `pages` inserted as one block at `index`.
     AddPages,
+    // `pages` removed from the sorted indices `pageIndices` (pre-removal).
     RemovePages,
     ReplacePages,
     // Document::ReorderPages with `pageIndices` as the order; undo applies

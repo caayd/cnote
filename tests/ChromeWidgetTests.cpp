@@ -985,6 +985,30 @@ void TestSidebarMultiSelectDrag() {
     Check(sidebar.SelectedPages().empty(), "a document change clears the selection");
 }
 
+void TestSidebarScrollClampsAfterPageRemoval() {
+    QWidget host;
+    host.resize(1400, 900);
+    cnote::ui::SidebarWidget sidebar(&host);
+    cnote::Document document = BuildDocument(12);
+    sidebar.SetDocument(&document, nullptr);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    sidebar.SetOpen(true);
+    host.show();
+    QApplication::processEvents();
+    sidebar.SetScrollY(sidebar.MaxScroll());
+    const int scrolledToEnd = sidebar.ScrollY();
+    Check(scrolledToEnd > 0, "a 12-page list scrolls");
+
+    // Deleting several pages at once (a multi-page selection) shortens the
+    // list by more than the viewport; the scroll must not point past it.
+    for (int removed = 0; removed < 8; ++removed) {
+        document.RemovePage(document.PageCount() - 1U);
+    }
+    sidebar.NotifyDocumentChanged();
+    Check(sidebar.ScrollY() == sidebar.MaxScroll() && sidebar.ScrollY() < scrolledToEnd,
+        "the scroll clamps to the shorter list");
+}
+
 void TestToolbarAutoHide() {
     QWidget host;
     host.resize(1400, 900);
@@ -1160,6 +1184,7 @@ int main(int argc, char** argv) {
     TestSidebarSlideState();
     TestSidebarDragReorder();
     TestSidebarMultiSelectDrag();
+    TestSidebarScrollClampsAfterPageRemoval();
     TestSidebarThumbnailCacheInvalidation();
     TestToolbarAutoHide();
     TestOverlayDismissalConsumesPaletteMenu();

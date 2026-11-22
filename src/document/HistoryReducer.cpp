@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <numeric>
 #include <optional>
+#include <vector>
 
 namespace cnote {
 namespace {
@@ -25,14 +27,16 @@ std::optional<std::size_t> FindLatexIndexById(const Page& page, std::uint64_t la
     return std::nullopt;
 }
 
-// Number of pages a sequential removal at a fixed index can actually delete:
-// bounded by the request, by the pages from `index` to the end, and by the
-// one-page minimum Document::RemovePage enforces.
-std::size_t PageRemovalCount(const Document& document, std::size_t index, std::size_t requested) {
-    if (document.PageCount() == 0U || index >= document.PageCount()) {
-        return 0U;
+// Where the pages of an AddPages/RemovePages action sit in the document that
+// holds them, ascending: AddPages inserted one block at `index`, RemovePages
+// records each removed page's index (`pageIndices`).
+std::vector<std::size_t> PagePositions(const HistoryAction& action) {
+    if (action.type == HistoryActionType::RemovePages) {
+        return action.pageIndices;
     }
-    return std::min({ requested, document.PageCount() - index, document.PageCount() - 1U });
+    std::vector<std::size_t> positions(action.pages.size());
+    std::iota(positions.begin(), positions.end(), action.index);
+    return positions;
 }
 
 }  // namespace
@@ -133,24 +137,33 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
     case HistoryActionType::AddPages:
     case HistoryActionType::RemovePages: {
         // Undo AddPages / redo RemovePages delete the recorded pages; the
-        // opposite direction reinserts the snapshot at its recorded index.
+        // opposite direction reinserts the snapshots at their recorded indices.
+        // Both validate first, so a failed step leaves the document untouched
+        // (and always keeps at least one page).
+        const std::vector<std::size_t> positions = PagePositions(action);
+        if (positions.empty() || positions.size() != action.pages.size()
+            || !std::is_sorted(positions.begin(), positions.end())
+            || std::adjacent_find(positions.begin(), positions.end()) != positions.end()) {
+            return false;
+        }
         const bool remove = undo == (action.type == HistoryActionType::AddPages);
         if (remove) {
-            const std::size_t count = PageRemovalCount(document, action.index, action.pages.size());
-            if (count == 0U) {
+            if (positions.back() >= document.PageCount() || positions.size() >= document.PageCount()) {
                 return false;
             }
-            for (std::size_t offset = 0; offset < count; ++offset) {
-                document.RemovePage(action.index);
+            for (auto position = positions.rbegin(); position != positions.rend(); ++position) {
+                document.RemovePage(*position);
             }
             return true;
         }
-        if (action.pages.empty() || action.index > document.PageCount()) {
-            return false;
+        // Ascending inserts: each index counts the pages inserted before it.
+        for (std::size_t offset = 0; offset < positions.size(); ++offset) {
+            if (positions[offset] > document.PageCount() + offset) {
+                return false;
+            }
         }
-        std::size_t insertIndex = action.index;
-        for (const Page& page : action.pages) {
-            document.InsertPage(insertIndex++, page);
+        for (std::size_t offset = 0; offset < positions.size(); ++offset) {
+            document.InsertPage(positions[offset], action.pages[offset]);
         }
         return true;
     }
