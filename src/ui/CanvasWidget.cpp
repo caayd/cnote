@@ -2050,14 +2050,13 @@ bool CanvasWidget::HandleEditorKey(QObject* watched, QKeyEvent* event) {
         }
     }
 
+    // Ctrl+Enter and Escape both finish the edit and keep what was typed
+    // (Excalidraw's textWysiwyg submits on Escape); an emptied text is
+    // removed by the commit itself.
     const bool commitChord = (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
         && event->modifiers().testFlag(Qt::ControlModifier);
-    if (commitChord) {
+    if (commitChord || event->key() == Qt::Key_Escape) {
         CommitActiveEdit();
-        return true;
-    }
-    if (event->key() == Qt::Key_Escape) {
-        CancelActiveEdit();
         return true;
     }
 
@@ -2191,7 +2190,7 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
 
 void CanvasWidget::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Escape) {
-        CancelActiveEdit();
+        CommitActiveEdit();
         HandlePointerCancel(CancelReason::Escape);
         event->accept();
         return;
@@ -2282,7 +2281,7 @@ void CanvasWidget::HandlePointerCancel(CancelReason reason) {
     // Idempotent: the router abandons the live *pointer* interaction without
     // committing it (Escape / lost grab) and releases capture.  Active
     // text/LaTeX edits are not cancelled here: they own their own focus, and a
-    // canvas focus change must not discard typed content (Escape cancels).
+    // canvas focus change must not discard typed content (Escape commits).
     static_cast<void>(reason);
     router_->CancelInteraction();
     TrackEraserTrail(std::nullopt);

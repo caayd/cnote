@@ -530,6 +530,44 @@ void TextFormatPopupLeavesFocusWithEditor() {
     Check(!harness.canvas->EditOverlayActive(), "Ctrl+Enter after the popup commits the edit");
 }
 
+// Escape finishes a text or LaTeX edit and keeps what was typed, like
+// Excalidraw's editor; it used to discard the whole edit.
+void EscapeCommitsTheEdit() {
+    Harness harness;
+    const auto& page = harness.window->Controller().DocumentRef().PageAt(0U);
+    const std::size_t textsBefore = page.texts.size();
+    harness.window->AddTextObject();
+    QApplication::processEvents();
+    if (QTextEdit* editor = harness.canvas->TextEditor(); editor != nullptr) {
+        editor->setFocus(Qt::OtherFocusReason);
+    }
+    harness.Press(Qt::Key_A);
+    harness.Press(Qt::Key_B);
+    harness.Press(Qt::Key_Escape);
+    Check(!harness.canvas->EditOverlayActive(), "Escape closes the text editor");
+    Check(page.texts.size() == textsBefore + 1U && page.texts.back().content == u"ab",
+        "Escape keeps the typed text");
+    Check(harness.window->Controller().CanUndo(), "the kept text is one undoable step");
+
+    harness.window->AddTextObject();
+    QApplication::processEvents();
+    harness.Press(Qt::Key_Escape);
+    Check(page.texts.size() == textsBefore + 1U, "Escape on a new, empty text leaves no object");
+
+    const std::size_t latexesBefore = page.latexes.size();
+    harness.window->AddLatexObject();
+    QApplication::processEvents();
+    if (QPlainTextEdit* editor = harness.canvas->LatexEditor(); editor != nullptr) {
+        editor->setFocus(Qt::OtherFocusReason);
+        editor->setPlainText(QStringLiteral("x^2"));
+    }
+    QApplication::processEvents();
+    harness.Press(Qt::Key_Escape);
+    Check(!harness.canvas->EditOverlayActive(), "Escape closes the LaTeX editor");
+    Check(page.latexes.size() == latexesBefore + 1U && page.latexes.back().content == u"x^2",
+        "Escape keeps the typed LaTeX");
+}
+
 void EditorKeepsCtrlBWhileEditingText() {
     // Reference precedence (TextEditProc, MessageLoop.cpp): ctrl+B inside a text
     // edit is the editor's bold command, so the sidebar toggle must not steal it.
@@ -1141,6 +1179,7 @@ int main(int argc, char** argv) {
     QuickActionsFireEverywhere();
     QuickPopupIsTextFormattingWhileEditing();
     TextFormatPopupLeavesFocusWithEditor();
+    EscapeCommitsTheEdit();
     PendingTextFormatSeedsNewObjects();
     AlignmentChangedWhileEditingIsCommitted();
     FormatCommandsChangeOnlyTheirProperty();

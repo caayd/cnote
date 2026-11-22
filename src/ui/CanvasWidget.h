@@ -203,7 +203,7 @@ public:
     // Shows the overlay for an edit the controller already started (e.g. a new
     // object created from a shell command), or hides it when none is active.
     void SyncEditOverlay();
-    // Commits (Ctrl+Enter) or cancels (Escape) the active edit.
+    // Commits (Ctrl+Enter, Escape) or cancels the active edit.
     void CommitActiveEdit();
     void CancelActiveEdit();
     [[nodiscard]] bool EditOverlayActive() const;
