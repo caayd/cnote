@@ -177,6 +177,10 @@ void InteractionRouter::BeginPressInteraction(const PointerSample& sample) {
         BeginPan(sample.position, false);
         return;
     case Tool::Move:
+        if ((sample.modifiers & Qt::ShiftModifier) != 0) {
+            BeginShiftSelection(sample, true);
+            return;
+        }
         if (host_.PageWithPdfTextAt(sample.position).has_value()) {
             if (host_.HasSelection()) {
                 host_.ClearSelection();
@@ -187,6 +191,10 @@ void InteractionRouter::BeginPressInteraction(const PointerSample& sample) {
         BeginSelectOrMove(sample, true);
         return;
     case Tool::Select:
+        if ((sample.modifiers & Qt::ShiftModifier) != 0) {
+            BeginShiftSelection(sample, false);
+            return;
+        }
         if (host_.HasSelection() && host_.CursorInteractsWithSelection(sample.position)) {
             BeginMoveSelection(sample);
             return;
@@ -670,7 +678,7 @@ void InteractionRouter::EndErase(bool commit) {
 
 // ----------------------------------------------------------- selection -----
 
-void InteractionRouter::BeginSelection(const QPointF& logical, bool boxOverride) {
+void InteractionRouter::BeginSelection(const QPointF& logical, bool boxOverride, bool additive) {
     // Selection.cpp:1221-1246 BeginSelection.
     if (state_.kind == InteractionKind::Pan) {
         return;
@@ -686,6 +694,7 @@ void InteractionRouter::BeginSelection(const QPointF& logical, bool boxOverride)
     state_.select.lassoPoints.clear();
     state_.select.lassoPoints.push_back(logical);
     state_.select.boxOverride = boxOverride;
+    state_.select.additive = additive;
     state_.kind = InteractionKind::Select;
     UpdateCapture();
     host_.UpdateSelectionOverlay(state_.select.anchor, state_.select.current,
@@ -743,7 +752,7 @@ void InteractionRouter::EndSelection() {
         }
     }
     host_.CommitSelection(state_.select.anchor, state_.select.current, lasso,
-        state_.select.boxOverride, click);
+        state_.select.boxOverride, click, state_.select.additive);
     ResetInteraction();
     host_.InvalidateCanvas();
 }
@@ -770,18 +779,8 @@ void InteractionRouter::BeginMoveSelection(const PointerSample& sample) {
     }
     const std::size_t pageIndex = hit->pageIndex;
 
-    if (const std::optional<TransformRequest> probe = host_.HitTestSelectionHandle(logical);
-        probe.has_value() && probe->pageIndex == pageIndex) {
-        TransformRequest request = *probe;
-        request.pressLogical = logical;
-        // Enter Transform only when the host could actually start the session;
-        // otherwise fall through so the press is not swallowed.
-        if (host_.BeginTransform(request)) {
-            state_.kind = InteractionKind::Transform;
-            UpdateCapture();
-            host_.InvalidateCanvas();
-            return;
-        }
+    if (TryBeginTransform(logical, pageIndex)) {
+        return;
     }
 
     const std::optional<SelectionHit> objectHit = host_.HitTestSelectionObject(logical, pageIndex);
@@ -836,6 +835,47 @@ void InteractionRouter::BeginMoveSelection(const PointerSample& sample) {
         host_.BeginMoveSelection(pageIndex);
     }
     host_.InvalidateCanvas();
+}
+
+bool InteractionRouter::TryBeginTransform(const QPointF& logical, std::size_t pageIndex) {
+    const std::optional<TransformRequest> probe = host_.HitTestSelectionHandle(logical);
+    if (!probe.has_value() || probe->pageIndex != pageIndex) {
+        return false;
+    }
+    TransformRequest request = *probe;
+    request.pressLogical = logical;
+    // Enter Transform only when the host could actually start the session;
+    // otherwise the caller falls through so the press is not swallowed.
+    if (!host_.BeginTransform(request)) {
+        return false;
+    }
+    state_.kind = InteractionKind::Transform;
+    UpdateCapture();
+    host_.InvalidateCanvas();
+    return true;
+}
+
+void InteractionRouter::BeginShiftSelection(const PointerSample& sample, bool moveTool) {
+    // Shift edits the selection instead of replacing it, mirroring the page
+    // sidebar's Shift multi-select: a press on an object toggles it, a press
+    // elsewhere starts a marquee/lasso whose objects are added.
+    const QPointF& logical = sample.position;
+    const std::optional<PageHit> hit = host_.HitTestPage(logical);
+    if (!hit.has_value()) {
+        return;  // off the pages: keep the selection
+    }
+    // Handles keep working: Shift is their aspect-lock / rotation-snap key.
+    if (TryBeginTransform(logical, hit->pageIndex)) {
+        return;
+    }
+    if (const std::optional<SelectionHit> objectHit = host_.HitTestSelectionObject(logical, hit->pageIndex);
+        objectHit.has_value()) {
+        host_.ToggleObjectInSelection(ObjectRef { hit->pageIndex, objectHit->kind, objectHit->objectIndex });
+        host_.InvalidateCanvas();
+        return;
+    }
+    // The Move tool's empty-space press is a box selection (BeginMoveSelection).
+    BeginSelection(logical, moveTool, true);
 }
 
 void InteractionRouter::UpdateMoveSelection(const PointerSample& sample) {

@@ -142,6 +142,13 @@ public:
     virtual void ClearSelection() = 0;
     virtual void AddObjectToSelection(const ObjectRef& object) = 0;
     virtual void SelectObjects(std::size_t pageIndex, PageSelection selection) = 0;
+    // Shift multi-select.  Both keep the selection on one page: a selection on
+    // another page is dropped first, since move and transform act on one page.
+    // Shift-click: adds `object`, or removes it when it is already selected.
+    virtual void ToggleObjectInSelection(const ObjectRef& object) = 0;
+    // Shift-marquee/lasso: unions `selection` into the page's selection.  PDF
+    // text never merges with objects: it replaces the selection.
+    virtual void AddToSelection(std::size_t pageIndex, PageSelection selection) = 0;
     // Page-space character boxes of the page's imported PDF text (the
     // reference called PdfiumBackend::ExtractTextCharBoxes per query; the
     // controller caches per source). Empty/nullptr when the page has no PDF

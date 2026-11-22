@@ -164,8 +164,9 @@ struct Harness {
     }
 };
 
-void SendMouse(QWidget& widget, QEvent::Type type, const QPointF& position, Qt::MouseButton button, Qt::MouseButtons buttons) {
-    QMouseEvent event(type, position, widget.mapToGlobal(position.toPoint()), button, buttons, Qt::NoModifier);
+void SendMouse(QWidget& widget, QEvent::Type type, const QPointF& position, Qt::MouseButton button, Qt::MouseButtons buttons,
+    Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+    QMouseEvent event(type, position, widget.mapToGlobal(position.toPoint()), button, buttons, modifiers);
     QApplication::sendEvent(&widget, &event);
 }
 
@@ -1014,6 +1015,69 @@ void FocusedPageFollowsViewport() {
     Check(harness.sidebar->CurrentPage() == 1U, "the sidebar follows the scroll");
 }
 
+void ShiftBuildsAnObjectSelection() {
+    // Shift multi-select on the canvas, through real mouse events: Shift-click
+    // toggles an object, Shift-drag adds a marquee's objects, and a plain drag
+    // on a selected object then moves every selected object.
+    Harness harness;
+    auto& controller = harness.window->Controller();
+    const QRectF canvasRect(harness.canvas->rect());
+    const qreal x = canvasRect.center().x();
+    const std::array<qreal, 3> rows {
+        canvasRect.top() + (canvasRect.height() * 0.3),
+        canvasRect.top() + (canvasRect.height() * 0.5),
+        canvasRect.top() + (canvasRect.height() * 0.7),
+    };
+    const auto drag = [&](QPointF from, QPointF to, Qt::KeyboardModifiers modifiers) {
+        SendMouse(*harness.canvas, QEvent::MouseButtonPress, from, Qt::LeftButton, Qt::LeftButton, modifiers);
+        SendMouse(*harness.canvas, QEvent::MouseMove, (from + to) / 2.0, Qt::NoButton, Qt::LeftButton, modifiers);
+        SendMouse(*harness.canvas, QEvent::MouseMove, to, Qt::NoButton, Qt::LeftButton, modifiers);
+        SendMouse(*harness.canvas, QEvent::MouseButtonRelease, to, Qt::LeftButton, Qt::NoButton, modifiers);
+        QApplication::processEvents();
+    };
+    // Clicks land on a stroke but off the selection frame's corner and
+    // edge-centre handles, which take precedence over the object under them.
+    const auto click = [&](qreal y, Qt::KeyboardModifiers modifiers) {
+        drag(QPointF(x - 20.0, y), QPointF(x - 20.0, y), modifiers);
+    };
+    using Indices = std::vector<std::size_t>;
+    const auto selected = [&]() { return controller.SelectionFor(0).strokes; };
+
+    SelectTool(harness, cnote::settings::Tool::Draw);
+    for (const qreal y : rows) {
+        drag(QPointF(x - 40.0, y), QPointF(x + 40.0, y), Qt::NoModifier);
+    }
+    Check(controller.DocumentRef().PageAt(0).strokes.size() == 3U, "three strokes to select");
+
+    SelectTool(harness, cnote::settings::Tool::Select);
+    harness.canvas->SetSelectionMode(cnote::ui::SelectionMode::Box);
+    click(rows[0], Qt::NoModifier);
+    Check(selected() == Indices { 0 }, "a plain click selects one stroke");
+    click(rows[2], Qt::ShiftModifier);
+    std::printf("shift-click stroke 3: %zu selected\n", selected().size());
+    Check(selected() == Indices { 0, 2 }, "Shift-click adds a stroke");
+    click(rows[0], Qt::ShiftModifier);
+    Check(selected() == Indices { 2 }, "Shift-click on a selected stroke removes it");
+    drag(QPointF(x - 80.0, rows[1] - 30.0), QPointF(x + 80.0, rows[1] + 30.0), Qt::ShiftModifier);
+    std::printf("shift-marquee stroke 2: %zu selected\n", selected().size());
+    Check(selected() == Indices { 1, 2 }, "a Shift-marquee adds its strokes");
+    click(rows[0], Qt::ShiftModifier);
+    Check(selected() == Indices { 0, 1, 2 }, "every stroke is selected");
+
+    // A plain drag on a selected stroke moves the whole selection.
+    const auto firstY = [&](std::size_t index) { return controller.DocumentRef().PageAt(0).strokes[index].points.front().y; };
+    const std::array<float, 3> before { firstY(0), firstY(1), firstY(2) };
+    drag(QPointF(x, rows[1]), QPointF(x, rows[1] + 60.0), Qt::NoModifier);
+    bool allMoved = true;
+    for (std::size_t index = 0; index < 3U; ++index) {
+        allMoved = allMoved && firstY(index) > before[index] + 1.0f;
+    }
+    Check(allMoved, "dragging one selected stroke moves every selected stroke");
+
+    click(canvasRect.top() + (canvasRect.height() * 0.9), Qt::NoModifier);
+    Check(selected().empty(), "a plain click on empty space still replaces the selection");
+}
+
 void SidebarPageKeysActOnTheSelection() {
     // With the sidebar owning the keyboard, Delete/Ctrl+C/Ctrl+V act on its
     // multi-page selection, not just the current page.
@@ -1270,6 +1334,7 @@ int main(int argc, char** argv) {
     PageNavigationIsGatedWhileEditing();
     FocusedPageFollowsViewport();
     SidebarPageKeysActOnTheSelection();
+    ShiftBuildsAnObjectSelection();
     QuickActionsFireEverywhere();
     QuickPopupIsTextFormattingWhileEditing();
     TextFormatPopupLeavesFocusWithEditor();

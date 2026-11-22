@@ -287,8 +287,13 @@ public:
     // One call per completed selection gesture (App::EndSelection,
     // Selection.cpp:1268); `boxOverride` marks the click-selection path
     // (Selection.cpp:1581) and `click` the 18-px click radius (Selection.cpp:1269).
-    virtual void CommitSelection(const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click) = 0;
+    // `additive` (Shift held at the press) adds the result to the selection
+    // instead of replacing it.
+    virtual void CommitSelection(const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click,
+        bool additive) = 0;
     virtual void AddObjectToSelection(ObjectRef object) = 0;
+    // Shift-click on an object: select it, or deselect it when selected.
+    virtual void ToggleObjectInSelection(ObjectRef object) = 0;
     virtual void BeginMoveSelection(std::size_t pageIndex) = 0;
     // Alt-press variant: the host duplicates the selection inside the move
     // gesture so the drag carries the clones, not the originals.
@@ -378,7 +383,13 @@ private:
     // MessageLoop.cpp:189-246 (left) and 250-256 (middle) press routing.
     void BeginPressInteraction(const PointerSample& sample);
     void BeginSelectOrMove(const PointerSample& sample, bool moveTool);
-    void BeginSelection(const QPointF& logical, bool boxOverride);
+    // Shift press under Select/Move: toggles the object under the pointer or
+    // starts an additive marquee/lasso; never moves or replaces the selection.
+    void BeginShiftSelection(const PointerSample& sample, bool moveTool);
+    // Starts a transform when `logical` is on a handle of the selection on
+    // `pageIndex`; false when there is none or the host refused it.
+    bool TryBeginTransform(const QPointF& logical, std::size_t pageIndex);
+    void BeginSelection(const QPointF& logical, bool boxOverride, bool additive = false);
     void ExtendSelection(const PointerSample& sample);
     void EndSelection();
     void BeginMoveSelection(const PointerSample& sample);
@@ -432,6 +443,7 @@ private:
             QPointF current {};
             std::vector<QPointF> lassoPoints;
             bool boxOverride = false;
+            bool additive = false;
         };
         struct MoveData {
             QPointF lastPosition {};

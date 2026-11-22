@@ -88,6 +88,8 @@ public:
     void ClearSelection() override;
     void AddObjectToSelection(const ui::ObjectRef& object) override;
     void SelectObjects(std::size_t pageIndex, ui::PageSelection selection) override;
+    void ToggleObjectInSelection(const ui::ObjectRef& object) override;
+    void AddToSelection(std::size_t pageIndex, ui::PageSelection selection) override;
     void SetCurrentPageIndex(std::size_t index) override;
 
     // One transaction per gesture: the page is snapshotted when the gesture
