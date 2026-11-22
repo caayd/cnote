@@ -143,6 +143,8 @@ void SidebarWidget::SetDocument(const Document* document, render::PdfBackgroundP
         return;
     }
     CancelPageDrag();
+    ClearPageSelection();
+    selectionAnchor_.reset();
     if (documentChanged) {
         // A new document resets navigation and the scroll position; a page
         // insert/remove below only drops the caches.
@@ -171,6 +173,27 @@ void SidebarWidget::NotifyDocumentChanged() {
         CancelPageDrag();
         InvalidateThumbnails();
     }
+    // Any commit (an undo included) may have moved the selected pages; the
+    // host reselects a block it just moved (SelectPages).
+    ClearPageSelection();
+    update();
+}
+
+void SidebarWidget::SelectPages(std::size_t first, std::size_t count) {
+    const std::size_t pageCount = PageCount();
+    selectedPages_.clear();
+    for (std::size_t index = first; index < first + count && index < pageCount; ++index) {
+        selectedPages_.push_back(index);
+    }
+    selectionAnchor_ = first < pageCount ? std::optional<std::size_t>(first) : std::nullopt;
+    update();
+}
+
+void SidebarWidget::ClearPageSelection() {
+    if (selectedPages_.empty()) {
+        return;
+    }
+    selectedPages_.clear();
     update();
 }
 
@@ -345,6 +368,7 @@ void SidebarWidget::SetOpen(bool open) {
     // editor is owned by this widget and must not outlive its visible state.
     CancelPageJumpEdit();
     CancelPageDrag();
+    ClearPageSelection();
     if (open == IsOpen()) {
         return;
     }
@@ -466,9 +490,11 @@ void SidebarWidget::paintEvent(QPaintEvent*) {
         }
         const QRect labelRect(item->left(), item->bottom() - static_cast<int>(metrics.labelHeight), item->width(), static_cast<int>(metrics.labelHeight));
         const QRect thumbRect(item->left(), item->top(), item->width(), item->height() - static_cast<int>(metrics.labelHeight));
-        const bool selected = pageIndex == currentPage_;
-        // The dragged page stays in place, faded, until it is dropped.
-        const bool dragged = PageDragActive() && pageDrag_->page == pageIndex;
+        const bool selected = pageIndex == currentPage_
+            || std::binary_search(selectedPages_.begin(), selectedPages_.end(), pageIndex);
+        // Dragged pages stay in place, faded, until they are dropped.
+        const bool dragged = PageDragActive()
+            && std::binary_search(pageDrag_->pages.begin(), pageDrag_->pages.end(), pageIndex);
         painter.setOpacity(dragged ? 0.4 : 1.0);
 
         if (selected) {
@@ -749,8 +775,13 @@ void SidebarWidget::UpdatePageDrag(const QPoint& position) {
             break;
         }
     }
-    // The two gaps around the dragged page would leave it where it is.
-    const bool moves = slot != pageDrag_->page && slot != pageDrag_->page + 1U;
+    // A slot that would leave every page where it is (a single page's own
+    // gaps, or inside or around an already contiguous block) is no drop.
+    const std::vector<std::size_t> order = Document::MovedPageOrder(pageCount, pageDrag_->pages, slot);
+    bool moves = false;
+    for (std::size_t index = 0; index < order.size() && !moves; ++index) {
+        moves = order[index] != index;
+    }
     pageDrag_->dropSlot = moves ? std::optional<std::size_t>(slot) : std::nullopt;
 
     const QRect content = ContentRect();
@@ -804,6 +835,9 @@ void SidebarWidget::mousePressEvent(QMouseEvent* event) {
     CancelPageDrag();
     if (event->button() == Qt::RightButton) {
         if (const auto page = PageAtWidgetPosition(event->position().toPoint()); page.has_value()) {
+            // The page menu acts on one page: drop a multi-selection first.
+            ClearPageSelection();
+            selectionAnchor_ = *page;
             emit PageActivated(*page);
             emit PageContextMenuRequested(*page, event->globalPosition().toPoint());
         }
@@ -834,8 +868,32 @@ void SidebarWidget::mousePressEvent(QMouseEvent* event) {
         return;
     }
     if (const auto page = PageAtWidgetPosition(position); page.has_value()) {
-        // A press may become a reorder drag once it moves far enough.
-        pageDrag_ = PageDrag { *page, position, position, false, std::nullopt };
+        PageDrag drag;
+        drag.pressedPage = *page;
+        drag.pressPosition = position;
+        drag.position = position;
+        if (event->modifiers().testFlag(Qt::ShiftModifier)) {
+            // Range from the anchor; the anchor stays for the next shift-click.
+            const std::size_t anchor = std::min(selectionAnchor_.value_or(currentPage_), PageCount() - 1U);
+            selectedPages_.clear();
+            for (std::size_t index = std::min(anchor, *page); index <= std::max(anchor, *page); ++index) {
+                selectedPages_.push_back(index);
+            }
+            selectionAnchor_ = anchor;
+            update();
+        } else if (std::binary_search(selectedPages_.begin(), selectedPages_.end(), *page)) {
+            drag.collapseOnClick = true;  // keep the selection: this may drag it
+        } else {
+            ClearPageSelection();
+            selectionAnchor_ = *page;
+        }
+        // A press may become a reorder drag once it moves far enough; it
+        // carries the whole selection when the pressed page is part of it.
+        drag.pages = selectedPages_.size() > 1U
+                && std::binary_search(selectedPages_.begin(), selectedPages_.end(), *page)
+            ? selectedPages_
+            : std::vector<std::size_t> { *page };
+        pageDrag_ = std::move(drag);
         emit PageActivated(*page);
     }
     // The reference HandleSidebarClick consumes any click inside the sidebar.
@@ -855,12 +913,18 @@ void SidebarWidget::mouseReleaseEvent(QMouseEvent* event) {
         event->ignore();
         return;
     }
-    const std::size_t from = pageDrag_->page;
+    const std::vector<std::size_t> pages = pageDrag_->pages;
+    const bool collapse = !pageDrag_->active && pageDrag_->collapseOnClick;
+    const std::size_t pressedPage = pageDrag_->pressedPage;
     const std::optional<std::size_t> slot = DropSlot();
     CancelPageDrag();
+    if (collapse) {
+        // A plain click on a selected page selects only that page.
+        ClearPageSelection();
+        selectionAnchor_ = pressedPage;
+    }
     if (slot.has_value()) {
-        // Removing the page first shifts every later gap up by one.
-        emit PageMoveRequested(from, *slot > from ? *slot - 1U : *slot);
+        emit PagesMoveRequested(pages, *slot);
     }
     event->accept();
 }

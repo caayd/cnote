@@ -1712,31 +1712,45 @@ bool QtDocumentController::PastePage(std::size_t index) {
     return true;
 }
 
-bool QtDocumentController::MovePage(std::size_t from, std::size_t to) {
-    if (session_ == nullptr) {
-        return false;
+std::optional<std::size_t> QtDocumentController::MovePages(const std::vector<std::size_t>& pages, std::size_t slot) {
+    if (session_ == nullptr || pages.empty()) {
+        return std::nullopt;
+    }
+    const std::size_t pageCount = session_->document.PageCount();
+    if (slot > pageCount || !std::is_sorted(pages.begin(), pages.end())
+        || std::adjacent_find(pages.begin(), pages.end()) != pages.end() || pages.back() >= pageCount) {
+        return std::nullopt;
     }
     // An open edit or stroke addresses its page by index: settle it first.
     AbortTransientState();
-    if (!session_->document.MovePage(from, to)) {
-        return false;
+    std::vector<std::size_t> order = Document::MovedPageOrder(pageCount, pages, slot);
+    if (!session_->document.ReorderPages(order)) {
+        return std::nullopt;
     }
 
     if (!selection_.empty()) {
+        std::vector<std::size_t> newIndex(pageCount, 0U);
+        for (std::size_t index = 0; index < pageCount; ++index) {
+            newIndex[order[index]] = index;
+        }
         std::map<std::size_t, ui::PageSelection> remapped;
         for (auto& entry : selection_) {
-            remapped[Document::MovedPageIndex(entry.first, from, to)] = std::move(entry.second);
+            remapped[newIndex[entry.first]] = std::move(entry.second);
         }
         selection_ = std::move(remapped);
         emit SelectionChanged();
     }
 
+    // The block lands after every unmoved page that sat before the slot.
+    const std::size_t movedBeforeSlot = static_cast<std::size_t>(
+        std::lower_bound(pages.begin(), pages.end(), slot) - pages.begin());
+    const std::size_t landed = slot - movedBeforeSlot;
+
     HistoryAction action {};
-    action.type = HistoryActionType::MovePage;
-    action.index = from;
-    action.pageIndex = to;
+    action.type = HistoryActionType::ReorderPages;
+    action.pageIndices = std::move(order);
     RecordCommit(std::move(action));
-    return true;
+    return landed;
 }
 
 bool QtDocumentController::RotatePage(std::size_t pageIndex, int quarterTurns) {

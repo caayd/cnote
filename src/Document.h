@@ -284,13 +284,17 @@ public:
     bool SetCurrentPageIndex(std::size_t index);
     std::size_t InsertPage(std::size_t index, Page page);
     std::size_t RemovePage(std::size_t index);
-    // Moves page `from` so it ends up at index `to`; the pages in between shift
-    // by one toward `from`.  Epochs travel with their pages and the current
-    // page index keeps pointing at the same page.  False when either index is
-    // out of range or they are equal.
-    bool MovePage(std::size_t from, std::size_t to);
-    // Where the page at `index` sits after MovePage(from, to).
-    [[nodiscard]] static std::size_t MovedPageIndex(std::size_t index, std::size_t from, std::size_t to) noexcept;
+    // Rearranges the pages so new index `i` holds the page that was at
+    // `order[i]`.  Epochs travel with their pages and the current page index
+    // keeps pointing at the same page.  False (nothing changes) unless `order`
+    // is a permutation of every page index other than the identity.
+    bool ReorderPages(const std::vector<std::size_t>& order);
+    // The ReorderPages order that lifts `pages` (sorted, unique, in range) out
+    // of a `pageCount`-page document and inserts them, in their current order,
+    // at gap `slot` (0..pageCount, the gap before page `slot` as counted
+    // before the move).
+    [[nodiscard]] static std::vector<std::size_t> MovedPageOrder(
+        std::size_t pageCount, const std::vector<std::size_t>& pages, std::size_t slot);
     void SetFilePath(std::filesystem::path filePath);
     void SetNewPageDefaults(PageDefaults pageDefaults);
     void ResetToBlank();
