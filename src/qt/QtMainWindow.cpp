@@ -1828,6 +1828,18 @@ bool QtMainWindow::HandleNativeChromeMessage(void* message, qintptr* result) {
     case WM_POINTERLEAVE:
         SyncPenClientArea(msg->message, msg->wParam, msg->lParam);
         return false;
+    case WM_MOUSELEAVE:
+        // Qt's pen enter arms TrackMouseEvent, and Windows answers at once with
+        // WM_MOUSELEAVE because the mouse - not the pen - is elsewhere.  Qt takes
+        // that as the pointer leaving: it stops applying cursors to this window,
+        // and the pen's moves never re-enter it, so the canvas keeps whatever
+        // cursor was last shown.  While a pen hovers the window its leave comes
+        // from WM_POINTERLEAVE (Qt) and the frame crossing (SyncPenClientArea).
+        if (penInClient_ || penLeftForFrame_) {
+            *result = 0;
+            return true;
+        }
+        return false;
     default:
         break;
     }
