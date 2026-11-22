@@ -147,7 +147,6 @@ public:
     [[nodiscard]] std::vector<ObjectRef> EraseTargetsAt(std::size_t pageIndex, Vec2 start, Vec2 end) const override;
     void ZoomByWheelSteps(int steps, const QPointF& anchor) override;
     void ScrollBy(const QPointF& logicalDelta) override;
-    void SetViewPage(std::size_t pageIndex) override;
     // Cursor the interaction asks for.  CursorKind::Draw shows the configured
     // drawing cursor (dot or precision crosshair, see SetDrawCursorSettings);
     // CursorKind::Arrow restores the plain default arrow.
@@ -450,6 +449,10 @@ private:
     void BeginZoomSession(const QPointF& anchor);
     void EndZoomSession();
     void NotifyViewportChanged();
+    // The focused (current) page is the one covering the largest share of the
+    // visible canvas; ties go to the page whose centre is nearest the canvas
+    // centre.  Leaves the current page alone while no page is visible.
+    void SyncFocusedPage();
     void ClampViewportPan();
     [[nodiscard]] QRectF VisibleCanvasRect() const;
     // Reference MaximizedCanvasWidthForZoom (Viewport.cpp:36-52): the fit scale

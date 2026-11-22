@@ -974,6 +974,46 @@ void PageNavigationIsGatedWhileEditing() {
     Check(harness.window->Controller().CurrentPageIndex() < secondPage, "PgUp works again after the editor closes");
 }
 
+void FocusedPageFollowsViewport() {
+    // The focused page is the one filling most of the canvas: scrolling moves
+    // the focus (and the sidebar's highlight), drawing on a partly visible
+    // neighbour does not.
+    Harness harness;
+    harness.window->AddPage();
+    harness.window->AddPage();
+    QApplication::processEvents();
+    const auto& controller = harness.window->Controller();
+    const QRectF canvasRect(harness.canvas->rect());
+    // Pans so page 0's bottom edge sits at `fraction` of the canvas height.
+    const auto scrollPageZeroBottomTo = [&](qreal fraction) {
+        const qreal bottom = harness.canvas->CalculatePageView(0).rect.bottom();
+        harness.canvas->PanBy(QPointF(0.0, canvasRect.top() + (canvasRect.height() * fraction) - bottom));
+        QApplication::processEvents();
+    };
+    Check(harness.canvas->CalculatePageView(0).rect.height() > canvasRect.height(),
+        "a page is taller than the canvas at the default zoom");
+
+    scrollPageZeroBottomTo(0.65);
+    std::printf("page 0 bottom at 65%%: focused page %zu\n", controller.CurrentPageIndex());
+    Check(controller.CurrentPageIndex() == 0U, "scrolling page 0 over most of the canvas focuses it");
+    Check(harness.sidebar->CurrentPage() == 0U, "the sidebar highlights the viewport's page");
+
+    SelectTool(harness, cnote::settings::Tool::Draw);
+    const QPointF onPageOne(canvasRect.center().x(), canvasRect.top() + (canvasRect.height() * 0.9));
+    SendMouse(*harness.canvas, QEvent::MouseButtonPress, onPageOne, Qt::LeftButton, Qt::LeftButton);
+    SendMouse(*harness.canvas, QEvent::MouseMove, onPageOne + QPointF(30.0, 0.0), Qt::NoButton, Qt::LeftButton);
+    SendMouse(*harness.canvas, QEvent::MouseButtonRelease, onPageOne + QPointF(30.0, 0.0), Qt::LeftButton, Qt::NoButton);
+    QApplication::processEvents();
+    Check(controller.DocumentRef().PageAt(1).strokes.size() == 1U, "the stroke lands on the partly visible page 1");
+    std::printf("stroke on page 1: focused page %zu\n", controller.CurrentPageIndex());
+    Check(controller.CurrentPageIndex() == 0U, "drawing on a minority page keeps the viewport's page focused");
+
+    scrollPageZeroBottomTo(0.35);
+    std::printf("page 0 bottom at 35%%: focused page %zu\n", controller.CurrentPageIndex());
+    Check(controller.CurrentPageIndex() == 1U, "scrolling page 1 over most of the canvas focuses it");
+    Check(harness.sidebar->CurrentPage() == 1U, "the sidebar follows the scroll");
+}
+
 // --- 5. a remapped binding from the settings store ---------------------------
 
 void RemappedBindingIsHonoured() {
@@ -1195,6 +1235,7 @@ int main(int argc, char** argv) {
     EditorOwnsToolKeys();
     ToolKeysRecoverAfterEditorCloses();
     PageNavigationIsGatedWhileEditing();
+    FocusedPageFollowsViewport();
     QuickActionsFireEverywhere();
     QuickPopupIsTextFormattingWhileEditing();
     TextFormatPopupLeavesFocusWithEditor();

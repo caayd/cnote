@@ -311,11 +311,11 @@ private:
     void AbortTransientState(bool commitOpenEdit = true, bool restoreGesture = true);
     // Commits (or, without an edit-content source, cancels) the live edit.
     void FinishOpenEdit();
-    // Shared commit tail: dirty, one revision bump, the viewed page and one
-    // broadcast.
-    void NoteCommitted(std::size_t pageIndex);
+    // Shared commit tail: dirty, one revision bump, the viewed page resynced to
+    // the document's and one broadcast.
+    void NoteCommitted();
     // Pushes `action`, drops the redo stack and runs the shared tail.
-    void RecordCommit(HistoryAction action, std::size_t pageIndex);
+    void RecordCommit(HistoryAction action);
     void MarkGestureChanged() {
         if (gesture_.has_value()) {
             gesture_->changed = true;

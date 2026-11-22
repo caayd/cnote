@@ -324,9 +324,37 @@ void CanvasWidget::ClampViewportPan() {
 }
 
 void CanvasWidget::NotifyViewportChanged() {
+    SyncFocusedPage();
     PositionOverlays();
     update();
     emit ViewportChanged();
+}
+
+void CanvasWidget::SyncFocusedPage() {
+    const QRectF canvasRect = VisibleCanvasRect();
+    const qreal canvasCenterY = canvasRect.center().y();
+    std::optional<std::size_t> best;
+    qreal bestArea = 0.0;
+    qreal bestDistance = 0.0;
+    for (const CanvasPageView& view : CalculatePageViews()) {
+        if (view.rect.top() >= canvasRect.bottom()) {
+            break;  // pages stack top to bottom: the rest are below the canvas
+        }
+        const QRectF visible = view.rect.intersected(canvasRect);
+        const qreal area = visible.width() * visible.height();
+        if (!view.valid || area <= 0.0) {
+            continue;
+        }
+        const qreal distance = std::abs(view.rect.center().y() - canvasCenterY);
+        if (!best.has_value() || area > bestArea || (area == bestArea && distance < bestDistance)) {
+            best = view.pageIndex;
+            bestArea = area;
+            bestDistance = distance;
+        }
+    }
+    if (best.has_value()) {
+        controller_.SetCurrentPageIndex(*best);
+    }
 }
 
 // --- geometry --------------------------------------------------------------
@@ -945,6 +973,8 @@ void CanvasWidget::NotifyDocumentChanged() {
     // raster. Clearing here re-rendered a dense page (~1 s) on the paint after
     // each commit, which delayed the first frame of the next stroke by ~10
     // refresh intervals (measured on dense-1000x100 at a 0.8 s cadence).
+    // Inserted, removed or resized pages move the layout under the viewport.
+    SyncFocusedPage();
     update();
 }
 
@@ -1410,8 +1440,7 @@ void CanvasWidget::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
     // The fit scale depends on the canvas width, so the page layout changes with
     // the widget; the reference frontend re-derives it on every paint as well.
-    PositionOverlays();
-    update();
+    NotifyViewportChanged();
 }
 
 // --- interaction -----------------------------------------------------------
@@ -2693,10 +2722,6 @@ void CanvasWidget::ZoomByWheelSteps(int steps, const QPointF& anchor) {
 void CanvasWidget::ScrollBy(const QPointF& logicalDelta) {
     // Wheel notches animate through the accumulating chase (StartSmoothScroll).
     StartSmoothScroll(logicalDelta);
-}
-
-void CanvasWidget::SetViewPage(std::size_t pageIndex) {
-    controller_.SetCurrentPageIndex(pageIndex);
 }
 
 void CanvasWidget::SetCursor(CursorKind cursor) {
