@@ -38,6 +38,7 @@ const char* KindName(std::optional<RecognizedShape> shape) {
     switch (shape->kind) {
     case RecognizedShapeKind::Line: return "line";
     case RecognizedShapeKind::Arrow: return "arrow";
+    case RecognizedShapeKind::Brace: return "brace";
     case RecognizedShapeKind::Ellipse: return "ellipse";
     case RecognizedShapeKind::Circle: return "circle";
     case RecognizedShapeKind::Triangle: return "triangle";
@@ -117,6 +118,76 @@ std::vector<Vec2> Arc(Vec2 center, float a, float b, float rotation, float start
         });
     }
     return points;
+}
+
+// A hand-drawn-style curly brace from `start` to `end`, its tip `depth` off
+// the chord's middle on the left of the start-to-end direction: each arm
+// leaves its end steeply and settles `arm` off the chord, and a pointed bump
+// in the middle reaches out to the tip.  Not the recognizer's own outline.
+std::vector<Vec2> Brace(Vec2 start, Vec2 end, float depth, float arm, float curl = 6.0f) {
+    const float length = Distance(start, end);
+    const Vec2 along { (end.x - start.x) / length, (end.y - start.y) / length };
+    const Vec2 normal { -along.y, along.x };
+    std::vector<Vec2> points;
+    for (float u = 0.0f; u <= length; u += 0.25f) {
+        const float rise = 1.0f - std::exp(-std::min(u, length - u) / curl);
+        const float bump = std::max(0.0f, 1.0f - (std::abs(u - (0.5f * length)) / 25.0f));
+        const float v = (arm * rise) + ((depth - arm) * bump * bump);
+        points.push_back({ start.x + (along.x * u) + (normal.x * v), start.y + (along.y * u) + (normal.y * v) });
+    }
+    points.push_back(end);
+    return points;
+}
+
+// A chain of cubic Bezier segments: on-curve points at 0, 3, 6, ... with two
+// control points between each pair, walked at about 1 unit per point.
+std::vector<Vec2> Cubics(const std::vector<Vec2>& points) {
+    std::vector<Vec2> out { points.front() };
+    for (std::size_t index = 0; index + 3U < points.size(); index += 3U) {
+        const Vec2 p0 = points[index], p1 = points[index + 1U], p2 = points[index + 2U], p3 = points[index + 3U];
+        const int steps = std::max(1, static_cast<int>(Distance(p0, p1) + Distance(p1, p2) + Distance(p2, p3)));
+        for (int step = 1; step <= steps; ++step) {
+            const float t = static_cast<float>(step) / static_cast<float>(steps);
+            const float s = 1.0f - t;
+            const float a = s * s * s, b = 3.0f * s * s * t, c = 3.0f * s * t * t, d = t * t * t;
+            out.push_back({ (a * p0.x) + (b * p1.x) + (c * p2.x) + (d * p3.x), (a * p0.y) + (b * p1.y) + (c * p2.y) + (d * p3.y) });
+        }
+    }
+    return out;
+}
+
+// A "}" drawn as a ">" between two lumps: the centreline of a user's stroke,
+// every 8 px of a screenshot.  The lumps bow out nearly as far as the tip,
+// which sits above the middle between two inner corners.  `map` places each
+// traced point.
+template <typename Map>
+std::vector<Vec2> LumpyBrace(Map map) {
+    std::vector<Vec2> traced {
+        { 165.0f, 83.0f }, { 173.0f, 83.0f }, { 181.0f, 83.0f }, { 189.0f, 83.0f }, { 197.0f, 84.0f },
+        { 205.0f, 86.0f }, { 213.0f, 89.0f }, { 219.0f, 92.0f }, { 224.0f, 95.0f }, { 229.0f, 100.0f },
+        { 233.0f, 104.0f }, { 236.0f, 109.0f }, { 239.0f, 114.0f }, { 242.0f, 122.0f }, { 244.0f, 130.0f },
+        { 244.0f, 138.0f }, { 244.0f, 146.0f }, { 243.0f, 154.0f }, { 241.0f, 162.0f }, { 238.0f, 169.0f },
+        { 235.0f, 177.0f }, { 232.0f, 185.0f }, { 229.0f, 192.0f }, { 226.0f, 199.0f }, { 223.0f, 206.0f },
+        { 220.0f, 213.0f }, { 217.0f, 220.0f }, { 213.0f, 227.0f }, { 210.0f, 234.0f }, { 207.0f, 241.0f },
+        { 203.0f, 248.0f }, { 200.0f, 255.0f }, { 197.0f, 262.0f }, { 194.0f, 267.0f }, { 192.0f, 273.0f },
+        { 190.0f, 281.0f }, { 198.0f, 281.0f }, { 206.0f, 279.0f }, { 214.0f, 278.0f }, { 222.0f, 277.0f },
+        { 230.0f, 277.0f }, { 238.0f, 277.0f }, { 246.0f, 279.0f }, { 252.0f, 282.0f }, { 255.0f, 289.0f },
+        { 253.0f, 296.0f }, { 248.0f, 302.0f }, { 243.0f, 307.0f }, { 238.0f, 313.0f }, { 232.0f, 319.0f },
+        { 226.0f, 324.0f }, { 222.0f, 328.0f }, { 218.0f, 332.0f }, { 214.0f, 336.0f }, { 209.0f, 342.0f },
+        { 204.0f, 348.0f }, { 205.0f, 355.0f }, { 211.0f, 357.0f }, { 216.0f, 361.0f }, { 220.0f, 365.0f },
+        { 224.0f, 371.0f }, { 228.0f, 376.0f }, { 232.0f, 382.0f }, { 235.0f, 387.0f }, { 237.0f, 393.0f },
+        { 240.0f, 398.0f }, { 242.0f, 404.0f }, { 245.0f, 411.0f }, { 247.0f, 419.0f }, { 248.0f, 427.0f },
+        { 249.0f, 434.0f }, { 249.0f, 442.0f }, { 250.0f, 450.0f }, { 250.0f, 458.0f }, { 249.0f, 466.0f },
+        { 248.0f, 474.0f }, { 247.0f, 482.0f }, { 246.0f, 490.0f }, { 244.0f, 498.0f }, { 241.0f, 506.0f },
+        { 239.0f, 514.0f }, { 236.0f, 522.0f }, { 233.0f, 530.0f }, { 230.0f, 537.0f }, { 227.0f, 544.0f },
+        { 224.0f, 551.0f }, { 221.0f, 558.0f }, { 217.0f, 564.0f }, { 213.0f, 570.0f }, { 209.0f, 576.0f },
+        { 205.0f, 582.0f }, { 201.0f, 588.0f }, { 196.0f, 593.0f }, { 192.0f, 597.0f }, { 187.0f, 602.0f },
+        { 181.0f, 606.0f }, { 174.0f, 611.0f },
+    };
+    for (Vec2& point : traced) {
+        point = map(point);
+    }
+    return Polyline(traced);
 }
 
 struct Bounds {
@@ -323,6 +394,80 @@ int main() {
         }
         Check(reachesTip && Distance(arrow->points.front(), { 100.0f, 400.0f }) < 4.0f,
             "the arrow starts at the tail and reaches the tip");
+    }
+
+    // --- braces -------------------------------------------------------------
+    // A "{" drawn top to bottom (tip on the left), a "}" drawn bottom to top,
+    // a brace under something and one at an angle.
+    const std::vector<Vec2> leftBrace = Brace({ 300.0f, 100.0f }, { 300.0f, 320.0f }, 45.0f, 20.0f);
+    CheckEverySeed("a { is a brace", RecognizedShapeKind::Brace, leftBrace, 1.0f);
+    CheckEverySeed("a } drawn upward is a brace", RecognizedShapeKind::Brace,
+        Brace({ 300.0f, 320.0f }, { 300.0f, 100.0f }, 40.0f, 18.0f), 1.0f);
+    CheckEverySeed("an underbrace is a brace", RecognizedShapeKind::Brace,
+        Brace({ 100.0f, 300.0f }, { 400.0f, 300.0f }, 40.0f, 18.0f), 1.0f);
+    CheckEverySeed("a tilted brace is a brace", RecognizedShapeKind::Brace,
+        Brace({ 100.0f, 100.0f }, { 280.0f, 220.0f }, 40.0f, 18.0f), 1.0f);
+    CheckEverySeed("a small brace is a brace", RecognizedShapeKind::Brace,
+        Brace({ 300.0f, 100.0f }, { 300.0f, 200.0f }, 22.0f, 10.0f, 4.0f), 1.0f);
+    CheckEverySeed("a lazily curled, shaky brace is a brace", RecognizedShapeKind::Brace,
+        Brace({ 300.0f, 100.0f }, { 300.0f, 320.0f }, 45.0f, 20.0f, 12.0f), 2.0f);
+    {
+        // Slightly off vertical: the snapped brace stands level between the
+        // drawn ends, its tip on the left at the drawn depth.
+        const std::optional<RecognizedShape> brace =
+            RecognizeShape(HandDrawn(Brace({ 300.0f, 100.0f }, { 310.0f, 320.0f }, 45.0f, 20.0f), 1.0f, 4U));
+        const Bounds b = Is(brace, RecognizedShapeKind::Brace) ? BoundsOf(brace->points) : Bounds {};
+        Check(Is(brace, RecognizedShapeKind::Brace) && std::abs(brace->points.front().x - brace->points.back().x) < 0.01f
+                && Distance(brace->points.front(), { 305.0f, 100.0f }) < 5.0f
+                && Distance(brace->points.back(), { 305.0f, 320.0f }) < 5.0f
+                && std::abs((brace->points.front().x - b.minX) - 45.0f) < 5.0f && b.maxX - brace->points.front().x < 0.01f,
+            "the brace snaps level, keeps its ends and tip depth and opens toward its ends");
+    }
+    // The ">" between two lumps style.
+    CheckEverySeed("a } drawn as a > between two lumps is a brace", RecognizedShapeKind::Brace,
+        LumpyBrace([](Vec2 p) { return p; }), 1.5f);
+    CheckEverySeed("a lumpy { (mirrored) is a brace", RecognizedShapeKind::Brace,
+        LumpyBrace([](Vec2 p) { return Vec2 { 400.0f - p.x, p.y }; }), 1.5f);
+    CheckEverySeed("a small lumpy brace on its side is a brace", RecognizedShapeKind::Brace,
+        LumpyBrace([](Vec2 p) { return Vec2 { 100.0f + (0.4f * p.y), 100.0f + (0.4f * p.x) }; }), 1.0f);
+    // Variants of that stroke: lumps bulging past the tip (the tip is then not
+    // the farthest point from the chord), and the tip drawn well above the
+    // middle (the top half squashed).
+    const auto inZ = [](Vec2 p) { return p.y > 272.0f && p.y < 360.0f; };
+    CheckEverySeed("a lumpy brace whose lumps reach past the tip is a brace", RecognizedShapeKind::Brace,
+        LumpyBrace([&](Vec2 p) { return inZ(p) ? p : Vec2 { 170.0f + ((p.x - 170.0f) * 1.3f), p.y }; }), 1.5f);
+    CheckEverySeed("a lumpy brace with its tip well above the middle is a brace", RecognizedShapeKind::Brace,
+        LumpyBrace([](Vec2 p) { return Vec2 { p.x, p.y < 290.0f ? 290.0f - ((290.0f - p.y) * 0.75f) : p.y }; }), 1.5f);
+    {
+        const std::optional<RecognizedShape> brace = RecognizeShape(HandDrawn(LumpyBrace([](Vec2 p) { return p; }), 1.5f, 2U));
+        const Bounds b = Is(brace, RecognizedShapeKind::Brace) ? BoundsOf(brace->points) : Bounds {};
+        Check(Is(brace, RecognizedShapeKind::Brace) && b.minX - brace->points.front().x > -0.01f
+                && std::abs(b.maxX - 255.0f) < 8.0f && std::abs(brace->points.front().x - brace->points.back().x) < 0.01f,
+            "the lumpy brace snaps to a level } reaching the drawn tip");
+    }
+    {
+        // A "<" also turns sharply at its middle, but leaves its ends along
+        // the chord.
+        int braces = 0;
+        for (int seed = 1; seed <= kSeeds; ++seed) {
+            const std::vector<Vec2> chevron = Polyline({ { 300.0f, 100.0f }, { 255.0f, 210.0f }, { 300.0f, 320.0f } });
+            braces += Is(RecognizeShape(HandDrawn(chevron, 1.0f, static_cast<std::uint32_t>(seed))), RecognizedShapeKind::Brace) ? 1 : 0;
+        }
+        Check(braces == 0, "a < is not a brace: " + std::to_string(braces) + "/" + std::to_string(kSeeds));
+    }
+    {
+        // A "3" has the lumps but its middle corner points in, not out.
+        int braces = 0;
+        for (int seed = 1; seed <= kSeeds; ++seed) {
+            const std::vector<Vec2> three = Cubics({
+                { 165.0f, 83.0f }, { 210.0f, 78.0f }, { 248.0f, 100.0f }, { 245.0f, 145.0f },
+                { 240.0f, 200.0f }, { 215.0f, 280.0f }, { 195.0f, 320.0f },
+                { 240.0f, 370.0f }, { 255.0f, 440.0f }, { 243.0f, 500.0f },
+                { 232.0f, 555.0f }, { 200.0f, 595.0f }, { 175.0f, 610.0f },
+            });
+            braces += Is(RecognizeShape(HandDrawn(three, 1.5f, static_cast<std::uint32_t>(seed))), RecognizedShapeKind::Brace) ? 1 : 0;
+        }
+        Check(braces == 0, "a 3 is not a brace: " + std::to_string(braces) + "/" + std::to_string(kSeeds));
     }
 
     // --- not shapes ---------------------------------------------------------
