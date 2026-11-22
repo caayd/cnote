@@ -4,17 +4,22 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <numeric>
 #include <utility>
 
 #include <QApplication>
 #include <QEvent>
 #include <QFocusEvent>
+#include <QElapsedTimer>
 #include <QFontMetricsF>
 #include <QKeyEvent>
+#include <QLineF>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPolygonF>
+#include <QShowEvent>
 #include <QTimer>
 #include <QWindow>
 
@@ -43,22 +48,27 @@ constexpr float kBrushSizeStep = 0.25f;          // App.cpp:996
 constexpr float kQuickSizePresetSnapRadius = 0.75f;  // ToolbarState.cpp:24
 constexpr int kMaxPaletteMenuColumns = 4;        // Layout.cpp:377
 
-// Palette-wheel paint constants (App.cpp:155-164, App::PaintPaletteWheel).
-constexpr std::uint32_t kWheelHalo = 0xD2121820U;             // App.cpp:6782 (210,18,24,32)
+// Palette-wheel paint.  Slices are separate rounded cards floating on soft
+// shadows; the hovered one lifts (grows outward, slides off the centre and
+// casts a deeper shadow), animated together with the wheel's open fade.
 constexpr std::uint32_t kWheelUnselectedFill = 0xF5202934U;   // App.cpp:6855 (245,32,41,52)
-constexpr std::uint32_t kWheelSelectedFill = 0xFF3D76A4U;     // App.cpp:6853 (255,61,118,164)
-constexpr std::uint32_t kWheelSelectedStroke = 0xFFF4F7FCU;   // App.cpp:6877 (255,244,247,252)
-constexpr std::uint32_t kWheelSeparatorStroke = 0x78F4F7FCU;  // App.cpp:6878 (120,244,247,252)
+constexpr std::uint32_t kWheelSliceEdge = 0x30FFFFFFU;        // hairline so dark slices read on dark chrome
+constexpr std::uint32_t kWheelSelectionTab = kChromeAccent;   // selected-entry arc outside the slice
 constexpr std::uint32_t kWheelToolIconTint = 0xFFE8EEF5U;     // App.cpp:6892 RGB(232,238,245)
 constexpr std::uint32_t kWheelSelectedIconTint = 0xFFFFFFFFU;  // App.cpp:6892
 constexpr std::uint32_t kWheelCenterFill = 0xFF121820U;       // App.cpp:7022 (255,18,24,32)
 constexpr std::uint32_t kWheelZoomCenterFill = 0xFF253A4EU;   // App.cpp:7021 (255,37,58,78)
-constexpr std::uint32_t kWheelCenterBorder = 0xB4F4F7FCU;     // App.cpp:7037 (180,244,247,252)
 constexpr std::uint32_t kWheelZoomCenterBorder = 0xEB84BFFFU;  // App.cpp:7036 (235,132,191,255)
-constexpr qreal kPaletteWheelShadowInsetDip = 6.0;            // App.cpp:156
-constexpr qreal kPaletteWheelStrokeDip = 1.2f;                // App.cpp:161
-constexpr qreal kPaletteWheelSelectedStrokeDip = 3.0f;        // App.cpp:160
-constexpr qreal kPaletteWheelBorderDip = 1.5f;                // App.cpp:162
+constexpr qreal kPaletteWheelSliceGapDip = 5.0;               // even gap between neighbouring slices
+constexpr qreal kPaletteWheelRingGapDip = 6.0;                // gap between the centre disc and the slices
+constexpr qreal kPaletteWheelCornerDip = 7.0;                 // slice corner radius (outer corners)
+constexpr qreal kPaletteWheelTabGapDip = 5.0;                 // slice outer edge to the tab's centre line
+constexpr qreal kPaletteWheelTabWidthDip = 3.5;
+constexpr qreal kPaletteWheelHoverIconScale = 0.15;           // extra icon scale at full lift
+constexpr qreal kPaletteWheelOpenScale = 0.9;                 // wheel scale at the start of the open animation
+constexpr int kPaletteWheelHoverMs = 140;
+constexpr int kPaletteWheelOpenMs = 160;
+constexpr int kPaletteWheelFrameMs = 16;
 constexpr qreal kPaletteWheelCenterIconHalfDip = 13.0;        // App.cpp:7027 ScaleForDpi(13)
 constexpr qreal kPaletteWheelSwatchDropDip = 72.0;            // ToolbarState.cpp:135 (logical px)
 
@@ -806,6 +816,8 @@ public:
         setAttribute(Qt::WA_TranslucentBackground);
         setAttribute(Qt::WA_NoSystemBackground);
         setMouseTracking(true);
+        animationTimer_.setInterval(kPaletteWheelFrameMs);
+        QObject::connect(&animationTimer_, &QTimer::timeout, this, [this]() { AdvanceAnimation(); });
     }
 
     void Configure(const QRect& hostClientRect) {
@@ -835,124 +847,95 @@ public:
         }
         if (next != owner_->wheelHoverIndex_) {
             owner_->wheelHoverIndex_ = next;
+            StartAnimation();
             update();
         }
     }
 
 protected:
-    // App::PaintPaletteWheel (App.cpp:6755-7044): halo, slice fills, separators,
-    // the selected/hovered outline, tool icons or preset labels, then the centre
-    // cut-out with the zoom magnifier.
+    // Floating-slice wheel: soft shadows, rounded slices separated by an even
+    // gap, the hovered slice lifted, tool icons or preset labels, then the
+    // centre disc with the zoom magnifier.
     void paintEvent(QPaintEvent*) override {
         const std::size_t entries = EntryCount();
         if (entries == 0U) {
             return;
         }
+        SyncHoverProgress();
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
         painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
         const qt::PaletteWheelLayout layout = BuildLayout();
         const QPointF center = layout.center;
-        const qreal inner = layout.innerRadius;
+        const qreal ringInner = layout.innerRadius + kPaletteWheelRingGapDip;
         const qreal outer = layout.outerRadius;
         const qreal dpr = devicePixelRatioF();
 
-        const auto isHovered = [&](std::size_t index) {
-            return owner_->wheelHoverIndex_.has_value() && *owner_->wheelHoverIndex_ == index;
+        const qreal open = EaseOut(openProgress_);
+        const qreal scale = kPaletteWheelOpenScale + ((1.0 - kPaletteWheelOpenScale) * open);
+        painter.setOpacity(open);
+        painter.translate(center);
+        painter.scale(scale, scale);
+        painter.translate(-center);
+
+        // Slice `index` at lift 0..1: grown outward by the hover grow and
+        // pushed off the centre along its bisector by the hover offset.
+        const auto lift = [&](std::size_t index) { return EaseOut(hoverProgress_[index]); };
+        const auto bisector = [&](std::size_t index) {
+            return AngleAt((static_cast<qreal>(index) + 0.5) / static_cast<qreal>(entries));
         };
-        const auto sliceOuter = [&](std::size_t index) {
-            return isHovered(index) ? outer + qt::PaletteWheelHoverGrow() : outer;
+        const auto sliceOrigin = [&](std::size_t index) {
+            return Polar(center, qt::PaletteWheelHoverOffset() * lift(index), bisector(index));
         };
-        // A hovered slice's icon/label slides outward and its centre radius
-        // grows by half the hover grow (App.cpp:6839-6841, 6989-6993).
-        const auto glyphCenter = [&](std::size_t index) {
-            const qreal fraction = (static_cast<qreal>(index) + 0.5) / static_cast<qreal>(entries);
-            const qreal radius = inner + ((outer - inner) * 0.5);
-            if (!isHovered(index)) {
-                return PointAt(center, radius, fraction);
+        const auto slicePath = [&](std::size_t index) {
+            const QPointF origin = sliceOrigin(index);
+            const qreal sliceOuter = outer + (qt::PaletteWheelHoverGrow() * lift(index));
+            if (entries == 1U) {
+                QPainterPath ring;
+                ring.addEllipse(origin, sliceOuter, sliceOuter);
+                ring.addEllipse(origin, ringInner, ringInner);
+                return ring;
             }
-            const qreal angle = AngleAt(fraction);
-            const qreal grown = radius + (qt::PaletteWheelHoverGrow() * 0.5) + qt::PaletteWheelHoverOffset();
-            return QPointF(center.x() + (std::cos(angle) * grown), center.y() + (std::sin(angle) * grown));
+            return SlicePath(origin, ringInner, sliceOuter,
+                AngleAt(static_cast<qreal>(index) / static_cast<qreal>(entries)),
+                AngleAt(static_cast<qreal>(index + 1U) / static_cast<qreal>(entries)));
         };
 
-        // Halo behind the ring (App.cpp:6781-6790).
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(ChromeColor(kWheelHalo));
-        const qreal haloRadius = outer + kPaletteWheelShadowInsetDip;
-        painter.drawEllipse(center, haloRadius, haloRadius);
-
+        // Resting shadows go down first so no slice darkens its neighbours;
+        // a lifted slice adds its deeper shadow right under itself instead.
         for (std::size_t index = 0; index < entries; ++index) {
-            painter.setPen(Qt::NoPen);
+            PaintShadow(painter, slicePath(index), 0.0);
+        }
+        std::vector<std::size_t> order(entries);
+        std::iota(order.begin(), order.end(), std::size_t { 0 });
+        std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+            return hoverProgress_[a] < hoverProgress_[b];
+        });
+        for (const std::size_t index : order) {
+            const QPainterPath path = slicePath(index);
+            if (lift(index) > 0.0) {
+                PaintShadow(painter, path, lift(index));
+            }
+            painter.setPen(QPen(ChromeColor(kWheelSliceEdge), 1.0));
             painter.setBrush(FillColor(index));
-            painter.drawPolygon(WedgePolygon(center, inner, sliceOuter(index), index, entries));
-        }
-
-        // Base separators: 120-alpha white outer arcs and radial dividers, both
-        // skipped around the hovered slice, which paints its own outline
-        // (App.cpp:6906-6938).
-        painter.setBrush(Qt::NoBrush);
-        painter.setPen(QPen(ChromeColor(kWheelSeparatorStroke), kPaletteWheelStrokeDip));
-        if (entries == 1U) {
-            painter.drawEllipse(center, outer, outer);
-        } else {
-            for (std::size_t index = 0; index < entries; ++index) {
-                const std::size_t previous = index == 0U ? entries - 1U : index - 1U;
-                const qreal divider = static_cast<qreal>(index) / static_cast<qreal>(entries);
-                if (!isHovered(index)) {
-                    painter.drawPolyline(OuterArc(center, outer, index, entries));
-                }
-                if (!isHovered(index) && !isHovered(previous)) {
-                    painter.drawLine(PointAt(center, inner, divider), PointAt(center, outer, divider));
-                }
+            painter.drawPath(path);
+            const qreal glyphRadius = (ringInner + outer + (qt::PaletteWheelHoverGrow() * lift(index))) * 0.5;
+            PaintGlyph(painter, index, Polar(sliceOrigin(index), glyphRadius, bisector(index)), lift(index), dpr);
+            if (IsSelectedEntry(index)) {
+                PaintSelectionTab(painter, sliceOrigin(index), outer + (qt::PaletteWheelHoverGrow() * lift(index)),
+                    AngleAt(static_cast<qreal>(index) / static_cast<qreal>(entries)),
+                    AngleAt(static_cast<qreal>(index + 1U) / static_cast<qreal>(entries)));
             }
         }
 
-        // Selected/hovered slice outline (App.cpp:6873-6879).
-        painter.setPen(QPen(ChromeColor(kWheelSelectedStroke), kPaletteWheelSelectedStrokeDip));
-        for (std::size_t index = 0; index < entries; ++index) {
-            if (isHovered(index) || IsSelectedEntry(index)) {
-                painter.drawPolygon(WedgePolygon(center, inner, sliceOuter(index), index, entries));
-            }
-        }
-
-        for (std::size_t index = 0; index < entries; ++index) {
-            if (IsColorEntry(index)) {
-                continue;
-            }
-            const QPointF glyph = glyphCenter(index);
-            if (zoomPresetMode_) {
-                float preset = 0.0f;
-                if (!ZoomPresetValueAt(index, preset)) {
-                    continue;
-                }
-                painter.setPen(ChromeColor(kChromeTextPrimary));
-                painter.setFont(ChromeFont(13));
-                const QString label = QString::number(static_cast<int>(std::lround(preset * 100.0))) + QStringLiteral("%");
-                painter.drawText(QRectF(glyph.x() - 24.0, glyph.y() - 10.0, 48.0, 20.0), Qt::AlignCenter, label);
-                continue;
-            }
-            const std::size_t toolIndex = index - palette_.size();
-            if (toolIndex >= tools_.size()) {
-                continue;
-            }
-            // Reference icon rect is PaletteWheelIconHalfSize each side of the
-            // centre, tinted white while selected (App.cpp:6881-6897).
-            const qreal half = qt::PaletteWheelIconHalfSize();
-            const int extent = std::max(1, static_cast<int>(std::lround(half * 2.0)));
-            const QPixmap icon = ChromeIconPixmap(ToolIconName(tools_[toolIndex]), QSize(extent, extent),
-                ChromeColor(IsSelectedEntry(index) ? kWheelSelectedIconTint : kWheelToolIconTint), dpr);
-            if (!icon.isNull()) {
-                painter.drawPixmap(glyph - QPointF(half, half), icon);
-            }
-        }
-
-        // Centre cut-out, magnifier and border (App.cpp:7019-7044).
         const bool zoomToggleEnabled = HasZoomEntry();
         const bool zoomCentre = zoomToggleEnabled && zoomPresetMode_;
-        painter.setPen(Qt::NoPen);
+        QPainterPath disc;
+        disc.addEllipse(center, layout.innerRadius, layout.innerRadius);
+        PaintShadow(painter, disc, 0.0);
+        painter.setPen(QPen(ChromeColor(zoomCentre ? kWheelZoomCenterBorder : kWheelSliceEdge), zoomCentre ? 1.5 : 1.0));
         painter.setBrush(ChromeColor(zoomCentre ? kWheelZoomCenterFill : kWheelCenterFill));
-        painter.drawEllipse(center, inner, inner);
+        painter.drawPath(disc);
         if (zoomToggleEnabled) {
             const int extent = std::max(1, static_cast<int>(std::lround(kPaletteWheelCenterIconHalfDip * 2.0)));
             const QPixmap icon = ChromeIconPixmap(ToolIconName(settings::Tool::Zoom), QSize(extent, extent),
@@ -961,9 +944,18 @@ protected:
                 painter.drawPixmap(QPointF(center.x() - kPaletteWheelCenterIconHalfDip, center.y() - kPaletteWheelCenterIconHalfDip), icon);
             }
         }
-        painter.setBrush(Qt::NoBrush);
-        painter.setPen(QPen(ChromeColor(zoomCentre ? kWheelZoomCenterBorder : kWheelCenterBorder), kPaletteWheelBorderDip));
-        painter.drawEllipse(center, inner, inner);
+    }
+
+    void showEvent(QShowEvent* event) override {
+        QWidget::showEvent(event);
+        openProgress_ = 0.0;
+        hoverProgress_.assign(EntryCount(), 0.0);
+        StartAnimation();
+    }
+
+    void hideEvent(QHideEvent* event) override {
+        animationTimer_.stop();
+        QWidget::hideEvent(event);
     }
 
     void mouseMoveEvent(QMouseEvent* event) override {
@@ -1053,40 +1045,164 @@ private:
         return qt::BuildPaletteWheelLayout(QRectF(rect()), owner_->wheelCenter_, std::max<std::size_t>(1U, EntryCount()), qt::ToolbarHeight(owner_->maximized_));
     }
 
-    // Point on the wheel at normalized angle `fraction` (0 == the reference
-    // index-0 slice start): atan2 = fraction * 2pi - pi/2, mirroring
+    // Normalized angle `fraction` (0 == the index-0 slice start) to screen
+    // radians: atan2 = fraction * 2pi - pi/2, mirroring
     // appui::PaletteWheelIndexAtPoint.
     static qreal AngleAt(qreal fraction) {
         return (fraction * 2.0 * kWheelPi) - (kWheelPi * 0.5);
     }
 
-    static QPointF PointAt(const QPointF& center, qreal radius, qreal fraction) {
-        const qreal angle = AngleAt(fraction);
-        return QPointF(center.x() + std::cos(angle) * radius, center.y() + std::sin(angle) * radius);
+    static QPointF Polar(const QPointF& center, qreal radius, qreal angle) {
+        return QPointF(center.x() + (std::cos(angle) * radius), center.y() + (std::sin(angle) * radius));
     }
 
-    static void AppendArcPoints(QPolygonF& polygon, const QPointF& center, qreal radius, qreal from, qreal to) {
-        constexpr int kSamples = 16;
-        for (int sample = 0; sample <= kSamples; ++sample) {
-            polygon << PointAt(center, radius, from + ((to - from) * static_cast<qreal>(sample) / static_cast<qreal>(kSamples)));
+    static qreal EaseOut(qreal progress) {
+        const qreal remaining = 1.0 - std::clamp(progress, 0.0, 1.0);
+        return 1.0 - (remaining * remaining * remaining);
+    }
+
+    // Appends a circular arc from screen angle `from` to `to` (radians,
+    // clockwise on screen); QPainterPath::arcTo takes counter-clockwise degrees.
+    static void AppendArc(QPainterPath& path, const QPointF& center, qreal radius, qreal from, qreal to) {
+        constexpr qreal kDegrees = 180.0 / kWheelPi;
+        path.arcTo(QRectF(center.x() - radius, center.y() - radius, radius * 2.0, radius * 2.0), -from * kDegrees, -(to - from) * kDegrees);
+    }
+
+    // Annular sector between screen angles `start` and `end`, inset so
+    // neighbours keep an even kPaletteWheelSliceGapDip gap (each straight
+    // edge is parallel to the boundary radius) and with rounded corners.
+    static QPainterPath SlicePath(const QPointF& center, qreal inner, qreal outer, qreal start, qreal end) {
+        const qreal halfGap = kPaletteWheelSliceGapDip * 0.5;
+        const qreal outerStart = start + std::asin(std::min(1.0, halfGap / outer));
+        const qreal outerEnd = end - std::asin(std::min(1.0, halfGap / outer));
+        qreal innerStart = start + std::asin(std::min(1.0, halfGap / inner));
+        qreal innerEnd = end - std::asin(std::min(1.0, halfGap / inner));
+        if (innerEnd < innerStart) {
+            innerStart = innerEnd = (start + end) * 0.5;  // a thin slice tapers to a point
+        }
+        const QPointF outerA = Polar(center, outer, outerStart);
+        const QPointF outerB = Polar(center, outer, outerEnd);
+        const QPointF innerA = Polar(center, inner, innerStart);
+        const QPointF innerB = Polar(center, inner, innerEnd);
+        const qreal edge = QLineF(innerA, outerA).length();
+        const qreal outerCorner = std::min({ kPaletteWheelCornerDip, edge * 0.5, outer * (outerEnd - outerStart) * 0.5 });
+        const qreal innerCorner = std::min({ kPaletteWheelCornerDip * 0.6, edge * 0.5, inner * (innerEnd - innerStart) * 0.5 });
+        const auto toward = [](const QPointF& from, const QPointF& to, qreal distance) {
+            const qreal length = QLineF(from, to).length();
+            return length > 0.0 ? from + ((to - from) * (distance / length)) : from;
+        };
+        QPainterPath path;
+        path.moveTo(toward(outerA, innerA, outerCorner));
+        path.quadTo(outerA, Polar(center, outer, outerStart + (outerCorner / outer)));
+        AppendArc(path, center, outer, outerStart + (outerCorner / outer), outerEnd - (outerCorner / outer));
+        path.quadTo(outerB, toward(outerB, innerB, outerCorner));
+        path.lineTo(toward(innerB, outerB, innerCorner));
+        path.quadTo(innerB, Polar(center, inner, innerEnd - (innerCorner / inner)));
+        AppendArc(path, center, inner, innerEnd - (innerCorner / inner), innerStart + (innerCorner / inner));
+        path.quadTo(innerA, toward(innerA, outerA, innerCorner));
+        path.closeSubpath();
+        return path;
+    }
+
+    // Soft drop shadow: stacked translucent round-joined strokes, so alpha
+    // builds up toward the shape's edge.  `lift` deepens and lowers it.
+    static void PaintShadow(QPainter& painter, const QPainterPath& path, qreal lift) {
+        constexpr int kLayers = 5;
+        painter.save();
+        painter.translate(0.0, 2.0 + (3.0 * lift));
+        painter.setBrush(Qt::NoBrush);
+        const int alpha = static_cast<int>(std::lround(lift > 0.0 ? 9.0 * lift : 5.0));
+        for (int layer = kLayers; layer >= 1; --layer) {
+            const qreal spread = static_cast<qreal>(layer) * (1.5 + lift);
+            painter.setPen(QPen(QColor(0, 0, 0, alpha), spread * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter.drawPath(path);
+        }
+        painter.restore();
+    }
+
+    // Selected entry (colour, tool or zoom preset): a rounded accent arc just
+    // outside the slice's outer edge, inset past the slice's rounded corners.
+    // It sits on the backdrop, so it reads the same on every palette colour,
+    // and it follows the lift.
+    static void PaintSelectionTab(QPainter& painter, const QPointF& origin, qreal sliceOuter, qreal start, qreal end) {
+        constexpr qreal kDegrees = 180.0 / kWheelPi;
+        const qreal radius = sliceOuter + kPaletteWheelTabGapDip;
+        const qreal inset = ((kPaletteWheelSliceGapDip * 0.5) + kPaletteWheelCornerDip) / radius;
+        const qreal from = start + inset;
+        const qreal to = end - inset;
+        if (to <= from) {
+            return;
+        }
+        const QRectF circle(origin.x() - radius, origin.y() - radius, radius * 2.0, radius * 2.0);
+        QPainterPath arc;
+        arc.arcMoveTo(circle, -from * kDegrees);
+        arc.arcTo(circle, -from * kDegrees, -(to - from) * kDegrees);
+        painter.setPen(QPen(ChromeColor(kWheelSelectionTab), kPaletteWheelTabWidthDip, Qt::SolidLine, Qt::RoundCap));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPath(arc);
+    }
+
+    // Tool icon or zoom-preset label at `glyph`; colour slices carry none.
+    void PaintGlyph(QPainter& painter, std::size_t index, const QPointF& glyph, qreal lift, qreal dpr) const {
+        if (IsColorEntry(index)) {
+            return;
+        }
+        if (zoomPresetMode_) {
+            float preset = 0.0f;
+            if (!ZoomPresetValueAt(index, preset)) {
+                return;
+            }
+            painter.setPen(ChromeColor(kChromeTextPrimary));
+            painter.setFont(ChromeFont(13));
+            const QString label = QString::number(static_cast<int>(std::lround(preset * 100.0))) + QStringLiteral("%");
+            painter.drawText(QRectF(glyph.x() - 24.0, glyph.y() - 10.0, 48.0, 20.0), Qt::AlignCenter, label);
+            return;
+        }
+        const std::size_t toolIndex = index - palette_.size();
+        if (toolIndex >= tools_.size()) {
+            return;
+        }
+        const qreal half = qt::PaletteWheelIconHalfSize() * (1.0 + (kPaletteWheelHoverIconScale * lift));
+        const int extent = std::max(1, static_cast<int>(std::lround(half * 2.0)));
+        const QPixmap icon = ChromeIconPixmap(ToolIconName(tools_[toolIndex]), QSize(extent, extent),
+            ChromeColor(IsSelectedEntry(index) ? kWheelSelectedIconTint : kWheelToolIconTint), dpr);
+        if (!icon.isNull()) {
+            painter.drawPixmap(glyph - QPointF(static_cast<qreal>(extent) * 0.5, static_cast<qreal>(extent) * 0.5), icon);
         }
     }
 
-    static QPolygonF OuterArc(const QPointF& center, qreal radius, std::size_t index, std::size_t count) {
-        QPolygonF arc;
-        AppendArcPoints(arc, center, radius,
-            static_cast<qreal>(index) / static_cast<qreal>(count),
-            static_cast<qreal>(index + 1U) / static_cast<qreal>(count));
-        return arc;
+    void SyncHoverProgress() {
+        const std::size_t entries = EntryCount();
+        if (hoverProgress_.size() != entries) {
+            hoverProgress_.assign(entries, 0.0);
+        }
     }
 
-    static QPolygonF WedgePolygon(const QPointF& center, qreal inner, qreal outer, std::size_t index, std::size_t count) {
-        const qreal start = static_cast<qreal>(index) / static_cast<qreal>(count);
-        const qreal end = static_cast<qreal>(index + 1U) / static_cast<qreal>(count);
-        QPolygonF polygon;
-        AppendArcPoints(polygon, center, outer, start, end);
-        AppendArcPoints(polygon, center, inner, end, start);
-        return polygon;
+    void StartAnimation() {
+        if (!animationTimer_.isActive()) {
+            animationClock_.start();
+            animationTimer_.start();
+        }
+    }
+
+    // Steps the open fade and every slice's lift toward its target; stops the
+    // timer once nothing moves.
+    void AdvanceAnimation() {
+        const qreal elapsed = static_cast<qreal>(animationClock_.restart());
+        SyncHoverProgress();
+        openProgress_ = std::min(1.0, openProgress_ + (elapsed / kPaletteWheelOpenMs));
+        bool moving = openProgress_ < 1.0;
+        const qreal step = elapsed / kPaletteWheelHoverMs;
+        for (std::size_t index = 0; index < hoverProgress_.size(); ++index) {
+            const bool hovered = owner_->wheelHoverIndex_.has_value() && *owner_->wheelHoverIndex_ == index;
+            qreal& progress = hoverProgress_[index];
+            progress = hovered ? std::min(1.0, progress + step) : std::max(0.0, progress - step);
+            moving = moving || (hovered ? progress < 1.0 : progress > 0.0);
+        }
+        if (!moving) {
+            animationTimer_.stop();
+        }
+        update();
     }
 
     // Reference isColorEntry / selected (App.cpp:6847-6856).
@@ -1133,7 +1249,7 @@ private:
         if (IsColorEntry(index)) {
             return ChromeColor(palette_[index]);
         }
-        return ChromeColor(IsSelectedEntry(index) ? kWheelSelectedFill : kWheelUnselectedFill);
+        return ChromeColor(kWheelUnselectedFill);
     }
 
     ToolbarWidget* owner_ = nullptr;
@@ -1142,6 +1258,10 @@ private:
     std::size_t colorIndex_ = 0;
     bool zoomPresetMode_ = false;
     std::array<float, settings::kZoomPresetCount> zoomPresets_ {};
+    QTimer animationTimer_ {};
+    QElapsedTimer animationClock_ {};
+    qreal openProgress_ = 1.0;
+    std::vector<qreal> hoverProgress_ {};  // per entry, 0 (resting) .. 1 (lifted), linear
 };
 
 // ---------------------------------------------------------------------------

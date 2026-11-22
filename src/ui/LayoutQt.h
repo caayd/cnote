@@ -35,9 +35,9 @@ namespace cnote::appui::qt {
 //     interaction copy - the call path used by App::UpdatePaletteWheelHover
 //     (ToolbarState.cpp:202), App::PaletteWheelBounds (ToolbarState.cpp:161)
 //     and the message loop wheel hit test (MessageLoop.cpp:415).
-//   * PaletteWheelHoverGrow()/PaletteWheelHoverOffset() expose the paint-only
-//     hover feedback geometry from the App.cpp paint path
-//     (App.cpp:158-159, 6773-6774).
+//   * PaletteWheelHoverGrow()/PaletteWheelHoverOffset()/PaletteWheelIconHalfSize()
+//     are the paint-only geometry of the Qt floating-slice wheel, which no
+//     longer follows the App.cpp paint path.
 //
 // Every other constant matches both copies; the layout_parity_qt CTest drives
 // cnote::appui directly on Windows to keep that true.
@@ -159,7 +159,8 @@ qreal ToolbarTopInset(bool maximized);
 // reserved even on platforms whose native decorations supply the buttons.
 qreal CaptionButtonReserve();
 
-// Paint-only palette-wheel hover feedback (App.cpp:158-159, 6773-6774).
+// Paint-only palette-wheel geometry: how far a hovered slice grows outward
+// and slides off the centre, and the tool icon half size.
 qreal PaletteWheelHoverGrow();
 qreal PaletteWheelHoverOffset();
 qreal PaletteWheelIconHalfSize();
