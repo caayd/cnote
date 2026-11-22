@@ -1550,6 +1550,44 @@ void CanvasWidget::CommitActiveEdit() {
     update();
 }
 
+void CanvasWidget::CommitActiveEditFromKeyboard() {
+    // Excalidraw selects a text submitted from the keyboard (Escape,
+    // Ctrl+Enter), so it can be moved, resized or deleted next.  The object
+    // is found again by id: the commit may reorder or (emptied) remove it.
+    const std::size_t pageIndex = controller_.EditingPageIndex();
+    std::optional<std::uint64_t> textId;
+    std::optional<std::uint64_t> latexId;
+    if (const PageText* text = controller_.EditingTextObject(); text != nullptr && controller_.EditingTextIndex().has_value()) {
+        textId = text->id;
+    } else if (const PageLatex* latex = controller_.EditingLatexObject();
+               latex != nullptr && controller_.EditingLatexIndex().has_value()) {
+        latexId = latex->id;
+    }
+    CommitActiveEdit();
+
+    const Document& document = controller_.DocumentRef();
+    if (pageIndex >= document.PageCount() || (!textId.has_value() && !latexId.has_value())) {
+        return;
+    }
+    const Page& page = document.PageAt(pageIndex);
+    PageSelection selection;
+    for (std::size_t index = 0; textId.has_value() && index < page.texts.size(); ++index) {
+        if (page.texts[index].id == *textId) {
+            selection.texts.push_back(index);
+        }
+    }
+    for (std::size_t index = 0; latexId.has_value() && index < page.latexes.size(); ++index) {
+        if (page.latexes[index].id == *latexId) {
+            selection.latexes.push_back(index);
+        }
+    }
+    if (!selection.Empty()) {
+        controller_.SelectObjects(pageIndex, std::move(selection));
+        update();
+        emit KeyboardCommitSelected();
+    }
+}
+
 void CanvasWidget::CancelActiveEdit() {
     const bool cancellingText = controller_.EditingTextIndex().has_value();
     const bool cancellingLatex = controller_.EditingLatexIndex().has_value();
@@ -2050,14 +2088,13 @@ bool CanvasWidget::HandleEditorKey(QObject* watched, QKeyEvent* event) {
         }
     }
 
+    // Ctrl+Enter and Escape both finish the edit and keep what was typed
+    // (Excalidraw's textWysiwyg submits on Escape); an emptied text is
+    // removed by the commit itself.
     const bool commitChord = (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
         && event->modifiers().testFlag(Qt::ControlModifier);
-    if (commitChord) {
-        CommitActiveEdit();
-        return true;
-    }
-    if (event->key() == Qt::Key_Escape) {
-        CancelActiveEdit();
+    if (commitChord || event->key() == Qt::Key_Escape) {
+        CommitActiveEditFromKeyboard();
         return true;
     }
 
@@ -2191,7 +2228,7 @@ void CanvasWidget::tabletEvent(QTabletEvent* event) {
 
 void CanvasWidget::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Escape) {
-        CancelActiveEdit();
+        CommitActiveEditFromKeyboard();
         HandlePointerCancel(CancelReason::Escape);
         event->accept();
         return;
@@ -2282,7 +2319,7 @@ void CanvasWidget::HandlePointerCancel(CancelReason reason) {
     // Idempotent: the router abandons the live *pointer* interaction without
     // committing it (Escape / lost grab) and releases capture.  Active
     // text/LaTeX edits are not cancelled here: they own their own focus, and a
-    // canvas focus change must not discard typed content (Escape cancels).
+    // canvas focus change must not discard typed content (Escape commits).
     static_cast<void>(reason);
     router_->CancelInteraction();
     TrackEraserTrail(std::nullopt);

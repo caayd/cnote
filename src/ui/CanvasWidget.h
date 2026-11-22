@@ -203,9 +203,11 @@ public:
     // Shows the overlay for an edit the controller already started (e.g. a new
     // object created from a shell command), or hides it when none is active.
     void SyncEditOverlay();
-    // Commits (Ctrl+Enter) or cancels (Escape) the active edit.
+    // Commits (Ctrl+Enter, Escape) or cancels the active edit.
     void CommitActiveEdit();
     void CancelActiveEdit();
+    // The keyboard commit (Escape, Ctrl+Enter): commits and selects the object.
+    void CommitActiveEditFromKeyboard();
     [[nodiscard]] bool EditOverlayActive() const;
 
     [[nodiscard]] QTextEdit* TextEditor() const { return textEditor_; }
@@ -256,6 +258,8 @@ signals:
     // Raised from the editor's own event filter, installed when the editor is
     // created, so it works from the first keystroke of the first edit.
     void TextBoldShortcutPressed();
+    // Escape or Ctrl+Enter committed an edit and left its object selected.
+    void KeyboardCommitSelected();
 
 protected:
     void paintEvent(QPaintEvent* event) override;

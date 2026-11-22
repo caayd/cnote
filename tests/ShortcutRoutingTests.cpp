@@ -530,6 +530,63 @@ void TextFormatPopupLeavesFocusWithEditor() {
     Check(!harness.canvas->EditOverlayActive(), "Ctrl+Enter after the popup commits the edit");
 }
 
+// Escape finishes a text or LaTeX edit and keeps what was typed, like
+// Excalidraw's editor; it used to discard the whole edit.  A keyboard commit
+// (Escape or Ctrl+Enter) leaves the object selected, as Excalidraw does.
+void EscapeCommitsTheEdit() {
+    Harness harness;
+    SelectTool(harness, cnote::settings::Tool::Text);
+    auto& controller = harness.window->Controller();
+    const auto& page = controller.DocumentRef().PageAt(0U);
+    const auto selectedTexts = [&]() { return controller.SelectionFor(0U).texts; };
+    const std::size_t textsBefore = page.texts.size();
+    harness.window->AddTextObject();
+    QApplication::processEvents();
+    if (QTextEdit* editor = harness.canvas->TextEditor(); editor != nullptr) {
+        editor->setFocus(Qt::OtherFocusReason);
+    }
+    harness.Press(Qt::Key_A);
+    harness.Press(Qt::Key_B);
+    harness.Press(Qt::Key_Escape);
+    Check(!harness.canvas->EditOverlayActive(), "Escape closes the text editor");
+    Check(page.texts.size() == textsBefore + 1U && page.texts.back().content == u"ab",
+        "Escape keeps the typed text");
+    Check(controller.CanUndo(), "the kept text is one undoable step");
+    Check(selectedTexts() == std::vector<std::size_t> { textsBefore },
+        "Escape leaves the committed text selected");
+    Check(harness.ActiveTool() == cnote::settings::Tool::Select,
+        "a keyboard commit switches to the Select tool so the text can be moved or resized");
+
+    harness.window->AddTextObject();
+    QApplication::processEvents();
+    harness.Press(Qt::Key_C);
+    harness.Press(Qt::Key_Return, Qt::ControlModifier);
+    Check(selectedTexts() == std::vector<std::size_t> { textsBefore + 1U },
+        "Ctrl+Enter leaves the committed text selected");
+
+    controller.ClearSelection();
+    harness.window->AddTextObject();
+    QApplication::processEvents();
+    harness.Press(Qt::Key_Escape);
+    Check(page.texts.size() == textsBefore + 2U, "Escape on a new, empty text leaves no object");
+    Check(!controller.HasSelection(), "an emptied text leaves nothing selected");
+
+    const std::size_t latexesBefore = page.latexes.size();
+    harness.window->AddLatexObject();
+    QApplication::processEvents();
+    if (QPlainTextEdit* editor = harness.canvas->LatexEditor(); editor != nullptr) {
+        editor->setFocus(Qt::OtherFocusReason);
+        editor->setPlainText(QStringLiteral("x^2"));
+    }
+    QApplication::processEvents();
+    harness.Press(Qt::Key_Escape);
+    Check(!harness.canvas->EditOverlayActive(), "Escape closes the LaTeX editor");
+    Check(page.latexes.size() == latexesBefore + 1U && page.latexes.back().content == u"x^2",
+        "Escape keeps the typed LaTeX");
+    Check(controller.SelectionFor(0U).latexes == std::vector<std::size_t> { latexesBefore },
+        "Escape leaves the committed formula selected");
+}
+
 void EditorKeepsCtrlBWhileEditingText() {
     // Reference precedence (TextEditProc, MessageLoop.cpp): ctrl+B inside a text
     // edit is the editor's bold command, so the sidebar toggle must not steal it.
@@ -1141,6 +1198,7 @@ int main(int argc, char** argv) {
     QuickActionsFireEverywhere();
     QuickPopupIsTextFormattingWhileEditing();
     TextFormatPopupLeavesFocusWithEditor();
+    EscapeCommitsTheEdit();
     PendingTextFormatSeedsNewObjects();
     AlignmentChangedWhileEditingIsCommitted();
     FormatCommandsChangeOnlyTheirProperty();
