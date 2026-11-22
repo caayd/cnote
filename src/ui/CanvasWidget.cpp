@@ -74,6 +74,17 @@ constexpr int kEraserTrailAlpha = 51;
 constexpr int kEraserTrailFrameMs = 16;
 constexpr float kEraserTrailTolerance = 0.25f;
 
+// Hold-to-snap: how long the pointer must rest mid-stroke, and how far (in
+// logical pixels) it may drift while resting, to snap the stroke to a shape.
+constexpr int kShapeHoldMs = 500;
+constexpr qreal kShapeHoldTolerancePixels = 3.0;
+
+// The snapped stroke's freehand original: its opacity under the shape while
+// the pointer is down, and how long it takes to fade out after the release.
+constexpr float kSnapGhostOpacity = 0.3f;
+constexpr int kSnapGhostFadeMs = 250;
+constexpr int kSnapGhostFrameMs = 16;
+
 // LaTeX source box and completion popup metrics (logical pixels).
 constexpr int kLatexSourceBoxHeight = 120;
 constexpr int kLatexSourceBoxGap = 6;
@@ -120,6 +131,16 @@ CanvasWidget::CanvasWidget(CanvasController& controller, QWidget* parent)
     eraserTrailTimer_ = new QTimer(this);
     eraserTrailTimer_->setInterval(kEraserTrailFrameMs);
     connect(eraserTrailTimer_, &QTimer::timeout, this, [this]() { RefreshEraserTrail(); });
+
+    shapeHoldTimer_ = new QTimer(this);
+    shapeHoldTimer_->setSingleShot(true);
+    shapeHoldTimer_->setInterval(kShapeHoldMs);
+    connect(shapeHoldTimer_, &QTimer::timeout, this, [this]() { SnapHeldStroke(); });
+
+    snapGhostClock_.start();
+    snapGhostTimer_ = new QTimer(this);
+    snapGhostTimer_->setInterval(kSnapGhostFrameMs);
+    connect(snapGhostTimer_, &QTimer::timeout, this, [this]() { RefreshSnapGhost(); });
 }
 
 CanvasWidget::~CanvasWidget() = default;
@@ -1361,6 +1382,14 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
             }
         }
 
+        // A snapped stroke's freehand original, faded under the shape.
+        if (snapGhost_.has_value() && snapGhost_->pageIndex == view.pageIndex) {
+            painter.save();
+            painter.translate(view.rect.topLeft());
+            render::PaintStrokePreview(painter, snapGhost_->stroke, RenderParamsFor(view), SnapGhostOpacity());
+            painter.restore();
+        }
+
         if (liveStrokeOnPage) {
             if (const Stroke* pending = controller_.PendingStroke(); pending != nullptr) {
                 painter.save();
@@ -2330,17 +2359,21 @@ void CanvasWidget::HandlePointerPress(const PointerSample& sample) {
     }
     router_->HandlePointerPress(sample);
     TrackEraserTrail(sample.position);
+    TrackShapeHold(sample.position);
     update();
 }
 
 void CanvasWidget::HandlePointerMove(const PointerSample& sample) {
     router_->HandlePointerMove(sample);
     TrackEraserTrail(sample.position);
+    TrackShapeHold(sample.position);
 }
 
 void CanvasWidget::HandlePointerRelease(const PointerSample& sample) {
     router_->HandlePointerRelease(sample);
     TrackEraserTrail(sample.position);
+    TrackShapeHold(std::nullopt);
+    EndSnapGhost(true);
     update();
 }
 
@@ -2352,7 +2385,83 @@ void CanvasWidget::HandlePointerCancel(CancelReason reason) {
     static_cast<void>(reason);
     router_->CancelInteraction();
     TrackEraserTrail(std::nullopt);
+    TrackShapeHold(std::nullopt);
+    EndSnapGhost(false);
     update();
+}
+
+void CanvasWidget::TrackShapeHold(std::optional<QPointF> position) {
+    if (!position.has_value() || router_->ActiveInteraction() != InteractionKind::Stroke) {
+        shapeHoldTimer_->stop();
+        return;
+    }
+    const QPointF drift = *position - shapeHoldAnchor_;
+    if (!shapeHoldTimer_->isActive() || std::hypot(drift.x(), drift.y()) > kShapeHoldTolerancePixels) {
+        shapeHoldAnchor_ = *position;
+        shapeHoldTimer_->start();
+    }
+}
+
+void CanvasWidget::SnapHeldStroke() {
+    const Stroke* pending = controller_.PendingStroke();
+    if (pending == nullptr) {
+        return;
+    }
+    SnapGhost ghost { controller_.PendingStrokePage(), *pending, std::nullopt };
+    if (!router_->SnapStrokeToShape()) {
+        return;
+    }
+    // A previous ghost still fading gives way to the new one.
+    RepaintSnapGhost();
+    snapGhostTimer_->stop();
+    snapGhost_ = std::move(ghost);
+    RepaintSnapGhost();
+}
+
+float CanvasWidget::SnapGhostOpacity() const {
+    if (!snapGhost_.has_value()) {
+        return 0.0f;
+    }
+    if (!snapGhost_->releasedAt.has_value()) {
+        return kSnapGhostOpacity;
+    }
+    const auto faded = static_cast<float>(snapGhostClock_.elapsed() - *snapGhost_->releasedAt);
+    return kSnapGhostOpacity * std::max(0.0f, 1.0f - (faded / static_cast<float>(kSnapGhostFadeMs)));
+}
+
+void CanvasWidget::RepaintSnapGhost() {
+    if (!snapGhost_.has_value()) {
+        return;
+    }
+    float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
+    if (!StrokeBounds(snapGhost_->stroke, &minX, &minY, &maxX, &maxY)) {
+        return;
+    }
+    const float margin = snapGhost_->stroke.style.width + kStrokeDirtyMarginPixels;
+    update(PageRegionDirtyRect(snapGhost_->pageIndex, QRectF(
+        static_cast<qreal>(minX - margin), static_cast<qreal>(minY - margin),
+        static_cast<qreal>((maxX - minX) + margin * 2.0f), static_cast<qreal>((maxY - minY) + margin * 2.0f))));
+}
+
+void CanvasWidget::EndSnapGhost(bool fade) {
+    if (!snapGhost_.has_value() || snapGhost_->releasedAt.has_value()) {
+        return;
+    }
+    RepaintSnapGhost();
+    if (!fade) {
+        snapGhost_.reset();
+        return;
+    }
+    snapGhost_->releasedAt = snapGhostClock_.elapsed();
+    snapGhostTimer_->start();
+}
+
+void CanvasWidget::RefreshSnapGhost() {
+    RepaintSnapGhost();
+    if (SnapGhostOpacity() <= 0.0f) {
+        snapGhost_.reset();
+        snapGhostTimer_->stop();
+    }
 }
 
 void CanvasWidget::TrackEraserTrail(std::optional<QPointF> position) {

@@ -94,6 +94,7 @@ public:
     StrokeSampling lastSampling {};
     std::optional<float> beginPressure;
     std::vector<std::optional<float>> appendPressures;
+    std::vector<Vec2> replacedPoints;
 
     std::optional<ui::PageHit> HitTestPage(const QPointF& logical) const override { return hitPage(logical); }
     Vec2 ScreenToPage(const QPointF& logical, bool clampToPage) const override { return screenToPage(logical, clampToPage); }
@@ -133,6 +134,7 @@ public:
         ops.push_back("AppendStrokePoint(" + Format(point) + ",dotted=" + (dotted ? "1" : "0") + ")");
     }
     void ReplaceStrokePoints(const std::vector<Vec2>& points, bool dotted) override {
+        replacedPoints = points;
         ops.push_back("ReplaceStrokePoints(" + std::to_string(points.size()) + ",dotted=" + (dotted ? "1" : "0") + ")");
     }
     void CommitStroke() override { ops.push_back("CommitStroke"); }
@@ -456,6 +458,108 @@ void TestStrokeRawSamplesAndSampling() {
     host.Reset();
     router.HandlePointerRelease(Release(400.0, 0.0));
     Check(host.CountOp("CommitStroke") == 1, "the raw stroke commits once");
+}
+
+// Hold-to-snap: a held freehand circle becomes the recognized shape in one
+// ReplaceStrokePoints, later movement leaves it alone and the release commits
+// it once.  A scribble or the straight-line mode never snaps.
+void TestStrokeSnapToShape() {
+    const auto circlePoint = [](int step) {
+        const double angle = static_cast<double>(step) * 2.0 * 3.14159265358979323846 / 120.0;
+        return QPointF(300.0 + (80.0 * std::cos(angle)), 300.0 + (80.0 * std::sin(angle)));
+    };
+    const auto pageUnits = [](const QPointF& logical, bool) {
+        return Vec2 { static_cast<float>(logical.x()), static_cast<float>(logical.y()) };
+    };
+    {
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        Check(!router.SnapStrokeToShape(), "nothing snaps without a live stroke");
+        router.HandlePointerPress(Press(circlePoint(0).x(), circlePoint(0).y()));
+        for (int step = 1; step <= 120; ++step) {
+            router.HandlePointerMove(Move(circlePoint(step).x(), circlePoint(step).y()));
+        }
+        host.Reset();
+        Check(router.SnapStrokeToShape() && host.CountOp("ReplaceStrokePoints(73,dotted=0)") == 1,
+            "a held circle snaps to the 72-segment circle\n" + host.Dump());
+        host.Reset();
+        Check(!router.SnapStrokeToShape() && host.ops.empty(), "a snapped stroke does not snap twice");
+        router.HandlePointerMove(Move(500.0, 500.0));
+        Check(host.CountOp("AppendStrokePoint") == 0 && host.CountOp("ReplaceStrokePoints") == 0,
+            "moving after the snap keeps the shape\n" + host.Dump());
+        router.HandlePointerRelease(Release(500.0, 500.0));
+        Check(host.CountOp("CommitStroke") == 1 && router.ActiveInteraction() == ui::InteractionKind::None,
+            "the release commits the snapped shape once");
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        router.HandlePointerPress(Press(100.0, 300.0));
+        for (int peak = 1; peak <= 8; ++peak) {
+            router.HandlePointerMove(Move(100.0 + (15.0 * peak), peak % 2 == 0 ? 300.0 : 270.0));
+        }
+        host.Reset();
+        Check(!router.SnapStrokeToShape() && host.ops.empty(), "a held scribble stays ink");
+        router.HandlePointerMove(Move(240.0, 300.0));
+        Check(host.CountOp("AppendStrokePoint") == 1, "the unsnapped stroke keeps drawing");
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        ui::InteractionModifiers straight;
+        straight.straightLine = true;
+        router.SetModifiers(straight);
+        router.HandlePointerPress(Press(circlePoint(0).x(), circlePoint(0).y()));
+        for (int step = 1; step <= 120; ++step) {
+            router.HandlePointerMove(Move(circlePoint(step).x(), circlePoint(step).y()));
+        }
+        host.Reset();
+        Check(!router.SnapStrokeToShape() && host.ops.empty(), "the straight-line mode owns its stroke: no snap");
+    }
+    {
+        // Shift toggled over a held snapped trapezoid squares it into an
+        // axis-aligned rectangle; releasing Shift restores the fitted shape.
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        const QPointF corners[] = { { 150.0, 300.0 }, { 350.0, 300.0 }, { 300.0, 180.0 }, { 200.0, 180.0 }, { 150.0, 300.0 } };
+        router.HandlePointerPress(Press(corners[0].x(), corners[0].y()));
+        for (std::size_t side = 1; side < std::size(corners); ++side) {
+            for (int step = 1; step <= 50; ++step) {
+                const QPointF point = corners[side - 1] + ((corners[side] - corners[side - 1]) * (step / 50.0));
+                router.HandlePointerMove(Move(point.x(), point.y()));
+            }
+        }
+        Check(router.SnapStrokeToShape(), "a held trapezoid snaps");
+        const std::vector<Vec2> fitted = host.replacedPoints;
+        host.Reset();
+        ui::InteractionModifiers shift;
+        shift.snapLine = true;
+        router.SetModifiers(shift);
+        float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+        for (const Vec2 p : host.replacedPoints) {
+            minX = std::min(minX, p.x);
+            minY = std::min(minY, p.y);
+            maxX = std::max(maxX, p.x);
+            maxY = std::max(maxY, p.y);
+        }
+        bool onBox = host.CountOp("ReplaceStrokePoints") == 1;
+        for (const Vec2 p : host.replacedPoints) {
+            onBox = onBox && (Near(p.x, minX) || Near(p.x, maxX) || Near(p.y, minY) || Near(p.y, maxY));
+        }
+        Check(onBox, "pressing Shift re-snaps the held shape to a rectangle\n" + host.Dump());
+        host.Reset();
+        router.SetModifiers({});
+        Check(host.CountOp("ReplaceStrokePoints") == 1 && host.replacedPoints.size() == fitted.size(),
+            "releasing Shift restores the fitted trapezoid");
+    }
 }
 
 // Pen pressure rides every stroke sample; a mouse stroke carries none.  The
@@ -1401,6 +1505,7 @@ int main() {
     TestStrokePageSegmentation();
     TestStrokeRawSamplesAndSampling();
     TestStrokePenPressure();
+    TestStrokeSnapToShape();
     TestStrokeStraightLineSnapAndOval();
     TestStrokeDottedModifierWithoutMotion();
     TestStrokeReleaseOutsideCanvas();
