@@ -239,21 +239,18 @@ QTextCharFormat ToggleModifier(const QTextEdit* editor, TextToggle toggle) {
     return modifier;
 }
 
-PageTextStyle TextStyleFromEditor(const QTextEdit* editor, TextAlignment& alignment) {
+TextAlignment NextTextAlignment(TextAlignment alignment) {
+    return alignment == TextAlignment::Left
+        ? TextAlignment::Center
+        : (alignment == TextAlignment::Center ? TextAlignment::Right : TextAlignment::Left);
+}
+
+PageTextStyle TextStyleFromEditor(const QTextEdit* editor) {
     PageTextStyle style {};
     if (editor == nullptr) {
-        alignment = TextAlignment::Left;
         return style;
     }
     const QTextCharFormat format = editor->currentCharFormat();
-    const Qt::Alignment current = editor->alignment();
-    if (current & Qt::AlignHCenter) {
-        alignment = TextAlignment::Center;
-    } else if (current & Qt::AlignRight) {
-        alignment = TextAlignment::Right;
-    } else {
-        alignment = TextAlignment::Left;
-    }
     // fontFamily comes from the shared capture mapping (its page-unit
     // fontSize is overwritten below: the popup shows the editor's screen point
     // size, same as the legacy size box).  The toggles read the whole
@@ -593,17 +590,12 @@ void QtMainWindow::CreateChrome() {
         toggleTextFormat(TextToggle::Underline, settings_.textUnderline);
     });
     connect(toolbar_, &ui::ToolbarWidget::TextAlignCycleRequested, this, [this, persistPendingTextStyle]() {
-        QTextEdit* editor = canvas_->TextEditor();
-        if (editor != nullptr && controller_.EditingText()) {
-            const Qt::Alignment current = editor->alignment();
-            const Qt::Alignment next = (current & Qt::AlignHCenter)
-                ? Qt::AlignRight
-                : ((current & Qt::AlignRight) ? Qt::AlignLeft : Qt::AlignHCenter);
-            editor->setAlignment(next);
+        // Alignment belongs to the whole object (PageText::alignment), not to
+        // the editor's paragraph under the caret.
+        if (const PageText* object = controller_.EditingTextObject(); object != nullptr) {
+            canvas_->SetTextEditAlignment(NextTextAlignment(object->alignment));
         } else {
-            settings_.textAlignment = settings_.textAlignment == TextAlignment::Left
-                ? TextAlignment::Center
-                : (settings_.textAlignment == TextAlignment::Center ? TextAlignment::Right : TextAlignment::Left);
+            settings_.textAlignment = NextTextAlignment(settings_.textAlignment);
         }
         persistPendingTextStyle();
     });
@@ -710,13 +702,12 @@ void QtMainWindow::SyncPendingTextStyle() {
     // the pending style - new objects take the active palette slot - and the
     // size comes from the preset index alone (the editor's point size is a
     // view-scale conversion, not a pending choice).
-    TextAlignment alignment = TextAlignment::Left;
-    const PageTextStyle style = TextStyleFromEditor(editor, alignment);
+    const PageTextStyle style = TextStyleFromEditor(editor);
     settings_.textFontFamily = style.fontFamily;
     settings_.textBold = style.bold;
     settings_.textItalic = style.italic;
     settings_.textUnderline = style.underline;
-    settings_.textAlignment = alignment;
+    settings_.textAlignment = controller_.EditingTextObject()->alignment;
 }
 
 void QtMainWindow::ApplyPendingTextStyle() {
@@ -1993,9 +1984,8 @@ void QtMainWindow::UpdateChrome() {
         // the next created text will inherit.
         toolbar_->SetTextFormatAvailable(controller_.EditingText() || activeTool_ == settings::Tool::Text);
         if (controller_.EditingText()) {
-            TextAlignment alignment = TextAlignment::Left;
-            const PageTextStyle style = TextStyleFromEditor(canvas_ != nullptr ? canvas_->TextEditor() : nullptr, alignment);
-            toolbar_->SetTextFormatState(style, alignment, settings_.textSizePreset);
+            const PageTextStyle style = TextStyleFromEditor(canvas_ != nullptr ? canvas_->TextEditor() : nullptr);
+            toolbar_->SetTextFormatState(style, controller_.EditingTextObject()->alignment, settings_.textSizePreset);
         } else {
             toolbar_->SetTextFormatState(
                 PageTextStyle {

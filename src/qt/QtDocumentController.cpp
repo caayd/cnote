@@ -670,6 +670,12 @@ void QtDocumentController::FitEditingText(const PageText& edited, float maxAutoW
     edit_->text = text::FitTextBox(edit_->text, std::move(next), maxAutoWidth);
 }
 
+void QtDocumentController::SetEditingTextAlignment(TextAlignment alignment) {
+    if (EditingText()) {
+        edit_->text.alignment = alignment;
+    }
+}
+
 bool QtDocumentController::BeginLatexEdit(std::size_t pageIndex, std::size_t latexIndex) {
     AbortTransientState();
     Page* page = PageAt(pageIndex);
@@ -1723,52 +1729,45 @@ bool QtDocumentController::RotatePage(std::size_t pageIndex, int quarterTurns) {
     Page& page = document.PageAt(pageIndex);
     const Page before = page;
 
-    // LaTeX boxes derive from Measure (no stored extents), so their x/y maps
-    // by bounds centre before the object rotation accumulates inside
-    // RotatePageContents.
+    // Text and LaTeX boxes come from layout (no stored height), so each one's
+    // measured bounds centre follows the page and the box - whose size a turn
+    // does not change, since it rotates about that centre - is re-centred on
+    // it after RotatePageContents accumulates the rotation.
     const float width = page.width;
     const float height = page.height;
-    std::vector<Vec2> latexCenters;
-    latexCenters.reserve(page.latexes.size());
+    struct Box {
+        Vec2 center;
+        float width = 0.0f;
+        float height = 0.0f;
+    };
+    const auto boxOf = [](float left, float top, float right, float bottom) {
+        return Box { { (left + right) * 0.5f, (top + bottom) * 0.5f }, right - left, bottom - top };
+    };
+    std::vector<Box> textBoxes;
+    textBoxes.reserve(page.texts.size());
+    for (const PageText& text : page.texts) {
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, width);
+        textBoxes.push_back(boxOf(bounds.left, bounds.top, bounds.right, bounds.bottom));
+    }
+    std::vector<Box> latexBoxes;
+    latexBoxes.reserve(page.latexes.size());
     for (const PageLatex& latex : page.latexes) {
         const ui::LatexBounds bounds = ui::MeasurePageLatexBounds(latex, width);
-        latexCenters.push_back({ (bounds.left + bounds.right) * 0.5f, (bounds.top + bounds.bottom) * 0.5f });
-    }
-    std::vector<ui::LatexBounds> latexBounds;
-    latexBounds.reserve(page.latexes.size());
-    for (const PageLatex& latex : page.latexes) {
-        latexBounds.push_back(ui::MeasurePageLatexBounds(latex, width));
-    }
-    // Text boxes are as tall as their layout, so they map the same way: the
-    // bounds centre follows the page and the box (whose size the turn does
-    // not change) is re-centred on it, rotating with its accumulated angle.
-    std::vector<text::QtTextBounds> textBounds;
-    textBounds.reserve(page.texts.size());
-    for (const PageText& text : page.texts) {
-        textBounds.push_back(text::MeasurePageTextBoundsQt(text, width));
+        latexBoxes.push_back(boxOf(bounds.left, bounds.top, bounds.right, bounds.bottom));
     }
 
     RotatePageContents(page, turns);
 
+    const auto recentre = [&](const Box& box, float& x, float& y) {
+        const Vec2 mapped = RotatePointQuarterTurn(box.center, width, height, turns);
+        x = mapped.x - box.width * 0.5f;
+        y = mapped.y - box.height * 0.5f;
+    };
     for (std::size_t index = 0; index < page.texts.size(); ++index) {
-        const text::QtTextBounds& bounds = textBounds[index];
-        const Vec2 mapped = RotatePointQuarterTurn(
-            { (bounds.left + bounds.right) * 0.5f, (bounds.top + bounds.bottom) * 0.5f }, width, height, turns);
-        page.texts[index].x = mapped.x - (bounds.right - bounds.left) * 0.5f;
-        page.texts[index].y = mapped.y - (bounds.bottom - bounds.top) * 0.5f;
+        recentre(textBoxes[index], page.texts[index].x, page.texts[index].y);
     }
-
     for (std::size_t index = 0; index < page.latexes.size(); ++index) {
-        const Vec2 mapped = RotatePointQuarterTurn(latexCenters[index], width, height, turns);
-        const float halfWidth = (latexBounds[index].right - latexBounds[index].left) * 0.5f;
-        const float halfHeight = (latexBounds[index].bottom - latexBounds[index].top) * 0.5f;
-        if (turns % 2 != 0) {
-            page.latexes[index].x = mapped.x - halfHeight;
-            page.latexes[index].y = mapped.y - halfWidth;
-        } else {
-            page.latexes[index].x = mapped.x - halfWidth;
-            page.latexes[index].y = mapped.y - halfHeight;
-        }
+        recentre(latexBoxes[index], page.latexes[index].x, page.latexes[index].y);
     }
 
     document.TouchPage(pageIndex);

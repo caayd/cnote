@@ -254,6 +254,50 @@ int main(int argc, char** argv) {
                 + " line=" + std::to_string(lineExtent) + ")");
     }
 
+    // A page turn turns an image with the page: a wide image comes out tall
+    // and unstretched.  The model used to swap the image box's sides and add
+    // the 90 degrees as well, so the pixels were squeezed into the swapped
+    // box and then turned back to the old shape.
+    {
+        cnote::Page turnPage;
+        turnPage.width = 200.0f;
+        turnPage.height = 100.0f;
+        cnote::PageImage wide;
+        wide.x = 20.0f;
+        wide.y = 40.0f;
+        wide.width = 60.0f;
+        wide.height = 20.0f;
+        wide.pixelWidth = 60;
+        wide.pixelHeight = 20;
+        wide.stride = 60 * 4;
+        wide.pixels = cnote::PixelBuffer(SolidBgra(60, 20, 0x00, 0x00, 0xFF, 0xFF));
+        turnPage.images.push_back(wide);
+        cnote::RotatePageContents(turnPage, 1);
+
+        const QImage turned = cnote::render::RenderPageSurface(turnPage, cnote::render::PageRenderParams {});
+        int left = turned.width();
+        int right = -1;
+        int top = turned.height();
+        int bottom = -1;
+        for (int y = 0; y < turned.height(); ++y) {
+            for (int x = 0; x < turned.width(); ++x) {
+                const QRgb pixel = turned.pixel(x, y);
+                if (qRed(pixel) > 200 && qGreen(pixel) < 80 && qBlue(pixel) < 80) {
+                    left = std::min(left, x);
+                    right = std::max(right, x);
+                    top = std::min(top, y);
+                    bottom = std::max(bottom, y);
+                }
+            }
+        }
+        const cnote::Vec2 centre = cnote::RotatePointQuarterTurn({ 50.0f, 50.0f }, 200.0f, 100.0f, 1);
+        Check(right >= left && std::abs((right - left + 1) - 20) <= 2 && std::abs((bottom - top + 1) - 60) <= 2,
+            "a turned wide image draws tall and unstretched (" + std::to_string(right - left + 1) + "x"
+                + std::to_string(bottom - top + 1) + ")");
+        Check(std::abs((left + right + 1) * 0.5f - centre.x) <= 1.5f && std::abs((top + bottom + 1) * 0.5f - centre.y) <= 1.5f,
+            "a turned image stays centred where the page turn takes its centre");
+    }
+
     // Pressure ink is a filled union of tapered quads, round caps and join
     // fans.  At half pressure (width factor 1) it must cover what the
     // constant-width round pen covers: a hole where pieces overlap at a sharp

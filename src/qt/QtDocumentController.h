@@ -224,6 +224,9 @@ public:
     // spans; see text::FitTextBox): an auto-width text keeps its alignment's
     // anchor and starts wrapping once it outgrows `maxAutoWidth`.
     void FitEditingText(const PageText& edited, float maxAutoWidth);
+    // Alignment is the whole object's (PageText::alignment), so the edit
+    // changes the live object; the commit records it with the content.
+    void SetEditingTextAlignment(TextAlignment alignment);
     // Commits the edited object; the caller passes the overlay's converted
     // content and spans. Nothing is recorded when the object is unchanged.
     void CommitTextEdit(PageText edited);

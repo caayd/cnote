@@ -1648,6 +1648,12 @@ void CanvasWidget::ApplyTextEditorWrap(const PageText& text) {
     // committed layout; PositionOverlays keeps it in sync on zoom.
     if (text.width > 0.0f) {
         textEditor_->setLineWrapColumnOrWidth(text::TextWrapWidthPx(text, textEditScale_));
+    } else {
+        // A non-wrapping QTextEdit aligns within its viewport only after one
+        // of its own relayouts (a resize or a wrap-mode change) has seen
+        // aligned content; an alignment change is neither, so give the
+        // document the width it aligns in now.
+        textEditor_->document()->setPageSize(QSizeF(textEditor_->viewport()->width(), -1.0));
     }
 }
 
@@ -1705,6 +1711,19 @@ void CanvasWidget::RevealEditedText(const PageText& text) {
 float CanvasWidget::MaxAutoTextWidth(std::size_t pageIndex) const {
     const CanvasPageView view = CalculatePageView(pageIndex);
     return text::MaxAutoTextWidth(static_cast<float>(VisibleCanvasRect().width()), view.valid ? view.scale : 1.0f);
+}
+
+void CanvasWidget::SetTextEditAlignment(TextAlignment alignment) {
+    controller_.SetEditingTextAlignment(alignment);
+    const PageText* object = controller_.EditingTextObject();
+    if (textEditor_ == nullptr || object == nullptr) {
+        return;
+    }
+    // The editor aligns every paragraph through its document's default
+    // option, the same one the committed layout uses.
+    ApplyTextEditorWrap(*object);
+    PositionOverlays();
+    update();
 }
 
 void CanvasWidget::ShowLatexOverlay(const PageLatex& object) {
