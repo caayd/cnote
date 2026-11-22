@@ -567,6 +567,14 @@ private:
     // interaction, then repaints/animates what changed.
     void TrackEraserTrail(std::optional<QPointF> position);
     void RefreshEraserTrail();
+    // Hold-to-snap: while a stroke is live, shapeHoldTimer_ restarts whenever
+    // the pointer leaves kShapeHoldTolerancePixels of shapeHoldAnchor_; when
+    // it fires (the pointer rested) the router snaps the stroke to a shape.
+    QTimer* shapeHoldTimer_ = nullptr;
+    QPointF shapeHoldAnchor_ {};
+    // After the router handled a pointer sample at `position` (nullopt for a
+    // cancel): restarts or stops the hold timer with the stroke interaction.
+    void TrackShapeHold(std::optional<QPointF> position);
 
     // Transform gesture session: the handle being dragged, the selection
     // bounds captured at BeginTransform and the logical press position

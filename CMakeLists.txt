@@ -414,6 +414,7 @@ add_library(cnote_services
     src/render/PageRenderer.cpp
     src/selection/StrokeSmoothing.cpp
     src/selection/InkOutline.cpp
+    src/selection/ShapeRecognition.cpp
     src/PdfBackend.cpp
     src/render/PdfExportQt.cpp
     src/render/PdfiumBackgroundProvider.cpp
@@ -875,6 +876,18 @@ target_link_libraries(cnote_eraser_trail_tests PRIVATE cnote_ui)
 add_test(NAME eraser_trail COMMAND cnote_eraser_trail_tests)
 set_tests_properties(eraser_trail PROPERTIES TIMEOUT 60)
 
+# --- Shape recognition --------------------------------------------------------
+# Hold-to-snap fitting (cnote::RecognizeShape) on synthetic hand-drawn strokes
+# over many deterministic seeds.  Plain computation, no window.
+add_executable(cnote_shape_recognition_tests tests/ShapeRecognitionTests.cpp)
+target_compile_features(cnote_shape_recognition_tests PRIVATE cxx_std_20)
+target_compile_options(cnote_shape_recognition_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_shape_recognition_tests PRIVATE cnote_model cnote_services)
+add_test(NAME shape_recognition COMMAND cnote_shape_recognition_tests)
+set_tests_properties(shape_recognition PROPERTIES TIMEOUT 60)
+
 
 # --- Portable selection math (plan steps 5.2/5.3) ----------------------------
 # src/selection/Geometry.cpp is bound to App/POINT/RECT and cannot be linked
@@ -1084,6 +1097,7 @@ if(WIN32)
         cnote_chrome_tests
         cnote_interaction_router_tests
         cnote_eraser_trail_tests
+        cnote_shape_recognition_tests
         cnote_selection_math_tests
         cnote_portability_tests
         cnote_font_fallback_tests

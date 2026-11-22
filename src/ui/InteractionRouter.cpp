@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cmath>
 
+
+#include "selection/ShapeRecognition.h"
+
 namespace cnote::ui {
 
 namespace {
@@ -527,6 +530,10 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
     if (state_.kind != InteractionKind::Stroke || !state_.stroke.page.has_value()) {
         return false;
     }
+    // A snapped shape stays as recognized until the pointer lifts.
+    if (state_.stroke.snapped) {
+        return false;
+    }
     const float pageScale = state_.stroke.page->scale;
     if (pageScale <= 0.0f) {
         return false;
@@ -607,6 +614,21 @@ void InteractionRouter::EndStroke() {
     }
     ResetInteraction();
     host_.InvalidateCanvas();
+}
+
+bool InteractionRouter::SnapStrokeToShape() {
+    if (state_.kind != InteractionKind::Stroke || state_.stroke.snapped || modifiers_.straightLine) {
+        return false;
+    }
+    std::optional<RecognizedShape> shape = RecognizeShape(state_.stroke.freehandPoints);
+    if (!shape.has_value()) {
+        return false;
+    }
+    state_.stroke.points = std::move(shape->points);
+    state_.stroke.snapped = true;
+    host_.ReplaceStrokePoints(state_.stroke.points, state_.stroke.dotted);
+    host_.InvalidateCanvas();
+    return true;
 }
 
 // -------------------------------------------------------------- erase ------

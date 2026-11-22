@@ -74,6 +74,11 @@ constexpr int kEraserTrailAlpha = 51;
 constexpr int kEraserTrailFrameMs = 16;
 constexpr float kEraserTrailTolerance = 0.25f;
 
+// Hold-to-snap: how long the pointer must rest mid-stroke, and how far (in
+// logical pixels) it may drift while resting, to snap the stroke to a shape.
+constexpr int kShapeHoldMs = 500;
+constexpr qreal kShapeHoldTolerancePixels = 3.0;
+
 // LaTeX source box and completion popup metrics (logical pixels).
 constexpr int kLatexSourceBoxHeight = 120;
 constexpr int kLatexSourceBoxGap = 6;
@@ -120,6 +125,11 @@ CanvasWidget::CanvasWidget(CanvasController& controller, QWidget* parent)
     eraserTrailTimer_ = new QTimer(this);
     eraserTrailTimer_->setInterval(kEraserTrailFrameMs);
     connect(eraserTrailTimer_, &QTimer::timeout, this, [this]() { RefreshEraserTrail(); });
+
+    shapeHoldTimer_ = new QTimer(this);
+    shapeHoldTimer_->setSingleShot(true);
+    shapeHoldTimer_->setInterval(kShapeHoldMs);
+    connect(shapeHoldTimer_, &QTimer::timeout, this, [this]() { router_->SnapStrokeToShape(); });
 }
 
 CanvasWidget::~CanvasWidget() = default;
@@ -2330,17 +2340,20 @@ void CanvasWidget::HandlePointerPress(const PointerSample& sample) {
     }
     router_->HandlePointerPress(sample);
     TrackEraserTrail(sample.position);
+    TrackShapeHold(sample.position);
     update();
 }
 
 void CanvasWidget::HandlePointerMove(const PointerSample& sample) {
     router_->HandlePointerMove(sample);
     TrackEraserTrail(sample.position);
+    TrackShapeHold(sample.position);
 }
 
 void CanvasWidget::HandlePointerRelease(const PointerSample& sample) {
     router_->HandlePointerRelease(sample);
     TrackEraserTrail(sample.position);
+    TrackShapeHold(std::nullopt);
     update();
 }
 
@@ -2352,7 +2365,20 @@ void CanvasWidget::HandlePointerCancel(CancelReason reason) {
     static_cast<void>(reason);
     router_->CancelInteraction();
     TrackEraserTrail(std::nullopt);
+    TrackShapeHold(std::nullopt);
     update();
+}
+
+void CanvasWidget::TrackShapeHold(std::optional<QPointF> position) {
+    if (!position.has_value() || router_->ActiveInteraction() != InteractionKind::Stroke) {
+        shapeHoldTimer_->stop();
+        return;
+    }
+    const QPointF drift = *position - shapeHoldAnchor_;
+    if (!shapeHoldTimer_->isActive() || std::hypot(drift.x(), drift.y()) > kShapeHoldTolerancePixels) {
+        shapeHoldAnchor_ = *position;
+        shapeHoldTimer_->start();
+    }
 }
 
 void CanvasWidget::TrackEraserTrail(std::optional<QPointF> position) {

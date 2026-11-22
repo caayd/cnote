@@ -458,6 +458,70 @@ void TestStrokeRawSamplesAndSampling() {
     Check(host.CountOp("CommitStroke") == 1, "the raw stroke commits once");
 }
 
+// Hold-to-snap: a held freehand circle becomes the recognized shape in one
+// ReplaceStrokePoints, later movement leaves it alone and the release commits
+// it once.  A scribble or the straight-line mode never snaps.
+void TestStrokeSnapToShape() {
+    const auto circlePoint = [](int step) {
+        const double angle = static_cast<double>(step) * 2.0 * 3.14159265358979323846 / 120.0;
+        return QPointF(300.0 + (80.0 * std::cos(angle)), 300.0 + (80.0 * std::sin(angle)));
+    };
+    const auto pageUnits = [](const QPointF& logical, bool) {
+        return Vec2 { static_cast<float>(logical.x()), static_cast<float>(logical.y()) };
+    };
+    {
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        Check(!router.SnapStrokeToShape(), "nothing snaps without a live stroke");
+        router.HandlePointerPress(Press(circlePoint(0).x(), circlePoint(0).y()));
+        for (int step = 1; step <= 120; ++step) {
+            router.HandlePointerMove(Move(circlePoint(step).x(), circlePoint(step).y()));
+        }
+        host.Reset();
+        Check(router.SnapStrokeToShape() && host.CountOp("ReplaceStrokePoints(73,dotted=0)") == 1,
+            "a held circle snaps to the 72-segment circle\n" + host.Dump());
+        host.Reset();
+        Check(!router.SnapStrokeToShape() && host.ops.empty(), "a snapped stroke does not snap twice");
+        router.HandlePointerMove(Move(500.0, 500.0));
+        Check(host.CountOp("AppendStrokePoint") == 0 && host.CountOp("ReplaceStrokePoints") == 0,
+            "moving after the snap keeps the shape\n" + host.Dump());
+        router.HandlePointerRelease(Release(500.0, 500.0));
+        Check(host.CountOp("CommitStroke") == 1 && router.ActiveInteraction() == ui::InteractionKind::None,
+            "the release commits the snapped shape once");
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        router.HandlePointerPress(Press(100.0, 300.0));
+        for (int peak = 1; peak <= 8; ++peak) {
+            router.HandlePointerMove(Move(100.0 + (15.0 * peak), peak % 2 == 0 ? 300.0 : 270.0));
+        }
+        host.Reset();
+        Check(!router.SnapStrokeToShape() && host.ops.empty(), "a held scribble stays ink");
+        router.HandlePointerMove(Move(240.0, 300.0));
+        Check(host.CountOp("AppendStrokePoint") == 1, "the unsnapped stroke keeps drawing");
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        ui::InteractionModifiers straight;
+        straight.straightLine = true;
+        router.SetModifiers(straight);
+        router.HandlePointerPress(Press(circlePoint(0).x(), circlePoint(0).y()));
+        for (int step = 1; step <= 120; ++step) {
+            router.HandlePointerMove(Move(circlePoint(step).x(), circlePoint(step).y()));
+        }
+        host.Reset();
+        Check(!router.SnapStrokeToShape() && host.ops.empty(), "the straight-line mode owns its stroke: no snap");
+    }
+}
+
 // Pen pressure rides every stroke sample; a mouse stroke carries none.  The
 // pen's release reports zero pressure (the tip left the surface), so the
 // release's final point keeps the last measured pressure instead.
@@ -1401,6 +1465,7 @@ int main() {
     TestStrokePageSegmentation();
     TestStrokeRawSamplesAndSampling();
     TestStrokePenPressure();
+    TestStrokeSnapToShape();
     TestStrokeStraightLineSnapAndOval();
     TestStrokeDottedModifierWithoutMotion();
     TestStrokeReleaseOutsideCanvas();

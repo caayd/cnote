@@ -96,6 +96,7 @@ decorations, so the band there never draws the in-client window buttons.
 ## Default Controls
 
 - `D` draw
+- While drawing, hold the pen still for half a second before lifting to snap the stroke to a shape: line, one-stroke arrow, circle, ellipse, triangle, rectangle or square, other four-sided shapes, and five- or six-sided polygons. Near-level ellipses and rectangles snap level. A stroke that fits no shape stays as drawn, and movement after the snap doesn't change the shape
 - `E` erase
 - `S` select
 - `M` move
@@ -204,15 +205,16 @@ metrics break the Windows font tests:
 
 ```bash
 # model/codec tests, no display
-ctest --test-dir build-qt -R '^(xpress_codec|session_manager_qt|interaction_router_qt|eraser_trail|precision_input_router_qt)$' --output-on-failure
+ctest --test-dir build-qt -R '^(xpress_codec|session_manager_qt|interaction_router_qt|eraser_trail|shape_recognition|precision_input_router_qt)$' --output-on-failure
 # everything else (offscreen, or the native platform where a test requires it)
-ctest --test-dir build-qt -E '^(xpress_codec|session_manager_qt|interaction_router_qt|eraser_trail|precision_input_router_qt)$' --output-on-failure
+ctest --test-dir build-qt -E '^(xpress_codec|session_manager_qt|interaction_router_qt|eraser_trail|shape_recognition|precision_input_router_qt)$' --output-on-failure
 ```
 
-The headless set is `xpress_codec` (pure C++), `session_manager_qt`
-(`QCoreApplication` only), `interaction_router_qt`, `eraser_trail` and
-`precision_input_router_qt` (no Qt application object). On Windows the suite
-has 38 tests; Linux and macOS have 36 because `precision_touchpad_qt` and
+The headless set is `xpress_codec` and `shape_recognition` (pure C++),
+`session_manager_qt` (`QCoreApplication` only), `interaction_router_qt`,
+`eraser_trail` and `precision_input_router_qt` (no Qt application object).
+`shape_recognition` fits synthetic hand-drawn strokes over many fixed seeds.
+On Windows the suite has 39 tests; Linux and macOS have 37 because `precision_touchpad_qt` and
 `window_chrome_native_qt` are Windows-only. On Windows, `selection_clipboard_qt`
 (real clipboard bridge), `layout_parity_qt` and `font_fallback_qt` (real font
 metrics) run on the native platform with a `QGuiApplication` and no window;
