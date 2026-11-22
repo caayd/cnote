@@ -139,6 +139,10 @@ private:
     // Toolbar auto-hide when the cursor crossed the client boundary (left the
     // window, or moved between client and non-client): reads the cursor.
     void UpdateToolbarAutoHideAtBoundary();
+    // Gives a hovering pen the client-area leave/enter the mouse gets when it
+    // crosses the caption strip or a resize edge.  Takes a pointer message's
+    // fields.  Defined on Windows only.
+    void SyncPenClientArea(unsigned int message, quintptr wParam, qintptr lParam);
     // An active canvas drag/edit gesture (the reference auto-hide guard list).
     [[nodiscard]] bool CanvasInteractionActive() const;
     // Caption button under a client-coordinate mouse position (physical
@@ -261,6 +265,10 @@ private:
     ui::ToolbarControl ncButtonArmed_ = ui::ToolbarControl::None;
     // WM_NCMOUSELEAVE is requested (TrackMouseEvent) until it arrives.
     bool ncLeaveTracked_ = false;
+    // A pen is over the client area as Qt sees it; Qt was sent a leave for a
+    // pen that moved onto the frame and is owed the enter.
+    bool penInClient_ = false;
+    bool penLeftForFrame_ = false;
     // Native window whose mouse/enter/leave events drive the toolbar
     // auto-hide; installed on show (the handle exists from then on).
     QPointer<QWindow> autoHideInputWindow_;
