@@ -178,20 +178,20 @@ QtTextLayout LayoutPageTextQt(const PageText& text, float pageWidth) {
     QTextDocument& document = *built.document;
 
     QtTextLayout layout;
-    const QFontMetricsF defaultMetrics(document.defaultFont());
-    layout.lineHeight = std::max(1, static_cast<int>(std::ceil(defaultMetrics.height())));
-    for (const PageTextStyleSpan& span : text.styleSpans) {
-        const QFontMetricsF spanMetrics(FontForStyle(span.style));
-        layout.lineHeight = std::max(layout.lineHeight, static_cast<int>(std::ceil(spanMetrics.height())));
-    }
-
     for (QTextBlock block = document.begin(); block.isValid(); block = block.next()) {
         const QTextLayout* blockLayout = block.layout();
         if (blockLayout == nullptr) {
             continue;
         }
+        // A line's pitch on the page: its own height (the tallest font or
+        // formula on it) plus the block's scale-linear line distance.
+        const QTextBlockFormat blockFormat = block.blockFormat();
+        const float lineDistance = blockFormat.lineHeightType() == QTextBlockFormat::LineDistanceHeight
+            ? static_cast<float>(blockFormat.lineHeight())
+            : 0.0f;
         for (int lineIndex = 0; lineIndex < blockLayout->lineCount(); ++lineIndex) {
             const QTextLine line = blockLayout->lineAt(lineIndex);
+            layout.lineHeight = std::max(layout.lineHeight, static_cast<float>(line.height()) + lineDistance);
             const std::size_t documentStart = static_cast<std::size_t>(block.position() + line.textStart());
             const std::size_t documentEnd = documentStart + static_cast<std::size_t>(line.textLength());
             if (documentEnd >= built.map.documentToModel.size()) {
@@ -207,13 +207,9 @@ QtTextLayout LayoutPageTextQt(const PageText& text, float pageWidth) {
         }
     }
 
-    // Lines holding a tall inline formula grow past the font line height;
-    // the laid-out document height covers them.
-    layout.height = std::max({
-        layout.lineHeight,
-        static_cast<int>(layout.lines.size()) * layout.lineHeight,
-        static_cast<int>(std::ceil(document.size().height())),
-    });
+    // Exactly what the text covers: the fonts are scale-linear, so this
+    // page-unit height is the drawn height at every zoom.
+    layout.height = std::max(layout.lineHeight, static_cast<float>(document.size().height()));
 
     cache.push_back({ key, layout });
     if (cache.size() > kMaxCachedLayouts) {
@@ -228,7 +224,7 @@ QtTextBounds MeasurePageTextBoundsQt(const PageText& text, float pageWidth) {
         text.x,
         text.y,
         text.x + ResolvedTextWidth(text, pageWidth),
-        text.y + static_cast<float>(layout.height),
+        text.y + layout.height,
     };
 }
 
@@ -279,14 +275,17 @@ PageText FitTextBox(const PageText& current, PageText next, float maxAutoWidth) 
     const auto rotate = [cosine, sine](float x, float y) {
         return Vec2 { x * cosine - y * sine, x * sine + y * cosine };
     };
-    const Vec2 beforeOffset = rotate(beforeWidth * (ratio - 0.5f), -beforeHeight * 0.5f);
-    const Vec2 anchor {
-        current.x + beforeWidth * 0.5f + beforeOffset.x,
-        current.y + beforeHeight * 0.5f + beforeOffset.y,
+    // The anchor's offset from the top-left, before and after; the box moves
+    // by their difference, which is exactly zero when its size did not
+    // change (an unchanged commit must leave the object bit-identical).
+    const auto anchorOffset = [&](float width, float height) {
+        const Vec2 fromCentre = rotate(width * (ratio - 0.5f), -height * 0.5f);
+        return Vec2 { width * 0.5f + fromCentre.x, height * 0.5f + fromCentre.y };
     };
-    const Vec2 afterOffset = rotate(afterWidth * (ratio - 0.5f), -afterHeight * 0.5f);
-    next.x = anchor.x - afterOffset.x - afterWidth * 0.5f;
-    next.y = anchor.y - afterOffset.y - afterHeight * 0.5f;
+    const Vec2 anchorBefore = anchorOffset(beforeWidth, beforeHeight);
+    const Vec2 anchorAfter = anchorOffset(afterWidth, afterHeight);
+    next.x = current.x + (anchorBefore.x - anchorAfter.x);
+    next.y = current.y + (anchorBefore.y - anchorAfter.y);
     return next;
 }
 
@@ -307,8 +306,8 @@ void DrawPageTextQt(QPainter& painter, const PageText& text, float pageWidth, fl
     painter.setOpacity(painter.opacity() * std::clamp(opacity, 0.0f, 1.0f));
 
     QAbstractTextDocumentLayout::PaintContext context;
-    // Auto-width lines may run a little past the page-unit width once fonts
-    // are rounded at the layout scale; the editor shows them, so do we.
+    // Scale-linear fonts keep lines to the page-unit width to well under a
+    // pixel; what remains may run a hair past it, so it is not clipped.
     context.clip = QRectF(0.0, 0.0, std::max(document.textWidth(), document.idealWidth()), document.size().height());
     context.palette.setColor(QPalette::Text, QColor::fromRgba(text.color));
     context.palette.setBrush(QPalette::Base, Qt::NoBrush);

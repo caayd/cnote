@@ -39,6 +39,22 @@ inline constexpr float kPointsPerPageUnit = 72.0f / 96.0f;
 [[nodiscard]] QTextCharFormat CharFormatForStyle(const PageTextStyle& style, float displayScale = 1.0f);
 [[nodiscard]] PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextStyle& fallback, float displayScale = 1.0f);
 
+// Qt lays text out with every font at a whole pixel size, so the same text
+// laid out at two zooms is not to scale: 23 page units at 53% is a 12 px font
+// (not 12.19), and its line runs 2% long.  Text here must be to scale - its
+// page-unit box is measured once and drawn and edited at any zoom - so fonts
+// are made scale-linear: unhinted (advances follow the design, not the pixel
+// grid) and letter-spaced by requested/actual size, which brings the
+// rounded font's advances back to the requested size.  Sets `font` to
+// `pointSize` that way; FontForStyle does it for every text font.
+void SetScaleLinearPointSize(QFont& font, double pointSize);
+// The same for a char-format merge that only changes the size.
+void SetScaleLinearPointSize(QTextCharFormat& format, double pointSize);
+// The line distance that brings `font`'s laid-out line height (from its
+// rounded pixel size) back to the requested size's: what
+// ApplyPageTextFormatting gives every block for the object's base font.
+[[nodiscard]] double ScaleLinearLineDistance(const QFont& font);
+
 // How `$...$` formulas appear in a QTextDocument built from a PageText:
 // as their source characters (the editor, for now) or as one rendered
 // inline-math object each (the committed render).

@@ -128,6 +128,34 @@ void TestTextBoxFit() {
     Check(cnote::text::MaxAutoTextWidth(9000.0f, 0.25f) == 2000.0f, "zoomed far out, the cap stops at 2000 page units");
 }
 
+// The page-unit box is measured once (at scale 1) and the text is drawn and
+// edited at the view's scale.  Qt rounds font pixel sizes, so before fonts
+// were made scale-linear a line laid out at 53% ran about 2% longer and
+// lines stood up to 4% taller than the box, and right/centred text sat off
+// its box.  Laid out like the editor and the renderer do, at any zoom, the
+// text now fills its page-unit box.
+void TestLayoutIsToScale() {
+    cnote::PageText text {};
+    text.fontSize = 23.0f;
+    text.content = u"a longer second line of handwritten text\nWAVE To fi AV\nthird";
+    text.styleSpans.push_back({ 0U, 8U, { 23.0f, 0xFF111827U, cnote::TextFontFamily::Serif, true, false, false } });
+    const cnote::text::QtTextBounds box = cnote::text::MeasurePageTextBoundsQt(text, 0.0f);
+    const float boxWidth = box.right - box.left;
+    const float boxHeight = box.bottom - box.top;
+    for (const float scale : { 0.53f, 0.97f, 1.37f, 2.0f, 3.21f }) {
+        QTextDocument document;
+        document.setDocumentMargin(0.0);
+        document.setPlainText(QString::fromStdU16String(text.content));
+        cnote::text::ApplyPageTextFormatting(document, text, scale);
+        const float width = static_cast<float>(document.idealWidth()) / scale;
+        const float height = static_cast<float>(document.size().height()) / scale;
+        Check(std::abs(width - boxWidth) <= boxWidth * 0.004f && std::abs(height - boxHeight) <= boxHeight * 0.004f,
+            "text laid out at scale " + std::to_string(scale) + " fills its page-unit box ("
+                + std::to_string(width) + "x" + std::to_string(height) + " vs " + std::to_string(boxWidth) + "x"
+                + std::to_string(boxHeight) + ")");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -430,6 +458,7 @@ int main(int argc, char** argv) {
     }
 
     TestTextBoxFit();
+    TestLayoutIsToScale();
 
     std::printf(g_failures == 0 ? "ALL TEXT EDITING CHECKS PASSED\n" : "%d TEXT EDITING CHECK(S) FAILED\n", g_failures);
     return g_failures == 0 ? 0 : 1;

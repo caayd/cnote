@@ -154,7 +154,7 @@ void CheckLayoutKeepsEverything() {
         "the last line stays inside the content");
 
     const cnote::text::QtTextBounds bounds = cnote::text::MeasurePageTextBoundsQt(text, 300.0f);
-    std::printf("     measured bounds: left=%.1f top=%.1f right=%.1f bottom=%.1f (lineHeight=%d lines=%zu)\n",
+    std::printf("     measured bounds: left=%.1f top=%.1f right=%.1f bottom=%.1f (lineHeight=%.2f lines=%zu)\n",
         bounds.left, bounds.top, bounds.right, bounds.bottom, layout.lineHeight, LineCount(layout));
     Check(bounds.right > bounds.left && bounds.bottom > bounds.top, "the measured box is non-empty");
     Check(bounds.right - bounds.left <= text.width + 1.0f,

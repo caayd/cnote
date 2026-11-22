@@ -611,7 +611,7 @@ void QtMainWindow::CreateChrome() {
             const float points = settings_.textSizePresets[index]
                 * std::max(0.01f, canvas_->TextEditScale()) * text::kPointsPerPageUnit;
             QTextCharFormat modifier;
-            modifier.setFontPointSize(points);
+            text::SetScaleLinearPointSize(modifier, points);
             ApplyTextFormat(modifier);
         }
         persistPendingTextStyle();
