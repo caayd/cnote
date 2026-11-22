@@ -258,6 +258,8 @@ signals:
     // Raised from the editor's own event filter, installed when the editor is
     // created, so it works from the first keystroke of the first edit.
     void TextBoldShortcutPressed();
+    // Escape or Ctrl+Enter committed an edit and left its object selected.
+    void KeyboardCommitSelected();
 
 protected:
     void paintEvent(QPaintEvent* event) override;

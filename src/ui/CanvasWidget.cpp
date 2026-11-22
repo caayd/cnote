@@ -1584,6 +1584,7 @@ void CanvasWidget::CommitActiveEditFromKeyboard() {
     if (!selection.Empty()) {
         controller_.SelectObjects(pageIndex, std::move(selection));
         update();
+        emit KeyboardCommitSelected();
     }
 }
 

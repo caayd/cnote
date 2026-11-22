@@ -535,6 +535,7 @@ void TextFormatPopupLeavesFocusWithEditor() {
 // (Escape or Ctrl+Enter) leaves the object selected, as Excalidraw does.
 void EscapeCommitsTheEdit() {
     Harness harness;
+    SelectTool(harness, cnote::settings::Tool::Text);
     auto& controller = harness.window->Controller();
     const auto& page = controller.DocumentRef().PageAt(0U);
     const auto selectedTexts = [&]() { return controller.SelectionFor(0U).texts; };
@@ -553,6 +554,8 @@ void EscapeCommitsTheEdit() {
     Check(controller.CanUndo(), "the kept text is one undoable step");
     Check(selectedTexts() == std::vector<std::size_t> { textsBefore },
         "Escape leaves the committed text selected");
+    Check(harness.ActiveTool() == cnote::settings::Tool::Select,
+        "a keyboard commit switches to the Select tool so the text can be moved or resized");
 
     harness.window->AddTextObject();
     QApplication::processEvents();

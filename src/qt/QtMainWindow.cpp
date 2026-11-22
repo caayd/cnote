@@ -583,6 +583,12 @@ void QtMainWindow::CreateChrome() {
     connect(canvas_, &ui::CanvasWidget::TextBoldShortcutPressed, this, [this, toggleTextFormat]() {
         toggleTextFormat(TextToggle::Bold, settings_.textBold);
     });
+    // A keyboard commit leaves its object selected; like Excalidraw, which
+    // goes back to the selection tool once a text is placed, the Select tool
+    // takes over so the object can be moved or resized right away.
+    connect(canvas_, &ui::CanvasWidget::KeyboardCommitSelected, this, [this]() {
+        SetActiveTool(settings::Tool::Select);
+    });
     connect(toolbar_, &ui::ToolbarWidget::TextItalicToggleRequested, this, [this, toggleTextFormat]() {
         toggleTextFormat(TextToggle::Italic, settings_.textItalic);
     });
