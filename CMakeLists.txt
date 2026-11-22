@@ -1057,9 +1057,6 @@ set_tests_properties(headless_failures_qt PROPERTIES TIMEOUT 180)
 # result depends on the ambient PATH and on the order ctest happens to use
 # (observed as STATUS_ENTRYPOINT_NOT_FOUND / DLL-not-found flips between runs).
 if(WIN32)
-    get_target_property(_cnote_core_location Qt6::Core IMPORTED_LOCATION)
-    get_filename_component(_cnote_bin_dir "${_cnote_core_location}" DIRECTORY)
-
     function(cnote_stage_test_runtime target)
         foreach(_cnote_runtime_target Qt6::Core Qt6::Gui Qt6::Widgets pdfium)
             if(TARGET ${_cnote_runtime_target})
@@ -1069,11 +1066,13 @@ if(WIN32)
                         "$<TARGET_FILE_DIR:${target}>")
             endif()
         endforeach()
+        # From the compiler's bin directory, like the cnote target: the Qt kit
+        # does not ship the MinGW runtime.
         foreach(_cnote_runtime_dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll)
-            if(EXISTS "${_cnote_bin_dir}/${_cnote_runtime_dll}")
+            if(EXISTS "${_cnote_compiler_bin}/${_cnote_runtime_dll}")
                 add_custom_command(TARGET ${target} POST_BUILD
                     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                        "${_cnote_bin_dir}/${_cnote_runtime_dll}"
+                        "${_cnote_compiler_bin}/${_cnote_runtime_dll}"
                         "$<TARGET_FILE_DIR:${target}>")
             endif()
         endforeach()
