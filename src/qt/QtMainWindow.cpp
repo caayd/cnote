@@ -1684,6 +1684,20 @@ bool QtMainWindow::nativeEvent(const QByteArray& eventType, void* message, qintp
 #if defined(Q_OS_WIN)
 bool QtMainWindow::HandleNativeChromeMessage(void* message, qintptr* result) {
     auto* msg = static_cast<MSG*>(message);
+    // Qt queues the pen's WM_POINTERLEAVE leave and delivers it later, merged
+    // with an enter queued in between: the merged enter targets this window's
+    // top widget, not the canvas under the point, so the canvas never gets
+    // its enter and every cursor it sets afterwards is applied as the main
+    // window's arrow.  The mouse path queues exactly that enter when the pen
+    // leaves range mid-drag (the pen button's mouse release lands under
+    // capture), and so does a pen that comes straight back.  Deliver the
+    // leave on its own before Qt handles the next input message.
+    if (penLeaveQueued_
+        && ((msg->message >= WM_MOUSEFIRST && msg->message <= WM_MOUSELAST)
+            || (msg->message >= WM_NCPOINTERUPDATE && msg->message <= WM_POINTERHWHEEL))) {
+        penLeaveQueued_ = false;
+        QWindowSystemInterface::flushWindowSystemEvents();
+    }
     switch (msg->message) {
     case WM_NCCALCSIZE:
         // App::HandleMessage (MessageLoop.cpp:87): the whole window rectangle is
@@ -1885,6 +1899,7 @@ void QtMainWindow::SyncPenClientArea(unsigned int message, quintptr wParam, qint
         // pen comes back into the window.
         penInClient_ = false;
         penLeftForFrame_ = false;
+        penLeaveQueued_ = true;
         return;
     }
 }

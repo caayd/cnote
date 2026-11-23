@@ -269,6 +269,9 @@ private:
     // pen that moved onto the frame and is owed the enter.
     bool penInClient_ = false;
     bool penLeftForFrame_ = false;
+    // Qt has queued the leave for a pen WM_POINTERLEAVE; it is flushed before
+    // the next input message can queue an enter to merge with it.
+    bool penLeaveQueued_ = false;
     // Native window whose mouse/enter/leave events drive the toolbar
     // auto-hide; installed on show (the handle exists from then on).
     QPointer<QWindow> autoHideInputWindow_;
