@@ -1035,8 +1035,8 @@ void ShiftBuildsAnObjectSelection() {
         SendMouse(*harness.canvas, QEvent::MouseButtonRelease, to, Qt::LeftButton, Qt::NoButton, modifiers);
         QApplication::processEvents();
     };
-    // Clicks land on a stroke but off the selection frame's corner and
-    // edge-centre handles, which take precedence over the object under them.
+    // Clicks land on a stroke but off the selection frame's corner handles,
+    // which take precedence over the object under them.
     const auto click = [&](qreal y, Qt::KeyboardModifiers modifiers) {
         drag(QPointF(x - 20.0, y), QPointF(x - 20.0, y), modifiers);
     };

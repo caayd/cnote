@@ -92,6 +92,64 @@ constexpr int kLatexPopupWidth = 260;
 constexpr int kLatexPopupHeight = 140;
 constexpr int kLatexPopupPageStep = 8;
 
+// Selection chrome after Excalidraw's interactive scene (renderSelectionBorder,
+// renderTransformHandles, getTransformHandlesFromCoords), in logical pixels:
+// a 1 px frame 4 px outside the selection, 8 px round-cornered corner handles
+// 2 px past the frame corners, and a round rotate handle 18 px above the frame.
+// Sides have no visible handle; a band along each frame edge resizes instead.
+constexpr QRgb kSelectionColor = 0xFF6965DBU;
+constexpr qreal kSelectionFramePadding = 4.0;
+constexpr qreal kSelectionHandleSize = 8.0;
+constexpr qreal kSelectionHandleCornerRadius = 2.0;
+constexpr qreal kSelectionHandleOutset = 2.0;
+constexpr qreal kSelectionRotateGap = 18.0;
+constexpr qreal kSelectionEdgeGrip = 5.0;
+
+// Logical-pixel outline of one selected object, padded outward along its own
+// (possibly rotated) axes like Excalidraw's per-element selection border.
+QPolygonF PaddedObjectOutline(const CanvasPageView& view, const std::array<Vec2, 4>& corners, qreal padding) {
+    std::array<QPointF, 4> points;
+    for (std::size_t index = 0; index < corners.size(); ++index) {
+        points[index] = QPointF(
+            view.rect.left() + (static_cast<qreal>(corners[index].x) * view.scale),
+            view.rect.top() + (static_cast<qreal>(corners[index].y) * view.scale));
+    }
+    // A straight stroke has a zero-length side; pad it along the other side's
+    // normal so the outline still has an area.
+    QPointF across = points[1] - points[0];
+    const qreal acrossLength = std::hypot(across.x(), across.y());
+    across = acrossLength > 1e-3 ? across / acrossLength : QPointF(1.0, 0.0);
+    QPointF down = points[3] - points[0];
+    const qreal downLength = std::hypot(down.x(), down.y());
+    down = downLength > 1e-3 ? down / downLength : QPointF(-across.y(), across.x());
+    across *= padding;
+    down *= padding;
+    return QPolygonF({
+        points[0] - across - down,
+        points[1] + across - down,
+        points[2] + across + down,
+        points[3] - across + down,
+    });
+}
+
+// Axis-aligned page-space union of object outlines; nullopt when empty.
+std::optional<SelectionBounds> OutlinesBounds(const std::vector<std::array<Vec2, 4>>& outlines) {
+    if (outlines.empty()) {
+        return std::nullopt;
+    }
+    const Vec2 first = outlines.front().front();
+    SelectionBounds bounds { first.x, first.y, first.x, first.y, true };
+    for (const std::array<Vec2, 4>& outline : outlines) {
+        for (const Vec2& corner : outline) {
+            bounds.left = std::min(bounds.left, corner.x);
+            bounds.top = std::min(bounds.top, corner.y);
+            bounds.right = std::max(bounds.right, corner.x);
+            bounds.bottom = std::max(bounds.bottom, corner.y);
+        }
+    }
+    return bounds;
+}
+
 QString FromUtf16(const std::u16string& value) {
     return QString::fromUtf16(value.data(), static_cast<qsizetype>(value.size()));
 }
@@ -965,16 +1023,13 @@ QRect CanvasWidget::SelectionDirtyRect(std::size_t pageIndex) const {
     if (!view.valid) {
         return rect();
     }
-    // The frame, its handles and the rotate knob all live inside the bounds
-    // inflated by the handle hit radius plus the rotate stem offset.
-    const qreal margin = SelectionHandleHitRadiusPixels(96)
-        + static_cast<qreal>(kSelectionRotateOffsetDip) + 4.0;
-    const QRectF frame(
-        view.rect.left() + (static_cast<qreal>(bounds->left) * view.scale),
-        view.rect.top() + (static_cast<qreal>(bounds->top) * view.scale),
-        static_cast<qreal>(bounds->right - bounds->left) * view.scale,
-        static_cast<qreal>(bounds->bottom - bounds->top) * view.scale);
-    return frame.adjusted(-margin, -margin, margin, margin).toAlignedRect().intersected(rect());
+    // The padded frame's handles reach the rotate handle's top above it, and
+    // less on the other sides; one margin covers them plus antialiasing.
+    const qreal margin = kSelectionRotateGap + kSelectionHandleSize + 2.0;
+    return SelectionFrameRect(view, *bounds)
+        .adjusted(-margin, -margin, margin, margin)
+        .toAlignedRect()
+        .intersected(rect());
 }
 
 void CanvasWidget::PruneSurfaces(const std::vector<std::size_t>& visiblePages) {
@@ -2721,12 +2776,7 @@ std::optional<TransformRequest> CanvasWidget::HitTestSelectionHandle(const QPoin
         return std::nullopt;
     }
 
-    const QRectF frame(
-        view->rect.left() + (static_cast<qreal>(bounds->left) * view->scale),
-        view->rect.top() + (static_cast<qreal>(bounds->top) * view->scale),
-        static_cast<qreal>(bounds->right - bounds->left) * view->scale,
-        static_cast<qreal>(bounds->bottom - bounds->top) * view->scale);
-
+    const QRectF frame = SelectionFrameRect(*view, *bounds);
     const qreal hitRadius = static_cast<qreal>(SelectionHandleHitRadiusPixels(96));
     const qreal hitRadiusSquared = hitRadius * hitRadius;
     const auto hits = [&logical, hitRadiusSquared](const QPointF& position) {
@@ -2740,31 +2790,46 @@ std::optional<TransformRequest> CanvasWidget::HitTestSelectionHandle(const QPoin
     TransformRequest request;
     request.pageIndex = view->pageIndex;
 
-    // The rotate handle's radius overlaps the top edge handle's, so it is
-    // checked first and wins a tie.
+    // On a short selection the rotate handle's radius overlaps the top
+    // corners' and the top edge, so it is checked first and wins a tie.
     if (hits(SelectionRotateHandlePosition(frame))) {
         request.handle = TransformHandle::Rotate;
         return request;
     }
 
-    const std::array<QPointF, 8> positions = SelectionHandlePositions(frame);
-    constexpr std::array<TransformHandle, 8> kHandles {{
+    const std::array<QPointF, 4> corners = SelectionHandlePositions(frame);
+    constexpr std::array<TransformHandle, 4> kCornerHandles {{
         TransformHandle::TopLeft,
         TransformHandle::TopRight,
         TransformHandle::BottomRight,
         TransformHandle::BottomLeft,
-        TransformHandle::Top,
-        TransformHandle::Bottom,
-        TransformHandle::Left,
-        TransformHandle::Right,
     }};
-    for (std::size_t index = 0; index < positions.size(); ++index) {
-        if (hits(positions[index])) {
-            request.handle = kHandles[index];
+    for (std::size_t index = 0; index < corners.size(); ++index) {
+        if (hits(corners[index])) {
+            request.handle = kCornerHandles[index];
             return request;
         }
     }
-    return std::nullopt;
+
+    // Side resizing grips the frame edges themselves (no visible handle): a
+    // band from just outside the frame in to the selection bounds, so a press
+    // on an object lying along the bounds still reaches the object.
+    const qreal reach = kSelectionEdgeGrip;
+    const qreal inset = kSelectionFramePadding;
+    const bool alongWidth = logical.x() >= frame.left() && logical.x() <= frame.right();
+    const bool alongHeight = logical.y() >= frame.top() && logical.y() <= frame.bottom();
+    if (alongWidth && logical.y() >= frame.top() - reach && logical.y() < frame.top() + inset) {
+        request.handle = TransformHandle::Top;
+    } else if (alongWidth && logical.y() <= frame.bottom() + reach && logical.y() > frame.bottom() - inset) {
+        request.handle = TransformHandle::Bottom;
+    } else if (alongHeight && logical.x() >= frame.left() - reach && logical.x() < frame.left() + inset) {
+        request.handle = TransformHandle::Left;
+    } else if (alongHeight && logical.x() <= frame.right() + reach && logical.x() > frame.right() - inset) {
+        request.handle = TransformHandle::Right;
+    } else {
+        return std::nullopt;
+    }
+    return request;
 }
 
 std::vector<ObjectRef> CanvasWidget::EraseTargetsAt(std::size_t pageIndex, Vec2 start, Vec2 end) const {
@@ -3556,8 +3621,10 @@ void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers
             transform.rotateDegrees = std::round(transform.rotateDegrees / 15.0f) * 15.0f;
         }
     } else {
-        // Resize: each dragged side follows the pointer while the opposite side
-        // stays fixed, so the selection scales about the opposite edge/corner.
+        // Resize: each dragged side moves with the pointer while the opposite
+        // side stays fixed, so the selection scales about the opposite
+        // edge/corner.  The handles sit outside the bounds, so the side follows
+        // the pointer's travel since the press rather than jumping to it.
         const bool movesLeft = handle == TransformHandle::Left
             || handle == TransformHandle::TopLeft || handle == TransformHandle::BottomLeft;
         const bool movesRight = handle == TransformHandle::Right
@@ -3566,17 +3633,19 @@ void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers
             || handle == TransformHandle::TopLeft || handle == TransformHandle::TopRight;
         const bool movesBottom = handle == TransformHandle::Bottom
             || handle == TransformHandle::BottomLeft || handle == TransformHandle::BottomRight;
+        const Vec2 press = ScreenToPage(view, session.pressLogical, false);
+        const Vec2 travel { pagePoint.x - press.x, pagePoint.y - press.y };
         if (movesLeft) {
-            transform.to.left = pagePoint.x;
+            transform.to.left = session.from.left + travel.x;
         }
         if (movesRight) {
-            transform.to.right = pagePoint.x;
+            transform.to.right = session.from.right + travel.x;
         }
         if (movesTop) {
-            transform.to.top = pagePoint.y;
+            transform.to.top = session.from.top + travel.y;
         }
         if (movesBottom) {
-            transform.to.bottom = pagePoint.y;
+            transform.to.bottom = session.from.bottom + travel.y;
         }
 
         // Keep both extents positive (never mirrored), clamped to the fixed
@@ -4039,35 +4108,28 @@ void CanvasWidget::PaintTextCreatePreview(QPainter& painter) {
     }
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
-    // The selection frame's dashed outline: the box the new text wraps in.
-    painter.setPen(QPen(QColor(59, 130, 246), 1.0, Qt::DashLine));
+    // A dashed outline in the selection colour: the box the new text wraps in.
+    painter.setPen(QPen(QColor::fromRgb(kSelectionColor), 1.0, Qt::DashLine));
     painter.setBrush(Qt::NoBrush);
     painter.drawRect(frame);
     painter.restore();
 }
 
 std::optional<SelectionBounds> CanvasWidget::SelectionBoundsForPage(std::size_t pageIndex) const {
+    return OutlinesBounds(SelectedObjectOutlines(pageIndex));
+}
+
+std::vector<std::array<Vec2, 4>> CanvasWidget::SelectedObjectOutlines(std::size_t pageIndex) const {
+    std::vector<std::array<Vec2, 4>> outlines;
     const Document& document = controller_.DocumentRef();
     if (pageIndex >= document.PageCount()) {
-        return std::nullopt;
+        return outlines;
     }
     const Page& page = document.PageAt(pageIndex);
     const PageSelection& selection = controller_.SelectionFor(pageIndex);
     if (selection.Empty()) {
-        return std::nullopt;
+        return outlines;
     }
-
-    SelectionBounds bounds;
-    const auto include = [&bounds](float left, float top, float right, float bottom) {
-        if (!bounds.valid) {
-            bounds = SelectionBounds { left, top, right, bottom, true };
-            return;
-        }
-        bounds.left = std::min(bounds.left, left);
-        bounds.top = std::min(bounds.top, top);
-        bounds.right = std::max(bounds.right, right);
-        bounds.bottom = std::max(bounds.bottom, bottom);
-    };
 
     for (const std::size_t index : selection.strokes) {
         if (index >= page.strokes.size()) {
@@ -4078,15 +4140,12 @@ std::optional<SelectionBounds> CanvasWidget::SelectionBoundsForPage(std::size_t 
         float maxX = 0.0f;
         float maxY = 0.0f;
         if (StrokeBounds(page.strokes[index], &minX, &minY, &maxX, &maxY)) {
-            include(minX, minY, maxX, maxY);
+            outlines.push_back({{ { minX, minY }, { maxX, minY }, { maxX, maxY }, { minX, maxY } }});
         }
     }
     for (const std::size_t index : selection.images) {
-        if (index >= page.images.size()) {
-            continue;
-        }
-        for (const Vec2& corner : ImageCorners(page.images[index])) {
-            include(corner.x, corner.y, corner.x, corner.y);
+        if (index < page.images.size()) {
+            outlines.push_back(ImageCorners(page.images[index]));
         }
     }
     for (const std::size_t index : selection.texts) {
@@ -4094,81 +4153,102 @@ std::optional<SelectionBounds> CanvasWidget::SelectionBoundsForPage(std::size_t 
             continue;
         }
         const text::QtTextBounds textBounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
-        for (const Vec2& corner : RotatedRectCorners(
-                textBounds.left, textBounds.top, textBounds.right, textBounds.bottom,
-                page.texts[index].rotationDegrees)) {
-            include(corner.x, corner.y, corner.x, corner.y);
-        }
+        outlines.push_back(RotatedRectCorners(
+            textBounds.left, textBounds.top, textBounds.right, textBounds.bottom,
+            page.texts[index].rotationDegrees));
     }
     for (const std::size_t index : selection.latexes) {
         if (index >= page.latexes.size()) {
             continue;
         }
         const LatexBounds latexBounds = MeasurePageLatexBounds(page.latexes[index], page.width);
-        for (const Vec2& corner : RotatedRectCorners(
-                latexBounds.left, latexBounds.top, latexBounds.right, latexBounds.bottom,
-                page.latexes[index].rotationDegrees)) {
-            include(corner.x, corner.y, corner.x, corner.y);
-        }
+        outlines.push_back(RotatedRectCorners(
+            latexBounds.left, latexBounds.top, latexBounds.right, latexBounds.bottom,
+            page.latexes[index].rotationDegrees));
     }
-    return bounds.valid ? std::optional<SelectionBounds>(bounds) : std::nullopt;
+    return outlines;
 }
 
-std::array<QPointF, 8> CanvasWidget::SelectionHandlePositions(const QRectF& frame) {
+QRectF CanvasWidget::SelectionFrameRect(const CanvasPageView& view, const SelectionBounds& bounds) {
+    return QRectF(
+        view.rect.left() + (static_cast<qreal>(bounds.left) * view.scale),
+        view.rect.top() + (static_cast<qreal>(bounds.top) * view.scale),
+        static_cast<qreal>(bounds.right - bounds.left) * view.scale,
+        static_cast<qreal>(bounds.bottom - bounds.top) * view.scale)
+        .adjusted(-kSelectionFramePadding, -kSelectionFramePadding, kSelectionFramePadding, kSelectionFramePadding);
+}
+
+std::array<QPointF, 4> CanvasWidget::SelectionHandlePositions(const QRectF& frame) {
+    const qreal outset = kSelectionHandleOutset;
     return {{
-        frame.topLeft(),
-        frame.topRight(),
-        frame.bottomRight(),
-        frame.bottomLeft(),
-        QPointF(frame.center().x(), frame.top()),
-        QPointF(frame.center().x(), frame.bottom()),
-        QPointF(frame.left(), frame.center().y()),
-        QPointF(frame.right(), frame.center().y()),
+        frame.topLeft() + QPointF(-outset, -outset),
+        frame.topRight() + QPointF(outset, -outset),
+        frame.bottomRight() + QPointF(outset, outset),
+        frame.bottomLeft() + QPointF(-outset, outset),
     }};
 }
 
 QPointF CanvasWidget::SelectionRotateHandlePosition(const QRectF& frame) {
-    return QPointF(frame.center().x(), frame.top() - static_cast<qreal>(kSelectionRotateOffsetDip));
+    return QPointF(frame.center().x(), frame.top() - kSelectionRotateGap);
 }
 
 void CanvasWidget::PaintSelectionOverlay(QPainter& painter) {
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    // Committed selection: dashed frame plus handles (transient, never cached).
+    // Committed selection (transient, never cached), drawn like Excalidraw's:
+    // one object gets a solid frame; several get a solid outline each plus a
+    // dotted frame around them all.  The frame carries white corner and rotate
+    // handles.
+    const QColor selectionColor = QColor::fromRgb(kSelectionColor);
+    const QPen solidPen(selectionColor, 1.0);
+    QPen dottedPen(selectionColor, 1.0);
+    dottedPen.setDashPattern({ 2.0, 2.0 });
+    // Centres the 1 px lines on device pixels (edges on pixel boundaries) so
+    // the thin chrome stays crisp instead of smearing over two pixels.
+    const qreal dpr = painter.device()->devicePixelRatioF();
+    const qreal lineDevice = solidPen.widthF() * dpr;
+    const auto snap = [dpr, lineDevice](qreal value) {
+        return (std::round((value * dpr) - (lineDevice * 0.5)) + (lineDevice * 0.5)) / dpr;
+    };
+    const auto snapPoint = [&snap](const QPointF& point) { return QPointF(snap(point.x()), snap(point.y())); };
     for (const CanvasPageView& view : CalculatePageViews()) {
         if (!view.valid) {
             continue;
         }
-        const std::optional<SelectionBounds> bounds = SelectionBoundsForPage(view.pageIndex);
+        const std::vector<std::array<Vec2, 4>> outlines = SelectedObjectOutlines(view.pageIndex);
+        const std::optional<SelectionBounds> bounds = OutlinesBounds(outlines);
         if (!bounds.has_value()) {
             continue;
         }
-        const QRectF frame(
-            view.rect.left() + (static_cast<qreal>(bounds->left) * view.scale),
-            view.rect.top() + (static_cast<qreal>(bounds->top) * view.scale),
-            static_cast<qreal>(bounds->right - bounds->left) * view.scale,
-            static_cast<qreal>(bounds->bottom - bounds->top) * view.scale);
+        const QRectF frame = SelectionFrameRect(view, *bounds);
 
-        QPen pen(QColor(59, 130, 246), 1.0, Qt::DashLine);
-        painter.setPen(pen);
         painter.setBrush(Qt::NoBrush);
-        painter.drawRect(frame);
-
-        const qreal handleHalf = 4.0;
-        painter.setPen(QPen(QColor(59, 130, 246), 1.0));
-        painter.setBrush(QColor(255, 255, 255));
-        for (const QPointF& handle : SelectionHandlePositions(frame)) {
-            painter.drawRect(QRectF(handle.x() - handleHalf, handle.y() - handleHalf, handleHalf * 2.0, handleHalf * 2.0));
+        if (outlines.size() > 1U) {
+            painter.setPen(solidPen);
+            for (const std::array<Vec2, 4>& outline : outlines) {
+                QPolygonF polygon = PaddedObjectOutline(view, outline, kSelectionFramePadding);
+                for (QPointF& point : polygon) {
+                    point = snapPoint(point);
+                }
+                painter.drawPolygon(polygon);
+            }
+            painter.setPen(dottedPen);
+        } else {
+            painter.setPen(solidPen);
         }
+        painter.drawRect(QRectF(snapPoint(frame.topLeft()), snapPoint(frame.bottomRight())));
 
-        // Rotate handle: a stem from the top edge midpoint to a circular knob
-        // (the same colours as the square handles).
-        const QPointF rotate = SelectionRotateHandlePosition(frame);
-        painter.setBrush(Qt::NoBrush);
-        painter.drawLine(QPointF(frame.center().x(), frame.top()), rotate);
-        painter.setBrush(QColor(255, 255, 255));
-        painter.drawEllipse(rotate, 4.0, 4.0);
+        const qreal handleHalf = kSelectionHandleSize * 0.5;
+        const auto handleRect = [&snapPoint, handleHalf](const QPointF& center) {
+            return QRectF(snapPoint(center - QPointF(handleHalf, handleHalf)), QSizeF(kSelectionHandleSize, kSelectionHandleSize));
+        };
+        painter.setPen(solidPen);
+        painter.setBrush(Qt::white);
+        for (const QPointF& handle : SelectionHandlePositions(frame)) {
+            painter.drawRoundedRect(handleRect(handle), kSelectionHandleCornerRadius, kSelectionHandleCornerRadius);
+        }
+        painter.drawEllipse(handleRect(SelectionRotateHandlePosition(frame)));
     }
     // PDF text highlight (App::PaintPdfTextSelection App.cpp:7818-7915):
     // committed boxes paint translucent over the text; a pdf text drag paints
@@ -4230,12 +4310,13 @@ void CanvasWidget::PaintSelectionOverlay(QPainter& painter) {
         }
     }
 
-    // Live marquee / lasso. A pdf text drag suppresses it entirely (the char
-    // boxes above are the feedback).
+    // Live marquee / lasso, Excalidraw's selection box: a solid 1 px outline
+    // over a faint blue wash.  A pdf text drag suppresses it entirely (the
+    // char boxes above are the feedback).
     if (selection_.Active() && selection_.mode != SelectionGesture::Mode::PdfText) {
         const bool lasso = selection_.mode == SelectionGesture::Mode::Lasso;
-        painter.setPen(QPen(QColor(59, 130, 246), 1.0, lasso ? Qt::SolidLine : Qt::DashLine));
-        painter.setBrush(QColor(59, 130, 246, 40));
+        painter.setPen(solidPen);
+        painter.setBrush(QColor(0, 0, 200, 10));
         if (lasso && selection_.lassoPoints.size() >= 2U) {
             QPainterPath path;
             path.moveTo(selection_.lassoPoints.front());

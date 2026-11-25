@@ -416,11 +416,15 @@ private:
 
     // Selection / erase rendering helpers.
     [[nodiscard]] std::optional<SelectionBounds> SelectionBoundsForPage(std::size_t pageIndex) const;
-    // Selection frame geometry in logical pixels, shared by the overlay painter
-    // and the handle hit test.  Eight resize handle centres in the order the
-    // overlay draws them (four corners, then the four edge midpoints) and the
-    // rotate handle above the top edge midpoint.
-    [[nodiscard]] static std::array<QPointF, 8> SelectionHandlePositions(const QRectF& frame);
+    // Page-space corners (clockwise from the unrotated top-left) of every
+    // selected object on the page; SelectionBoundsForPage is their union.
+    [[nodiscard]] std::vector<std::array<Vec2, 4>> SelectedObjectOutlines(std::size_t pageIndex) const;
+    // Selection frame geometry in logical pixels, shared by the overlay painter,
+    // the dirty rect and the handle hit test: the frame padded around the
+    // bounds, its four corner handle centres (top-left, top-right,
+    // bottom-right, bottom-left) and the rotate handle above the top edge.
+    [[nodiscard]] static QRectF SelectionFrameRect(const CanvasPageView& view, const SelectionBounds& bounds);
+    [[nodiscard]] static std::array<QPointF, 4> SelectionHandlePositions(const QRectF& frame);
     [[nodiscard]] static QPointF SelectionRotateHandlePosition(const QRectF& frame);
     [[nodiscard]] std::optional<ObjectRef> TopmostObjectAt(const QPointF& logical, bool includeStrokes) const;
     [[nodiscard]] bool EditOverlayOwnsPoint(const QPointF& logical) const;
