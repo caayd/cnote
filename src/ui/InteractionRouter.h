@@ -405,9 +405,9 @@ private:
     // Shift press under Select/Move: toggles the object under the pointer or
     // starts an additive marquee/lasso; never moves or replaces the selection.
     void BeginShiftSelection(const PointerSample& sample, bool moveTool);
-    // Starts a transform when `logical` is on a handle of the selection on
-    // `pageIndex`; false when there is none or the host refused it.
-    bool TryBeginTransform(const QPointF& logical, std::size_t pageIndex);
+    // Starts a transform when `logical` is on a selection handle, on or off
+    // the page; false when there is none or the host refused it.
+    bool TryBeginTransform(const QPointF& logical);
     void BeginSelection(const QPointF& logical, bool boxOverride, bool additive = false);
     void ExtendSelection(const PointerSample& sample);
     void EndSelection();

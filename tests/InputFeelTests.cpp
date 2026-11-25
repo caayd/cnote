@@ -562,17 +562,22 @@ void SelectionHandlesShowSystemCursors(ui::CanvasWidget& canvas, const cnote::qt
         return canvas.cursor().shape();
     };
 
-    // One stroke, selected by clicking it with the Select tool.
+    // One stroke ending on the page's bottom edge (its last point clamps to
+    // the page), so the bottom handles hang off the page; selected by clicking
+    // it with the Select tool.  The pan puts the page bottom a fixed distance
+    // below the canvas centre whatever the earlier checks left the view at.
     const QPointF centre(canvas.width() / 2.0, canvas.height() / 2.0);
+    const cnote::Page& page = controller.DocumentRef().PageAt(0);
+    canvas.PanBy(QPointF(0.0, centre.y() + 50.0 - canvas.PageToScreen(0, { 0.0f, page.height }).y()));
+    CheckNear(canvas.PageToScreen(0, { 0.0f, page.height }).y(), centre.y() + 50.0, 0.5, "the page bottom sits 50 px below the centre");
     canvas.SetTool(ui::Tool::Draw);
     SendMouse(canvas, QEvent::MouseButtonPress, centre + QPointF(-80.0, -50.0), Qt::LeftButton, Qt::LeftButton);
     SendMouse(canvas, QEvent::MouseMove, centre, Qt::NoButton, Qt::LeftButton);
-    SendMouse(canvas, QEvent::MouseMove, centre + QPointF(80.0, 50.0), Qt::NoButton, Qt::LeftButton);
-    SendMouse(canvas, QEvent::MouseButtonRelease, centre + QPointF(80.0, 50.0), Qt::LeftButton, Qt::NoButton);
+    SendMouse(canvas, QEvent::MouseMove, centre + QPointF(80.0, 80.0), Qt::NoButton, Qt::LeftButton);
+    SendMouse(canvas, QEvent::MouseButtonRelease, centre + QPointF(80.0, 80.0), Qt::LeftButton, Qt::NoButton);
     canvas.SetTool(ui::Tool::Select);
     SendMouse(canvas, QEvent::MouseButtonPress, centre, Qt::LeftButton, Qt::LeftButton);
     SendMouse(canvas, QEvent::MouseButtonRelease, centre, Qt::LeftButton, Qt::NoButton);
-    const cnote::Page& page = controller.DocumentRef().PageAt(0);
     float minX = 0.0f;
     float minY = 0.0f;
     float maxX = 0.0f;
@@ -608,6 +613,16 @@ void SelectionHandlesShowSystemCursors(ui::CanvasWidget& canvas, const cnote::qt
     SendMouse(canvas, QEvent::MouseMove, rotate, Qt::NoButton, Qt::LeftButton);
     SendMouse(canvas, QEvent::MouseButtonRelease, rotate, Qt::LeftButton, Qt::NoButton);
     Check(canvas.cursor().shape() == Qt::OpenHandCursor, "releasing over the rotate handle opens the hand again");
+
+    // The bottom-right handle hangs off the page, and pressing it still
+    // resizes: the bottom edge follows the pointer up by 30 px.
+    const QPointF offPage = bottomRight + QPointF(6.0, 6.0);
+    SendMouse(canvas, QEvent::MouseButtonPress, offPage, Qt::LeftButton, Qt::LeftButton);
+    SendMouse(canvas, QEvent::MouseMove, offPage + QPointF(0.0, -30.0), Qt::NoButton, Qt::LeftButton);
+    SendMouse(canvas, QEvent::MouseButtonRelease, offPage + QPointF(0.0, -30.0), Qt::LeftButton, Qt::NoButton);
+    Check(ui::StrokeBounds(page.strokes.front(), &minX, &minY, &maxX, &maxY), "the resized stroke has bounds");
+    CheckNear(canvas.PageToScreen(0, { maxX, maxY }).y(), bottomRight.y() - 30.0, 1.0,
+        "dragging the off-page bottom-right handle resizes the selection");
 
     const QPointF corner = topLeft + QPointF(-6.0, -6.0);
     SendMouse(canvas, QEvent::MouseButtonPress, corner, Qt::LeftButton, Qt::LeftButton);
