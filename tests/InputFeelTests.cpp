@@ -66,6 +66,7 @@
 #include "ui/CanvasWidget.h"
 #include "ui/InteractionRouter.h"
 #include "ui/PrecisionInputFilterQt.h"
+#include "ui/SelectionMath.h"
 
 #if defined(Q_OS_WIN)
 #include "platform/windows/PrecisionTouchpadQt.h"
@@ -551,6 +552,85 @@ void ConfiguredCursorIsShown(ui::CanvasWidget& canvas) {
     Check(canvas.cursor().pixmap().isNull(), "the default cursor has no pixmap again");
 }
 
+// --- selection handles show the system resize/rotate cursors -----------------
+
+void SelectionHandlesShowSystemCursors(ui::CanvasWidget& canvas, const cnote::qt::QtDocumentController& controller) {
+    std::printf("-- selection handle cursors\n");
+    canvas.setMouseTracking(true);
+    const auto hover = [&canvas](const QPointF& logical) {
+        SendMouse(canvas, QEvent::MouseMove, logical, Qt::NoButton, Qt::NoButton);
+        return canvas.cursor().shape();
+    };
+
+    // One stroke ending on the page's bottom edge (its last point clamps to
+    // the page), so the bottom handles hang off the page; selected by clicking
+    // it with the Select tool.  The pan puts the page bottom a fixed distance
+    // below the canvas centre whatever the earlier checks left the view at.
+    const QPointF centre(canvas.width() / 2.0, canvas.height() / 2.0);
+    const cnote::Page& page = controller.DocumentRef().PageAt(0);
+    canvas.PanBy(QPointF(0.0, centre.y() + 50.0 - canvas.PageToScreen(0, { 0.0f, page.height }).y()));
+    CheckNear(canvas.PageToScreen(0, { 0.0f, page.height }).y(), centre.y() + 50.0, 0.5, "the page bottom sits 50 px below the centre");
+    canvas.SetTool(ui::Tool::Draw);
+    SendMouse(canvas, QEvent::MouseButtonPress, centre + QPointF(-80.0, -50.0), Qt::LeftButton, Qt::LeftButton);
+    SendMouse(canvas, QEvent::MouseMove, centre, Qt::NoButton, Qt::LeftButton);
+    SendMouse(canvas, QEvent::MouseMove, centre + QPointF(80.0, 80.0), Qt::NoButton, Qt::LeftButton);
+    SendMouse(canvas, QEvent::MouseButtonRelease, centre + QPointF(80.0, 80.0), Qt::LeftButton, Qt::NoButton);
+    canvas.SetTool(ui::Tool::Select);
+    SendMouse(canvas, QEvent::MouseButtonPress, centre, Qt::LeftButton, Qt::LeftButton);
+    SendMouse(canvas, QEvent::MouseButtonRelease, centre, Qt::LeftButton, Qt::NoButton);
+    float minX = 0.0f;
+    float minY = 0.0f;
+    float maxX = 0.0f;
+    float maxY = 0.0f;
+    Check(page.strokes.size() == 1U && controller.SelectionFor(0).strokes.size() == 1U
+            && ui::StrokeBounds(page.strokes.front(), &minX, &minY, &maxX, &maxY),
+        "a clicked stroke is selected");
+
+    // The frame is padded 4 px outside the bounds; corner handles sit 2 px
+    // past its corners and the rotate handle 18 px above it.
+    const QPointF topLeft = canvas.PageToScreen(0, { minX, minY });
+    const QPointF bottomRight = canvas.PageToScreen(0, { maxX, maxY });
+    const qreal midX = (topLeft.x() + bottomRight.x()) / 2.0;
+    const qreal midY = (topLeft.y() + bottomRight.y()) / 2.0;
+    Check(hover(topLeft + QPointF(-6.0, -6.0)) == Qt::SizeFDiagCursor, "the top-left handle shows the \\ resize arrow");
+    Check(hover(bottomRight + QPointF(6.0, 6.0)) == Qt::SizeFDiagCursor, "the bottom-right handle shows the \\ resize arrow");
+    Check(hover(QPointF(bottomRight.x() + 6.0, topLeft.y() - 6.0)) == Qt::SizeBDiagCursor, "the top-right handle shows the / resize arrow");
+    Check(hover(QPointF(topLeft.x() - 6.0, bottomRight.y() + 6.0)) == Qt::SizeBDiagCursor, "the bottom-left handle shows the / resize arrow");
+    Check(hover(QPointF(midX, topLeft.y() - 4.0)) == Qt::SizeVerCursor, "the top edge shows the vertical resize arrow");
+    Check(hover(QPointF(midX, bottomRight.y() + 4.0)) == Qt::SizeVerCursor, "the bottom edge shows the vertical resize arrow");
+    Check(hover(QPointF(topLeft.x() - 4.0, midY)) == Qt::SizeHorCursor, "the left edge shows the horizontal resize arrow");
+    Check(hover(QPointF(bottomRight.x() + 4.0, midY)) == Qt::SizeHorCursor, "the right edge shows the horizontal resize arrow");
+    Check(hover(QPointF(midX, topLeft.y() - 22.0)) == Qt::OpenHandCursor, "the rotate handle shows the open hand");
+    Check(hover(QPointF(midX, bottomRight.y() + 150.0)) == Qt::ArrowCursor, "away from the handles the Select tool shows the arrow");
+
+    // A drag keeps its handle's cursor off the handle, and the hover cursor
+    // comes back on release.
+    const QPointF rotate(midX, topLeft.y() - 22.0);
+    SendMouse(canvas, QEvent::MouseButtonPress, rotate, Qt::LeftButton, Qt::LeftButton);
+    Check(canvas.cursor().shape() == Qt::ClosedHandCursor, "pressing the rotate handle closes the hand");
+    SendMouse(canvas, QEvent::MouseMove, rotate + QPointF(200.0, 120.0), Qt::NoButton, Qt::LeftButton);
+    Check(canvas.cursor().shape() == Qt::ClosedHandCursor, "rotating keeps the closed hand off the handle");
+    SendMouse(canvas, QEvent::MouseMove, rotate, Qt::NoButton, Qt::LeftButton);
+    SendMouse(canvas, QEvent::MouseButtonRelease, rotate, Qt::LeftButton, Qt::NoButton);
+    Check(canvas.cursor().shape() == Qt::OpenHandCursor, "releasing over the rotate handle opens the hand again");
+
+    // The bottom-right handle hangs off the page, and pressing it still
+    // resizes: the bottom edge follows the pointer up by 30 px.
+    const QPointF offPage = bottomRight + QPointF(6.0, 6.0);
+    SendMouse(canvas, QEvent::MouseButtonPress, offPage, Qt::LeftButton, Qt::LeftButton);
+    SendMouse(canvas, QEvent::MouseMove, offPage + QPointF(0.0, -30.0), Qt::NoButton, Qt::LeftButton);
+    SendMouse(canvas, QEvent::MouseButtonRelease, offPage + QPointF(0.0, -30.0), Qt::LeftButton, Qt::NoButton);
+    Check(ui::StrokeBounds(page.strokes.front(), &minX, &minY, &maxX, &maxY), "the resized stroke has bounds");
+    CheckNear(canvas.PageToScreen(0, { maxX, maxY }).y(), bottomRight.y() - 30.0, 1.0,
+        "dragging the off-page bottom-right handle resizes the selection");
+
+    const QPointF corner = topLeft + QPointF(-6.0, -6.0);
+    SendMouse(canvas, QEvent::MouseButtonPress, corner, Qt::LeftButton, Qt::LeftButton);
+    SendMouse(canvas, QEvent::MouseMove, corner + QPointF(-150.0, 0.0), Qt::NoButton, Qt::LeftButton);
+    Check(canvas.cursor().shape() == Qt::SizeFDiagCursor, "a corner resize keeps its arrow off the handle");
+    SendMouse(canvas, QEvent::MouseButtonRelease, corner + QPointF(-150.0, 300.0), Qt::LeftButton, Qt::NoButton);
+    Check(canvas.cursor().shape() == Qt::ArrowCursor, "releasing away from the handles restores the arrow");
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -595,6 +675,7 @@ int main(int argc, char** argv) {
     WheelNotchesAccumulateAndAnimate(canvas);
     NoGestureIsAppliedTwice(canvas);
     ConfiguredCursorIsShown(canvas);
+    SelectionHandlesShowSystemCursors(canvas, controller);
 
     std::printf(
         "\nDESKTOP CHECKS (cannot be automated: no touchpad, and a widget grab cannot\n"

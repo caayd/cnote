@@ -64,6 +64,13 @@ enum class CursorKind {
     Text,
     Eraser,
     Move,
+    // Resize arrows along an edge or a corner diagonal: Vertical (top/bottom
+    // edges), Horizontal (left/right), Diagonal (top-left/bottom-right) and
+    // AntiDiagonal (top-right/bottom-left).
+    ResizeVertical,
+    ResizeHorizontal,
+    ResizeDiagonal,
+    ResizeAntiDiagonal,
     // The configured drawing cursor: the canvas builds it from the application
     // settings (dot diameter / precision crosshair), the reference
     // App::DrawCursorForCurrentSize (App.cpp:7465-7485).  It is not a system
@@ -344,6 +351,10 @@ public:
     // the kind to a real cursor, because only it knows its device pixel ratio
     // and the configured cursor settings.
     [[nodiscard]] static CursorKind CursorForTool(Tool tool);
+    // The cursor over a selection transform handle, and while dragging it
+    // (Excalidraw's getCursorForResizingElement): resize arrows along the
+    // handle's axis, a hand for the rotate handle that closes while rotating.
+    [[nodiscard]] static CursorKind CursorForHandle(TransformHandle handle, bool dragging);
     void SetSelectionMode(SelectionMode mode);
     [[nodiscard]] SelectionMode ActiveSelectionMode() const { return selectionMode_; }
     void SetModifiers(InteractionModifiers modifiers);
@@ -394,9 +405,9 @@ private:
     // Shift press under Select/Move: toggles the object under the pointer or
     // starts an additive marquee/lasso; never moves or replaces the selection.
     void BeginShiftSelection(const PointerSample& sample, bool moveTool);
-    // Starts a transform when `logical` is on a handle of the selection on
-    // `pageIndex`; false when there is none or the host refused it.
-    bool TryBeginTransform(const QPointF& logical, std::size_t pageIndex);
+    // Starts a transform when `logical` is on a selection handle, on or off
+    // the page; false when there is none or the host refused it.
+    bool TryBeginTransform(const QPointF& logical);
     void BeginSelection(const QPointF& logical, bool boxOverride, bool additive = false);
     void ExtendSelection(const PointerSample& sample);
     void EndSelection();

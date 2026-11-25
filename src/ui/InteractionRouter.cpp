@@ -115,6 +115,28 @@ CursorKind InteractionRouter::CursorForTool(Tool tool) {
     }
 }
 
+CursorKind InteractionRouter::CursorForHandle(TransformHandle handle, bool dragging) {
+    switch (handle) {
+    case TransformHandle::TopLeft:
+    case TransformHandle::BottomRight:
+        return CursorKind::ResizeDiagonal;
+    case TransformHandle::TopRight:
+    case TransformHandle::BottomLeft:
+        return CursorKind::ResizeAntiDiagonal;
+    case TransformHandle::Top:
+    case TransformHandle::Bottom:
+        return CursorKind::ResizeVertical;
+    case TransformHandle::Left:
+    case TransformHandle::Right:
+        return CursorKind::ResizeHorizontal;
+    case TransformHandle::Rotate:
+        return dragging ? CursorKind::ClosedHand : CursorKind::OpenHand;
+    case TransformHandle::Move:
+    default:
+        return CursorKind::Move;
+    }
+}
+
 void InteractionRouter::SetSelectionMode(SelectionMode mode) {
     selectionMode_ = mode;
 }
@@ -801,6 +823,11 @@ void InteractionRouter::BeginMoveSelection(const PointerSample& sample) {
     // turns the drag into a clone-and-move.
     const QPointF& logical = sample.position;
     const bool clone = (sample.modifiers & Qt::AltModifier) != 0;
+    // The handles hang outside the selection bounds, so they can lie off the
+    // page (a selection along a page edge); probe them before the page.
+    if (TryBeginTransform(logical)) {
+        return;
+    }
     const std::optional<PageHit> hit = host_.HitTestPage(logical);
     if (!hit.has_value()) {
         if (host_.HasSelection()) {
@@ -810,10 +837,6 @@ void InteractionRouter::BeginMoveSelection(const PointerSample& sample) {
         return;
     }
     const std::size_t pageIndex = hit->pageIndex;
-
-    if (TryBeginTransform(logical, pageIndex)) {
-        return;
-    }
 
     const std::optional<SelectionHit> objectHit = host_.HitTestSelectionObject(logical, pageIndex);
     if (!objectHit.has_value()) {
@@ -869,9 +892,9 @@ void InteractionRouter::BeginMoveSelection(const PointerSample& sample) {
     host_.InvalidateCanvas();
 }
 
-bool InteractionRouter::TryBeginTransform(const QPointF& logical, std::size_t pageIndex) {
+bool InteractionRouter::TryBeginTransform(const QPointF& logical) {
     const std::optional<TransformRequest> probe = host_.HitTestSelectionHandle(logical);
-    if (!probe.has_value() || probe->pageIndex != pageIndex) {
+    if (!probe.has_value()) {
         return false;
     }
     TransformRequest request = *probe;
@@ -892,13 +915,13 @@ void InteractionRouter::BeginShiftSelection(const PointerSample& sample, bool mo
     // sidebar's Shift multi-select: a press on an object toggles it, a press
     // elsewhere starts a marquee/lasso whose objects are added.
     const QPointF& logical = sample.position;
+    // Handles keep working: Shift is their aspect-lock / rotation-snap key.
+    if (TryBeginTransform(logical)) {
+        return;
+    }
     const std::optional<PageHit> hit = host_.HitTestPage(logical);
     if (!hit.has_value()) {
         return;  // off the pages: keep the selection
-    }
-    // Handles keep working: Shift is their aspect-lock / rotation-snap key.
-    if (TryBeginTransform(logical, hit->pageIndex)) {
-        return;
     }
     if (const std::optional<SelectionHit> objectHit = host_.HitTestSelectionObject(logical, hit->pageIndex);
         objectHit.has_value()) {

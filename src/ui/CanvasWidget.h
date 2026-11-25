@@ -426,6 +426,9 @@ private:
     [[nodiscard]] static QRectF SelectionFrameRect(const CanvasPageView& view, const SelectionBounds& bounds);
     [[nodiscard]] static std::array<QPointF, 4> SelectionHandlePositions(const QRectF& frame);
     [[nodiscard]] static QPointF SelectionRotateHandlePosition(const QRectF& frame);
+    // The handle of `frame` under `logical`: rotate first, then the corners,
+    // then the edge grips.
+    [[nodiscard]] static std::optional<TransformHandle> SelectionHandleAt(const QRectF& frame, const QPointF& logical);
     [[nodiscard]] std::optional<ObjectRef> TopmostObjectAt(const QPointF& logical, bool includeStrokes) const;
     [[nodiscard]] bool EditOverlayOwnsPoint(const QPointF& logical) const;
     void PaintSelectionOverlay(QPainter& painter);

@@ -2415,6 +2415,9 @@ void CanvasWidget::HandlePointerPress(const PointerSample& sample) {
     router_->HandlePointerPress(sample);
     TrackEraserTrail(sample.position);
     TrackShapeHold(sample.position);
+    // A handle press turns the hover cursor into the drag's (the rotate hand
+    // closes).
+    RefreshCursor();
     update();
 }
 
@@ -2429,6 +2432,8 @@ void CanvasWidget::HandlePointerRelease(const PointerSample& sample) {
     TrackEraserTrail(sample.position);
     TrackShapeHold(std::nullopt);
     EndSnapGhost(true);
+    // The drag's cursor gives way to whatever the pointer now hovers.
+    RefreshCursor();
     update();
 }
 
@@ -2442,6 +2447,7 @@ void CanvasWidget::HandlePointerCancel(CancelReason reason) {
     TrackEraserTrail(std::nullopt);
     TrackShapeHold(std::nullopt);
     EndSnapGhost(false);
+    RefreshCursor();
     update();
 }
 
@@ -2592,6 +2598,13 @@ bool CanvasWidget::HasSelection() const {
 }
 
 bool CanvasWidget::CursorInteractsWithSelection(const QPointF& logical) const {
+    // The handles sit outside the frame, possibly off the page, and a
+    // Select-tool press there must reach the transform probe instead of
+    // clearing the selection; the router only calls BeginMoveSelection when
+    // this returns true.
+    if (HitTestSelectionHandle(logical).has_value()) {
+        return true;
+    }
     const std::optional<CanvasPageView> view = HitTestPageView(logical);
     if (!view.has_value()) {
         return false;
@@ -2599,12 +2612,6 @@ bool CanvasWidget::CursorInteractsWithSelection(const QPointF& logical) const {
     const std::optional<SelectionBounds> bounds = SelectionBoundsForPage(view->pageIndex);
     if (!bounds.has_value()) {
         return false;
-    }
-    // The rotate handle sits outside the frame, and a Select-tool press here
-    // must reach the transform probe instead of clearing the selection; the
-    // router only calls BeginMoveSelection when this returns true.
-    if (HitTestSelectionHandle(logical).has_value()) {
-        return true;
     }
 
     // Legacy App::CursorHitsSelectionMoveGrip (Selection.cpp:711): the grip is
@@ -2767,16 +2774,31 @@ std::optional<SelectionHit> CanvasWidget::HitTestSelectionObject(const QPointF& 
 }
 
 std::optional<TransformRequest> CanvasWidget::HitTestSelectionHandle(const QPointF& logical) const {
-    const std::optional<CanvasPageView> view = HitTestPageView(logical);
-    if (!view.has_value() || !view->valid) {
-        return std::nullopt;
+    // Every visible page's selection, not only the page under the pointer:
+    // the handles hang outside the selection bounds, so they can lie off the
+    // page when the selection runs along a page edge.
+    for (const CanvasPageView& view : CalculatePageViews()) {
+        if (!view.valid) {
+            continue;
+        }
+        const std::optional<SelectionBounds> bounds = SelectionBoundsForPage(view.pageIndex);
+        if (!bounds.has_value()) {
+            continue;
+        }
+        if (const std::optional<TransformHandle> handle = SelectionHandleAt(SelectionFrameRect(view, *bounds), logical);
+            handle.has_value()) {
+            // The transform spans the whole selection on the page, so `target`
+            // and `objectIndex` keep their Stroke/0 defaults and are ignored.
+            TransformRequest request;
+            request.pageIndex = view.pageIndex;
+            request.handle = *handle;
+            return request;
+        }
     }
-    const std::optional<SelectionBounds> bounds = SelectionBoundsForPage(view->pageIndex);
-    if (!bounds.has_value()) {
-        return std::nullopt;
-    }
+    return std::nullopt;
+}
 
-    const QRectF frame = SelectionFrameRect(*view, *bounds);
+std::optional<TransformHandle> CanvasWidget::SelectionHandleAt(const QRectF& frame, const QPointF& logical) {
     const qreal hitRadius = static_cast<qreal>(SelectionHandleHitRadiusPixels(96));
     const qreal hitRadiusSquared = hitRadius * hitRadius;
     const auto hits = [&logical, hitRadiusSquared](const QPointF& position) {
@@ -2785,16 +2807,10 @@ std::optional<TransformRequest> CanvasWidget::HitTestSelectionHandle(const QPoin
         return ((dx * dx) + (dy * dy)) <= hitRadiusSquared;
     };
 
-    // The transform spans the whole selection on the page, so `target` and
-    // `objectIndex` keep their Stroke/0 defaults and are ignored by the canvas.
-    TransformRequest request;
-    request.pageIndex = view->pageIndex;
-
     // On a short selection the rotate handle's radius overlaps the top
     // corners' and the top edge, so it is checked first and wins a tie.
     if (hits(SelectionRotateHandlePosition(frame))) {
-        request.handle = TransformHandle::Rotate;
-        return request;
+        return TransformHandle::Rotate;
     }
 
     const std::array<QPointF, 4> corners = SelectionHandlePositions(frame);
@@ -2806,8 +2822,7 @@ std::optional<TransformRequest> CanvasWidget::HitTestSelectionHandle(const QPoin
     }};
     for (std::size_t index = 0; index < corners.size(); ++index) {
         if (hits(corners[index])) {
-            request.handle = kCornerHandles[index];
-            return request;
+            return kCornerHandles[index];
         }
     }
 
@@ -2819,17 +2834,18 @@ std::optional<TransformRequest> CanvasWidget::HitTestSelectionHandle(const QPoin
     const bool alongWidth = logical.x() >= frame.left() && logical.x() <= frame.right();
     const bool alongHeight = logical.y() >= frame.top() && logical.y() <= frame.bottom();
     if (alongWidth && logical.y() >= frame.top() - reach && logical.y() < frame.top() + inset) {
-        request.handle = TransformHandle::Top;
-    } else if (alongWidth && logical.y() <= frame.bottom() + reach && logical.y() > frame.bottom() - inset) {
-        request.handle = TransformHandle::Bottom;
-    } else if (alongHeight && logical.x() >= frame.left() - reach && logical.x() < frame.left() + inset) {
-        request.handle = TransformHandle::Left;
-    } else if (alongHeight && logical.x() <= frame.right() + reach && logical.x() > frame.right() - inset) {
-        request.handle = TransformHandle::Right;
-    } else {
-        return std::nullopt;
+        return TransformHandle::Top;
     }
-    return request;
+    if (alongWidth && logical.y() <= frame.bottom() + reach && logical.y() > frame.bottom() - inset) {
+        return TransformHandle::Bottom;
+    }
+    if (alongHeight && logical.x() >= frame.left() - reach && logical.x() < frame.left() + inset) {
+        return TransformHandle::Left;
+    }
+    if (alongHeight && logical.x() <= frame.right() + reach && logical.x() > frame.right() - inset) {
+        return TransformHandle::Right;
+    }
+    return std::nullopt;
 }
 
 std::vector<ObjectRef> CanvasWidget::EraseTargetsAt(std::size_t pageIndex, Vec2 start, Vec2 end) const {
@@ -3049,6 +3065,18 @@ void CanvasWidget::ApplyCursor() {
     case CursorKind::Move:
         setCursor(Qt::SizeAllCursor);
         return;
+    case CursorKind::ResizeVertical:
+        setCursor(Qt::SizeVerCursor);
+        return;
+    case CursorKind::ResizeHorizontal:
+        setCursor(Qt::SizeHorCursor);
+        return;
+    case CursorKind::ResizeDiagonal:
+        setCursor(Qt::SizeFDiagCursor);
+        return;
+    case CursorKind::ResizeAntiDiagonal:
+        setCursor(Qt::SizeBDiagCursor);
+        return;
     case CursorKind::Eraser: {
         // The erase tool shows the brush-sized white disc rather than a
         // system cursor, so the user can see what the erase radius will hit
@@ -3080,14 +3108,25 @@ void CanvasWidget::ApplyCursor() {
 }
 
 void CanvasWidget::RefreshCursor() {
-    if (ActiveInteraction() == InteractionKind::Pan) {
+    const InteractionKind interaction = ActiveInteraction();
+    const bool selectTool = tool_ == Tool::Move || tool_ == Tool::Select;
+    if (interaction == InteractionKind::Pan) {
         // An in-flight pan owns the cursor even if the pointer left the page.
         cursorKind_ = CursorKind::ClosedHand;
-    } else if (ActiveInteraction() == InteractionKind::None
-        && (tool_ == Tool::Move || tool_ == Tool::Select)
-        && PageWithPdfTextAt(lastPointerPosition_).has_value()) {
-        // MessageLoop.cpp:665-680: Move/Select show an I-beam over PDF text.
-        // A live drag keeps its own interaction cursor.
+    } else if (interaction == InteractionKind::Transform && transformSession_.has_value()) {
+        // A handle drag keeps its handle's cursor wherever the pointer goes.
+        cursorKind_ = InteractionRouter::CursorForHandle(transformSession_->handle, true);
+    } else if (interaction != InteractionKind::None || !selectTool) {
+        // Any other live drag keeps its tool's cursor.
+        cursorKind_ = InteractionRouter::CursorForTool(tool_);
+    } else if (tool_ == Tool::Move && PageWithPdfTextAt(lastPointerPosition_).has_value()) {
+        // MessageLoop.cpp:665-680: an I-beam over PDF text.  A Move-tool press
+        // there selects text before it probes the selection handles.
+        cursorKind_ = CursorKind::Text;
+    } else if (const std::optional<TransformRequest> handle = HitTestSelectionHandle(lastPointerPosition_);
+               handle.has_value()) {
+        cursorKind_ = InteractionRouter::CursorForHandle(handle->handle, false);
+    } else if (PageWithPdfTextAt(lastPointerPosition_).has_value()) {
         cursorKind_ = CursorKind::Text;
     } else {
         cursorKind_ = InteractionRouter::CursorForTool(tool_);
