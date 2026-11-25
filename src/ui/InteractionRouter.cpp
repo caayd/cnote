@@ -115,6 +115,28 @@ CursorKind InteractionRouter::CursorForTool(Tool tool) {
     }
 }
 
+CursorKind InteractionRouter::CursorForHandle(TransformHandle handle, bool dragging) {
+    switch (handle) {
+    case TransformHandle::TopLeft:
+    case TransformHandle::BottomRight:
+        return CursorKind::ResizeDiagonal;
+    case TransformHandle::TopRight:
+    case TransformHandle::BottomLeft:
+        return CursorKind::ResizeAntiDiagonal;
+    case TransformHandle::Top:
+    case TransformHandle::Bottom:
+        return CursorKind::ResizeVertical;
+    case TransformHandle::Left:
+    case TransformHandle::Right:
+        return CursorKind::ResizeHorizontal;
+    case TransformHandle::Rotate:
+        return dragging ? CursorKind::ClosedHand : CursorKind::OpenHand;
+    case TransformHandle::Move:
+    default:
+        return CursorKind::Move;
+    }
+}
+
 void InteractionRouter::SetSelectionMode(SelectionMode mode) {
     selectionMode_ = mode;
 }

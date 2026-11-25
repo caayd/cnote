@@ -2415,6 +2415,9 @@ void CanvasWidget::HandlePointerPress(const PointerSample& sample) {
     router_->HandlePointerPress(sample);
     TrackEraserTrail(sample.position);
     TrackShapeHold(sample.position);
+    // A handle press turns the hover cursor into the drag's (the rotate hand
+    // closes).
+    RefreshCursor();
     update();
 }
 
@@ -2429,6 +2432,8 @@ void CanvasWidget::HandlePointerRelease(const PointerSample& sample) {
     TrackEraserTrail(sample.position);
     TrackShapeHold(std::nullopt);
     EndSnapGhost(true);
+    // The drag's cursor gives way to whatever the pointer now hovers.
+    RefreshCursor();
     update();
 }
 
@@ -2442,6 +2447,7 @@ void CanvasWidget::HandlePointerCancel(CancelReason reason) {
     TrackEraserTrail(std::nullopt);
     TrackShapeHold(std::nullopt);
     EndSnapGhost(false);
+    RefreshCursor();
     update();
 }
 
@@ -3049,6 +3055,18 @@ void CanvasWidget::ApplyCursor() {
     case CursorKind::Move:
         setCursor(Qt::SizeAllCursor);
         return;
+    case CursorKind::ResizeVertical:
+        setCursor(Qt::SizeVerCursor);
+        return;
+    case CursorKind::ResizeHorizontal:
+        setCursor(Qt::SizeHorCursor);
+        return;
+    case CursorKind::ResizeDiagonal:
+        setCursor(Qt::SizeFDiagCursor);
+        return;
+    case CursorKind::ResizeAntiDiagonal:
+        setCursor(Qt::SizeBDiagCursor);
+        return;
     case CursorKind::Eraser: {
         // The erase tool shows the brush-sized white disc rather than a
         // system cursor, so the user can see what the erase radius will hit
@@ -3080,14 +3098,25 @@ void CanvasWidget::ApplyCursor() {
 }
 
 void CanvasWidget::RefreshCursor() {
-    if (ActiveInteraction() == InteractionKind::Pan) {
+    const InteractionKind interaction = ActiveInteraction();
+    const bool selectTool = tool_ == Tool::Move || tool_ == Tool::Select;
+    if (interaction == InteractionKind::Pan) {
         // An in-flight pan owns the cursor even if the pointer left the page.
         cursorKind_ = CursorKind::ClosedHand;
-    } else if (ActiveInteraction() == InteractionKind::None
-        && (tool_ == Tool::Move || tool_ == Tool::Select)
-        && PageWithPdfTextAt(lastPointerPosition_).has_value()) {
-        // MessageLoop.cpp:665-680: Move/Select show an I-beam over PDF text.
-        // A live drag keeps its own interaction cursor.
+    } else if (interaction == InteractionKind::Transform && transformSession_.has_value()) {
+        // A handle drag keeps its handle's cursor wherever the pointer goes.
+        cursorKind_ = InteractionRouter::CursorForHandle(transformSession_->handle, true);
+    } else if (interaction != InteractionKind::None || !selectTool) {
+        // Any other live drag keeps its tool's cursor.
+        cursorKind_ = InteractionRouter::CursorForTool(tool_);
+    } else if (tool_ == Tool::Move && PageWithPdfTextAt(lastPointerPosition_).has_value()) {
+        // MessageLoop.cpp:665-680: an I-beam over PDF text.  A Move-tool press
+        // there selects text before it probes the selection handles.
+        cursorKind_ = CursorKind::Text;
+    } else if (const std::optional<TransformRequest> handle = HitTestSelectionHandle(lastPointerPosition_);
+               handle.has_value()) {
+        cursorKind_ = InteractionRouter::CursorForHandle(handle->handle, false);
+    } else if (PageWithPdfTextAt(lastPointerPosition_).has_value()) {
         cursorKind_ = CursorKind::Text;
     } else {
         cursorKind_ = InteractionRouter::CursorForTool(tool_);
