@@ -172,6 +172,7 @@ private:
     QLabel* autoSaveLabel_ = nullptr;
     QCheckBox* autoHideToolbarCheck_ = nullptr;
     QCheckBox* embedProjectInPdfCheck_ = nullptr;
+    QCheckBox* scratchToEraseCheck_ = nullptr;
     QLineEdit* zoomPresetEdits_[settings::kZoomPresetCount] {};
     QLineEdit* quickSizeSliderMaxEdit_ = nullptr;
     QLineEdit* brushSizePresetEdit_ = nullptr;

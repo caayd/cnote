@@ -213,12 +213,14 @@ inline constexpr float kPendingEraseOpacity = 0.5f;     // App.cpp:172
 inline constexpr int kWheelScrollLines = 3;             // MessageLoop.cpp:54 fallback
 inline constexpr int kWheelScrollUnitPixels = 18;       // MessageLoop.cpp:57
 
-// Stroke sampling tuning (settings input_spacing / input_smoothing).  The
-// router is the only place pointer samples are stabilized and resampled; the
-// controller stores the points it emits verbatim.
+// Stroke tuning (settings input_spacing / input_smoothing / scratch_to_erase).
+// The router is the only place pointer samples are stabilized and resampled;
+// the controller stores the points it emits verbatim.
 struct InteractionTuning {
     float inputSpacing = 0.85f;
     float inputSmoothing = 0.3f;
+    // A freehand zigzag over objects erases them (RecognizeScratchOut).
+    bool scratchToErase = true;
 };
 
 // Effects the canvas/controller owns.  Every call is safe to ignore for a
@@ -330,7 +332,9 @@ public:
 
     // --- scratch-out ------------------------------------------------------
     // The objects on `pageIndex` the scratch covers (ScratchOut::CoversPath /
-    // CoversArea); the live stroke itself is not on the page yet.
+    // CoversArea); the live stroke itself is not on the page yet.  While the
+    // stroke is live the router shows them through UpdatePendingErase, like
+    // the eraser's pending marks.
     [[nodiscard]] virtual std::vector<ObjectRef> ScratchOutTargets(std::size_t pageIndex, const ScratchOut& scratch) const = 0;
     // Drops the live stroke and erases `targets` as one history action.
     virtual void CommitScratchOut(const std::vector<ObjectRef>& targets) = 0;
@@ -428,10 +432,11 @@ private:
     void BeginStroke(const QPointF& logical);
     bool ApplyStrokePoint(const QPointF& logical);
     void EndStroke();
-    // Scratch-out: when the finished freehand stroke is a zigzag over
-    // objects, erases them instead of committing it.  False (nothing done)
-    // when it is not a scratch-out or covers nothing.
-    bool ScratchOutStroke();
+    // Scratch-out preview: recognizes the live freehand stroke and, when it
+    // is a zigzag over objects, shows them as pending erase marks (cleared
+    // when it stops being one).  EndStroke erases the marked objects instead
+    // of committing the stroke.
+    void RefreshScratchOutPreview();
     // Recognizes the live stroke's freehand points under the current Shift
     // state and replaces the stroke with the shape; false when none fits.
     bool ApplyShapeSnap();
@@ -464,6 +469,9 @@ private:
             std::vector<Vec2> freehandPoints;  // raw freehand samples (App.cpp:4497)
             bool dotted = false;
             bool snapped = false;        // SnapStrokeToShape replaced the points
+            // Objects the stroke would scratch out if it ended now; shown as
+            // pending erase marks.
+            std::vector<ObjectRef> scratchTargets;
         };
         struct EraseData {
             std::vector<ObjectRef> pending;

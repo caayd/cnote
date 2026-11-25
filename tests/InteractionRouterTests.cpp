@@ -730,14 +730,16 @@ void TestErasePendingSingleCommit() {
     Check(empty.CountOp("CommitErase(") == 0 && empty.CountOp("UpdatePendingErase(") == 0, "an erase drag over nothing commits nothing");
 }
 
-// Scratch-out: a freehand zigzag over objects erases them in one host call
-// instead of committing the stroke; over nothing, or drawn in the
-// straight-line mode, it stays ink.
+// Scratch-out: while a freehand zigzag covers objects they are shown as
+// pending erase marks, and lifting erases them in one host call instead of
+// committing the stroke.  Over nothing, in the straight-line mode, with the
+// setting off or cancelled, it stays ink (or goes) and the marks clear.
 void TestStrokeScratchOut() {
     const auto pageUnits = [](const QPointF& logical, bool) {
         return Vec2 { static_cast<float>(logical.x()), static_cast<float>(logical.y()) };
     };
-    // Six passes over x 100..220, drifting from y 100 to 130.
+    // Six passes over x 100..220, drifting from y 100 to 130; the pointer
+    // stays down.
     const auto scratch = [](ui::InteractionRouter& router) {
         router.HandlePointerPress(Press(100.0, 100.0));
         for (int pass = 1; pass <= 6; ++pass) {
@@ -748,7 +750,6 @@ void TestStrokeScratchOut() {
                 router.HandlePointerMove(Move(fromX + ((toX - fromX) * t), 100.0 + (5.0 * (pass - 1)) + (5.0 * t)));
             }
         }
-        router.HandlePointerRelease(Release(100.0, 130.0));
     };
     const std::vector<ui::ObjectRef> word {
         ui::ObjectRef { 0U, ui::ObjectKind::Stroke, 2U }, ui::ObjectRef { 0U, ui::ObjectKind::Text, 0U } };
@@ -759,9 +760,14 @@ void TestStrokeScratchOut() {
         ui::InteractionRouter router(host);
         router.SetTool(ui::Tool::Draw);
         scratch(router);
+        Check(host.CountOp("UpdatePendingErase(2)") == 1 && host.CountOp("UpdatePendingErase(0)") == 0
+                && host.CountOp("CommitScratchOut(") == 0,
+            "a scratch over objects marks them pending before the pen lifts\n" + host.Dump());
+        host.Reset();
+        router.HandlePointerRelease(Release(100.0, 130.0));
         Check(host.CountOp("CommitScratchOut(2)") == 1 && host.CountOp("CommitStroke") == 0
                 && host.CountOp("DiscardStroke") == 0 && host.CountOp("CommitErase(") == 0,
-            "a scratch over objects erases them once instead of committing the stroke\n" + host.Dump());
+            "lifting erases the marked objects once instead of committing the stroke\n" + host.Dump());
         Check(router.ActiveInteraction() == ui::InteractionKind::None && !host.capture, "the scratch-out ends the stroke");
     }
     {
@@ -770,8 +776,23 @@ void TestStrokeScratchOut() {
         ui::InteractionRouter router(host);
         router.SetTool(ui::Tool::Draw);
         scratch(router);
-        Check(host.scratchOutQueries == 1 && host.CountOp("CommitStroke") == 1 && host.CountOp("CommitScratchOut(") == 0,
-            "a scratch over nothing stays ink\n" + host.Dump());
+        router.HandlePointerRelease(Release(100.0, 130.0));
+        Check(host.scratchOutQueries > 0 && host.CountOp("UpdatePendingErase(") == 0 && host.CountOp("CommitStroke") == 1
+                && host.CountOp("CommitScratchOut(") == 0,
+            "a scratch over nothing marks nothing and stays ink\n" + host.Dump());
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        host.scratchOutTargets = word;
+        ui::InteractionTuning off;
+        off.scratchToErase = false;
+        ui::InteractionRouter router(host, off);
+        router.SetTool(ui::Tool::Draw);
+        scratch(router);
+        router.HandlePointerRelease(Release(100.0, 130.0));
+        Check(host.scratchOutQueries == 0 && host.CountOp("UpdatePendingErase(") == 0 && host.CountOp("CommitStroke") == 1,
+            "with scratch-to-erase off a scratch is ink\n" + host.Dump());
     }
     {
         RecordingHost host;
@@ -783,8 +804,49 @@ void TestStrokeScratchOut() {
         straight.straightLine = true;
         router.SetModifiers(straight);
         scratch(router);
+        router.HandlePointerRelease(Release(100.0, 130.0));
         Check(host.scratchOutQueries == 0 && host.CountOp("CommitStroke") == 1,
             "the straight-line mode never scratches out\n" + host.Dump());
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        host.scratchOutTargets = word;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        scratch(router);
+        host.Reset();
+        ui::InteractionModifiers straight;
+        straight.straightLine = true;
+        router.SetModifiers(straight);
+        Check(host.CountOp("UpdatePendingErase(0)") == 1, "entering the straight-line mode clears the marks\n" + host.Dump());
+        router.HandlePointerRelease(Release(100.0, 130.0));
+        Check(host.CountOp("CommitStroke") == 1 && host.CountOp("CommitScratchOut(") == 0,
+            "the straightened stroke commits as ink\n" + host.Dump());
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        host.scratchOutTargets = word;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        scratch(router);
+        host.Reset();
+        router.SetTuning(ui::InteractionTuning { 0.85f, 0.3f, false });
+        Check(host.CountOp("UpdatePendingErase(0)") == 1, "turning the setting off mid-stroke clears the marks\n" + host.Dump());
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        host.scratchOutTargets = word;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        scratch(router);
+        host.Reset();
+        router.CancelInteraction();
+        Check(host.CountOp("UpdatePendingErase(0)") == 1 && host.CountOp("DiscardStroke") == 1
+                && host.CountOp("CommitScratchOut(") == 0 && host.CountOp("CommitStroke") == 0,
+            "cancelling a scratch clears the marks and erases nothing\n" + host.Dump());
     }
     {
         // A line drawn over objects is not a zigzag: the host is not asked.

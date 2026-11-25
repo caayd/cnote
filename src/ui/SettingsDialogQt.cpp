@@ -298,6 +298,10 @@ void SettingsDialogQt::buildDrawingPage() {
     autoSaveLabel_->setObjectName(QStringLiteral("autoSaveLabel"));
     form->addRow(QStringLiteral("Auto Save"), MakeSliderRow(autoSaveSlider_, autoSaveLabel_, page));
 
+    scratchToEraseCheck_ = new QCheckBox(QStringLiteral("Scratch out ink to erase it"), page);
+    scratchToEraseCheck_->setObjectName(QStringLiteral("scratchToEraseCheck"));
+    form->addRow(QString(), scratchToEraseCheck_);
+
     autoHideToolbarCheck_ = new QCheckBox(QStringLiteral("Auto-hide toolbar"), page);
     autoHideToolbarCheck_->setObjectName(QStringLiteral("autoHideToolbarCheck"));
     form->addRow(QString(), autoHideToolbarCheck_);
@@ -402,6 +406,13 @@ void SettingsDialogQt::buildDrawingPage() {
         if (refreshing_) return;
         settings::Settings candidate = settings_;
         candidate.embedProjectInExportedPdfs = checked;
+        persist(std::move(candidate));
+        refreshDrawingControls();
+    });
+    connect(scratchToEraseCheck_, &QCheckBox::toggled, this, [this](bool checked) {
+        if (refreshing_) return;
+        settings::Settings candidate = settings_;
+        candidate.scratchToErase = checked;
         persist(std::move(candidate));
         refreshDrawingControls();
     });
@@ -572,6 +583,7 @@ void SettingsDialogQt::refreshDrawingControls() {
     const QSignalBlocker blockDefaultPageSize(defaultPageSizeCombo_);
     const QSignalBlocker blockAutoHide(autoHideToolbarCheck_);
     const QSignalBlocker blockEmbed(embedProjectInPdfCheck_);
+    const QSignalBlocker blockScratchToErase(scratchToEraseCheck_);
 
     stabilizationSlider_->setValue(static_cast<int>(std::lround(settings_.inputSmoothing * 100.0f)));
     spacingSlider_->setValue(static_cast<int>(std::lround(settings_.inputSpacing * 100.0f)));
@@ -585,6 +597,7 @@ void SettingsDialogQt::refreshDrawingControls() {
         std::min(settings_.defaultPageSizePreset, DimensionPresets().size() - 1U)));
     autoHideToolbarCheck_->setChecked(settings_.autoHideToolbar);
     embedProjectInPdfCheck_->setChecked(settings_.embedProjectInExportedPdfs);
+    scratchToEraseCheck_->setChecked(settings_.scratchToErase);
 
     stabilizationLabel_->setText(FormatFloatSliderLabel(QStringLiteral("Stabilization"), settings_.inputSmoothing, 100));
     spacingLabel_->setText(FormatSpacingLabel(settings_.inputSpacing));

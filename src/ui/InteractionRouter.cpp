@@ -143,16 +143,25 @@ void InteractionRouter::SetSelectionMode(SelectionMode mode) {
 
 void InteractionRouter::SetModifiers(InteractionModifiers modifiers) {
     const bool constrainChanged = modifiers.snapLine != modifiers_.snapLine;
+    const bool straightLineChanged = modifiers.straightLine != modifiers_.straightLine;
     modifiers_ = modifiers;
     // Shift pressed or released over a held snapped shape re-snaps it with
     // (or without) the circle and triangle constraints.
     if (constrainChanged && state_.kind == InteractionKind::Stroke && state_.stroke.snapped) {
         static_cast<void>(ApplyShapeSnap());
     }
+    // The straight-line mode owns its stroke: entering it drops the preview.
+    if (straightLineChanged && state_.kind == InteractionKind::Stroke) {
+        RefreshScratchOutPreview();
+    }
 }
 
 void InteractionRouter::SetTuning(InteractionTuning tuning) {
     tuning_ = tuning;
+    // Turning scratch-to-erase off mid-stroke drops the preview with it.
+    if (state_.kind == InteractionKind::Stroke) {
+        RefreshScratchOutPreview();
+    }
 }
 
 bool InteractionRouter::IsInteractionActive() const {
@@ -450,6 +459,9 @@ void InteractionRouter::CancelInteraction() {
     // below drops every payload, so a repeated cancel is a no-op.
     switch (state_.kind) {
     case InteractionKind::Stroke:
+        if (!state_.stroke.scratchTargets.empty()) {
+            host_.UpdatePendingErase({});
+        }
         host_.DiscardStroke();
         break;
     case InteractionKind::Erase:
@@ -575,6 +587,7 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
     if (hit.has_value() && hit->pageIndex != state_.stroke.page->pageIndex) {
         host_.CommitStroke();
         StartStrokeSegment(*hit, host_.ScreenToPage(logical, true), state_.stroke.dotted);
+        RefreshScratchOutPreview();
         host_.InvalidateCanvas();
         return true;
     }
@@ -620,6 +633,7 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
             state_.stroke.points.push_back(endPoint);
         }
         host_.ReplaceStrokePoints(state_.stroke.points, dottedMode);
+        RefreshScratchOutPreview();
         return true;
     }
 
@@ -627,6 +641,9 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
         return false;
     }
     state_.stroke.points = state_.stroke.freehandPoints;
+    if (pointAppended) {
+        RefreshScratchOutPreview();
+    }
     return true;
 }
 
@@ -637,30 +654,32 @@ void InteractionRouter::EndStroke() {
     }
     if (state_.stroke.points.empty()) {
         host_.DiscardStroke();
-    } else if (!ScratchOutStroke()) {
+    } else if (!state_.stroke.scratchTargets.empty()) {
+        // The marks the user saw before lifting are exactly what goes.
+        host_.CommitScratchOut(state_.stroke.scratchTargets);
+    } else {
         host_.CommitStroke();
     }
     ResetInteraction();
     host_.InvalidateCanvas();
 }
 
-bool InteractionRouter::ScratchOutStroke() {
+void InteractionRouter::RefreshScratchOutPreview() {
     // A snapped shape and the straight-line/oval modes are deliberate
-    // geometry, never a scratch.  Only this page's segment is tested.
-    if (state_.stroke.snapped || modifiers_.straightLine || !state_.stroke.page.has_value()) {
-        return false;
+    // geometry, never a scratch, and a zigzag over nothing stays ink.  Only
+    // this page's segment is tested.
+    std::vector<ObjectRef> targets;
+    if (tuning_.scratchToErase && !state_.stroke.snapped && !modifiers_.straightLine && state_.stroke.page.has_value()) {
+        if (const std::optional<ScratchOut> scratch = RecognizeScratchOut(state_.stroke.freehandPoints)) {
+            targets = host_.ScratchOutTargets(state_.stroke.page->pageIndex, *scratch);
+        }
     }
-    const std::optional<ScratchOut> scratch = RecognizeScratchOut(state_.stroke.freehandPoints);
-    if (!scratch.has_value()) {
-        return false;
+    if (targets == state_.stroke.scratchTargets) {
+        return;
     }
-    // A zigzag over nothing stays ink.
-    const std::vector<ObjectRef> targets = host_.ScratchOutTargets(state_.stroke.page->pageIndex, *scratch);
-    if (targets.empty()) {
-        return false;
-    }
-    host_.CommitScratchOut(targets);
-    return true;
+    state_.stroke.scratchTargets = std::move(targets);
+    host_.UpdatePendingErase(state_.stroke.scratchTargets);
+    host_.InvalidateCanvas();
 }
 
 bool InteractionRouter::SnapStrokeToShape() {
@@ -677,6 +696,7 @@ bool InteractionRouter::ApplyShapeSnap() {
     }
     state_.stroke.points = std::move(shape->points);
     state_.stroke.snapped = true;
+    RefreshScratchOutPreview();
     host_.ReplaceStrokePoints(state_.stroke.points, state_.stroke.dotted);
     host_.InvalidateCanvas();
     return true;

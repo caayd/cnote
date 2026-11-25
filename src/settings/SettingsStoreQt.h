@@ -113,6 +113,8 @@ struct Settings {
     unsigned int autoSaveIntervalSeconds = 60;
     bool autoHideToolbar = false;
     bool embedProjectInExportedPdfs = true;
+    // Scribbling back and forth over ink with the draw tool erases it.
+    bool scratchToErase = true;
     std::array<float, kZoomPresetCount> zoomPresets {};
     std::vector<Tool> wheelTools {};
     std::array<ShortcutBinding, kShortcutActionCount> shortcuts = DefaultShortcutBindings();
