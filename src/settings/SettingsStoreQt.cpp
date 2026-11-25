@@ -875,6 +875,13 @@ Settings SettingsStoreQt::ParseText(std::string_view text) {
             continue;
         }
 
+        if (key == "scratch_to_erase") {
+            if (const auto parsed = ParseUnsignedInt(value); parsed.has_value()) {
+                settings.scratchToErase = *parsed != 0U;
+            }
+            continue;
+        }
+
         if (key.starts_with("zoom_preset_")) {
             if (const auto index = ParseUnsignedInt(key.substr(12)); index.has_value()
                 && *index >= 1U
@@ -1036,6 +1043,7 @@ std::string SettingsStoreQt::Serialize(const Settings& settings) {
     output << "auto_save_interval_seconds=" << settings.autoSaveIntervalSeconds << '\n';
     output << "auto_hide_toolbar=" << (settings.autoHideToolbar ? 1 : 0) << '\n';
     output << "embed_project_in_exported_pdfs=" << (settings.embedProjectInExportedPdfs ? 1 : 0) << '\n';
+    output << "scratch_to_erase=" << (settings.scratchToErase ? 1 : 0) << '\n';
     for (std::size_t index = 0; index < settings.zoomPresets.size(); ++index) {
         output << "zoom_preset_" << (index + 1U) << '=' << settings.zoomPresets[index] << '\n';
     }

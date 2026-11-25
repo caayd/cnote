@@ -808,6 +808,7 @@ void QtMainWindow::ApplyToolToCanvas() {
     canvas_->Router().SetTuning(ui::InteractionTuning {
         settings_.inputSpacing,
         settings_.inputSmoothing,
+        settings_.scratchToErase,
     });
 }
 

@@ -97,6 +97,7 @@ decorations, so the band there never draws the in-client window buttons.
 
 - `D` draw
 - While drawing, hold the pen still for half a second before lifting to snap the stroke to a shape: line, one-stroke arrow, curly brace (any direction, opening either way), circle, ellipse, triangle, or rectangle or square (any four-sided stroke snaps to one with right-angle corners). Strokes with more corners are not snapped to polygons. Near-level ellipses, rectangles and braces snap level. The original stroke stays faded under the shape until you lift the pen, then fades out. A stroke that fits no shape stays as drawn, and movement after the snap doesn't change the shape. Hold `Shift` (before the snap or while still holding) to perfect the shape: ellipses become circles, and triangles become equilateral when nearly so, else right triangles
+- Scratch out ink to erase it: scribble back and forth over strokes, text, equations or images (at least four quick passes with sharp turns). While the pen is down, whatever lies mostly under the scribble turns faded, like under the eraser; keep scribbling to catch what you missed, then lift the pen to erase it, and the scribble fades away. One undo brings it all back. A scribble over empty paper, or over less than half of anything, stays as drawn, and so does handwriting (rounded turns, loops). Turn it off with Settings > Drawing > "Scratch out ink to erase it"
 - `E` erase
 - `S` select
 - `M` move
@@ -205,16 +206,17 @@ metrics break the Windows font tests:
 
 ```bash
 # model/codec tests, no display
-ctest --test-dir build-qt -R '^(xpress_codec|session_manager_qt|interaction_router_qt|eraser_trail|shape_recognition|precision_input_router_qt)$' --output-on-failure
+ctest --test-dir build-qt -R '^(xpress_codec|session_manager_qt|interaction_router_qt|eraser_trail|shape_recognition|scratch_out|precision_input_router_qt)$' --output-on-failure
 # everything else (offscreen, or the native platform where a test requires it)
-ctest --test-dir build-qt -E '^(xpress_codec|session_manager_qt|interaction_router_qt|eraser_trail|shape_recognition|precision_input_router_qt)$' --output-on-failure
+ctest --test-dir build-qt -E '^(xpress_codec|session_manager_qt|interaction_router_qt|eraser_trail|shape_recognition|scratch_out|precision_input_router_qt)$' --output-on-failure
 ```
 
-The headless set is `xpress_codec` and `shape_recognition` (pure C++),
+The headless set is `xpress_codec`, `shape_recognition` and `scratch_out` (pure C++),
 `session_manager_qt` (`QCoreApplication` only), `interaction_router_qt`,
 `eraser_trail` and `precision_input_router_qt` (no Qt application object).
-`shape_recognition` fits synthetic hand-drawn strokes over many fixed seeds.
-On Windows the suite has 39 tests; Linux and macOS have 37 because `precision_touchpad_qt` and
+`shape_recognition` fits synthetic hand-drawn strokes over many fixed seeds;
+`scratch_out` tells scribbled scratch-outs from handwriting and shapes the same way.
+On Windows the suite has 40 tests; Linux and macOS have 38 because `precision_touchpad_qt` and
 `window_chrome_native_qt` are Windows-only. On Windows, `selection_clipboard_qt`
 (real clipboard bridge), `layout_parity_qt` and `font_fallback_qt` (real font
 metrics) run on the native platform with a `QGuiApplication` and no window;

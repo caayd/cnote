@@ -120,6 +120,7 @@ bool SameSettings(const cnote::settings::Settings& a, const cnote::settings::Set
     if (a.autoSaveIntervalSeconds != b.autoSaveIntervalSeconds) return fail("autoSaveIntervalSeconds");
     if (a.autoHideToolbar != b.autoHideToolbar) return fail("autoHideToolbar");
     if (a.embedProjectInExportedPdfs != b.embedProjectInExportedPdfs) return fail("embedProjectInExportedPdfs");
+    if (a.scratchToErase != b.scratchToErase) return fail("scratchToErase");
     if (a.zoomPresets != b.zoomPresets) return fail("zoomPresets");
     if (a.wheelTools != b.wheelTools) return fail("wheelTools");
     if (a.shortcuts.size() != b.shortcuts.size()) return fail("shortcuts.size");
@@ -386,6 +387,7 @@ void ParsesRealPayload(const std::filesystem::path& scratch) {
     payload << "auto_save_interval_seconds=5000\n";
     payload << "auto_hide_toolbar=1\n";
     payload << "embed_project_in_exported_pdfs=0\n";
+    payload << "scratch_to_erase=0\n";
     payload << "zoom_preset_2=10\n";
     payload << "zoom_preset_3=0\n";
     payload << "zoom_preset_4=abc\n";
@@ -438,6 +440,7 @@ void ParsesRealPayload(const std::filesystem::path& scratch) {
     Check(settings.autoSaveIntervalSeconds == 300U, "auto_save_interval_seconds clamps to 300");
     Check(settings.autoHideToolbar, "auto_hide_toolbar parsed");
     Check(!settings.embedProjectInExportedPdfs, "embed_project_in_exported_pdfs parsed");
+    Check(!settings.scratchToErase, "scratch_to_erase parsed");
     Check(settings.zoomPresets[1] == 4.0f, "zoom preset clamps to kMaxZoom");
     Check(settings.zoomPresets[2] == 0.0f, "non-positive zoom preset stays unset");
     Check(settings.zoomPresets[3] == 0.0f, "unparsable zoom preset keeps the default");

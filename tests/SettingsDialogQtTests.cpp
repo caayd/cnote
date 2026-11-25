@@ -152,6 +152,7 @@ void ControlInventory(const std::filesystem::path& scratch) {
     auto* autoSave = Find<QSlider>(dialog, "autoSaveSlider");
     Find<QCheckBox>(dialog, "autoHideToolbarCheck");
     Find<QCheckBox>(dialog, "embedProjectInPdfCheck");
+    Find<QCheckBox>(dialog, "scratchToEraseCheck");
     Check(hue != nullptr && hue->minimum() == 0 && hue->maximum() == 360, "hue slider 0..360");
     Check(saturation != nullptr && saturation->minimum() == 0 && saturation->maximum() == 100, "saturation slider 0..100");
     Check(lightness != nullptr && lightness->minimum() == 0 && lightness->maximum() == 100, "lightness slider 0..100");
@@ -381,6 +382,10 @@ void DrawingOperations(const std::filesystem::path& scratch) {
     Check(settings.autoHideToolbar, "auto-hide toggle persists");
     embed->setChecked(false);
     Check(!settings.embedProjectInExportedPdfs, "embed toggle persists");
+    auto* scratchToErase = Find<QCheckBox>(dialog, "scratchToEraseCheck");
+    Check(scratchToErase->isChecked(), "scratch-to-erase is on by default");
+    scratchToErase->setChecked(false);
+    Check(!settings.scratchToErase, "scratch-to-erase toggle persists");
 
     const s::Settings reloaded = s::SettingsStoreQt(path).Load();
     Check(reloaded.inputSmoothing == settings.inputSmoothing, "drawing values persisted");
@@ -388,7 +393,7 @@ void DrawingOperations(const std::filesystem::path& scratch) {
     Check(reloaded.brushSizePresets == settings.brushSizePresets, "brush presets persisted");
     Check(reloaded.zoomPresets == settings.zoomPresets, "zoom presets persisted");
     Check(reloaded.defaultPageSizePreset == settings.defaultPageSizePreset, "default page size preset persisted");
-    Check(reloaded.autoHideToolbar && !reloaded.embedProjectInExportedPdfs, "toggles persisted");
+    Check(reloaded.autoHideToolbar && !reloaded.embedProjectInExportedPdfs && !reloaded.scratchToErase, "toggles persisted");
 }
 
 // 4. Shortcut capture, duplicate clearing, Escape.
@@ -606,6 +611,7 @@ void TabOrderAndScreenshots(const std::filesystem::path& scratch) {
         QStringLiteral("dashLengthSlider"),
         QStringLiteral("dashGapSlider"),
         QStringLiteral("autoSaveSlider"),
+        QStringLiteral("scratchToEraseCheck"),
         QStringLiteral("autoHideToolbarCheck"),
         QStringLiteral("embedProjectInPdfCheck"),
         QStringLiteral("zoomPresetEdit1"),
