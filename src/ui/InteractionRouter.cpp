@@ -637,11 +637,30 @@ void InteractionRouter::EndStroke() {
     }
     if (state_.stroke.points.empty()) {
         host_.DiscardStroke();
-    } else {
+    } else if (!ScratchOutStroke()) {
         host_.CommitStroke();
     }
     ResetInteraction();
     host_.InvalidateCanvas();
+}
+
+bool InteractionRouter::ScratchOutStroke() {
+    // A snapped shape and the straight-line/oval modes are deliberate
+    // geometry, never a scratch.  Only this page's segment is tested.
+    if (state_.stroke.snapped || modifiers_.straightLine || !state_.stroke.page.has_value()) {
+        return false;
+    }
+    const std::optional<ScratchOut> scratch = RecognizeScratchOut(state_.stroke.freehandPoints);
+    if (!scratch.has_value()) {
+        return false;
+    }
+    // A zigzag over nothing stays ink.
+    const std::vector<ObjectRef> targets = host_.ScratchOutTargets(state_.stroke.page->pageIndex, *scratch);
+    if (targets.empty()) {
+        return false;
+    }
+    host_.CommitScratchOut(targets);
+    return true;
 }
 
 bool InteractionRouter::SnapStrokeToShape() {

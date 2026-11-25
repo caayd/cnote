@@ -10,6 +10,7 @@
 #include <Qt>
 
 #include "Document.h"
+#include "selection/ScratchOut.h"
 
 namespace cnote::ui {
 
@@ -327,6 +328,13 @@ public:
     virtual void UpdatePendingErase(const std::vector<ObjectRef>& pending) = 0;
     virtual void CommitErase(const std::vector<ObjectRef>& pending) = 0;
 
+    // --- scratch-out ------------------------------------------------------
+    // The objects on `pageIndex` the scratch covers (ScratchOut::CoversPath /
+    // CoversArea); the live stroke itself is not on the page yet.
+    [[nodiscard]] virtual std::vector<ObjectRef> ScratchOutTargets(std::size_t pageIndex, const ScratchOut& scratch) const = 0;
+    // Drops the live stroke and erases `targets` as one history action.
+    virtual void CommitScratchOut(const std::vector<ObjectRef>& targets) = 0;
+
     // --- editing sessions -------------------------------------------------
     virtual void BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) = 0;
     // `width` 0 creates a text that grows with its content; anything else a
@@ -420,6 +428,10 @@ private:
     void BeginStroke(const QPointF& logical);
     bool ApplyStrokePoint(const QPointF& logical);
     void EndStroke();
+    // Scratch-out: when the finished freehand stroke is a zigzag over
+    // objects, erases them instead of committing it.  False (nothing done)
+    // when it is not a scratch-out or covers nothing.
+    bool ScratchOutStroke();
     // Recognizes the live stroke's freehand points under the current Shift
     // state and replaces the stroke with the shape; false when none fits.
     bool ApplyShapeSnap();

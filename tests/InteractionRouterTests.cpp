@@ -32,6 +32,7 @@ namespace {
 
 using cnote::Vec2;
 using cnote::StrokeSampling;
+using cnote::ScratchOut;
 namespace ui = cnote::ui;
 
 int g_checks = 0;
@@ -91,6 +92,8 @@ public:
     std::optional<ui::TransformRequest> selectionHandle;
     bool beginTransformSucceeds = true;
     std::vector<ui::ObjectRef> eraseTargets;
+    std::vector<ui::ObjectRef> scratchOutTargets;
+    mutable int scratchOutQueries = 0;
     StrokeSampling lastSampling {};
     std::optional<float> beginPressure;
     std::vector<std::optional<float>> appendPressures;
@@ -113,6 +116,10 @@ public:
     std::optional<ui::SelectionHit> HitTestSelectionObject(const QPointF&, std::size_t) const override { return selectionObject; }
     std::optional<ui::TransformRequest> HitTestSelectionHandle(const QPointF&) const override { return selectionHandle; }
     std::vector<ui::ObjectRef> EraseTargetsAt(std::size_t, Vec2, Vec2) const override { return eraseTargets; }
+    std::vector<ui::ObjectRef> ScratchOutTargets(std::size_t pageIndex, const ScratchOut&) const override {
+        ++scratchOutQueries;
+        return pageIndex == 0U ? scratchOutTargets : std::vector<ui::ObjectRef> {};
+    }
 
     void PanBy(const QPointF& delta) override { ops.push_back("PanBy(" + Format(delta.x()) + "," + Format(delta.y()) + ")"); }
     void ZoomByWheelSteps(int steps, const QPointF& anchor) override {
@@ -178,6 +185,9 @@ public:
     }
     void CommitErase(const std::vector<ui::ObjectRef>& pending) override {
         ops.push_back("CommitErase(" + std::to_string(pending.size()) + ")");
+    }
+    void CommitScratchOut(const std::vector<ui::ObjectRef>& targets) override {
+        ops.push_back("CommitScratchOut(" + std::to_string(targets.size()) + ")");
     }
 
     void BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) override {
@@ -718,6 +728,78 @@ void TestErasePendingSingleCommit() {
     emptyRouter.HandlePointerPress(Press(50.0, 50.0));
     emptyRouter.HandlePointerRelease(Release(50.0, 50.0));
     Check(empty.CountOp("CommitErase(") == 0 && empty.CountOp("UpdatePendingErase(") == 0, "an erase drag over nothing commits nothing");
+}
+
+// Scratch-out: a freehand zigzag over objects erases them in one host call
+// instead of committing the stroke; over nothing, or drawn in the
+// straight-line mode, it stays ink.
+void TestStrokeScratchOut() {
+    const auto pageUnits = [](const QPointF& logical, bool) {
+        return Vec2 { static_cast<float>(logical.x()), static_cast<float>(logical.y()) };
+    };
+    // Six passes over x 100..220, drifting from y 100 to 130.
+    const auto scratch = [](ui::InteractionRouter& router) {
+        router.HandlePointerPress(Press(100.0, 100.0));
+        for (int pass = 1; pass <= 6; ++pass) {
+            const double fromX = pass % 2 == 1 ? 100.0 : 220.0;
+            const double toX = pass % 2 == 1 ? 220.0 : 100.0;
+            for (int step = 1; step <= 40; ++step) {
+                const double t = step / 40.0;
+                router.HandlePointerMove(Move(fromX + ((toX - fromX) * t), 100.0 + (5.0 * (pass - 1)) + (5.0 * t)));
+            }
+        }
+        router.HandlePointerRelease(Release(100.0, 130.0));
+    };
+    const std::vector<ui::ObjectRef> word {
+        ui::ObjectRef { 0U, ui::ObjectKind::Stroke, 2U }, ui::ObjectRef { 0U, ui::ObjectKind::Text, 0U } };
+    {
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        host.scratchOutTargets = word;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        scratch(router);
+        Check(host.CountOp("CommitScratchOut(2)") == 1 && host.CountOp("CommitStroke") == 0
+                && host.CountOp("DiscardStroke") == 0 && host.CountOp("CommitErase(") == 0,
+            "a scratch over objects erases them once instead of committing the stroke\n" + host.Dump());
+        Check(router.ActiveInteraction() == ui::InteractionKind::None && !host.capture, "the scratch-out ends the stroke");
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        scratch(router);
+        Check(host.scratchOutQueries == 1 && host.CountOp("CommitStroke") == 1 && host.CountOp("CommitScratchOut(") == 0,
+            "a scratch over nothing stays ink\n" + host.Dump());
+    }
+    {
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        host.scratchOutTargets = word;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        ui::InteractionModifiers straight;
+        straight.straightLine = true;
+        router.SetModifiers(straight);
+        scratch(router);
+        Check(host.scratchOutQueries == 0 && host.CountOp("CommitStroke") == 1,
+            "the straight-line mode never scratches out\n" + host.Dump());
+    }
+    {
+        // A line drawn over objects is not a zigzag: the host is not asked.
+        RecordingHost host;
+        host.screenToPage = pageUnits;
+        host.scratchOutTargets = word;
+        ui::InteractionRouter router(host);
+        router.SetTool(ui::Tool::Draw);
+        router.HandlePointerPress(Press(100.0, 100.0));
+        for (int step = 1; step <= 40; ++step) {
+            router.HandlePointerMove(Move(100.0 + (3.0 * step), 100.0));
+        }
+        router.HandlePointerRelease(Release(220.0, 100.0));
+        Check(host.scratchOutQueries == 0 && host.CountOp("CommitStroke") == 1, "a plain stroke over objects stays ink");
+    }
 }
 
 // Selection.cpp:1269: within the 18-px click radius the gesture is a click,
@@ -1513,6 +1595,7 @@ int main() {
     TestStrokeDottedModifierWithoutMotion();
     TestStrokeReleaseOutsideCanvas();
     TestErasePendingSingleCommit();
+    TestStrokeScratchOut();
     TestSelectionClickVersusMarquee();
     TestSelectionLassoAccumulation();
     TestSelectionLassoClickVersusLoop();

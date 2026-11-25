@@ -2905,6 +2905,65 @@ std::vector<ObjectRef> CanvasWidget::EraseTargetsAt(std::size_t pageIndex, Vec2 
     return targets;
 }
 
+std::vector<ObjectRef> CanvasWidget::ScratchOutTargets(std::size_t pageIndex, const ScratchOut& scratch) const {
+    std::vector<ObjectRef> targets;
+    const Stroke* pending = controller_.PendingStroke();
+    if (scratch.hull.empty() || pending == nullptr) {
+        return targets;
+    }
+    const Document& document = controller_.DocumentRef();
+    const Page& page = document.PageAt(pageIndex);
+    // The scratch's ink reaches half its width past the points it was drawn with.
+    const float margin = pending->style.width * 0.5f;
+
+    for (std::size_t index = 0; index < page.images.size(); ++index) {
+        const PageImage& image = page.images[index];
+        if (scratch.CoversArea(RotatedRectCorners(image.x, image.y, image.x + image.width, image.y + image.height,
+                image.rotationDegrees), margin)) {
+            targets.push_back(ObjectRef { pageIndex, ObjectKind::Image, index });
+        }
+    }
+    for (std::size_t index = 0; index < page.texts.size(); ++index) {
+        const PageText& text = page.texts[index];
+        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page.width);
+        if (scratch.CoversArea(RotatedRectCorners(bounds.left, bounds.top, bounds.right, bounds.bottom,
+                text.rotationDegrees), margin)) {
+            targets.push_back(ObjectRef { pageIndex, ObjectKind::Text, index });
+        }
+    }
+    for (std::size_t index = 0; index < page.latexes.size(); ++index) {
+        const PageLatex& latex = page.latexes[index];
+        const LatexBounds bounds = MeasurePageLatexBounds(latex, page.width);
+        if (scratch.CoversArea(RotatedRectCorners(bounds.left, bounds.top, bounds.right, bounds.bottom,
+                latex.rotationDegrees), margin)) {
+            targets.push_back(ObjectRef { pageIndex, ObjectKind::Latex, index });
+        }
+    }
+
+    float hullLeft = scratch.hull.front().x, hullTop = scratch.hull.front().y;
+    float hullRight = hullLeft, hullBottom = hullTop;
+    for (const Vec2 point : scratch.hull) {
+        hullLeft = std::min(hullLeft, point.x);
+        hullTop = std::min(hullTop, point.y);
+        hullRight = std::max(hullRight, point.x);
+        hullBottom = std::max(hullBottom, point.y);
+    }
+    for (std::size_t index = 0; index < page.strokes.size(); ++index) {
+        const Stroke& stroke = page.strokes[index];
+        // Cheap reject before the smoothing pass, as in EraseTargetsAt: a
+        // stroke whose bounds miss the scratch's cannot be half under it.
+        float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
+        if (!StrokeBounds(stroke, &minX, &minY, &maxX, &maxY) || maxX < hullLeft - margin
+            || minX > hullRight + margin || maxY < hullTop - margin || minY > hullBottom + margin) {
+            continue;
+        }
+        if (scratch.CoversPath(BuildStrokeRenderPath(stroke, controller_.InputSettings().strokeSmoothing).points, margin)) {
+            targets.push_back(ObjectRef { pageIndex, ObjectKind::Stroke, index });
+        }
+    }
+    return targets;
+}
+
 void CanvasWidget::ZoomByWheelSteps(int steps, const QPointF& anchor) {
     ZoomBySteps(steps, anchor);
 }
@@ -3811,6 +3870,18 @@ void CanvasWidget::CommitErase(const std::vector<ObjectRef>& pending) {
     }
     pendingErase_.clear();
     update(dirty.isEmpty() ? rect() : dirty);
+}
+
+void CanvasWidget::CommitScratchOut(const std::vector<ObjectRef>& targets) {
+    // The scratch's ink fades out over what it erased rather than vanishing.
+    if (const Stroke* pending = controller_.PendingStroke(); pending != nullptr) {
+        RepaintSnapGhost();
+        snapGhost_ = SnapGhost { controller_.PendingStrokePage(), *pending, snapGhostClock_.elapsed() };
+        snapGhostTimer_->start();
+        RepaintSnapGhost();
+    }
+    DiscardStroke();
+    CommitErase(targets);
 }
 
 void CanvasWidget::BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) {

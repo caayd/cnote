@@ -145,6 +145,7 @@ public:
     [[nodiscard]] std::optional<SelectionHit> HitTestSelectionObject(const QPointF& logical, std::size_t pageIndex) const override;
     [[nodiscard]] std::optional<TransformRequest> HitTestSelectionHandle(const QPointF& logical) const override;
     [[nodiscard]] std::vector<ObjectRef> EraseTargetsAt(std::size_t pageIndex, Vec2 start, Vec2 end) const override;
+    [[nodiscard]] std::vector<ObjectRef> ScratchOutTargets(std::size_t pageIndex, const ScratchOut& scratch) const override;
     void ZoomByWheelSteps(int steps, const QPointF& anchor) override;
     void ScrollBy(const QPointF& logicalDelta) override;
     // Cursor the interaction asks for.  CursorKind::Draw shows the configured
@@ -178,6 +179,7 @@ public:
     void CancelTransform() override;
     void UpdatePendingErase(const std::vector<ObjectRef>& pending) override;
     void CommitErase(const std::vector<ObjectRef>& pending) override;
+    void CommitScratchOut(const std::vector<ObjectRef>& targets) override;
     void BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) override;
     void CreateTextAt(std::size_t pageIndex, Vec2 pagePoint, float width) override;
     void UpdateTextCreatePreview(std::optional<TextBoxPreview> preview) override;
@@ -585,9 +587,11 @@ private:
     // Snaps the live stroke and keeps its freehand original as snapGhost_.
     void SnapHeldStroke();
 
-    // The freehand stroke a snap replaced, painted faded under the shape
-    // while the pointer is down and faded out over kSnapGhostFadeMs after the
-    // release (snapGhostTimer_ animates it, snapGhostClock_ times it).
+    // A freehand stroke faded out instead of shown as ink: the original a
+    // snap replaced, painted faded under the shape while the pointer is down
+    // and faded out over kSnapGhostFadeMs after the release, or a scratch-out
+    // fading from the release on (snapGhostTimer_ animates it,
+    // snapGhostClock_ times it).
     struct SnapGhost {
         std::size_t pageIndex = 0;
         Stroke stroke;
