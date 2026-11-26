@@ -118,11 +118,39 @@ void ControlInventory(const std::filesystem::path& scratch) {
     cnote::ui::SettingsDialogQt dialog(settings, s::SettingsStoreQt(scratch / "settings.ini"), nullptr);
 
     auto* tabs = Find<QTabWidget>(dialog, "categoryTabs");
-    Check(tabs != nullptr && tabs->count() == 3, "three settings categories");
-    if (tabs != nullptr && tabs->count() == 3) {
-        Check(tabs->tabText(0) == QStringLiteral("Palette"), "category 1 is Palette");
-        Check(tabs->tabText(1) == QStringLiteral("Drawing"), "category 2 is Drawing");
-        Check(tabs->tabText(2) == QStringLiteral("Shortcuts"), "category 3 is Shortcuts");
+    const QStringList categories {
+        QStringLiteral("Palette"), QStringLiteral("Drawing"), QStringLiteral("Sizes"),
+        QStringLiteral("View"), QStringLiteral("Documents"), QStringLiteral("Shortcuts"),
+    };
+    Check(tabs != nullptr && tabs->count() == categories.size(), "six settings categories");
+    if (tabs != nullptr && tabs->count() == categories.size()) {
+        for (int index = 0; index < categories.size(); ++index) {
+            Check(tabs->tabText(index) == categories[index], "category " + categories[index].toStdString());
+        }
+        // Each control lives on the tab named for its category.
+        const std::pair<const char*, const char*> placements[] {
+            { "hexColorEdit", "Palette" },
+            { "stabilizationSlider", "Drawing" },
+            { "dashGapSlider", "Drawing" },
+            { "scratchToEraseCheck", "Drawing" },
+            { "quickSizeSliderMaxEdit", "Sizes" },
+            { "brushSizePresetEdit", "Sizes" },
+            { "textSizePresetEdit1", "Sizes" },
+            { "drawCursorKindCombo", "View" },
+            { "drawCursorSizeSlider", "View" },
+            { "autoHideToolbarCheck", "View" },
+            { "zoomPresetEdit1", "View" },
+            { "defaultPageSizeCombo", "Documents" },
+            { "autoSaveSlider", "Documents" },
+            { "embedProjectInPdfCheck", "Documents" },
+            { "shortcutList", "Shortcuts" },
+        };
+        for (const auto& [name, category] : placements) {
+            auto* control = Find<QWidget>(dialog, name);
+            QWidget* page = tabs->widget(static_cast<int>(categories.indexOf(QString::fromUtf8(category))));
+            Check(control != nullptr && page != nullptr && page->isAncestorOf(control),
+                std::string(name) + " is on the " + category + " tab");
+        }
     }
 
     auto* paletteList = Find<QListWidget>(dialog, "paletteList");
@@ -643,13 +671,14 @@ void TabOrderAndScreenshots(const std::filesystem::path& scratch) {
 
     auto* tabs = Find<QTabWidget>(dialog, "categoryTabs");
     const std::string paletteHash = ScreenshotHash(dialog, "palette");
-    tabs->setCurrentIndex(1);
-    QApplication::processEvents();
-    const std::string drawingHash = ScreenshotHash(dialog, "drawing");
-    tabs->setCurrentIndex(2);
-    QApplication::processEvents();
-    const std::string shortcutsHash = ScreenshotHash(dialog, "shortcuts");
-    Check(!paletteHash.empty() && paletteHash != drawingHash && drawingHash != shortcutsHash,
+    std::vector<std::string> hashes { paletteHash };
+    for (int index = 1; index < tabs->count(); ++index) {
+        tabs->setCurrentIndex(index);
+        QApplication::processEvents();
+        hashes.push_back(ScreenshotHash(dialog, tabs->tabText(index).toStdString().c_str()));
+    }
+    std::sort(hashes.begin(), hashes.end());
+    Check(!paletteHash.empty() && std::adjacent_find(hashes.begin(), hashes.end()) == hashes.end(),
         "each category renders a distinct screenshot");
 
     tabs->setCurrentIndex(0);

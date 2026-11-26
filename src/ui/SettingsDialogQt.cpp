@@ -8,6 +8,7 @@
 #include <QCoreApplication>
 #include <QEvent>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHideEvent>
 #include <QIcon>
@@ -93,15 +94,81 @@ void ClampSettings(settings::Settings& values) {
     values.textSizePreset = std::min(values.textSizePreset, settings::kTextSizePresetCount - 1U);
 }
 
-QWidget* MakeSliderRow(QSlider* slider, QLabel* label, QWidget* parent) {
+// Settings pages are a column of titled groups.  Every form label gets the same
+// minimum width so the fields of all groups on a page line up.
+constexpr int kFormLabelWidth = 140;
+constexpr int kValueLabelWidth = 64;
+constexpr int kNumberEditWidth = 72;
+
+QWidget* MakeSliderRow(QSlider* slider, QLabel* label, int labelWidth, QWidget* parent) {
     auto* row = new QWidget(parent);
+    row->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     auto* layout = new QHBoxLayout(row);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(8);
+    layout->setSpacing(10);
     layout->addWidget(slider, 1);
-    label->setMinimumWidth(150);
+    label->setMinimumWidth(labelWidth);
     layout->addWidget(label);
     return row;
+}
+
+QWidget* MakeNumberRow(QLineEdit* const* edits, std::size_t count, const char* namePrefix, QWidget* parent) {
+    auto* row = new QWidget(parent);
+    row->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    auto* layout = new QHBoxLayout(row);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(6);
+    for (std::size_t index = 0; index < count; ++index) {
+        edits[index]->setParent(row);
+        edits[index]->setObjectName(QStringLiteral("%1%2").arg(QString::fromUtf8(namePrefix)).arg(index + 1));
+        edits[index]->setMaxLength(8);
+        edits[index]->setFixedWidth(kNumberEditWidth);
+        layout->addWidget(edits[index]);
+    }
+    layout->addStretch(1);
+    return row;
+}
+
+QVBoxLayout* AddPage(QTabWidget* tabs, const QString& title, QWidget*& page) {
+    page = new QWidget(tabs);
+    auto* layout = new QVBoxLayout(page);
+    layout->setSpacing(12);
+    tabs->addTab(page, title);
+    return layout;
+}
+
+QGroupBox* AddGroup(QVBoxLayout* pageLayout, const QString& title, QWidget* page) {
+    auto* group = new QGroupBox(title, page);
+    pageLayout->addWidget(group);
+    return group;
+}
+
+QFormLayout* AddFormGroup(QVBoxLayout* pageLayout, const QString& title, QWidget* page) {
+    auto* form = new QFormLayout(AddGroup(pageLayout, title, page));
+    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    form->setHorizontalSpacing(16);
+    return form;
+}
+
+void AddFormRow(QFormLayout* form, const QString& text, QWidget* field) {
+    auto* label = new QLabel(text, form->parentWidget());
+    label->setMinimumWidth(kFormLabelWidth);
+    form->addRow(label, field);
+}
+
+QLabel* MakeValueLabel(const char* name, QWidget* parent) {
+    auto* label = new QLabel(parent);
+    label->setObjectName(QString::fromUtf8(name));
+    label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    return label;
+}
+
+QSlider* MakeSlider(const char* name, int minimum, int maximum, QWidget* parent) {
+    auto* slider = new QSlider(Qt::Horizontal, parent);
+    slider->setObjectName(QString::fromUtf8(name));
+    slider->setRange(minimum, maximum);
+    return slider;
 }
 
 }  // namespace
@@ -128,6 +195,7 @@ SettingsDialogQt::~SettingsDialogQt() {
 }
 
 void SettingsDialogQt::buildUi() {
+    setMinimumWidth(620);
     auto* root = new QVBoxLayout(this);
     categoryTabs_ = new QTabWidget(this);
     categoryTabs_->setObjectName(QStringLiteral("categoryTabs"));
@@ -135,76 +203,88 @@ void SettingsDialogQt::buildUi() {
 
     buildPalettePage();
     buildDrawingPage();
+    buildSizesPage();
+    buildViewPage();
+    buildDocumentsPage();
     buildShortcutsPage();
 }
 
 void SettingsDialogQt::buildPalettePage() {
-    auto* page = new QWidget(categoryTabs_);
-    auto* root = new QHBoxLayout(page);
+    QWidget* page = nullptr;
+    QVBoxLayout* pageLayout = AddPage(categoryTabs_, QStringLiteral("Palette"), page);
+    auto* columns = new QHBoxLayout();
+    columns->setSpacing(12);
+    pageLayout->addLayout(columns, 1);
 
-    paletteList_ = new QListWidget(page);
+    auto* colorsGroup = new QGroupBox(QStringLiteral("Colors"), page);
+    auto* colorsLayout = new QVBoxLayout(colorsGroup);
+    paletteList_ = new QListWidget(colorsGroup);
     paletteList_->setObjectName(QStringLiteral("paletteList"));
     paletteList_->setMinimumWidth(220);
-    root->addWidget(paletteList_, 1);
-
-    auto* column = new QVBoxLayout();
-    addColorButton_ = new QPushButton(QStringLiteral("Add Color"), page);
+    colorsLayout->addWidget(paletteList_, 1);
+    auto* colorButtons = new QHBoxLayout();
+    addColorButton_ = new QPushButton(QStringLiteral("Add Color"), colorsGroup);
     addColorButton_->setObjectName(QStringLiteral("addColorButton"));
-    removeColorButton_ = new QPushButton(QStringLiteral("Remove Color"), page);
+    removeColorButton_ = new QPushButton(QStringLiteral("Remove Color"), colorsGroup);
     removeColorButton_->setObjectName(QStringLiteral("removeColorButton"));
-    column->addWidget(addColorButton_);
-    column->addWidget(removeColorButton_);
+    colorButtons->addWidget(addColorButton_);
+    colorButtons->addWidget(removeColorButton_);
+    colorButtons->addStretch(1);
+    colorsLayout->addLayout(colorButtons);
+    columns->addWidget(colorsGroup, 1);
 
-    hexColorEdit_ = new QLineEdit(page);
+    auto* rightColumn = new QVBoxLayout();
+    rightColumn->setSpacing(12);
+    columns->addLayout(rightColumn, 1);
+
+    auto* editGroup = new QGroupBox(QStringLiteral("Edit Color"), page);
+    auto* editLayout = new QVBoxLayout(editGroup);
+    auto* hexRow = new QHBoxLayout();
+    hexRow->addWidget(new QLabel(QStringLiteral("Hex"), editGroup));
+    hexColorEdit_ = new QLineEdit(editGroup);
     hexColorEdit_->setObjectName(QStringLiteral("hexColorEdit"));
     hexColorEdit_->setMaxLength(10);
-    column->addWidget(hexColorEdit_);
+    hexRow->addWidget(hexColorEdit_, 1);
+    editLayout->addLayout(hexRow);
+    // These readouts name their slider ("Hue: 120 deg"), so they need the room.
+    constexpr int kHslLabelWidth = 110;
+    hueSlider_ = MakeSlider("hueSlider", 0, 360, editGroup);
+    hueLabel_ = MakeValueLabel("hueLabel", editGroup);
+    editLayout->addWidget(MakeSliderRow(hueSlider_, hueLabel_, kHslLabelWidth, editGroup));
+    saturationSlider_ = MakeSlider("saturationSlider", 0, 100, editGroup);
+    saturationLabel_ = MakeValueLabel("saturationLabel", editGroup);
+    editLayout->addWidget(MakeSliderRow(saturationSlider_, saturationLabel_, kHslLabelWidth, editGroup));
+    lightnessSlider_ = MakeSlider("lightnessSlider", 0, 100, editGroup);
+    lightnessLabel_ = MakeValueLabel("lightnessLabel", editGroup);
+    editLayout->addWidget(MakeSliderRow(lightnessSlider_, lightnessLabel_, kHslLabelWidth, editGroup));
+    rightColumn->addWidget(editGroup);
 
-    hueSlider_ = new QSlider(Qt::Horizontal, page);
-    hueSlider_->setObjectName(QStringLiteral("hueSlider"));
-    hueSlider_->setRange(0, 360);
-    hueLabel_ = new QLabel(page);
-    hueLabel_->setObjectName(QStringLiteral("hueLabel"));
-    column->addWidget(MakeSliderRow(hueSlider_, hueLabel_, page));
-
-    saturationSlider_ = new QSlider(Qt::Horizontal, page);
-    saturationSlider_->setObjectName(QStringLiteral("saturationSlider"));
-    saturationSlider_->setRange(0, 100);
-    saturationLabel_ = new QLabel(page);
-    saturationLabel_->setObjectName(QStringLiteral("saturationLabel"));
-    column->addWidget(MakeSliderRow(saturationSlider_, saturationLabel_, page));
-
-    lightnessSlider_ = new QSlider(Qt::Horizontal, page);
-    lightnessSlider_->setObjectName(QStringLiteral("lightnessSlider"));
-    lightnessSlider_->setRange(0, 100);
-    lightnessLabel_ = new QLabel(page);
-    lightnessLabel_->setObjectName(QStringLiteral("lightnessLabel"));
-    column->addWidget(MakeSliderRow(lightnessSlider_, lightnessLabel_, page));
-
-    auto* savedLayout = new QHBoxLayout();
-    savedPaletteNameEdit_ = new QLineEdit(page);
+    auto* savedGroup = new QGroupBox(QStringLiteral("Saved Palettes"), page);
+    auto* savedLayout = new QVBoxLayout(savedGroup);
+    auto* saveRow = new QHBoxLayout();
+    savedPaletteNameEdit_ = new QLineEdit(savedGroup);
     savedPaletteNameEdit_->setObjectName(QStringLiteral("savedPaletteNameEdit"));
     savedPaletteNameEdit_->setMaxLength(48);
     savedPaletteNameEdit_->setPlaceholderText(QStringLiteral("Palette name"));
-    savedLayout->addWidget(savedPaletteNameEdit_, 1);
-    savePaletteButton_ = new QPushButton(QStringLiteral("Save"), page);
+    saveRow->addWidget(savedPaletteNameEdit_, 1);
+    savePaletteButton_ = new QPushButton(QStringLiteral("Save"), savedGroup);
     savePaletteButton_->setObjectName(QStringLiteral("savePaletteButton"));
-    applyPaletteButton_ = new QPushButton(QStringLiteral("Apply"), page);
-    applyPaletteButton_->setObjectName(QStringLiteral("applyPaletteButton"));
-    deletePaletteButton_ = new QPushButton(QStringLiteral("Delete"), page);
-    deletePaletteButton_->setObjectName(QStringLiteral("deletePaletteButton"));
-    savedLayout->addWidget(savePaletteButton_);
-    savedLayout->addWidget(applyPaletteButton_);
-    savedLayout->addWidget(deletePaletteButton_);
-    column->addLayout(savedLayout);
-
-    savedPaletteList_ = new QListWidget(page);
+    saveRow->addWidget(savePaletteButton_);
+    savedLayout->addLayout(saveRow);
+    savedPaletteList_ = new QListWidget(savedGroup);
     savedPaletteList_->setObjectName(QStringLiteral("savedPaletteList"));
     savedPaletteList_->setMinimumHeight(120);
-    column->addWidget(savedPaletteList_);
-    root->addLayout(column, 1);
-
-    categoryTabs_->addTab(page, QStringLiteral("Palette"));
+    savedLayout->addWidget(savedPaletteList_, 1);
+    auto* savedButtons = new QHBoxLayout();
+    savedButtons->addStretch(1);
+    applyPaletteButton_ = new QPushButton(QStringLiteral("Apply"), savedGroup);
+    applyPaletteButton_->setObjectName(QStringLiteral("applyPaletteButton"));
+    deletePaletteButton_ = new QPushButton(QStringLiteral("Delete"), savedGroup);
+    deletePaletteButton_->setObjectName(QStringLiteral("deletePaletteButton"));
+    savedButtons->addWidget(applyPaletteButton_);
+    savedButtons->addWidget(deletePaletteButton_);
+    savedLayout->addLayout(savedButtons);
+    rightColumn->addWidget(savedGroup, 1);
 
     connect(paletteList_, &QListWidget::currentRowChanged, this, [this](int) {
         if (refreshing_) {
@@ -230,215 +310,87 @@ void SettingsDialogQt::buildPalettePage() {
     connect(savedPaletteList_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem*) { applySelectedNamedPalette(); });
 }
 
+// Connects a slider whose value is `field * scale` in the settings model.
+void SettingsDialogQt::connectScaledSlider(QSlider* slider, float settings::Settings::*field, float scale) {
+    connect(slider, &QSlider::valueChanged, this, [this, field, scale](int value) {
+        if (refreshing_) return;
+        settings::Settings candidate = settings_;
+        candidate.*field = static_cast<float>(value) / scale;
+        persist(std::move(candidate));
+        refreshOptionControls();
+    });
+}
+
+void SettingsDialogQt::connectCheck(QCheckBox* check, bool settings::Settings::*field) {
+    connect(check, &QCheckBox::toggled, this, [this, field](bool checked) {
+        if (refreshing_) return;
+        settings::Settings candidate = settings_;
+        candidate.*field = checked;
+        persist(std::move(candidate));
+        refreshOptionControls();
+    });
+}
+
 void SettingsDialogQt::buildDrawingPage() {
-    auto* page = new QWidget(categoryTabs_);
-    auto* form = new QFormLayout(page);
+    QWidget* page = nullptr;
+    QVBoxLayout* pageLayout = AddPage(categoryTabs_, QStringLiteral("Drawing"), page);
 
-    stabilizationSlider_ = new QSlider(Qt::Horizontal, page);
-    stabilizationSlider_->setObjectName(QStringLiteral("stabilizationSlider"));
-    stabilizationSlider_->setRange(5, 95);
-    stabilizationLabel_ = new QLabel(page);
-    stabilizationLabel_->setObjectName(QStringLiteral("stabilizationLabel"));
-    form->addRow(QStringLiteral("Stabilization"), MakeSliderRow(stabilizationSlider_, stabilizationLabel_, page));
+    QFormLayout* stroke = AddFormGroup(pageLayout, QStringLiteral("Stroke"), page);
+    stabilizationSlider_ = MakeSlider("stabilizationSlider", 5, 95, page);
+    stabilizationLabel_ = MakeValueLabel("stabilizationLabel", page);
+    AddFormRow(stroke, QStringLiteral("Stabilization"), MakeSliderRow(stabilizationSlider_, stabilizationLabel_, kValueLabelWidth, page));
+    spacingSlider_ = MakeSlider("spacingSlider", 5, 405, page);
+    spacingLabel_ = MakeValueLabel("spacingLabel", page);
+    AddFormRow(stroke, QStringLiteral("Point Spacing"), MakeSliderRow(spacingSlider_, spacingLabel_, kValueLabelWidth, page));
+    strokeSmoothingSlider_ = MakeSlider("strokeSmoothingSlider", 0, 100, page);
+    strokeSmoothingLabel_ = MakeValueLabel("strokeSmoothingLabel", page);
+    AddFormRow(stroke, QStringLiteral("Stroke Smoothing"), MakeSliderRow(strokeSmoothingSlider_, strokeSmoothingLabel_, kValueLabelWidth, page));
 
-    spacingSlider_ = new QSlider(Qt::Horizontal, page);
-    spacingSlider_->setObjectName(QStringLiteral("spacingSlider"));
-    spacingSlider_->setRange(5, 405);
-    spacingLabel_ = new QLabel(page);
-    spacingLabel_->setObjectName(QStringLiteral("spacingLabel"));
-    form->addRow(QStringLiteral("Spacing"), MakeSliderRow(spacingSlider_, spacingLabel_, page));
+    QFormLayout* dashes = AddFormGroup(pageLayout, QStringLiteral("Dashed Lines"), page);
+    dashLengthSlider_ = MakeSlider("dashLengthSlider", 5, 80, page);
+    dashLengthLabel_ = MakeValueLabel("dashLengthLabel", page);
+    AddFormRow(dashes, QStringLiteral("Dash Length"), MakeSliderRow(dashLengthSlider_, dashLengthLabel_, kValueLabelWidth, page));
+    dashGapSlider_ = MakeSlider("dashGapSlider", 5, 80, page);
+    dashGapLabel_ = MakeValueLabel("dashGapLabel", page);
+    AddFormRow(dashes, QStringLiteral("Dash Gap"), MakeSliderRow(dashGapSlider_, dashGapLabel_, kValueLabelWidth, page));
 
-    strokeSmoothingSlider_ = new QSlider(Qt::Horizontal, page);
-    strokeSmoothingSlider_->setObjectName(QStringLiteral("strokeSmoothingSlider"));
-    strokeSmoothingSlider_->setRange(0, 100);
-    strokeSmoothingLabel_ = new QLabel(page);
-    strokeSmoothingLabel_->setObjectName(QStringLiteral("strokeSmoothingLabel"));
-    form->addRow(QStringLiteral("Stroke Smoothing"), MakeSliderRow(strokeSmoothingSlider_, strokeSmoothingLabel_, page));
-
-    drawCursorKindCombo_ = new QComboBox(page);
-    drawCursorKindCombo_->setObjectName(QStringLiteral("drawCursorKindCombo"));
-    drawCursorKindCombo_->addItem(QStringLiteral("Dot"));
-    drawCursorKindCombo_->addItem(QStringLiteral("Precision Crosshair"));
-    form->addRow(QStringLiteral("Draw Cursor"), drawCursorKindCombo_);
-
-    defaultPageSizeCombo_ = new QComboBox(page);
-    defaultPageSizeCombo_->setObjectName(QStringLiteral("defaultPageSizeCombo"));
-    for (const DimensionPreset& preset : DimensionPresets()) {
-        defaultPageSizeCombo_->addItem(QString::fromUtf8(preset.label));
-    }
-    form->addRow(QStringLiteral("Default Page Size"), defaultPageSizeCombo_);
-
-    drawCursorSizeSlider_ = new QSlider(Qt::Horizontal, page);
-    drawCursorSizeSlider_->setObjectName(QStringLiteral("drawCursorSizeSlider"));
-    drawCursorSizeSlider_->setRange(4, 24);
-    drawCursorSizeLabel_ = new QLabel(page);
-    drawCursorSizeLabel_->setObjectName(QStringLiteral("drawCursorSizeLabel"));
-    form->addRow(QStringLiteral("Draw Cursor Size"), MakeSliderRow(drawCursorSizeSlider_, drawCursorSizeLabel_, page));
-
-    dashLengthSlider_ = new QSlider(Qt::Horizontal, page);
-    dashLengthSlider_->setObjectName(QStringLiteral("dashLengthSlider"));
-    dashLengthSlider_->setRange(5, 80);
-    dashLengthLabel_ = new QLabel(page);
-    dashLengthLabel_->setObjectName(QStringLiteral("dashLengthLabel"));
-    form->addRow(QStringLiteral("Dash Length"), MakeSliderRow(dashLengthSlider_, dashLengthLabel_, page));
-
-    dashGapSlider_ = new QSlider(Qt::Horizontal, page);
-    dashGapSlider_->setObjectName(QStringLiteral("dashGapSlider"));
-    dashGapSlider_->setRange(5, 80);
-    dashGapLabel_ = new QLabel(page);
-    dashGapLabel_->setObjectName(QStringLiteral("dashGapLabel"));
-    form->addRow(QStringLiteral("Dash Gap"), MakeSliderRow(dashGapSlider_, dashGapLabel_, page));
-
-    autoSaveSlider_ = new QSlider(Qt::Horizontal, page);
-    autoSaveSlider_->setObjectName(QStringLiteral("autoSaveSlider"));
-    autoSaveSlider_->setRange(0, 300);
-    autoSaveSlider_->setSingleStep(15);
-    autoSaveSlider_->setPageStep(15);
-    autoSaveLabel_ = new QLabel(page);
-    autoSaveLabel_->setObjectName(QStringLiteral("autoSaveLabel"));
-    form->addRow(QStringLiteral("Auto Save"), MakeSliderRow(autoSaveSlider_, autoSaveLabel_, page));
-
+    QFormLayout* gestures = AddFormGroup(pageLayout, QStringLiteral("Gestures"), page);
     scratchToEraseCheck_ = new QCheckBox(QStringLiteral("Scratch out ink to erase it"), page);
     scratchToEraseCheck_->setObjectName(QStringLiteral("scratchToEraseCheck"));
-    form->addRow(QString(), scratchToEraseCheck_);
+    gestures->addRow(scratchToEraseCheck_);
+    pageLayout->addStretch(1);
 
-    autoHideToolbarCheck_ = new QCheckBox(QStringLiteral("Auto-hide toolbar"), page);
-    autoHideToolbarCheck_->setObjectName(QStringLiteral("autoHideToolbarCheck"));
-    form->addRow(QString(), autoHideToolbarCheck_);
+    connectScaledSlider(stabilizationSlider_, &settings::Settings::inputSmoothing, 100.0f);
+    connectScaledSlider(spacingSlider_, &settings::Settings::inputSpacing, 100.0f);
+    connectScaledSlider(strokeSmoothingSlider_, &settings::Settings::strokeSmoothing, 100.0f);
+    connectScaledSlider(dashLengthSlider_, &settings::Settings::dashLength, 10.0f);
+    connectScaledSlider(dashGapSlider_, &settings::Settings::dashGap, 10.0f);
+    connectCheck(scratchToEraseCheck_, &settings::Settings::scratchToErase);
+}
 
-    embedProjectInPdfCheck_ = new QCheckBox(QStringLiteral("Embed project in exported PDFs"), page);
-    embedProjectInPdfCheck_->setObjectName(QStringLiteral("embedProjectInPdfCheck"));
-    form->addRow(QString(), embedProjectInPdfCheck_);
+void SettingsDialogQt::buildSizesPage() {
+    QWidget* page = nullptr;
+    QVBoxLayout* pageLayout = AddPage(categoryTabs_, QStringLiteral("Sizes"), page);
 
-    auto* zoomRow = new QWidget(page);
-    auto* zoomLayout = new QHBoxLayout(zoomRow);
-    zoomLayout->setContentsMargins(0, 0, 0, 0);
-    zoomLayout->setSpacing(6);
-    for (std::size_t index = 0; index < settings::kZoomPresetCount; ++index) {
-        zoomPresetEdits_[index] = new QLineEdit(zoomRow);
-        zoomPresetEdits_[index]->setObjectName(QStringLiteral("zoomPresetEdit%1").arg(index + 1));
-        zoomPresetEdits_[index]->setMaxLength(8);
-        zoomPresetEdits_[index]->setFixedWidth(72);
-        zoomLayout->addWidget(zoomPresetEdits_[index]);
-    }
-    zoomLayout->addStretch(1);
-    form->addRow(QStringLiteral("Zoom Presets (%)"), zoomRow);
-
+    QFormLayout* brush = AddFormGroup(pageLayout, QStringLiteral("Brush"), page);
     quickSizeSliderMaxEdit_ = new QLineEdit(page);
     quickSizeSliderMaxEdit_->setObjectName(QStringLiteral("quickSizeSliderMaxEdit"));
     quickSizeSliderMaxEdit_->setMaxLength(8);
-    form->addRow(QStringLiteral("Quick Size Max"), quickSizeSliderMaxEdit_);
-
+    quickSizeSliderMaxEdit_->setFixedWidth(kNumberEditWidth);
+    AddFormRow(brush, QStringLiteral("Quick Size Max"), quickSizeSliderMaxEdit_);
     brushSizePresetEdit_ = new QLineEdit(page);
     brushSizePresetEdit_->setObjectName(QStringLiteral("brushSizePresetEdit"));
     brushSizePresetEdit_->setMaxLength(96);
-    form->addRow(QStringLiteral("Brush Size Presets"), brushSizePresetEdit_);
-    auto* textSizeRow = new QWidget(page);
-    auto* textSizeLayout = new QHBoxLayout(textSizeRow);
-    textSizeLayout->setContentsMargins(0, 0, 0, 0);
-    textSizeLayout->setSpacing(6);
-    for (std::size_t index = 0; index < settings::kTextSizePresetCount; ++index) {
-        textSizePresetEdits_[index] = new QLineEdit(textSizeRow);
-        textSizePresetEdits_[index]->setObjectName(QStringLiteral("textSizePresetEdit%1").arg(index + 1));
-        textSizePresetEdits_[index]->setMaxLength(8);
-        textSizePresetEdits_[index]->setFixedWidth(72);
-        textSizeLayout->addWidget(textSizePresetEdits_[index]);
-    }
-    textSizeLayout->addStretch(1);
-    form->addRow(QStringLiteral("Text Sizes (S/M/L)"), textSizeRow);
+    AddFormRow(brush, QStringLiteral("Size Presets"), brushSizePresetEdit_);
 
-    categoryTabs_->addTab(page, QStringLiteral("Drawing"));
-
-    connect(stabilizationSlider_, &QSlider::valueChanged, this, [this](int value) {
-        if (refreshing_) return;
-        settings::Settings candidate = settings_;
-        candidate.inputSmoothing = static_cast<float>(value) / 100.0f;
-        persist(std::move(candidate));
-        refreshDrawingControls();
-    });
-    connect(spacingSlider_, &QSlider::valueChanged, this, [this](int value) {
-        if (refreshing_) return;
-        settings::Settings candidate = settings_;
-        candidate.inputSpacing = static_cast<float>(value) / 100.0f;
-        persist(std::move(candidate));
-        refreshDrawingControls();
-    });
-    connect(strokeSmoothingSlider_, &QSlider::valueChanged, this, [this](int value) {
-        if (refreshing_) return;
-        settings::Settings candidate = settings_;
-        candidate.strokeSmoothing = static_cast<float>(value) / 100.0f;
-        persist(std::move(candidate));
-        refreshDrawingControls();
-    });
-    connect(drawCursorSizeSlider_, &QSlider::valueChanged, this, [this](int value) {
-        if (refreshing_) return;
-        settings::Settings candidate = settings_;
-        candidate.drawCursorSize = static_cast<float>(value);
-        persist(std::move(candidate));
-        refreshDrawingControls();
-    });
-    connect(dashLengthSlider_, &QSlider::valueChanged, this, [this](int value) {
-        if (refreshing_) return;
-        settings::Settings candidate = settings_;
-        candidate.dashLength = static_cast<float>(value) / 10.0f;
-        persist(std::move(candidate));
-        refreshDrawingControls();
-    });
-    connect(dashGapSlider_, &QSlider::valueChanged, this, [this](int value) {
-        if (refreshing_) return;
-        settings::Settings candidate = settings_;
-        candidate.dashGap = static_cast<float>(value) / 10.0f;
-        persist(std::move(candidate));
-        refreshDrawingControls();
-    });
-    connect(autoSaveSlider_, &QSlider::valueChanged, this, [this](int) {
-        if (refreshing_) return;
-        applyAutoSaveSlider();
-    });
-    connect(autoHideToolbarCheck_, &QCheckBox::toggled, this, [this](bool checked) {
-        if (refreshing_) return;
-        settings::Settings candidate = settings_;
-        candidate.autoHideToolbar = checked;
-        persist(std::move(candidate));
-        refreshDrawingControls();
-    });
-    connect(embedProjectInPdfCheck_, &QCheckBox::toggled, this, [this](bool checked) {
-        if (refreshing_) return;
-        settings::Settings candidate = settings_;
-        candidate.embedProjectInExportedPdfs = checked;
-        persist(std::move(candidate));
-        refreshDrawingControls();
-    });
-    connect(scratchToEraseCheck_, &QCheckBox::toggled, this, [this](bool checked) {
-        if (refreshing_) return;
-        settings::Settings candidate = settings_;
-        candidate.scratchToErase = checked;
-        persist(std::move(candidate));
-        refreshDrawingControls();
-    });
-    connect(drawCursorKindCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
-        if (refreshing_) return;
-        settings::Settings candidate = settings_;
-        candidate.drawCursorKind = index == 1 ? settings::DrawCursorKind::PrecisionCrosshair : settings::DrawCursorKind::Dot;
-        persist(std::move(candidate));
-        refreshDrawingControls();
-    });
-    connect(defaultPageSizeCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
-        if (refreshing_) return;
-        if (index < 0 || static_cast<std::size_t>(index) >= DimensionPresets().size()) {
-            refreshDrawingControls();
-            return;
-        }
-        settings::Settings candidate = settings_;
-        candidate.defaultPageSizePreset = static_cast<std::size_t>(index);
-        persist(std::move(candidate));
-        refreshDrawingControls();
-    });
-    for (std::size_t index = 0; index < settings::kZoomPresetCount; ++index) {
-        connect(zoomPresetEdits_[index], &QLineEdit::editingFinished, this, [this, index] {
-            applyZoomPresetEdit(zoomPresetEdits_[index], index, true);
-        });
+    QFormLayout* text = AddFormGroup(pageLayout, QStringLiteral("Text"), page);
+    for (QLineEdit*& edit : textSizePresetEdits_) {
+        edit = new QLineEdit(page);
     }
+    AddFormRow(text, QStringLiteral("Small / Medium / Large"),
+        MakeNumberRow(textSizePresetEdits_, settings::kTextSizePresetCount, "textSizePresetEdit", page));
+    pageLayout->addStretch(1);
+
     connect(quickSizeSliderMaxEdit_, &QLineEdit::editingFinished, this, [this] { applyQuickSizeSliderMaxEdit(true); });
     connect(brushSizePresetEdit_, &QLineEdit::editingFinished, this, [this] { applyBrushSizePresetEdit(true); });
     for (std::size_t index = 0; index < settings::kTextSizePresetCount; ++index) {
@@ -446,6 +398,92 @@ void SettingsDialogQt::buildDrawingPage() {
             applyTextSizePresetEdit(textSizePresetEdits_[index], index, true);
         });
     }
+}
+
+void SettingsDialogQt::buildViewPage() {
+    QWidget* page = nullptr;
+    QVBoxLayout* pageLayout = AddPage(categoryTabs_, QStringLiteral("View"), page);
+
+    QFormLayout* cursor = AddFormGroup(pageLayout, QStringLiteral("Cursor"), page);
+    drawCursorKindCombo_ = new QComboBox(page);
+    drawCursorKindCombo_->setObjectName(QStringLiteral("drawCursorKindCombo"));
+    drawCursorKindCombo_->addItem(QStringLiteral("Dot"));
+    drawCursorKindCombo_->addItem(QStringLiteral("Precision Crosshair"));
+    AddFormRow(cursor, QStringLiteral("Draw Cursor"), drawCursorKindCombo_);
+    drawCursorSizeSlider_ = MakeSlider("drawCursorSizeSlider", 4, 24, page);
+    drawCursorSizeLabel_ = MakeValueLabel("drawCursorSizeLabel", page);
+    AddFormRow(cursor, QStringLiteral("Dot Size"), MakeSliderRow(drawCursorSizeSlider_, drawCursorSizeLabel_, kValueLabelWidth, page));
+
+    QFormLayout* toolbar = AddFormGroup(pageLayout, QStringLiteral("Toolbar"), page);
+    autoHideToolbarCheck_ = new QCheckBox(QStringLiteral("Auto-hide toolbar"), page);
+    autoHideToolbarCheck_->setObjectName(QStringLiteral("autoHideToolbarCheck"));
+    toolbar->addRow(autoHideToolbarCheck_);
+
+    QFormLayout* zoom = AddFormGroup(pageLayout, QStringLiteral("Zoom"), page);
+    for (QLineEdit*& edit : zoomPresetEdits_) {
+        edit = new QLineEdit(page);
+    }
+    AddFormRow(zoom, QStringLiteral("Presets (%)"),
+        MakeNumberRow(zoomPresetEdits_, settings::kZoomPresetCount, "zoomPresetEdit", page));
+    pageLayout->addStretch(1);
+
+    connect(drawCursorKindCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (refreshing_) return;
+        settings::Settings candidate = settings_;
+        candidate.drawCursorKind = index == 1 ? settings::DrawCursorKind::PrecisionCrosshair : settings::DrawCursorKind::Dot;
+        persist(std::move(candidate));
+        refreshOptionControls();
+    });
+    connectScaledSlider(drawCursorSizeSlider_, &settings::Settings::drawCursorSize, 1.0f);
+    connectCheck(autoHideToolbarCheck_, &settings::Settings::autoHideToolbar);
+    for (std::size_t index = 0; index < settings::kZoomPresetCount; ++index) {
+        connect(zoomPresetEdits_[index], &QLineEdit::editingFinished, this, [this, index] {
+            applyZoomPresetEdit(zoomPresetEdits_[index], index, true);
+        });
+    }
+}
+
+void SettingsDialogQt::buildDocumentsPage() {
+    QWidget* page = nullptr;
+    QVBoxLayout* pageLayout = AddPage(categoryTabs_, QStringLiteral("Documents"), page);
+
+    QFormLayout* newPages = AddFormGroup(pageLayout, QStringLiteral("New Pages"), page);
+    defaultPageSizeCombo_ = new QComboBox(page);
+    defaultPageSizeCombo_->setObjectName(QStringLiteral("defaultPageSizeCombo"));
+    for (const DimensionPreset& preset : DimensionPresets()) {
+        defaultPageSizeCombo_->addItem(QString::fromUtf8(preset.label));
+    }
+    AddFormRow(newPages, QStringLiteral("Default Page Size"), defaultPageSizeCombo_);
+
+    QFormLayout* saving = AddFormGroup(pageLayout, QStringLiteral("Saving"), page);
+    autoSaveSlider_ = MakeSlider("autoSaveSlider", 0, 300, page);
+    autoSaveSlider_->setSingleStep(15);
+    autoSaveSlider_->setPageStep(15);
+    autoSaveLabel_ = MakeValueLabel("autoSaveLabel", page);
+    AddFormRow(saving, QStringLiteral("Auto Save"), MakeSliderRow(autoSaveSlider_, autoSaveLabel_, kValueLabelWidth, page));
+
+    QFormLayout* pdf = AddFormGroup(pageLayout, QStringLiteral("PDF Export"), page);
+    embedProjectInPdfCheck_ = new QCheckBox(QStringLiteral("Embed project in exported PDFs"), page);
+    embedProjectInPdfCheck_->setObjectName(QStringLiteral("embedProjectInPdfCheck"));
+    pdf->addRow(embedProjectInPdfCheck_);
+    pageLayout->addStretch(1);
+
+    connect(defaultPageSizeCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (refreshing_) return;
+        if (index < 0 || static_cast<std::size_t>(index) >= DimensionPresets().size()) {
+            refreshOptionControls();
+            return;
+        }
+        settings::Settings candidate = settings_;
+        candidate.defaultPageSizePreset = static_cast<std::size_t>(index);
+        persist(std::move(candidate));
+        refreshOptionControls();
+    });
+    connect(autoSaveSlider_, &QSlider::valueChanged, this, [this](int) {
+        if (refreshing_) return;
+        applyAutoSaveSlider();
+    });
+    connectCheck(embedProjectInPdfCheck_, &settings::Settings::embedProjectInExportedPdfs);
 }
 
 void SettingsDialogQt::buildShortcutsPage() {
@@ -498,7 +536,7 @@ void SettingsDialogQt::refreshFromSettings() {
     refreshPaletteControls(true);
     refreshSavedPalettes();
     refreshSavedPaletteButtons();
-    refreshDrawingControls();
+    refreshOptionControls();
     refreshShortcutList();
     refreshShortcutButtons();
     refreshing_ = false;
@@ -571,7 +609,7 @@ void SettingsDialogQt::refreshSavedPaletteButtons() {
     deletePaletteButton_->setEnabled(hasSelection);
 }
 
-void SettingsDialogQt::refreshDrawingControls() {
+void SettingsDialogQt::refreshOptionControls() {
     const QSignalBlocker blockStabilization(stabilizationSlider_);
     const QSignalBlocker blockSpacing(spacingSlider_);
     const QSignalBlocker blockStrokeSmoothing(strokeSmoothingSlider_);
@@ -599,12 +637,12 @@ void SettingsDialogQt::refreshDrawingControls() {
     embedProjectInPdfCheck_->setChecked(settings_.embedProjectInExportedPdfs);
     scratchToEraseCheck_->setChecked(settings_.scratchToErase);
 
-    stabilizationLabel_->setText(FormatFloatSliderLabel(QStringLiteral("Stabilization"), settings_.inputSmoothing, 100));
+    stabilizationLabel_->setText(FormatFloatSliderLabel(settings_.inputSmoothing, 100));
     spacingLabel_->setText(FormatSpacingLabel(settings_.inputSpacing));
-    strokeSmoothingLabel_->setText(FormatFloatSliderLabel(QStringLiteral("Stroke Smoothing"), settings_.strokeSmoothing, 100));
-    drawCursorSizeLabel_->setText(FormatPixelLabel(QStringLiteral("Draw Cursor Size"), settings_.drawCursorSize));
-    dashLengthLabel_->setText(FormatDashLabel(QStringLiteral("Dash Length"), settings_.dashLength));
-    dashGapLabel_->setText(FormatDashLabel(QStringLiteral("Dash Gap"), settings_.dashGap));
+    strokeSmoothingLabel_->setText(FormatFloatSliderLabel(settings_.strokeSmoothing, 100));
+    drawCursorSizeLabel_->setText(FormatPixelLabel(settings_.drawCursorSize));
+    dashLengthLabel_->setText(FormatDashLabel(settings_.dashLength));
+    dashGapLabel_->setText(FormatDashLabel(settings_.dashGap));
     autoSaveLabel_->setText(FormatAutoSaveLabel(DecodeAutoSaveInterval(settings_.autoSaveIntervalSeconds)));
 
     const bool dotCursor = settings_.drawCursorKind == settings::DrawCursorKind::Dot;

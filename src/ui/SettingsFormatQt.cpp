@@ -170,20 +170,20 @@ QString FormatPercentLabel(const QString& prefix, int value) {
     return QStringLiteral("%1: %2%").arg(prefix).arg(value);
 }
 
-QString FormatFloatSliderLabel(const QString& prefix, float value, int multiplier) {
-    return QStringLiteral("%1: %2").arg(prefix).arg(static_cast<int>(std::lround(value * static_cast<float>(multiplier))));
+QString FormatFloatSliderLabel(float value, int multiplier) {
+    return QString::number(std::lround(value * static_cast<float>(multiplier)));
 }
 
 QString FormatSpacingLabel(float spacing) {
-    return QStringLiteral("Point Spacing: %1").arg(static_cast<double>(spacing), 0, 'f', 2);
+    return QString::number(static_cast<double>(spacing), 'f', 2);
 }
 
-QString FormatDashLabel(const QString& prefix, float value) {
-    return QStringLiteral("%1: %2x").arg(prefix).arg(static_cast<double>(value), 0, 'f', 1);
+QString FormatDashLabel(float value) {
+    return QStringLiteral("%1x").arg(static_cast<double>(value), 0, 'f', 1);
 }
 
-QString FormatPixelLabel(const QString& prefix, float value) {
-    return QStringLiteral("%1: %2 px").arg(prefix).arg(static_cast<double>(value), 0, 'f', 0);
+QString FormatPixelLabel(float value) {
+    return QStringLiteral("%1 px").arg(static_cast<double>(value), 0, 'f', 0);
 }
 
 std::optional<unsigned int> DecodeAutoSaveInterval(unsigned int seconds) {
@@ -210,17 +210,14 @@ float EncodeZoomPreset(std::optional<float> zoom) {
 
 QString FormatAutoSaveLabel(std::optional<unsigned int> seconds) {
     if (!seconds.has_value()) {
-        return QStringLiteral("Auto Save: Off");
+        return QStringLiteral("Off");
     }
     const unsigned int value = *seconds;
-    if (value < 60U) {
-        return QStringLiteral("Auto Save: %1 sec").arg(value);
-    }
-    if (value % 60U == 0U) {
+    if (value >= 60U && value % 60U == 0U) {
         const unsigned int minutes = value / 60U;
-        return QStringLiteral("Auto Save: %1 %2").arg(minutes).arg(minutes == 1U ? QStringLiteral("min") : QStringLiteral("mins"));
+        return QStringLiteral("%1 %2").arg(minutes).arg(minutes == 1U ? QStringLiteral("min") : QStringLiteral("mins"));
     }
-    return QStringLiteral("Auto Save: %1 sec").arg(value);
+    return QStringLiteral("%1 sec").arg(value);
 }
 
 QString FormatZoomPresetValue(std::optional<float> zoom) {
