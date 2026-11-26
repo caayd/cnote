@@ -129,6 +129,11 @@ public:
     // App::EraserRadiusPixels App.cpp:7426-7428).  It sizes both the round
     // erase cursor and the erase hit-test radius.
     void SetEraseBrushSize(float brushSize);
+    // Leaves the canvas around the pages transparent instead of painting the
+    // reference backdrop colour, so the window's backdrop shows through
+    // (settings canvas_backdrop, ui::ApplyWindowBackdrop).
+    void SetTransparentBackdrop(bool transparent);
+    [[nodiscard]] bool TransparentBackdrop() const { return transparentBackdrop_; }
     // Builds the sample the Qt event handlers feed to the router.
     [[nodiscard]] PointerSample SampleFromEvent(const QMouseEvent& event);
 
@@ -537,6 +542,7 @@ private:
     settings::DrawCursorKind drawCursorKind_ = settings::DrawCursorKind::Dot;
     float drawCursorSize_ = 8.0f;
     std::uint32_t drawCursorColor_ = 0xFF000000U;
+    bool transparentBackdrop_ = false;
     std::optional<QCursor> drawCursor_ {};
     qreal drawCursorDevicePixelRatio_ = 0.0;
     // Eraser brush size in logical pixels, defaulting as settings::Settings

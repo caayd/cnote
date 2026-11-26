@@ -138,6 +138,7 @@ void ControlInventory(const std::filesystem::path& scratch) {
             { "textSizePresetEdit1", "Sizes" },
             { "drawCursorKindCombo", "View" },
             { "drawCursorSizeSlider", "View" },
+            { "canvasBackdropCombo", "View" },
             { "autoHideToolbarCheck", "View" },
             { "zoomPresetEdit1", "View" },
             { "defaultPageSizeCombo", "Documents" },
@@ -361,6 +362,13 @@ void DrawingOperations(const std::filesystem::path& scratch) {
     Check(settings.drawCursorKind == s::DrawCursorKind::Dot, "cursor kind combo restores the dot");
     Check(cursorSize->isEnabled(), "cursor size re-enables for the dot");
 
+    auto* backdrop = Find<QComboBox>(dialog, "canvasBackdropCombo");
+    backdrop->setCurrentIndex(static_cast<int>(s::CanvasBackdrop::Acrylic));
+    Check(settings.canvasBackdrop == s::CanvasBackdrop::Acrylic, "backdrop combo selects acrylic");
+    backdrop->setCurrentIndex(static_cast<int>(s::CanvasBackdrop::Solid));
+    Check(settings.canvasBackdrop == s::CanvasBackdrop::Solid, "backdrop combo restores solid");
+    backdrop->setCurrentIndex(static_cast<int>(s::CanvasBackdrop::Transparent));
+
     auto* pageSize = Find<QComboBox>(dialog, "defaultPageSizeCombo");
     pageSize->setCurrentIndex(5);
     Check(settings.defaultPageSizePreset == 5U, "default page size selection applies");
@@ -422,6 +430,7 @@ void DrawingOperations(const std::filesystem::path& scratch) {
     Check(reloaded.zoomPresets == settings.zoomPresets, "zoom presets persisted");
     Check(reloaded.defaultPageSizePreset == settings.defaultPageSizePreset, "default page size preset persisted");
     Check(reloaded.autoHideToolbar && !reloaded.embedProjectInExportedPdfs && !reloaded.scratchToErase, "toggles persisted");
+    Check(reloaded.canvasBackdrop == s::CanvasBackdrop::Transparent, "canvas backdrop persisted");
 }
 
 // 4. Shortcut capture, duplicate clearing, Escape.

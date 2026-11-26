@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <array>
@@ -248,6 +249,8 @@ private:
 
     settings::SettingsStoreQt settingsStore_;
     settings::Settings settings_ {};
+    // The canvas_backdrop last handed to ui::ApplyWindowBackdrop.
+    std::optional<settings::CanvasBackdrop> appliedBackdrop_ {};
     settings::Tool activeTool_ = settings::Tool::Draw;
     std::vector<std::uint32_t> recentPageColors_ {};
     std::vector<QAction*> toolShortcutActions_ {};

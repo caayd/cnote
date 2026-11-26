@@ -190,6 +190,28 @@ std::optional<DrawCursorKind> ParseDrawCursorKindConfigName(std::string_view nam
     return std::nullopt;
 }
 
+const char* CanvasBackdropConfigName(CanvasBackdrop backdrop) {
+    switch (backdrop) {
+    case CanvasBackdrop::Transparent:
+        return "transparent";
+    case CanvasBackdrop::Acrylic:
+        return "acrylic";
+    case CanvasBackdrop::Solid:
+    default:
+        return "solid";
+    }
+}
+
+std::optional<CanvasBackdrop> ParseCanvasBackdropConfigName(std::string_view name) {
+    for (const CanvasBackdrop backdrop :
+        { CanvasBackdrop::Solid, CanvasBackdrop::Transparent, CanvasBackdrop::Acrylic }) {
+        if (name == CanvasBackdropConfigName(backdrop)) {
+            return backdrop;
+        }
+    }
+    return std::nullopt;
+}
+
 const char* ToolConfigName(Tool tool) {
     switch (tool) {
     case Tool::Select:
@@ -826,6 +848,13 @@ Settings SettingsStoreQt::ParseText(std::string_view text) {
             continue;
         }
 
+        if (key == "canvas_backdrop") {
+            if (const auto parsed = ParseCanvasBackdropConfigName(value); parsed.has_value()) {
+                settings.canvasBackdrop = *parsed;
+            }
+            continue;
+        }
+
         if (key == "input_spacing") {
             if (const auto parsed = ParseFloat(value); parsed.has_value()) {
                 settings.inputSpacing = std::clamp(*parsed, 0.05f, 4.05f);
@@ -1035,6 +1064,7 @@ std::string SettingsStoreQt::Serialize(const Settings& settings) {
     output << "text_size_large=" << settings.textSizePresets[2] << '\n';
     output << "draw_cursor_kind=" << DrawCursorKindConfigName(settings.drawCursorKind) << '\n';
     output << "draw_cursor_size=" << settings.drawCursorSize << '\n';
+    output << "canvas_backdrop=" << CanvasBackdropConfigName(settings.canvasBackdrop) << '\n';
     output << "input_smoothing=" << settings.inputSmoothing << '\n';
     output << "input_spacing=" << settings.inputSpacing << '\n';
     output << "stroke_smoothing=" << settings.strokeSmoothing << '\n';

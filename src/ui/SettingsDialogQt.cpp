@@ -20,6 +20,7 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QStandardItemModel>
 #include <QTabWidget>
 #include <QVBoxLayout>
 
@@ -28,6 +29,7 @@
 #include <utility>
 
 #include "ui/SettingsFormatQt.h"
+#include "ui/WindowBackdropQt.h"
 
 namespace cnote::ui {
 
@@ -414,6 +416,24 @@ void SettingsDialogQt::buildViewPage() {
     drawCursorSizeLabel_ = MakeValueLabel("drawCursorSizeLabel", page);
     AddFormRow(cursor, QStringLiteral("Dot Size"), MakeSliderRow(drawCursorSizeSlider_, drawCursorSizeLabel_, kValueLabelWidth, page));
 
+    QFormLayout* canvas = AddFormGroup(pageLayout, QStringLiteral("Canvas"), page);
+    canvasBackdropCombo_ = new QComboBox(page);
+    canvasBackdropCombo_->setObjectName(QStringLiteral("canvasBackdropCombo"));
+    canvasBackdropCombo_->setToolTip(QStringLiteral(
+        "What shows around the pages. Transparent needs Windows; Acrylic needs Windows 11 22H2 or later."));
+    // Item index == settings::CanvasBackdrop value.
+    const std::pair<settings::CanvasBackdrop, QString> backdrops[] {
+        { settings::CanvasBackdrop::Solid, QStringLiteral("Solid") },
+        { settings::CanvasBackdrop::Transparent, QStringLiteral("Transparent") },
+        { settings::CanvasBackdrop::Acrylic, QStringLiteral("Acrylic (blurred)") },
+    };
+    auto* backdropModel = qobject_cast<QStandardItemModel*>(canvasBackdropCombo_->model());
+    for (const auto& [backdrop, label] : backdrops) {
+        canvasBackdropCombo_->addItem(label);
+        backdropModel->item(canvasBackdropCombo_->count() - 1)->setEnabled(WindowBackdropSupported(backdrop));
+    }
+    AddFormRow(canvas, QStringLiteral("Background"), canvasBackdropCombo_);
+
     QFormLayout* toolbar = AddFormGroup(pageLayout, QStringLiteral("Toolbar"), page);
     autoHideToolbarCheck_ = new QCheckBox(QStringLiteral("Auto-hide toolbar"), page);
     autoHideToolbarCheck_->setObjectName(QStringLiteral("autoHideToolbarCheck"));
@@ -433,6 +453,12 @@ void SettingsDialogQt::buildViewPage() {
         candidate.drawCursorKind = index == 1 ? settings::DrawCursorKind::PrecisionCrosshair : settings::DrawCursorKind::Dot;
         persist(std::move(candidate));
         refreshOptionControls();
+    });
+    connect(canvasBackdropCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (refreshing_ || index < 0) return;
+        settings::Settings candidate = settings_;
+        candidate.canvasBackdrop = static_cast<settings::CanvasBackdrop>(index);
+        persist(std::move(candidate));
     });
     connectScaledSlider(drawCursorSizeSlider_, &settings::Settings::drawCursorSize, 1.0f);
     connectCheck(autoHideToolbarCheck_, &settings::Settings::autoHideToolbar);
@@ -618,6 +644,7 @@ void SettingsDialogQt::refreshOptionControls() {
     const QSignalBlocker blockDashGap(dashGapSlider_);
     const QSignalBlocker blockAutoSave(autoSaveSlider_);
     const QSignalBlocker blockCursorKind(drawCursorKindCombo_);
+    const QSignalBlocker blockCanvasBackdrop(canvasBackdropCombo_);
     const QSignalBlocker blockDefaultPageSize(defaultPageSizeCombo_);
     const QSignalBlocker blockAutoHide(autoHideToolbarCheck_);
     const QSignalBlocker blockEmbed(embedProjectInPdfCheck_);
@@ -631,6 +658,7 @@ void SettingsDialogQt::refreshOptionControls() {
     dashGapSlider_->setValue(static_cast<int>(std::lround(settings_.dashGap * 10.0f)));
     autoSaveSlider_->setValue(static_cast<int>(settings_.autoSaveIntervalSeconds));
     drawCursorKindCombo_->setCurrentIndex(settings_.drawCursorKind == settings::DrawCursorKind::PrecisionCrosshair ? 1 : 0);
+    canvasBackdropCombo_->setCurrentIndex(static_cast<int>(settings_.canvasBackdrop));
     defaultPageSizeCombo_->setCurrentIndex(static_cast<int>(
         std::min(settings_.defaultPageSizePreset, DimensionPresets().size() - 1U)));
     autoHideToolbarCheck_->setChecked(settings_.autoHideToolbar);

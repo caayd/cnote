@@ -40,6 +40,7 @@
 #include "ui/SettingsFormatQt.h"
 #include "ui/SidebarWidget.h"
 #include "ui/ToolbarWidget.h"
+#include "ui/WindowBackdropQt.h"
 #include "ui/WindowBehaviorQt.h"
 
 #if defined(Q_OS_WIN)
@@ -276,6 +277,12 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
     // the document's file name once the session exists.
     setWindowTitle(QStringLiteral("cnote"));
     settings_ = settingsStore_.Load();
+#if defined(Q_OS_WIN)
+    // An alpha backing store, so the canvas can leave its backdrop to the DWM
+    // (settings canvas_backdrop).  Qt only honours this before the native
+    // window exists, so it is always on; the solid backdrop paints over it.
+    setAttribute(Qt::WA_TranslucentBackground);
+#endif
 
     content_ = new QWidget(this);
     contentLayout_ = new QVBoxLayout(content_);
@@ -785,6 +792,11 @@ void QtMainWindow::ApplySettingsToShell() {
     }
     if (sidebar_ != nullptr) {
         sidebar_->SetMaximized(IsWindowMaximized());
+    }
+    if (appliedBackdrop_ != settings_.canvasBackdrop) {
+        appliedBackdrop_ = settings_.canvasBackdrop;
+        canvas_->SetTransparentBackdrop(
+            ui::ApplyWindowBackdrop(*this, settings_.canvasBackdrop) != settings::CanvasBackdrop::Solid);
     }
 }
 
@@ -1709,10 +1721,12 @@ bool QtMainWindow::HandleNativeChromeMessage(void* message, qintptr* result) {
         *result = 0;
         return true;
     case WM_NCACTIVATE:
-        // App::HandleMessage (MessageLoop.cpp:85-86) answers TRUE: the frame has
-        // no non-client area left to repaint on activation, so the default
-        // handler is never allowed to draw one.
-        *result = TRUE;
+        // App::HandleMessage (MessageLoop.cpp:85-86) never lets the default
+        // handler draw a frame on activation: the whole window is client area.
+        // It still runs, with lParam -1 (update the state, paint nothing), so
+        // the DWM knows the window is active: without it the acrylic backdrop
+        // stays on its inactive, solid fallback.
+        *result = DefWindowProcW(msg->hwnd, WM_NCACTIVATE, msg->wParam, -1);
         return true;
     case WM_NCHITTEST: {
         const HWND window = reinterpret_cast<HWND>(winId());

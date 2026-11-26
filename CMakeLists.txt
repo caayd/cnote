@@ -244,6 +244,7 @@ add_library(cnote_ui
     src/ui/PrecisionInputRouter.cpp
     src/ui/PrecisionInputFilterQt.cpp
     src/ui/PointerPositionQt.cpp
+    src/ui/WindowBackdropQt.cpp
     src/qt/QtDocumentController.cpp
     src/qt/QtDocumentIo.cpp
     src/qt/QtMainWindow.cpp
@@ -308,7 +309,7 @@ if(WIN32)
     )
     target_compile_definitions(cnote_ui PUBLIC
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
-    target_link_libraries(cnote_ui PUBLIC user32)
+    target_link_libraries(cnote_ui PUBLIC user32 PRIVATE dwmapi gdi32)
 endif()
 if(MINGW)
     set_source_files_properties(
@@ -1027,7 +1028,7 @@ if(WIN32)
     target_compile_options(cnote_window_chrome_native_tests PRIVATE
         $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
     )
-    target_link_libraries(cnote_window_chrome_native_tests PRIVATE cnote_ui Qt6::Widgets user32)
+    target_link_libraries(cnote_window_chrome_native_tests PRIVATE cnote_ui Qt6::Widgets user32 dwmapi)
     add_test(NAME window_chrome_native_qt COMMAND cnote_window_chrome_native_tests)
     set_tests_properties(window_chrome_native_qt PROPERTIES TIMEOUT 120
         ENVIRONMENT "QT_PLUGIN_PATH=${_cnote_plugins}")

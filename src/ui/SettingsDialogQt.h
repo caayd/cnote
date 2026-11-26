@@ -167,6 +167,7 @@ private:
     QSlider* strokeSmoothingSlider_ = nullptr;
     QLabel* strokeSmoothingLabel_ = nullptr;
     QComboBox* drawCursorKindCombo_ = nullptr;
+    QComboBox* canvasBackdropCombo_ = nullptr;
     QComboBox* defaultPageSizeCombo_ = nullptr;
     QSlider* drawCursorSizeSlider_ = nullptr;
     QLabel* drawCursorSizeLabel_ = nullptr;
