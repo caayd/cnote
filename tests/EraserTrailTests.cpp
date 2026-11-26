@@ -42,16 +42,16 @@ int main() {
         Check(!outline.polygonEnds.empty(), "the resting head draws");
     }
 
-    // A fast drag shows a short comet: only the newest samples have width,
-    // so the trail ends well before where the drag began.
+    // A fast drag shows a short comet: only the samples within kTaperMs of
+    // the head have width, so the trail ends well before where the drag began.
     {
         EraserTrail trail;
         trail.Begin({ 0.0f, 0.0f }, 0, kRadius);
         for (int i = 1; i <= 40; ++i) {
-            trail.Add({ 10.0f * static_cast<float>(i), 0.0f }, EraserTrail::kSampleIntervalMs * i);
+            trail.Add({ 10.0f * static_cast<float>(i), 0.0f }, 16 * i);
         }
         float left = 0.0f, top = 0.0f, right = 0.0f, bottom = 0.0f;
-        Check(trail.Bounds(EraserTrail::kSampleIntervalMs * 40, &left, &top, &right, &bottom), "the dragging trail has bounds");
+        Check(trail.Bounds(16 * 40, &left, &top, &right, &bottom), "the dragging trail has bounds");
         Check(left > 250.0f && right > 380.0f && Near(bottom - top, 2.0f * kRadius),
             "the trail tapers to nothing within its last samples (left=" + std::to_string(left)
                 + " right=" + std::to_string(right) + ")");

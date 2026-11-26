@@ -33,24 +33,18 @@ void EraserTrail::Add(Vec2 point, std::int64_t nowMs) {
         return;
     }
     std::vector<Sample>& samples = trails_.back().samples;
-    // Points reported within kSampleIntervalMs of the newest sample replace
-    // it, so the trail's length does not depend on the device's report rate.
-    std::int64_t time = nowMs;
-    if (samples.size() > 1U && nowMs - samples.back().time < kSampleIntervalMs) {
-        time = samples.back().time;
-        samples.pop_back();
-    }
     const Vec2 last = samples.back().position;
     const float follow = 1.0f - kStreamline;
     const Vec2 filtered { last.x + ((point.x - last.x) * follow), last.y + ((point.y - last.y) * follow) };
     if (Vec2Equal(filtered, last)) {
         return;
     }
-    samples.push_back(Sample { filtered, time });
-    // Samples further back than the taper are drawn with no radius forever.
-    if (samples.size() > static_cast<std::size_t>(kTaperPoints)) {
-        samples.erase(samples.begin());
-    }
+    samples.push_back(Sample { filtered, nowMs });
+    // Samples kTaperMs behind the newest are drawn with no radius forever;
+    // the newest of them stays as the tail's tip.
+    const auto taperEnd = std::find_if(samples.begin() + 1, samples.end(),
+        [nowMs](const Sample& sample) { return nowMs - sample.time < kTaperMs; });
+    samples.erase(samples.begin(), taperEnd - 1);
 }
 
 void EraserTrail::End() {
@@ -65,10 +59,10 @@ float EraserTrail::RadiusAt(const Trail& trail, std::size_t index, std::int64_t 
     if (trail.head && index + 1U == count) {
         return trail.radius;
     }
-    const float age = static_cast<float>(nowMs - trail.samples[index].time);
-    const float time = 1.0f - (age / static_cast<float>(kDecayMs));
-    const float fromHead = static_cast<float>(std::min<std::size_t>(static_cast<std::size_t>(kTaperPoints), count - index));
-    const float length = (static_cast<float>(kTaperPoints) - fromHead) / static_cast<float>(kTaperPoints);
+    const std::int64_t sampled = trail.samples[index].time;
+    const float time = 1.0f - (static_cast<float>(nowMs - sampled) / static_cast<float>(kDecayMs));
+    const float behindHead = static_cast<float>(trail.samples.back().time - sampled);
+    const float length = 1.0f - (behindHead / static_cast<float>(kTaperMs));
     return trail.radius * std::min(EaseOut(length), EaseOut(time));
 }
 
