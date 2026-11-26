@@ -420,12 +420,11 @@ void SettingsDialogQt::buildViewPage() {
     canvasBackdropCombo_ = new QComboBox(page);
     canvasBackdropCombo_->setObjectName(QStringLiteral("canvasBackdropCombo"));
     canvasBackdropCombo_->setToolTip(QStringLiteral(
-        "What shows around the pages. Transparent needs Windows; Mica and Acrylic need Windows 11 22H2 or later."));
+        "What shows around the pages. Transparent needs Windows; Acrylic needs Windows 11 22H2 or later."));
     // Item index == settings::CanvasBackdrop value.
     const std::pair<settings::CanvasBackdrop, QString> backdrops[] {
         { settings::CanvasBackdrop::Solid, QStringLiteral("Solid") },
         { settings::CanvasBackdrop::Transparent, QStringLiteral("Transparent") },
-        { settings::CanvasBackdrop::Mica, QStringLiteral("Mica (blurred wallpaper)") },
         { settings::CanvasBackdrop::Acrylic, QStringLiteral("Acrylic (blurred)") },
     };
     auto* backdropModel = qobject_cast<QStandardItemModel*>(canvasBackdropCombo_->model());

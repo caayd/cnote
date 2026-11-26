@@ -122,8 +122,8 @@ decorations, so the band there never draws the in-client window buttons.
 Shortcuts are editable in the settings window.
 
 Settings > View > Background sets what shows around the pages: Solid (the default), Transparent (the desktop
-behind the window), Mica (blurred wallpaper) or Acrylic (a blur of what is behind the window). Transparent needs
-Windows; Mica and Acrylic need Windows 11 22H2 or later, and Windows shows them only while the window is active.
+behind the window) or Acrylic (a blur of what is behind the window). Transparent needs Windows; Acrylic needs
+Windows 11 22H2 or later, and Windows shows it only while the window is active.
 
 ## Target and layer structure
 

@@ -279,13 +279,26 @@ void TestBackdrop(const NativeWindow& native, cnote::settings::CanvasBackdrop re
         Check(clear ? alpha == 0 : alpha == 255, "the space around the pages is transparent only off the solid backdrop");
     }
     Check((GetWindowLongPtrW(native.hwnd, GWL_EXSTYLE) & WS_EX_LAYERED) == 0, "the window is not layered");
-    if (cnote::ui::WindowBackdropSupported(CanvasBackdrop::Mica)) {
+    if (cnote::ui::WindowBackdropSupported(CanvasBackdrop::Acrylic)) {
         constexpr DWORD kSystemBackdropType = 38;  // DWMWA_SYSTEMBACKDROP_TYPE
         int type = -1;
         const bool read = SUCCEEDED(DwmGetWindowAttribute(native.hwnd, kSystemBackdropType, &type, sizeof(type)));
-        const int expected = effective == CanvasBackdrop::Mica ? 2 : (effective == CanvasBackdrop::Acrylic ? 3 : 0);
+        const int expected = effective == CanvasBackdrop::Acrylic ? 3 : 0;
         // A window still on the default backdrop may not report one.
         Check(read ? type == expected : expected == 0, "the DWM system backdrop matches the setting");
+    }
+    if (effective == CanvasBackdrop::Acrylic) {
+        // The frame extended under the whole window would show the DWM's own
+        // minimize/maximize/close through the clear canvas (the toolbar band
+        // covers them only while it is shown).
+        RECT buttons {};
+        const bool read = SUCCEEDED(DwmGetWindowAttribute(native.hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, &buttons, sizeof(buttons)));
+        Check(read && buttons.right <= buttons.left, "the DWM draws no caption buttons over the acrylic backdrop");
+        // Leaving acrylic gives the window its system menu back.
+        cnote::ui::ApplyWindowBackdrop(native.window, CanvasBackdrop::Solid);
+        Check((GetWindowLongPtrW(native.hwnd, GWL_STYLE) & WS_SYSMENU) != 0, "the solid backdrop restores the system menu");
+        cnote::ui::ApplyWindowBackdrop(native.window, CanvasBackdrop::Acrylic);
+        Check((GetWindowLongPtrW(native.hwnd, GWL_STYLE) & WS_SYSMENU) == 0, "acrylic drops the system menu again");
     }
 }
 
@@ -335,8 +348,8 @@ int main(int argc, char** argv) {
     withWindow([](const NativeWindow& native) {
         TestNonClientArea(native);
         TestHitCodes(native);
-        TestCaptionButtonCycle(native);
         TestBackdrop(native, cnote::settings::CanvasBackdrop::Solid);
+        TestCaptionButtonCycle(native);
     });
     // Auto-hide comes from the saved settings, applied as the window is built,
     // exactly as on a launch.

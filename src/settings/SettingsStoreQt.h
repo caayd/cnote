@@ -54,14 +54,12 @@ enum class DrawCursorKind {
 };
 
 // What shows through the canvas around the pages.  Solid paints the reference
-// backdrop colour; the others clear it so the desktop shows through: as is
-// (Transparent), as blurred wallpaper (Mica) or as a blur of whatever lies
-// behind the window (Acrylic).  ui::WindowBackdropSupported says which ones
-// this system can show.
+// backdrop colour; the others clear it so the desktop shows through, as is
+// (Transparent) or as a blur of whatever lies behind the window (Acrylic).
+// ui::WindowBackdropSupported says which ones this system can show.
 enum class CanvasBackdrop {
     Solid,
     Transparent,
-    Mica,
     Acrylic,
 };
 

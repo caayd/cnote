@@ -19,7 +19,6 @@ namespace {
 constexpr DWORD kDwmUseImmersiveDarkMode = 20;     // DWMWA_USE_IMMERSIVE_DARK_MODE
 constexpr DWORD kDwmSystemBackdropType = 38;       // DWMWA_SYSTEMBACKDROP_TYPE
 constexpr int kDwmBackdropAuto = 0;                // DWMSBT_AUTO
-constexpr int kDwmBackdropMainWindow = 2;          // DWMSBT_MAINWINDOW: Mica
 constexpr int kDwmBackdropTransientWindow = 3;     // DWMSBT_TRANSIENTWINDOW: Acrylic
 
 // The DWM needs a real HWND: the offscreen platform the tests and headless
@@ -45,7 +44,6 @@ bool WindowBackdropSupported(settings::CanvasBackdrop backdrop) {
 #else
         return false;
 #endif
-    case settings::CanvasBackdrop::Mica:
     case settings::CanvasBackdrop::Acrylic:
 #if defined(Q_OS_WIN)
         return NativeWindowsPlatform() && SystemBackdropsAvailable();
@@ -81,21 +79,30 @@ settings::CanvasBackdrop ApplyWindowBackdrop(QWidget& window, settings::CanvasBa
         DeleteObject(blurBehind.hRgnBlur);
     }
 
-    // Mica and Acrylic: the system material fills the frame, and the frame
-    // extended over the whole client area shows under every transparent pixel.
-    const bool material = effective == CanvasBackdrop::Mica || effective == CanvasBackdrop::Acrylic;
-    const int extent = material ? -1 : 0;
+    // Acrylic: the system material fills the frame, and the frame extended
+    // over the whole client area shows under every transparent pixel.
+    const bool acrylic = effective == CanvasBackdrop::Acrylic;
+    const int extent = acrylic ? -1 : 0;
     const MARGINS margins { extent, extent, extent, extent };
     DwmExtendFrameIntoClientArea(hwnd, &margins);
+    // The extended frame also carries the DWM's own minimize/maximize/close,
+    // which would show through the clear canvas wherever the toolbar band
+    // does not cover them (auto-hide).  The DWM draws none for a window
+    // without a system menu; cnote's band has its own buttons.
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    const LONG_PTR wanted = acrylic ? (style & ~static_cast<LONG_PTR>(WS_SYSMENU)) : (style | WS_SYSMENU);
+    if (wanted != style) {
+        SetWindowLongPtrW(hwnd, GWL_STYLE, wanted);
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    }
     if (SystemBackdropsAvailable()) {
-        if (material) {
+        if (acrylic) {
             // The material takes the window's light/dark mode; cnote's chrome is dark.
             const BOOL dark = TRUE;
             DwmSetWindowAttribute(hwnd, kDwmUseImmersiveDarkMode, &dark, sizeof(dark));
         }
-        const int type = effective == CanvasBackdrop::Mica
-            ? kDwmBackdropMainWindow
-            : (effective == CanvasBackdrop::Acrylic ? kDwmBackdropTransientWindow : kDwmBackdropAuto);
+        const int type = acrylic ? kDwmBackdropTransientWindow : kDwmBackdropAuto;
         DwmSetWindowAttribute(hwnd, kDwmSystemBackdropType, &type, sizeof(type));
     }
 #else

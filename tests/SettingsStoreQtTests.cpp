@@ -536,7 +536,7 @@ void PersistenceKeepsPreviousFile(const std::filesystem::path& scratch) {
     cnote::settings::Settings settings;
     settings.palette = { 0xFF010203U, 0xFF040506U };
     settings.autoHideToolbar = true;
-    settings.canvasBackdrop = cnote::settings::CanvasBackdrop::Mica;
+    settings.canvasBackdrop = cnote::settings::CanvasBackdrop::Transparent;
     settings.zoomPresets[0] = 1.5f;
     settings.shortcuts[0].sequence = QKeySequence(Qt::CTRL | Qt::Key_K);
     Check(store.Save(settings), "save creates the destination directory and commits");

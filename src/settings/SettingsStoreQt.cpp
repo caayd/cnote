@@ -194,8 +194,6 @@ const char* CanvasBackdropConfigName(CanvasBackdrop backdrop) {
     switch (backdrop) {
     case CanvasBackdrop::Transparent:
         return "transparent";
-    case CanvasBackdrop::Mica:
-        return "mica";
     case CanvasBackdrop::Acrylic:
         return "acrylic";
     case CanvasBackdrop::Solid:
@@ -206,7 +204,7 @@ const char* CanvasBackdropConfigName(CanvasBackdrop backdrop) {
 
 std::optional<CanvasBackdrop> ParseCanvasBackdropConfigName(std::string_view name) {
     for (const CanvasBackdrop backdrop :
-        { CanvasBackdrop::Solid, CanvasBackdrop::Transparent, CanvasBackdrop::Mica, CanvasBackdrop::Acrylic }) {
+        { CanvasBackdrop::Solid, CanvasBackdrop::Transparent, CanvasBackdrop::Acrylic }) {
         if (name == CanvasBackdropConfigName(backdrop)) {
             return backdrop;
         }
