@@ -112,6 +112,7 @@ bool SameSettings(const cnote::settings::Settings& a, const cnote::settings::Set
     if (a.textSizePresets != b.textSizePresets) return fail("textSizePresets");
     if (a.drawCursorKind != b.drawCursorKind) return fail("drawCursorKind");
     if (a.drawCursorSize != b.drawCursorSize) return fail("drawCursorSize");
+    if (a.canvasBackdrop != b.canvasBackdrop) return fail("canvasBackdrop");
     if (a.inputSpacing != b.inputSpacing) return fail("inputSpacing");
     if (a.inputSmoothing != b.inputSmoothing) return fail("inputSmoothing");
     if (a.strokeSmoothing != b.strokeSmoothing) return fail("strokeSmoothing");
@@ -380,6 +381,7 @@ void ParsesRealPayload(const std::filesystem::path& scratch) {
     payload << "brush_size_presets= 3 , 1.5 ,1.5, 2 \n";
     payload << "draw_cursor_kind=precision_crosshair\n";
     payload << "draw_cursor_size=1\n";
+    payload << "canvas_backdrop=acrylic\n";
     payload << "input_spacing=9\n";
     payload << "stroke_smoothing=2\n";
     payload << "dash_length=0.1\n";
@@ -433,6 +435,7 @@ void ParsesRealPayload(const std::filesystem::path& scratch) {
     Check(settings.brushSizePresets == std::vector<float>({ 1.5f, 2.0f, 3.0f }), "brush presets snap, sort and dedupe");
     Check(settings.drawCursorKind == s::DrawCursorKind::PrecisionCrosshair, "draw_cursor_kind parsed");
     Check(settings.drawCursorSize == 4.0f, "draw_cursor_size clamps to 4");
+    Check(settings.canvasBackdrop == s::CanvasBackdrop::Acrylic, "canvas_backdrop parsed");
     Check(settings.inputSpacing == 4.05f, "input_spacing clamps to 4.05");
     Check(settings.strokeSmoothing == 1.0f, "stroke_smoothing clamps to 1");
     Check(settings.dashLength == 0.5f, "dash_length clamps to 0.5");
@@ -533,6 +536,7 @@ void PersistenceKeepsPreviousFile(const std::filesystem::path& scratch) {
     cnote::settings::Settings settings;
     settings.palette = { 0xFF010203U, 0xFF040506U };
     settings.autoHideToolbar = true;
+    settings.canvasBackdrop = cnote::settings::CanvasBackdrop::Mica;
     settings.zoomPresets[0] = 1.5f;
     settings.shortcuts[0].sequence = QKeySequence(Qt::CTRL | Qt::Key_K);
     Check(store.Save(settings), "save creates the destination directory and commits");

@@ -53,6 +53,18 @@ enum class DrawCursorKind {
     PrecisionCrosshair,
 };
 
+// What shows through the canvas around the pages.  Solid paints the reference
+// backdrop colour; the others clear it so the desktop shows through: as is
+// (Transparent), as blurred wallpaper (Mica) or as a blur of whatever lies
+// behind the window (Acrylic).  ui::WindowBackdropSupported says which ones
+// this system can show.
+enum class CanvasBackdrop {
+    Solid,
+    Transparent,
+    Mica,
+    Acrylic,
+};
+
 struct NamedPalette {
     std::u16string name {};
     std::vector<std::uint32_t> colors {};
@@ -105,6 +117,7 @@ struct Settings {
     std::array<float, kTextSizePresetCount> textSizePresets { 16.0f, 24.0f, 36.0f };
     DrawCursorKind drawCursorKind = DrawCursorKind::Dot;
     float drawCursorSize = 8.0f;
+    CanvasBackdrop canvasBackdrop = CanvasBackdrop::Solid;
     float inputSpacing = 0.85f;
     float inputSmoothing = 0.3f;
     float strokeSmoothing = 0.55f;

@@ -1084,7 +1084,14 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    painter.fillRect(event->rect(), QColor::fromRgba(kCanvasBackdrop));
+    if (transparentBackdrop_) {
+        // The window's backdrop (ui::ApplyWindowBackdrop) shows around the pages.
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.fillRect(event->rect(), Qt::transparent);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    } else {
+        painter.fillRect(event->rect(), QColor::fromRgba(kCanvasBackdrop));
+    }
 
     const Document& document = controller_.DocumentRef();
     const QRectF clip = QRectF(event->rect());
@@ -3016,6 +3023,16 @@ void CanvasWidget::SetEraseBrushSize(float brushSize) {
     if (cursorKind_ == CursorKind::Eraser) {
         ApplyCursor();
     }
+}
+
+void CanvasWidget::SetTransparentBackdrop(bool transparent) {
+    if (transparent == transparentBackdrop_) {
+        return;
+    }
+    transparentBackdrop_ = transparent;
+    // A clear backdrop no longer covers the widget.
+    setAttribute(Qt::WA_OpaquePaintEvent, !transparent);
+    update();
 }
 
 QCursor CanvasWidget::BuildDrawCursor() const {

@@ -33,13 +33,16 @@
 #include <QWindow>
 
 #include <windows.h>
+#include <dwmapi.h>
 
 #include "qt/QtMainWindow.h"
 #include "settings/SettingsStoreQt.h"
 #include "shell/AppManager.h"
 #include "shell/CaptureDriver.h"
+#include "ui/CanvasWidget.h"
 #include "ui/PointerPositionQt.h"
 #include "ui/ToolbarWidget.h"
+#include "ui/WindowBackdropQt.h"
 
 namespace {
 
@@ -232,6 +235,60 @@ void TestAutoHideInput(const NativeWindow& native) {
     cnote::ui::SetSyntheticCursorPos(std::nullopt);
 }
 
+// The canvas_backdrop setting, applied as the window is built: the canvas
+// leaves the space around the pages transparent for every backdrop but Solid,
+// the DWM gets the matching system backdrop, and the window is never made
+// layered (a layered window would let clicks fall through clear pixels).
+void TestBackdrop(const NativeWindow& native, cnote::settings::CanvasBackdrop requested) {
+    using cnote::settings::CanvasBackdrop;
+    const CanvasBackdrop effective = cnote::ui::WindowBackdropSupported(requested) ? requested : CanvasBackdrop::Solid;
+    const bool clear = effective != CanvasBackdrop::Solid;
+    cnote::ui::CanvasWidget* canvas = native.window.Canvas();
+    Check(canvas->TransparentBackdrop() == clear, "the canvas backdrop follows the setting");
+    // A canvas point clear of every page (and of the chrome overlays), zoomed
+    // out until the pages leave one.  The window is rendered the way the
+    // backing store composes it: no widget fills a background.
+    const auto backdropPoint = [&]() -> std::optional<QPoint> {
+        const std::vector<cnote::ui::CanvasPageView> views = canvas->CalculatePageViews();
+        for (int y = 8; y < canvas->height() - 8; y += 16) {
+            for (int x = 8; x < canvas->width() - 8; x += 16) {
+                const QRectF probe(x - 6, y - 6, 12, 12);
+                const QPoint point = canvas->mapTo(&native.window, QPoint(x, y));
+                if (native.window.childAt(point) == canvas
+                    && std::none_of(views.begin(), views.end(), [&](const cnote::ui::CanvasPageView& view) {
+                           return view.valid && view.rect.intersects(probe);
+                       })) {
+                    return point;
+                }
+            }
+        }
+        return std::nullopt;
+    };
+    std::optional<QPoint> point = backdropPoint();
+    for (int step = 0; step < 8 && !point.has_value(); ++step) {
+        native.window.ZoomOut();
+        QApplication::processEvents();
+        point = backdropPoint();
+    }
+    Check(point.has_value(), "the canvas shows backdrop beside the pages");
+    if (point.has_value()) {
+        QImage image(native.window.size(), QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::transparent);
+        native.window.render(&image, QPoint(), QRegion(), QWidget::DrawChildren);
+        const int alpha = qAlpha(image.pixel(*point));
+        Check(clear ? alpha == 0 : alpha == 255, "the space around the pages is transparent only off the solid backdrop");
+    }
+    Check((GetWindowLongPtrW(native.hwnd, GWL_EXSTYLE) & WS_EX_LAYERED) == 0, "the window is not layered");
+    if (cnote::ui::WindowBackdropSupported(CanvasBackdrop::Mica)) {
+        constexpr DWORD kSystemBackdropType = 38;  // DWMWA_SYSTEMBACKDROP_TYPE
+        int type = -1;
+        const bool read = SUCCEEDED(DwmGetWindowAttribute(native.hwnd, kSystemBackdropType, &type, sizeof(type)));
+        const int expected = effective == CanvasBackdrop::Mica ? 2 : (effective == CanvasBackdrop::Acrylic ? 3 : 0);
+        // A window still on the default backdrop may not report one.
+        Check(read ? type == expected : expected == 0, "the DWM system backdrop matches the setting");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -279,6 +336,7 @@ int main(int argc, char** argv) {
         TestNonClientArea(native);
         TestHitCodes(native);
         TestCaptionButtonCycle(native);
+        TestBackdrop(native, cnote::settings::CanvasBackdrop::Solid);
     });
     // Auto-hide comes from the saved settings, applied as the window is built,
     // exactly as on a launch.
@@ -286,9 +344,13 @@ int main(int argc, char** argv) {
         const cnote::settings::SettingsStoreQt store;
         cnote::settings::Settings saved = store.Load();
         saved.autoHideToolbar = true;
+        saved.canvasBackdrop = cnote::settings::CanvasBackdrop::Acrylic;
         Check(store.Save(saved), "the auto-hide setting is saved");
     }
-    withWindow(TestAutoHideInput);
+    withWindow([](const NativeWindow& native) {
+        TestAutoHideInput(native);
+        TestBackdrop(native, cnote::settings::CanvasBackdrop::Acrylic);
+    });
     Check(!ownsForeground(), "the process does not own the foreground window");
 
     std::printf(gFailures == 0 ? "ALL NATIVE WINDOW CHROME CHECKS PASSED\n" : "%d NATIVE WINDOW CHROME CHECK(S) FAILED\n",

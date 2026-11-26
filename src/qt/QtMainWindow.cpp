@@ -40,6 +40,7 @@
 #include "ui/SettingsFormatQt.h"
 #include "ui/SidebarWidget.h"
 #include "ui/ToolbarWidget.h"
+#include "ui/WindowBackdropQt.h"
 #include "ui/WindowBehaviorQt.h"
 
 #if defined(Q_OS_WIN)
@@ -276,6 +277,12 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
     // the document's file name once the session exists.
     setWindowTitle(QStringLiteral("cnote"));
     settings_ = settingsStore_.Load();
+#if defined(Q_OS_WIN)
+    // An alpha backing store, so the canvas can leave its backdrop to the DWM
+    // (settings canvas_backdrop).  Qt only honours this before the native
+    // window exists, so it is always on; the solid backdrop paints over it.
+    setAttribute(Qt::WA_TranslucentBackground);
+#endif
 
     content_ = new QWidget(this);
     contentLayout_ = new QVBoxLayout(content_);
@@ -785,6 +792,11 @@ void QtMainWindow::ApplySettingsToShell() {
     }
     if (sidebar_ != nullptr) {
         sidebar_->SetMaximized(IsWindowMaximized());
+    }
+    if (appliedBackdrop_ != settings_.canvasBackdrop) {
+        appliedBackdrop_ = settings_.canvasBackdrop;
+        canvas_->SetTransparentBackdrop(
+            ui::ApplyWindowBackdrop(*this, settings_.canvasBackdrop) != settings::CanvasBackdrop::Solid);
     }
 }
 
