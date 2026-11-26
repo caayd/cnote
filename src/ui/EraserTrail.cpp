@@ -33,13 +33,20 @@ void EraserTrail::Add(Vec2 point, std::int64_t nowMs) {
         return;
     }
     std::vector<Sample>& samples = trails_.back().samples;
+    // Points reported within kSampleIntervalMs of the newest sample replace
+    // it, so the trail's length does not depend on the device's report rate.
+    std::int64_t time = nowMs;
+    if (samples.size() > 1U && nowMs - samples.back().time < kSampleIntervalMs) {
+        time = samples.back().time;
+        samples.pop_back();
+    }
     const Vec2 last = samples.back().position;
     const float follow = 1.0f - kStreamline;
     const Vec2 filtered { last.x + ((point.x - last.x) * follow), last.y + ((point.y - last.y) * follow) };
     if (Vec2Equal(filtered, last)) {
         return;
     }
-    samples.push_back(Sample { filtered, nowMs });
+    samples.push_back(Sample { filtered, time });
     // Samples further back than the taper are drawn with no radius forever.
     if (samples.size() > static_cast<std::size_t>(kTaperPoints)) {
         samples.erase(samples.begin());

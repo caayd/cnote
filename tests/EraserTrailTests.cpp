@@ -48,13 +48,32 @@ int main() {
         EraserTrail trail;
         trail.Begin({ 0.0f, 0.0f }, 0, kRadius);
         for (int i = 1; i <= 40; ++i) {
-            trail.Add({ 10.0f * static_cast<float>(i), 0.0f }, 4 * i);
+            trail.Add({ 10.0f * static_cast<float>(i), 0.0f }, EraserTrail::kSampleIntervalMs * i);
         }
         float left = 0.0f, top = 0.0f, right = 0.0f, bottom = 0.0f;
-        Check(trail.Bounds(160, &left, &top, &right, &bottom), "the dragging trail has bounds");
+        Check(trail.Bounds(EraserTrail::kSampleIntervalMs * 40, &left, &top, &right, &bottom), "the dragging trail has bounds");
         Check(left > 250.0f && right > 380.0f && Near(bottom - top, 2.0f * kRadius),
             "the trail tapers to nothing within its last samples (left=" + std::to_string(left)
                 + " right=" + std::to_string(right) + ")");
+    }
+
+    // The same drag reported by a 1000 Hz mouse and a 125 Hz pen leaves the
+    // same comet: a high report rate must not shrink it to the head's disc.
+    {
+        const auto dragLeft = [](int intervalMs) {
+            EraserTrail trail;
+            trail.Begin({ 0.0f, 0.0f }, 0, kRadius);
+            for (int t = intervalMs; t <= 400; t += intervalMs) {
+                trail.Add({ static_cast<float>(t), 0.0f }, t);
+            }
+            float left = 0.0f, top = 0.0f, right = 0.0f, bottom = 0.0f;
+            return trail.Bounds(400, &left, &top, &right, &bottom) ? left : 0.0f;
+        };
+        const float mouse = dragLeft(1);
+        const float pen = dragLeft(8);
+        Check(mouse < 330.0f && std::abs(mouse - pen) < kRadius,
+            "the trail's length does not depend on the report rate (1 ms left=" + std::to_string(mouse)
+                + " 8 ms left=" + std::to_string(pen) + ")");
     }
 
     // After release the trail decays within kDecayMs of its newest sample and

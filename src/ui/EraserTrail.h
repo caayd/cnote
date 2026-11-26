@@ -12,13 +12,17 @@ namespace cnote::ui {
 // comet in widget coordinates that follows an erase drag.  A point shrinks
 // as it ages and is gone kDecayMs after it was sampled; the trail also tapers
 // over its last kTaperPoints samples toward the tail, both eased out
-// (1 - (1 - k)^4).  While the drag lasts its head keeps the full radius, so a
-// resting eraser still shows its swept disc; after release the whole trail
-// decays away.  Pure geometry over caller-supplied millisecond timestamps.
+// (1 - (1 - k)^4).  Samples are taken at most once per kSampleIntervalMs, one
+// per display frame like a browser's coalesced pointermove, so a 1000 Hz mouse
+// draws the same comet as a 125 Hz pen.  While the drag lasts its head keeps
+// the full radius, so a resting eraser still shows its swept disc; after
+// release the whole trail decays away.  Pure geometry over caller-supplied
+// millisecond timestamps.
 class EraserTrail {
 public:
     static constexpr std::int64_t kDecayMs = 200;
     static constexpr int kTaperPoints = 10;
+    static constexpr std::int64_t kSampleIntervalMs = 16;
     // Samples follow the pointer by 1 - kStreamline (Excalidraw's 0.2).
     static constexpr float kStreamline = 0.2f;
 
