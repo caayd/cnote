@@ -1721,10 +1721,12 @@ bool QtMainWindow::HandleNativeChromeMessage(void* message, qintptr* result) {
         *result = 0;
         return true;
     case WM_NCACTIVATE:
-        // App::HandleMessage (MessageLoop.cpp:85-86) answers TRUE: the frame has
-        // no non-client area left to repaint on activation, so the default
-        // handler is never allowed to draw one.
-        *result = TRUE;
+        // App::HandleMessage (MessageLoop.cpp:85-86) never lets the default
+        // handler draw a frame on activation: the whole window is client area.
+        // It still runs, with lParam -1 (update the state, paint nothing), so
+        // the DWM knows the window is active: without it the Mica and Acrylic
+        // backdrops stay on their inactive, solid fallback.
+        *result = DefWindowProcW(msg->hwnd, WM_NCACTIVATE, msg->wParam, -1);
         return true;
     case WM_NCHITTEST: {
         const HWND window = reinterpret_cast<HWND>(winId());
