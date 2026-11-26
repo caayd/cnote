@@ -23,12 +23,13 @@ class QTabWidget;
 
 namespace cnote::ui {
 
-// Qt port of the legacy Win32 SettingsWindow (plan step 6.2).
-//
-// Same three categories, controls and policy as src/SettingsWindow.cpp: palette
-// add/remove/rename/reset, HSL + hex colour editing, saved palettes, drawing
-// spacing/smoothing/dash/quick-size/brush-preset values, zoom presets, auto-save
-// interval, toggles and shortcut capture for every action in KeyBindingQt.
+// Qt port of the legacy Win32 SettingsWindow (plan step 6.2), regrouped into
+// six categories: Palette (palette add/remove, HSL + hex colour editing, saved
+// palettes), Drawing (stroke stabilization/spacing/smoothing, dashes, scratch
+// to erase), Sizes (quick-size maximum, brush and text size presets), View
+// (draw cursor, toolbar auto-hide, zoom presets), Documents (default page size,
+// auto-save interval, PDF embedding) and Shortcuts (capture for every action in
+// KeyBindingQt).
 //
 // The legacy dialog had no OK/Cancel: every edit is applied to the live model
 // and persisted immediately (SaveAppSettings), and closing it changed nothing
@@ -96,7 +97,12 @@ private:
     void buildUi();
     void buildPalettePage();
     void buildDrawingPage();
+    void buildSizesPage();
+    void buildViewPage();
+    void buildDocumentsPage();
     void buildShortcutsPage();
+    void connectScaledSlider(QSlider* slider, float settings::Settings::*field, float scale);
+    void connectCheck(QCheckBox* check, bool settings::Settings::*field);
 
     // Stages `candidate`, clamps it, saves it, and only applies it to the live
     // model on success.  Returns whether the settings were applied.
@@ -106,7 +112,7 @@ private:
     void refreshPaletteControls(bool syncSliders);
     void refreshSavedPalettes();
     void refreshSavedPaletteButtons();
-    void refreshDrawingControls();
+    void refreshOptionControls();
     void refreshShortcutList();
     void refreshShortcutButtons();
 

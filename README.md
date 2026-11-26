@@ -24,7 +24,7 @@ inventories the licenses and lists the open release prerequisites.
 
 ## Default page size
 
-**Settings → Drawing → Default Page Size** selects Letter Portrait, Letter
+**Settings → Documents → Default Page Size** selects Letter Portrait, Letter
 Landscape, Legal Portrait, A4 Portrait, A4 Landscape, or Tabloid Landscape.
 A4 Portrait is the initial preset. New projects use it for their first page;
 future blank pages follow the app preset, including pages added to imported

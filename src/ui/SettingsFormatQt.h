@@ -42,10 +42,11 @@ std::uint32_t HslToColor(float hueDegrees, float saturation, float lightness);
 
 QString FormatHueLabel(int hue);
 QString FormatPercentLabel(const QString& prefix, int value);
-QString FormatFloatSliderLabel(const QString& prefix, float value, int multiplier);
+// Value readouts beside settings sliders; the form row already names the slider.
+QString FormatFloatSliderLabel(float value, int multiplier);
 QString FormatSpacingLabel(float spacing);
-QString FormatDashLabel(const QString& prefix, float value);
-QString FormatPixelLabel(const QString& prefix, float value);
+QString FormatDashLabel(float value);
+QString FormatPixelLabel(float value);
 
 // `Settings::autoSaveIntervalSeconds` stores 0 for "off" and `zoomPresets`
 // stores 0 for "unset" to keep the public settings file compatible.  These are
