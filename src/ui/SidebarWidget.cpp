@@ -429,7 +429,12 @@ void SidebarWidget::UpdateVisibility() {
     // UpdateChromeGeometry raises it before the toolbar).
 }
 
+// The host re-applies its chrome geometry on every toolbar reveal frame, so
+// an unchanged rect or state must not repaint the panel.
 void SidebarWidget::SetHostClientRect(const QRect& clientRect, int reservedTop) {
+    if (clientRect == hostClientRect_ && reservedTop == reservedTop_) {
+        return;
+    }
     hostClientRect_ = clientRect;
     reservedTop_ = reservedTop;
     UpdateGeometry();
@@ -444,6 +449,9 @@ void SidebarWidget::SetHostClientRect(const QRect& clientRect, int reservedTop) 
 }
 
 void SidebarWidget::SetMaximized(bool maximized) {
+    if (maximized == maximized_) {
+        return;
+    }
     maximized_ = maximized;
     UpdateGeometry();
     update();

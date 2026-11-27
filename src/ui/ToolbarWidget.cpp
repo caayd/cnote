@@ -1384,12 +1384,18 @@ ToolbarWidget::ToolbarWidget(QWidget* parent)
     setMouseTracking(true);
     setFocusPolicy(Qt::ClickFocus);
     setAttribute(Qt::WA_TranslucentBackground, false);
+    // paintEvent fills the whole band whenever any of it is on screen, so the
+    // canvas below never has to repaint behind it, and a reveal frame only
+    // paints the newly exposed rows (Qt scrolls an opaque widget's pixels).
+    setAttribute(Qt::WA_OpaquePaintEvent, true);
     setAutoFillBackground(false);
     settings_.autoHideToolbar = false;
 
+    // Elapsed-time driven, so the tick only sets the frame rate; 16 ms
+    // matches the other chrome animations.
     revealTimer_ = new QTimer(this);
     revealTimer_->setTimerType(Qt::PreciseTimer);
-    revealTimer_->setInterval(8);
+    revealTimer_->setInterval(16);
     connect(revealTimer_, &QTimer::timeout, this, &ToolbarWidget::OnRevealTick);
 
     UpdateToolbarGeometry();
@@ -1879,9 +1885,10 @@ void ToolbarWidget::OnRevealTick() {
         reveal_.phase = reveal_.to >= 1.0 ? RevealPhase::Shown : RevealPhase::Hidden;
         revealTimer_->stop();
     }
+    // Only the position changes while the band slides; moving the widget
+    // repaints what it uncovers.
     UpdateToolbarGeometry();
     emit RevealProgressChanged(revealProgress_);
-    update();
 }
 
 void ToolbarWidget::paintEvent(QPaintEvent*) {
