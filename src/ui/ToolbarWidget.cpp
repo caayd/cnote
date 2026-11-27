@@ -12,6 +12,7 @@
 #include <QFocusEvent>
 #include <QElapsedTimer>
 #include <QFontMetricsF>
+#include <QImage>
 #include <QKeyEvent>
 #include <QLineF>
 #include <QMenu>
@@ -851,7 +852,7 @@ public:
         if (next != owner_->wheelHoverIndex_) {
             owner_->wheelHoverIndex_ = next;
             StartAnimation();
-            update();
+            UpdateWheel();
         }
     }
 
@@ -891,23 +892,20 @@ protected:
             return Polar(center, qt::PaletteWheelHoverOffset() * lift(index), bisector(index));
         };
         const auto slicePath = [&](std::size_t index) {
-            const QPointF origin = sliceOrigin(index);
-            const qreal sliceOuter = outer + (qt::PaletteWheelHoverGrow() * lift(index));
-            if (entries == 1U) {
-                QPainterPath ring;
-                ring.addEllipse(origin, sliceOuter, sliceOuter);
-                ring.addEllipse(origin, ringInner, ringInner);
-                return ring;
-            }
-            return SlicePath(origin, ringInner, sliceOuter,
-                AngleAt(static_cast<qreal>(index) / static_cast<qreal>(entries)),
-                AngleAt(static_cast<qreal>(index + 1U) / static_cast<qreal>(entries)));
+            return SliceShape(sliceOrigin(index), entries, index, ringInner, outer + (qt::PaletteWheelHoverGrow() * lift(index)));
         };
+        const auto shadowStep = [&](std::size_t index) {
+            return static_cast<int>(std::lround(lift(index) * static_cast<qreal>(kShadowLiftSteps)));
+        };
+        const auto sliceDegrees = [&](std::size_t index) {
+            return 360.0 * static_cast<qreal>(index) / static_cast<qreal>(entries);
+        };
+        SyncShadows(entries, ringInner, outer, layout.innerRadius, dpr);
 
         // Resting shadows go down first so no slice darkens its neighbours;
         // a lifted slice adds its deeper shadow right under itself instead.
         for (std::size_t index = 0; index < entries; ++index) {
-            PaintShadow(painter, slicePath(index), 0.0);
+            DrawShadow(painter, SliceShadow(shadowStep(index), false), center, sliceDegrees(index), ShadowDrop(0.0));
         }
         std::vector<std::size_t> order(entries);
         std::iota(order.begin(), order.end(), std::size_t { 0 });
@@ -916,8 +914,9 @@ protected:
         });
         for (const std::size_t index : order) {
             const QPainterPath path = slicePath(index);
-            if (lift(index) > 0.0) {
-                PaintShadow(painter, path, lift(index));
+            if (const int step = shadowStep(index); step > 0) {
+                DrawShadow(painter, SliceShadow(step, true), center, sliceDegrees(index),
+                    ShadowDrop(static_cast<qreal>(step) / static_cast<qreal>(kShadowLiftSteps)));
             }
             painter.setPen(QPen(ChromeColor(kWheelSliceEdge), 1.0));
             painter.setBrush(FillColor(index));
@@ -935,7 +934,7 @@ protected:
         const bool zoomCentre = zoomToggleEnabled && zoomPresetMode_;
         QPainterPath disc;
         disc.addEllipse(center, layout.innerRadius, layout.innerRadius);
-        PaintShadow(painter, disc, 0.0);
+        DrawShadow(painter, discShadow_, center, 0.0, ShadowDrop(0.0));
         painter.setPen(QPen(ChromeColor(zoomCentre ? kWheelZoomCenterBorder : kWheelSliceEdge), zoomCentre ? 1.5 : 1.0));
         painter.setBrush(ChromeColor(zoomCentre ? kWheelZoomCenterFill : kWheelCenterFill));
         painter.drawPath(disc);
@@ -958,6 +957,7 @@ protected:
 
     void hideEvent(QHideEvent* event) override {
         animationTimer_.stop();
+        ReleaseShadows();
         QWidget::hideEvent(event);
     }
 
@@ -1107,20 +1107,106 @@ private:
         return path;
     }
 
+    // Slice `index` of `entries` around `origin`; a single entry is a ring.
+    static QPainterPath SliceShape(const QPointF& origin, std::size_t entries, std::size_t index, qreal inner, qreal outer) {
+        if (entries == 1U) {
+            QPainterPath ring;
+            ring.addEllipse(origin, outer, outer);
+            ring.addEllipse(origin, inner, inner);
+            return ring;
+        }
+        return SlicePath(origin, inner, outer,
+            AngleAt(static_cast<qreal>(index) / static_cast<qreal>(entries)),
+            AngleAt(static_cast<qreal>(index + 1U) / static_cast<qreal>(entries)));
+    }
+
     // Soft drop shadow: stacked translucent round-joined strokes, so alpha
-    // builds up toward the shape's edge.  `lift` deepens and lowers it.
-    static void PaintShadow(QPainter& painter, const QPainterPath& path, qreal lift) {
-        constexpr int kLayers = 5;
-        painter.save();
-        painter.translate(0.0, 2.0 + (3.0 * lift));
+    // builds up toward the shape's edge.  `lift` deepens it (and, through
+    // ShadowDrop, lowers it).
+    static constexpr int kShadowLayers = 5;
+    static qreal ShadowDrop(qreal lift) { return 2.0 + (3.0 * lift); }
+    static qreal ShadowSpread(qreal lift) { return static_cast<qreal>(kShadowLayers) * (1.5 + lift); }
+    static void StrokeShadow(QPainter& painter, const QPainterPath& path, qreal lift) {
         painter.setBrush(Qt::NoBrush);
         const int alpha = static_cast<int>(std::lround(lift > 0.0 ? 9.0 * lift : 5.0));
-        for (int layer = kLayers; layer >= 1; --layer) {
+        for (int layer = kShadowLayers; layer >= 1; --layer) {
             const qreal spread = static_cast<qreal>(layer) * (1.5 + lift);
             painter.setPen(QPen(QColor(0, 0, 0, alpha), spread * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             painter.drawPath(path);
         }
+    }
+
+    // The wide antialiased strokes above cost far more than the rest of the
+    // wheel, so each shadow is stroked once into a sprite and blitted per
+    // frame.  Sprites are in wheel-centre coordinates, in slice 0's
+    // orientation and without the drop: every slice is slice 0 rotated about
+    // the centre, and the drop stays straight down on screen.  Lift is
+    // quantised to kShadowLiftSteps, finer than the shadow's own alpha steps.
+    struct ShadowSprite {
+        QImage image {};
+        QPointF topLeft {};
+    };
+    static constexpr int kShadowLiftSteps = 16;
+
+    static ShadowSprite RenderShadow(const QPainterPath& path, qreal lift, qreal dpr) {
+        const qreal reach = ShadowSpread(lift) + 1.0;
+        const QRectF bounds = path.boundingRect().adjusted(-reach, -reach, reach, reach);
+        const QRect device = QRectF(bounds.topLeft() * dpr, bounds.size() * dpr).toAlignedRect();
+        ShadowSprite sprite { QImage(device.size(), QImage::Format_ARGB32_Premultiplied), QPointF(device.topLeft()) / dpr };
+        sprite.image.setDevicePixelRatio(dpr);
+        sprite.image.fill(Qt::transparent);
+        QPainter painter(&sprite.image);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.translate(-sprite.topLeft);
+        StrokeShadow(painter, path, lift);
+        return sprite;
+    }
+
+    static void DrawShadow(QPainter& painter, const ShadowSprite& sprite, const QPointF& center, qreal degrees, qreal drop) {
+        painter.save();
+        painter.translate(center.x(), center.y() + drop);
+        painter.rotate(degrees);
+        painter.drawImage(sprite.topLeft, sprite.image);
         painter.restore();
+    }
+
+    // Drops the sprites when the wheel geometry they were stroked for changes.
+    void SyncShadows(std::size_t entries, qreal ringInner, qreal outer, qreal discRadius, qreal dpr) {
+        if (entries == shadowEntries_ && ringInner == shadowRingInner_ && outer == shadowOuter_
+            && discRadius == shadowDiscRadius_ && dpr == shadowDpr_ && !discShadow_.image.isNull()) {
+            return;
+        }
+        shadowEntries_ = entries;
+        shadowRingInner_ = ringInner;
+        shadowOuter_ = outer;
+        shadowDiscRadius_ = discRadius;
+        shadowDpr_ = dpr;
+        restShadows_.assign(kShadowLiftSteps + 1, ShadowSprite {});
+        liftShadows_.assign(kShadowLiftSteps + 1, ShadowSprite {});
+        QPainterPath disc;
+        disc.addEllipse(QPointF(), discRadius, discRadius);
+        discShadow_ = RenderShadow(disc, 0.0, dpr);
+    }
+
+    void ReleaseShadows() {
+        restShadows_.clear();
+        liftShadows_.clear();
+        discShadow_ = ShadowSprite {};
+    }
+
+    // Slice 0's shadow at lift step `step`: the resting shadow (`lifted`
+    // false) or the deeper lifted one, both under the lifted slice's shape.
+    const ShadowSprite& SliceShadow(int step, bool lifted) {
+        ShadowSprite& sprite = (lifted ? liftShadows_ : restShadows_)[static_cast<std::size_t>(step)];
+        if (sprite.image.isNull()) {
+            const qreal lift = static_cast<qreal>(step) / static_cast<qreal>(kShadowLiftSteps);
+            const QPointF origin = Polar(QPointF(), qt::PaletteWheelHoverOffset() * lift,
+                AngleAt(0.5 / static_cast<qreal>(shadowEntries_)));
+            const QPainterPath path = SliceShape(origin, shadowEntries_, 0, shadowRingInner_,
+                shadowOuter_ + (qt::PaletteWheelHoverGrow() * lift));
+            sprite = RenderShadow(path, lifted ? lift : 0.0, shadowDpr_);
+        }
+        return sprite;
     }
 
     // Selected entry (colour, tool or zoom preset): a rounded accent arc just
@@ -1205,7 +1291,19 @@ private:
         if (!moving) {
             animationTimer_.stop();
         }
-        update();
+        UpdateWheel();
+    }
+
+    // The overlay spans the host client rect so an outside click closes the
+    // wheel, but only the wheel itself changes while it animates.  A bare
+    // update() would make every widget under this translucent overlay (the
+    // whole canvas) repaint each frame.
+    void UpdateWheel() {
+        const qt::PaletteWheelLayout layout = BuildLayout();
+        const qreal reach = layout.outerRadius + qt::PaletteWheelHoverOffset() + qt::PaletteWheelHoverGrow()
+            + std::max(ShadowSpread(1.0) + ShadowDrop(1.0), kPaletteWheelTabGapDip + kPaletteWheelTabWidthDip)
+            + 2.0;  // antialiasing
+        update(QRectF(layout.center.x() - reach, layout.center.y() - reach, reach * 2.0, reach * 2.0).toAlignedRect());
     }
 
     // Reference isColorEntry / selected (App.cpp:6847-6856).
@@ -1265,6 +1363,16 @@ private:
     QElapsedTimer animationClock_ {};
     qreal openProgress_ = 1.0;
     std::vector<qreal> hoverProgress_ {};  // per entry, 0 (resting) .. 1 (lifted), linear
+    // Shadow sprites (SliceShadow), indexed by lift step, and the geometry
+    // they were stroked for.  Released while the wheel is hidden.
+    std::vector<ShadowSprite> restShadows_ {};
+    std::vector<ShadowSprite> liftShadows_ {};
+    ShadowSprite discShadow_ {};
+    std::size_t shadowEntries_ = 0;
+    qreal shadowRingInner_ = 0.0;
+    qreal shadowOuter_ = 0.0;
+    qreal shadowDiscRadius_ = 0.0;
+    qreal shadowDpr_ = 0.0;
 };
 
 // ---------------------------------------------------------------------------
