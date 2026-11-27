@@ -1981,9 +1981,6 @@ void QtMainWindow::UpdateChromeGeometry() {
     if (sidebar_ != nullptr) {
         sidebar_->SetMaximized(maximized);
         sidebar_->SetHostClientRect(rect(), reserved);
-        // The sidebar overlays the canvas but stays below the toolbar band:
-        // raise it first so the toolbar's raise keeps it on top.
-        sidebar_->raise();
     }
     if (toolbar_ != nullptr) {
         UpdateNativeFrameThickness();
@@ -1991,7 +1988,28 @@ void QtMainWindow::UpdateChromeGeometry() {
         // The widget owns the 120 ms reveal offset; the window only supplies the
         // band's width and the maximized state.
         toolbar_->setGeometry(0, qRound(toolbar_->ToolbarOffsetY()), width(), band);
-        toolbar_->raise();
+    }
+    // The sidebar overlays the canvas but stays below the toolbar band, so
+    // the toolbar is the topmost child and the sidebar the one under it.
+    // This runs on every reveal frame, and a raise() repaints the raised
+    // widget whole, so only re-stack when that order is broken.
+    QWidget* top = nullptr;
+    QWidget* belowTop = nullptr;
+    const QObjectList& stack = children();
+    for (auto it = stack.crbegin(); it != stack.crend() && belowTop == nullptr; ++it) {
+        auto* widget = qobject_cast<QWidget*>(*it);
+        if (widget == nullptr || widget->isWindow()) {
+            continue;
+        }
+        (top == nullptr ? top : belowTop) = widget;
+    }
+    if (top != toolbar_ || belowTop != sidebar_) {
+        if (sidebar_ != nullptr) {
+            sidebar_->raise();
+        }
+        if (toolbar_ != nullptr) {
+            toolbar_->raise();
+        }
     }
     if (contentLayout_ != nullptr && reservedTop_ != reserved) {
         reservedTop_ = reserved;
