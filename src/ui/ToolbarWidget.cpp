@@ -1891,12 +1891,41 @@ void ToolbarWidget::OnRevealTick() {
     emit RevealProgressChanged(revealProgress_);
 }
 
+namespace {
+
+// Set by the first band paint in the process.  The first paint loads the
+// chrome text and caption-glyph fonts (~200 ms on a cold start); every later
+// paint, in any window, finds them cached.
+bool chromeBandPainted = false;
+
+}  // namespace
+
 void ToolbarWidget::paintEvent(QPaintEvent*) {
     // Exactly the vertical-extent truth the shell's hit test consumes.
     if (VisibleToolbarHeight() <= 0.0) {
         return;
     }
     QPainter painter(this);
+    PaintBand(painter);
+}
+
+void ToolbarWidget::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    // A shown band pays the font loading on its startup paint.  An auto-hidden
+    // one would pay it on its first reveal instead, stalling that slide, so
+    // paint it once offscreen now.
+    if (chromeBandPainted || VisibleToolbarHeight() > 0.0 || size().isEmpty()) {
+        return;
+    }
+    const qreal dpr = devicePixelRatioF();
+    QImage scratch((QSizeF(size()) * dpr).toSize(), QImage::Format_ARGB32_Premultiplied);
+    scratch.setDevicePixelRatio(dpr);
+    QPainter painter(&scratch);
+    PaintBand(painter);
+}
+
+void ToolbarWidget::PaintBand(QPainter& painter) {
+    chromeBandPainted = true;
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
@@ -1912,7 +1941,6 @@ void ToolbarWidget::paintEvent(QPaintEvent*) {
             QRectF(0.0, toolbarHeight - kToolbarEdgeGuard, static_cast<qreal>(width()), kToolbarEdgeGuard),
             ChromeColor(kChromeWindowBackground));
     }
-
     const qt::ToolbarLayout layout = ComputeLayout();
     const qt::ToolbarTitleLayout titleLayout = ComputeTitleLayout();
 
