@@ -17,6 +17,7 @@
 #include "ui/LayoutQt.h"
 
 class QFocusEvent;
+class QPainter;
 class QTimer;
 
 namespace cnote::ui {
@@ -277,6 +278,7 @@ signals:
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void showEvent(QShowEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
@@ -288,6 +290,7 @@ protected:
 
 private:
     void UpdateToolbarGeometry();
+    void PaintBand(QPainter& painter);
     // The only writer of the reveal state: starts (or snaps) the transition to
     // `revealed`, emits RevealStateChanged when the exposed truth changes, and
     // always leaves geometry and RevealProgressChanged consistent.
