@@ -14,6 +14,12 @@ enum class HistoryActionType {
     AddPages,
     // `pages` removed from the sorted indices `pageIndices` (pre-removal).
     RemovePages,
+    // Only the affected objects of the listed pages change; each entry of
+    // `beforeObjects`/`afterObjects` is one page's delta, parallel to
+    // `pageIndices`.  Used for object edits (move, transform, recolor, clone,
+    // erase, cut, paste) so their history cost is O(affected objects), not
+    // O(page).
+    ReplaceObjects,
     ReplacePages,
     // Document::ReorderPages with `pageIndices` as the order; undo applies
     // its inverse.
@@ -21,6 +27,27 @@ enum class HistoryActionType {
     AddLatex,
     RemoveLatex,
     UpdateLatex,
+};
+
+// The objects a ReplaceObjects action touches, grouped by kind.  Indices are
+// the objects' positions in the page's vectors when the action was recorded.
+// An index present on one side only means the object was inserted (after) or
+// removed (before); an index on both sides is an in-place update.  Objects of
+// one kind in one action are all of the same sort (updates, insertions or
+// removals) and the index lists are sorted ascending.
+struct PageObjectSet {
+    std::vector<std::size_t> strokeIndices {};
+    std::vector<Stroke> strokes {};
+    std::vector<std::size_t> imageIndices {};
+    std::vector<PageImage> images {};
+    std::vector<std::size_t> textIndices {};
+    std::vector<PageText> texts {};
+    std::vector<std::size_t> latexIndices {};
+    std::vector<PageLatex> latexes {};
+
+    [[nodiscard]] bool Empty() const noexcept {
+        return strokeIndices.empty() && imageIndices.empty() && textIndices.empty() && latexIndices.empty();
+    }
 };
 
 struct HistoryAction {
@@ -32,6 +59,11 @@ struct HistoryAction {
     PageLatex replacementLatex {};
     std::vector<Page> pages {};
     std::vector<Page> replacementPages {};
+    // ReplaceObjects only: one affected-object set per page index, parallel to
+    // `pageIndices`.  A multi-page object edit (delete/cut across a selection)
+    // remains one undo step.
+    std::vector<PageObjectSet> beforeObjects {};
+    std::vector<PageObjectSet> afterObjects {};
     std::vector<std::size_t> pageIndices {};
     std::size_t index = 0;
     std::size_t pageIndex = 0;

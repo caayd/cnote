@@ -692,6 +692,7 @@ int main(int argc, char** argv) {
     const QImage beforeDrag = canvas.grab().toImage();
     const InkBox beforeInk = RedInk(beforeDrag);
     Check(beforeInk.valid(), "selected stroke has ink before the drag");
+    const cnote::Stroke originalStroke = controller.DocumentRef().PageAt(0).strokes[0];
 
     const std::uint64_t gestureRendersBefore = canvas.SurfaceRenderCount();
     SendMouse(canvas, QEvent::MouseButtonPress, center, Qt::LeftButton, Qt::LeftButton);
@@ -731,8 +732,34 @@ int main(int argc, char** argv) {
     std::printf("MOVE-COMMIT mid=%s after=%s\n", FormatBox(midInk).c_str(), FormatBox(afterInk).c_str());
     Check(BoxNear(afterInk, midInk, static_cast<int>(4 * devicePixelRatio) + 2),
           "the committed frame matches the last drag frame");
+    // The move is one ReplaceObjects action carrying only the dragged stroke;
+    // undo/redo must restore its exact state without a whole-page snapshot.
+    const std::shared_ptr<cnote::ProjectSession> session = controller.Session();
+    Check(!session->undoActions.empty()
+            && session->undoActions.back().type == cnote::HistoryActionType::ReplaceObjects,
+          "a move records one object-delta history action");
+    if (!session->undoActions.empty()) {
+        const cnote::HistoryAction& moveAction = session->undoActions.back();
+        Check(moveAction.pages.empty() && moveAction.replacementPages.empty(),
+              "the move history keeps no whole-page snapshot");
+        Check(moveAction.beforeObjects.size() == 1U
+                && moveAction.afterObjects.size() == 1U
+                && moveAction.pageIndices == std::vector<std::size_t> { 0U }
+                && moveAction.beforeObjects.front().strokes.size() == 1U
+                && moveAction.afterObjects.front().strokes.size() == 1U
+                && moveAction.beforeObjects.front().strokeIndices == std::vector<std::size_t> { 0U },
+              "the move history retains only the dragged stroke");
+    }
+    const cnote::Stroke movedStroke = controller.DocumentRef().PageAt(0).strokes[0];
+    Check(!cnote::StrokeEqual(originalStroke, movedStroke), "the drag changed the stroke position");
     Check(controller.Undo(), "undo restores the probe stroke position");
+    Check(cnote::StrokeEqual(controller.DocumentRef().PageAt(0).strokes[0], originalStroke),
+          "undo restores the moved stroke exactly");
+    Check(controller.Redo(), "redo reapplies the move");
+    Check(cnote::StrokeEqual(controller.DocumentRef().PageAt(0).strokes[0], movedStroke),
+          "redo restores the moved stroke exactly");
     controller.ClearSelection();
+    Check(controller.Undo(), "undo restores the probe stroke position again");
     Check(controller.Undo(), "undo removes the move-gesture probe stroke");
     QCoreApplication::processEvents();
 

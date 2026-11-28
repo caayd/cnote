@@ -1009,14 +1009,39 @@ void QtDocumentController::AddToSelection(std::size_t pageIndex, ui::PageSelecti
 
 void QtDocumentController::BeginPageGesture(std::size_t pageIndex) {
     CancelPageGesture();
-    const Page* page = PageAt(pageIndex);
-    if (page == nullptr) {
+    if (PageAt(pageIndex) == nullptr) {
         return;
     }
     PageGesture gesture;
     gesture.pageIndex = pageIndex;
-    gesture.before = *page;
     gesture_ = std::move(gesture);
+}
+
+void QtDocumentController::CaptureGestureSelection(const Page& page, const ui::PageSelection& selection) {
+    if (!gesture_.has_value()) {
+        return;
+    }
+    PageGesture& gesture = *gesture_;
+    for (const std::size_t index : selection.strokes) {
+        if (index < page.strokes.size() && gesture.insertedStrokes.find(index) == gesture.insertedStrokes.end()) {
+            gesture.beforeStrokes.try_emplace(index, page.strokes[index]);
+        }
+    }
+    for (const std::size_t index : selection.images) {
+        if (index < page.images.size() && gesture.insertedImages.find(index) == gesture.insertedImages.end()) {
+            gesture.beforeImages.try_emplace(index, page.images[index]);
+        }
+    }
+    for (const std::size_t index : selection.texts) {
+        if (index < page.texts.size() && gesture.insertedTexts.find(index) == gesture.insertedTexts.end()) {
+            gesture.beforeTexts.try_emplace(index, page.texts[index]);
+        }
+    }
+    for (const std::size_t index : selection.latexes) {
+        if (index < page.latexes.size() && gesture.insertedLatexes.find(index) == gesture.insertedLatexes.end()) {
+            gesture.beforeLatexes.try_emplace(index, page.latexes[index]);
+        }
+    }
 }
 
 const std::vector<PdfTextCharBox>* QtDocumentController::PdfTextCharBoxesFor(std::size_t pageIndex) const {
@@ -1122,17 +1147,109 @@ Page* QtDocumentController::GesturePage() {
     return gesture_.has_value() ? PageAt(gesture_->pageIndex) : nullptr;
 }
 
+std::optional<HistoryAction> QtDocumentController::BuildPageGestureAction() const {
+    if (!gesture_.has_value() || session_ == nullptr) {
+        return std::nullopt;
+    }
+    const Page* page = PageAt(gesture_->pageIndex);
+    if (page == nullptr) {
+        return std::nullopt;
+    }
+    const PageGesture& gesture = *gesture_;
+    PageObjectSet before {};
+    PageObjectSet after {};
+
+    // Compare only the objects this gesture captured: an object the gesture
+    // never touched (or one it restored to its start state) is not recorded,
+    // replacing the former whole-page PageEqual check.
+    const auto appendUpdates = [](const auto& beforeMap, const auto& current,
+        auto& beforeIndices, auto& beforeObjects,
+        auto& afterIndices, auto& afterObjects, const auto& equal) {
+        for (const auto& [index, object] : beforeMap) {
+            if (index >= current.size() || equal(object, current[index])) {
+                continue;
+            }
+            beforeIndices.push_back(index);
+            beforeObjects.push_back(object);
+            afterIndices.push_back(index);
+            afterObjects.push_back(current[index]);
+        }
+    };
+    appendUpdates(gesture.beforeStrokes, page->strokes,
+        before.strokeIndices, before.strokes,
+        after.strokeIndices, after.strokes, StrokeEqual);
+    appendUpdates(gesture.beforeImages, page->images,
+        before.imageIndices, before.images,
+        after.imageIndices, after.images, PageImageEqual);
+    appendUpdates(gesture.beforeTexts, page->texts,
+        before.textIndices, before.texts,
+        after.textIndices, after.texts, PageTextEqual);
+    appendUpdates(gesture.beforeLatexes, page->latexes,
+        before.latexIndices, before.latexes,
+        after.latexIndices, after.latexes, PageLatexEqual);
+
+    // Erased objects belong to the before side only; cloned objects to the
+    // after side only.  Both maps/sets iterate ascending, so each side's index
+    // list stays sorted for the reducer.
+    for (const auto& [index, object] : gesture.removedStrokes) {
+        before.strokeIndices.push_back(index);
+        before.strokes.push_back(object);
+    }
+    for (const auto& [index, object] : gesture.removedImages) {
+        before.imageIndices.push_back(index);
+        before.images.push_back(object);
+    }
+    for (const auto& [index, object] : gesture.removedTexts) {
+        before.textIndices.push_back(index);
+        before.texts.push_back(object);
+    }
+    for (const auto& [index, object] : gesture.removedLatexes) {
+        before.latexIndices.push_back(index);
+        before.latexes.push_back(object);
+    }
+    for (const std::size_t index : gesture.insertedStrokes) {
+        if (index < page->strokes.size()) {
+            after.strokeIndices.push_back(index);
+            after.strokes.push_back(page->strokes[index]);
+        }
+    }
+    for (const std::size_t index : gesture.insertedImages) {
+        if (index < page->images.size()) {
+            after.imageIndices.push_back(index);
+            after.images.push_back(page->images[index]);
+        }
+    }
+    for (const std::size_t index : gesture.insertedTexts) {
+        if (index < page->texts.size()) {
+            after.textIndices.push_back(index);
+            after.texts.push_back(page->texts[index]);
+        }
+    }
+    for (const std::size_t index : gesture.insertedLatexes) {
+        if (index < page->latexes.size()) {
+            after.latexIndices.push_back(index);
+            after.latexes.push_back(page->latexes[index]);
+        }
+    }
+    if (before.Empty() && after.Empty()) {
+        return std::nullopt;
+    }
+    HistoryAction action {};
+    action.type = HistoryActionType::ReplaceObjects;
+    action.pageIndices = { gesture.pageIndex };
+    action.beforeObjects.push_back(std::move(before));
+    action.afterObjects.push_back(std::move(after));
+    return action;
+}
+
 void QtDocumentController::CommitPageGesture() {
     if (!gesture_.has_value()) {
         return;
     }
     const std::size_t pageIndex = gesture_->pageIndex;
-    Page before = std::move(gesture_->before);
-    const bool changed = gesture_->changed;
+    std::optional<HistoryAction> action = BuildPageGestureAction();
     gesture_.reset();
-
-    Page* page = PageAt(pageIndex);
-    if (!changed || page == nullptr || session_ == nullptr || PageEqual(before, *page)) {
+    if (!action.has_value()) {
         return;
     }
 
@@ -1140,13 +1257,8 @@ void QtDocumentController::CommitPageGesture() {
     // excluded objects only, so no epoch was needed mid-flight); the commit
     // makes the change visible to renderer caches.
     session_->document.TouchPage(pageIndex);
-    // One transaction per gesture, the reference's PushReplacePagesHistoryAction.
-    HistoryAction action {};
-    action.type = HistoryActionType::ReplacePages;
-    action.pageIndices = { pageIndex };
-    action.pages = { std::move(before) };
-    action.replacementPages = { *page };
-    RecordCommit(std::move(action));
+    // One transaction per gesture; only the affected objects are retained.
+    RecordCommit(std::move(*action));
 }
 
 void QtDocumentController::CancelPageGesture() {
@@ -1154,11 +1266,19 @@ void QtDocumentController::CancelPageGesture() {
         return;
     }
     const std::size_t pageIndex = gesture_->pageIndex;
-    Page before = std::move(gesture_->before);
+    std::optional<HistoryAction> action = BuildPageGestureAction();
     gesture_.reset();
-    if (Page* page = PageAt(pageIndex); page != nullptr) {
-        *page = std::move(before);
+    if (!action.has_value()) {
+        return;
     }
+    Page* page = PageAt(pageIndex);
+    if (page == nullptr) {
+        return;
+    }
+    // Restore without TouchPage: the page returns to the state renderer caches
+    // already hold, so surfaces and thumbnails need no invalidation.
+    static_cast<void>(ApplyPageObjectDelta(
+        *page, action->beforeObjects.front(), action->afterObjects.front(), true));
 }
 
 void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
@@ -1169,6 +1289,8 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
     PageGesture& gesture = *gesture_;
     PageGesture::MoveBounds& moveBounds = gesture.moveBounds;
     const ui::PageSelection& selection = SelectionFor(pageIndex);
+    // Snapshot the moved objects before the first mutation.
+    CaptureGestureSelection(*page, selection);
 
     // First move of the gesture measures every selected object's bounds once;
     // later samples reuse them and translate by the applied delta.  Without
@@ -1276,7 +1398,6 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
         }
         ui::TranslateStrokePoints(page->strokes[index], clamped);
         advance(moveBounds.strokes[slot], clamped);
-        MarkGestureChanged();
     }
     for (std::size_t slot = 0; slot < selection.images.size(); ++slot) {
         const std::size_t index = selection.images[slot];
@@ -1290,7 +1411,6 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
         page->images[index].x += clamped.x;
         page->images[index].y += clamped.y;
         advance(moveBounds.images[slot], clamped);
-        MarkGestureChanged();
     }
     for (std::size_t slot = 0; slot < selection.texts.size(); ++slot) {
         const std::size_t index = selection.texts[slot];
@@ -1304,7 +1424,6 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
         page->texts[index].x += clamped.x;
         page->texts[index].y += clamped.y;
         advance(moveBounds.texts[slot], clamped);
-        MarkGestureChanged();
     }
     for (std::size_t slot = 0; slot < selection.latexes.size(); ++slot) {
         const std::size_t index = selection.latexes[slot];
@@ -1318,7 +1437,6 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
         page->latexes[index].x += clamped.x;
         page->latexes[index].y += clamped.y;
         advance(moveBounds.latexes[slot], clamped);
-        MarkGestureChanged();
     }
 }
 
@@ -1337,6 +1455,7 @@ bool QtDocumentController::CloneSelection(std::size_t pageIndex) {
         }
         Stroke clone = page->strokes[index];
         clones.strokes.push_back(page->strokes.size());
+        gesture_->insertedStrokes.insert(clones.strokes.back());
         page->strokes.push_back(std::move(clone));
     }
     for (const std::size_t index : selection.images) {
@@ -1345,6 +1464,7 @@ bool QtDocumentController::CloneSelection(std::size_t pageIndex) {
         }
         PageImage clone = page->images[index];
         clones.images.push_back(page->images.size());
+        gesture_->insertedImages.insert(clones.images.back());
         page->images.push_back(std::move(clone));
     }
     for (const std::size_t index : selection.texts) {
@@ -1354,6 +1474,7 @@ bool QtDocumentController::CloneSelection(std::size_t pageIndex) {
         PageText clone = page->texts[index];
         clone.id = NextObjectId();
         clones.texts.push_back(page->texts.size());
+        gesture_->insertedTexts.insert(clones.texts.back());
         page->texts.push_back(std::move(clone));
     }
     for (const std::size_t index : selection.latexes) {
@@ -1363,15 +1484,15 @@ bool QtDocumentController::CloneSelection(std::size_t pageIndex) {
         PageLatex clone = page->latexes[index];
         clone.id = NextObjectId();
         clones.latexes.push_back(page->latexes.size());
+        gesture_->insertedLatexes.insert(clones.latexes.back());
         page->latexes.push_back(std::move(clone));
     }
     if (clones.Empty()) {
         return false;
     }
     selection_[pageIndex] = std::move(clones);
-    // The clone is a change even if the pointer never moves afterwards, so
-    // CommitPageGesture must not compare-and-skip it.
-    MarkGestureChanged();
+    // The clones are recorded as insertions, so the commit keeps them even if
+    // the pointer never moves afterwards.
     return true;
 }
 
@@ -1381,30 +1502,31 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         return;
     }
 
-    // Absolute, not cumulative: every update restores the gesture snapshot and
+    // Absolute, not cumulative: every update restores the captured objects and
     // re-applies the transform, so repeated UpdateTransform calls cannot drift.
-    // Only the selected objects are restored — copying the whole page per
-    // pointer event deep-copied every unselected stroke, image raster and text
-    // run, which dominated the gesture on dense pages.
+    // Only the selected objects are captured and restored — copying the whole
+    // page per pointer event deep-copied every unselected stroke, image raster
+    // and text run, which dominated the gesture on dense pages.
     const ui::PageSelection& selection = SelectionFor(pageIndex);
+    CaptureGestureSelection(*page, selection);
     for (const std::size_t index : selection.strokes) {
-        if (index < page->strokes.size() && index < gesture_->before.strokes.size()) {
-            page->strokes[index] = gesture_->before.strokes[index];
+        if (const auto found = gesture_->beforeStrokes.find(index); found != gesture_->beforeStrokes.end()) {
+            page->strokes[index] = found->second;
         }
     }
     for (const std::size_t index : selection.images) {
-        if (index < page->images.size() && index < gesture_->before.images.size()) {
-            page->images[index] = gesture_->before.images[index];
+        if (const auto found = gesture_->beforeImages.find(index); found != gesture_->beforeImages.end()) {
+            page->images[index] = found->second;
         }
     }
     for (const std::size_t index : selection.texts) {
-        if (index < page->texts.size() && index < gesture_->before.texts.size()) {
-            page->texts[index] = gesture_->before.texts[index];
+        if (const auto found = gesture_->beforeTexts.find(index); found != gesture_->beforeTexts.end()) {
+            page->texts[index] = found->second;
         }
     }
     for (const std::size_t index : selection.latexes) {
-        if (index < page->latexes.size() && index < gesture_->before.latexes.size()) {
-            page->latexes[index] = gesture_->before.latexes[index];
+        if (const auto found = gesture_->beforeLatexes.find(index); found != gesture_->beforeLatexes.end()) {
+            page->latexes[index] = found->second;
         }
     }
 
@@ -1427,7 +1549,6 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         // scales with them (exact for uniform scales and rotations; the
         // geometric mean approximates a non-uniform resize).
         stroke.sampling.spacing *= std::sqrt(std::abs(scaleX * scaleY));
-        MarkGestureChanged();
     }
     for (const std::size_t index : selection.images) {
         if (index >= page->images.size()) {
@@ -1444,7 +1565,6 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         image.x = mappedCenter.x - (image.width * 0.5f);
         image.y = mappedCenter.y - (image.height * 0.5f);
         image.rotationDegrees += transform.rotateDegrees;
-        MarkGestureChanged();
     }
     for (const std::size_t index : selection.texts) {
         if (index >= page->texts.size()) {
@@ -1484,7 +1604,6 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
                     text.width = std::max(kMinTextWidth, text.width * textScale);
                 }
             }
-            MarkGestureChanged();
             continue;
         }
 
@@ -1504,7 +1623,6 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         if (widthChanged) {
             text.width = std::max(kMinTextWidth, mappedBottomRight.x - mappedTopLeft.x);
         }
-        MarkGestureChanged();
     }
     for (const std::size_t index : selection.latexes) {
         if (index >= page->latexes.size()) {
@@ -1529,7 +1647,6 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
             object.y += mapped.y - bounds.top;
         }
         object.fontSize *= scaleY;
-        MarkGestureChanged();
     }
 }
 
@@ -1556,9 +1673,15 @@ void QtDocumentController::CommitErase(std::size_t pageIndex, const std::vector<
     }
 
     BeginPageGesture(pageIndex);
-    const auto removeDescending = [](auto& objects, std::vector<std::size_t>& indices) {
+    const auto removeDescending = [&](auto& objects, std::vector<std::size_t>& indices, auto& removed) {
         std::sort(indices.begin(), indices.end());
         indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+        // Capture the deleted objects (pre-removal index) for the undo delta.
+        for (const std::size_t index : indices) {
+            if (index < objects.size()) {
+                removed.emplace(index, objects[index]);
+            }
+        }
         for (auto it = indices.rbegin(); it != indices.rend(); ++it) {
             if (*it < objects.size()) {
                 objects.erase(objects.begin() + static_cast<std::ptrdiff_t>(*it));
@@ -1566,10 +1689,10 @@ void QtDocumentController::CommitErase(std::size_t pageIndex, const std::vector<
         }
     };
     // Reference order (App::EndErase): texts, latexes, images, strokes.
-    removeDescending(page->texts, texts);
-    removeDescending(page->latexes, latexes);
-    removeDescending(page->images, images);
-    removeDescending(page->strokes, strokes);
+    removeDescending(page->texts, texts, gesture_->removedTexts);
+    removeDescending(page->latexes, latexes, gesture_->removedLatexes);
+    removeDescending(page->images, images, gesture_->removedImages);
+    removeDescending(page->strokes, strokes, gesture_->removedStrokes);
 
     // The erased objects leave the selection as well.
     ui::PageSelection remaining = SelectionFor(pageIndex);
@@ -1586,14 +1709,13 @@ void QtDocumentController::CommitErase(std::size_t pageIndex, const std::vector<
     drop(remaining.texts, texts);
     SelectObjects(pageIndex, std::move(remaining));
 
-    MarkGestureChanged();
     CommitPageGesture();
 }
 bool QtDocumentController::RecolorSelection(std::uint32_t color) {
     // Reference App::SetColorIndex (ToolbarState.cpp:512-543) recolors selected
     // strokes; this port extends the same idea to text and LaTeX objects and
     // routes it through the page-gesture machinery so the recolor is one
-    // undoable ReplacePages action instead of an unrecorded mutation.
+    // undoable object-delta action instead of an unrecorded mutation.
     bool recolored = false;
     for (auto& [pageIndex, selection] : selection_) {
         if (selection.Empty()) {
@@ -1604,10 +1726,12 @@ bool QtDocumentController::RecolorSelection(std::uint32_t color) {
         if (page == nullptr) {
             continue;
         }
+        CaptureGestureSelection(*page, selection);
+        bool pageChanged = false;
         for (const std::size_t index : selection.strokes) {
             if (index < page->strokes.size() && page->strokes[index].style.color != color) {
                 page->strokes[index].style.color = color;
-                MarkGestureChanged();
+                pageChanged = true;
             }
         }
         for (const std::size_t index : selection.texts) {
@@ -1617,22 +1741,22 @@ bool QtDocumentController::RecolorSelection(std::uint32_t color) {
             PageText& text = page->texts[index];
             if (text.color != color) {
                 text.color = color;
-                MarkGestureChanged();
+                pageChanged = true;
             }
             for (PageTextStyleSpan& span : text.styleSpans) {
                 if (span.style.color != color) {
                     span.style.color = color;
-                    MarkGestureChanged();
+                    pageChanged = true;
                 }
             }
         }
         for (const std::size_t index : selection.latexes) {
             if (index < page->latexes.size() && page->latexes[index].color != color) {
                 page->latexes[index].color = color;
-                MarkGestureChanged();
+                pageChanged = true;
             }
         }
-        recolored = recolored || (gesture_.has_value() && gesture_->changed);
+        recolored = recolored || pageChanged;
         CommitPageGesture();
     }
     return recolored;
@@ -2109,22 +2233,40 @@ bool QtDocumentController::RemoveSelection() {
         }
     }
     Document& document = session_->document;
-    std::vector<std::size_t> indices;
-    std::vector<Page> before;
-    std::vector<Page> after;
-    bool changed = false;
+    HistoryAction action {};
+    action.type = HistoryActionType::ReplaceObjects;
 
+    // Deleting a selection is a removal delta per page: the removed objects at
+    // their pre-removal indices, which undo reinserts.  A multi-page selection
+    // (not produced by the current single-page selection UI) stays one step.
     for (const auto& [pageIndex, selection] : selection_) {
         if (pageIndex >= document.PageCount() || selection.Empty()) {
             continue;
         }
-        indices.push_back(pageIndex);
-        before.push_back(document.PageAt(pageIndex));
-        document.TouchPage(pageIndex);
         Page& page = document.PageAt(pageIndex);
+        PageObjectSet before {};
+        const auto recordRemoved = [](auto& objects, std::vector<std::size_t> indices,
+                                      auto& removedIndices, auto& removedObjects) {
+            std::sort(indices.begin(), indices.end());
+            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+            for (const std::size_t index : indices) {
+                if (index < objects.size()) {
+                    removedIndices.push_back(index);
+                    removedObjects.push_back(objects[index]);
+                }
+            }
+        };
+        recordRemoved(page.strokes, selection.strokes, before.strokeIndices, before.strokes);
+        recordRemoved(page.texts, selection.texts, before.textIndices, before.texts);
+        recordRemoved(page.latexes, selection.latexes, before.latexIndices, before.latexes);
+        recordRemoved(page.images, selection.images, before.imageIndices, before.images);
+        if (before.Empty()) {
+            continue;
+        }
 
         const auto removeAt = [](auto& objects, std::vector<std::size_t> indices) {
             std::sort(indices.begin(), indices.end(), std::greater<> {});
+            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
             for (const std::size_t index : indices) {
                 if (index < objects.size()) {
                     objects.erase(objects.begin() + static_cast<std::ptrdiff_t>(index));
@@ -2135,18 +2277,15 @@ bool QtDocumentController::RemoveSelection() {
         removeAt(page.texts, selection.texts);
         removeAt(page.latexes, selection.latexes);
         removeAt(page.images, selection.images);
-        after.push_back(page);
-        changed = true;
+        document.TouchPage(pageIndex);
+        action.pageIndices.push_back(pageIndex);
+        action.beforeObjects.push_back(std::move(before));
+        action.afterObjects.emplace_back();
     }
-    if (!changed) {
+    if (action.pageIndices.empty()) {
         return false;
     }
 
-    HistoryAction action {};
-    action.type = HistoryActionType::ReplacePages;
-    action.pageIndices = indices;
-    action.pages = std::move(before);
-    action.replacementPages = std::move(after);
     selection_.clear();
     emit SelectionChanged();
     RecordCommit(std::move(action));
@@ -2164,7 +2303,6 @@ bool QtDocumentController::PastePayload(
     pageIndex = std::min(pageIndex, DocumentRef().PageCount() - 1U);
     Document& document = session_->document;
     Page& page = document.PageAt(pageIndex);
-    const Page before = page;
 
     // Center the payload on the target and keep it inside the page when it fits.
     const float width = data.maxX - data.minX;
@@ -2178,12 +2316,18 @@ bool QtDocumentController::PastePayload(
         deltaY = std::clamp(deltaY, -data.minY, page.height - data.maxY);
     }
 
+    // Paste is an insertion delta: the appended objects at their new indices,
+    // which undo removes.  Keeping them by value also preserves the new
+    // text/LaTeX ids across undo and redo.
+    PageObjectSet after {};
     ui::PageSelection pasted {};
     for (const Stroke& source : data.strokes) {
         Stroke stroke = source;
         ui::TranslateStrokePoints(stroke, Vec2 { deltaX, deltaY });
         pasted.strokes.push_back(page.strokes.size());
+        after.strokeIndices.push_back(page.strokes.size());
         page.strokes.push_back(std::move(stroke));
+        after.strokes.push_back(page.strokes.back());
     }
     for (const PageText& source : data.texts) {
         PageText text = source;
@@ -2191,7 +2335,9 @@ bool QtDocumentController::PastePayload(
         text.x += deltaX;
         text.y += deltaY;
         pasted.texts.push_back(page.texts.size());
+        after.textIndices.push_back(page.texts.size());
         page.texts.push_back(std::move(text));
+        after.texts.push_back(page.texts.back());
     }
     for (const PageLatex& source : data.latexes) {
         PageLatex latex = source;
@@ -2199,23 +2345,27 @@ bool QtDocumentController::PastePayload(
         latex.x += deltaX;
         latex.y += deltaY;
         pasted.latexes.push_back(page.latexes.size());
+        after.latexIndices.push_back(page.latexes.size());
         page.latexes.push_back(std::move(latex));
+        after.latexes.push_back(page.latexes.back());
     }
     for (const PageImage& source : data.images) {
         PageImage image = source;
         image.x += deltaX;
         image.y += deltaY;
         pasted.images.push_back(page.images.size());
+        after.imageIndices.push_back(page.images.size());
         page.images.push_back(std::move(image));
+        after.images.push_back(page.images.back());
     }
 
     document.TouchPage(pageIndex);
 
     HistoryAction action {};
-    action.type = HistoryActionType::ReplacePages;
+    action.type = HistoryActionType::ReplaceObjects;
     action.pageIndices = { pageIndex };
-    action.pages = { before };
-    action.replacementPages = { page };
+    action.beforeObjects.emplace_back();
+    action.afterObjects.push_back(std::move(after));
 
     selection_.clear();
     selection_[pageIndex] = std::move(pasted);
