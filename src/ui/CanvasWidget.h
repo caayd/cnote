@@ -22,6 +22,7 @@
 #include "latex/LatexEngine.h"
 #include "render/PageRenderer.h"
 #include "settings/SettingsStoreQt.h"
+#include "ui/PageObjectBounds.h"
 #include "ui/CanvasController.h"
 #include "ui/EraserTrail.h"
 #include "ui/InteractionRouter.h"
@@ -248,6 +249,11 @@ public:
     // Diagnostics used by the gate harness/timings.
     // Page-surface re-renders (a signature change) and scale/DPR cache misses.
     [[nodiscard]] std::uint64_t SurfaceRenderCount() const { return surfaceRenders_; }
+    // How many times the erase/scratch bounds cache has measured a page; one
+    // per page epoch, not per pointer sample (diag for the bounds work).
+    [[nodiscard]] std::size_t ObjectBoundsRecomputeCount() const {
+        return objectBoundsCache_.RecomputeCount();
+    }
     [[nodiscard]] float ViewportPanX() const { return panX_; }
     [[nodiscard]] float ViewportPanY() const { return panY_; }
     [[nodiscard]] float ZoomReferenceWidth() const { return ZoomReferenceCanvasWidth(); }
@@ -715,6 +721,10 @@ private:
     float textCreatePreviewHeight_ = 0.0f;
 
     std::unordered_map<std::size_t, PageSurfaces> surfaces_;
+    // Page-object bounds for the eraser and scratch-out, keyed by page epoch
+    // and the session's transient generation: repeated samples over one page
+    // measure nothing.
+    mutable PageObjectBoundsCache objectBoundsCache_;
     GestureSurface gesture_ {};
     // Widget-space region the transient state has dirtied since the last
     // paint (live stroke growth, marquee drag, pending-erase marks);

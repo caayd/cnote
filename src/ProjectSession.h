@@ -88,6 +88,12 @@ struct ProjectSession {
     bool dirty = false;
     std::uint64_t revision = 0;
     unsigned int autoSaveIntervalSeconds = 60;
+    // Bumped by every in-place page gesture mutation (move/transform/clone/
+    // cancel), which does not bump Document::PageEpoch until it commits.  Any
+    // view's cache keyed on page contents must include it so a gesture started
+    // here invalidates every view, including aborts driven from elsewhere in
+    // the controller.
+    std::uint64_t transientGeneration = 0;
 };
 
 } // namespace cnote

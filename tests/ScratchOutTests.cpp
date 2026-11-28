@@ -218,6 +218,175 @@ void CheckIncrementalParity(const std::string& what, const std::vector<Vec2>& po
     }
 }
 
+// The coverage math before the bounds/early-exit optimization, kept as the
+// golden reference for exact-output parity.  It uses squared distances (the
+// optimized comparison) but no bounding-box rejects, disjoint-segment skips
+// or early exits.
+float RefDistanceSquared(Vec2 a, Vec2 b) {
+    const float dx = a.x - b.x;
+    const float dy = a.y - b.y;
+    return (dx * dx) + (dy * dy);
+}
+
+float RefDistanceSquaredToSegment(Vec2 point, Vec2 a, Vec2 b) {
+    const Vec2 ab { b.x - a.x, b.y - a.y };
+    const float lengthSquared = (ab.x * ab.x) + (ab.y * ab.y);
+    const float dot = ((point.x - a.x) * ab.x) + ((point.y - a.y) * ab.y);
+    const float t = lengthSquared > 0.0f ? std::clamp(dot / lengthSquared, 0.0f, 1.0f) : 0.0f;
+    return RefDistanceSquared(point, { a.x + (ab.x * t), a.y + (ab.y * t) });
+}
+
+bool RefHullContains(const std::vector<Vec2>& hull, Vec2 point, float margin) {
+    const float marginSquared = margin * margin;
+    bool inside = hull.size() >= 3U;
+    for (std::size_t index = 0; index < hull.size(); ++index) {
+        const Vec2 a = hull[index];
+        const Vec2 b = hull[(index + 1U) % hull.size()];
+        inside = inside && (((b.x - a.x) * (point.y - a.y)) - ((b.y - a.y) * (point.x - a.x))) >= 0.0f;
+        if (margin >= 0.0f && RefDistanceSquaredToSegment(point, a, b) <= marginSquared) {
+            return true;
+        }
+    }
+    return inside;
+}
+
+bool RefCoversPath(const std::vector<Vec2>& hull, const std::vector<Vec2>& path, float margin) {
+    if (hull.empty() || path.empty()) {
+        return false;
+    }
+    if (path.size() == 1U) {
+        return RefHullContains(hull, path.front(), margin);
+    }
+    const float piece = std::max(1.0f, margin);
+    float covered = 0.0f, total = 0.0f;
+    for (std::size_t index = 1; index < path.size(); ++index) {
+        const float length = std::sqrt(RefDistanceSquared(path[index - 1], path[index]));
+        const int pieces = std::max(1, static_cast<int>(std::ceil(length / piece)));
+        for (int step = 0; step < pieces; ++step) {
+            const float t = (static_cast<float>(step) + 0.5f) / static_cast<float>(pieces);
+            const Vec2 point {
+                path[index - 1].x + ((path[index].x - path[index - 1].x) * t),
+                path[index - 1].y + ((path[index].y - path[index - 1].y) * t),
+            };
+            if (RefHullContains(hull, point, margin)) {
+                covered += length / static_cast<float>(pieces);
+            }
+        }
+        total += length;
+    }
+    return total > 0.0f ? covered >= 0.5f * total : RefHullContains(hull, path.front(), margin);
+}
+
+bool RefCoversArea(const std::vector<Vec2>& hull, const std::array<Vec2, 4>& corners, float margin) {
+    if (hull.empty()) {
+        return false;
+    }
+    int covered = 0;
+    for (int row = 0; row < 8; ++row) {
+        const float v = (static_cast<float>(row) + 0.5f) / 8.0f;
+        const Vec2 left {
+            corners[0].x + ((corners[3].x - corners[0].x) * v),
+            corners[0].y + ((corners[3].y - corners[0].y) * v),
+        };
+        const Vec2 right {
+            corners[1].x + ((corners[2].x - corners[1].x) * v),
+            corners[1].y + ((corners[2].y - corners[1].y) * v),
+        };
+        for (int column = 0; column < 8; ++column) {
+            const float u = (static_cast<float>(column) + 0.5f) / 8.0f;
+            const Vec2 point {
+                left.x + ((right.x - left.x) * u),
+                left.y + ((right.y - left.y) * u),
+            };
+            covered += RefHullContains(hull, point, margin) ? 1 : 0;
+        }
+    }
+    return static_cast<float>(covered) >= 0.5f * 64.0f;
+}
+
+// Randomized exact-output parity: bounding-box rejects, disjoint-segment
+// skips and early exits must not change any CoversPath/CoversArea answer.
+void CheckCoverageParity() {
+    std::vector<std::vector<Vec2>> hulls {
+        { { 0.0f, 0.0f }, { 200.0f, 0.0f }, { 200.0f, 100.0f }, { 0.0f, 100.0f } },
+    };
+    {
+        const std::vector<Vec2> box { { 40.0f, 20.0f }, { 240.0f, 20.0f }, { 240.0f, 140.0f }, { 40.0f, 140.0f } };
+        hulls.push_back(Rotated(box, { 140.0f, 80.0f }, 0.41f));
+    }
+    {
+        std::vector<Vec2> octagon;
+        for (int index = 0; index < 8; ++index) {
+            const float angle = 2.0f * kPi * static_cast<float>(index) / 8.0f;
+            octagon.push_back({ 110.0f + (70.0f * std::cos(angle)), 65.0f + (45.0f * std::sin(angle)) });
+        }
+        hulls.push_back(std::move(octagon));
+    }
+
+    const std::array<float, 5> margins { 0.0f, 0.5f, 1.5f, 4.0f, 12.0f };
+    int cases = 0;
+    int mismatches = 0;
+    std::string firstMismatch;
+    for (const std::vector<Vec2>& hull : hulls) {
+        ScratchOut scratch;
+        scratch.hull = hull;
+        for (std::size_t marginIndex = 0; marginIndex < margins.size(); ++marginIndex) {
+            const float margin = margins[marginIndex];
+            for (int seed = 1; seed <= 20; ++seed) {
+                Noise noise(static_cast<std::uint32_t>((seed * 31) + static_cast<int>(marginIndex)));
+                const auto coordinate = [&noise](float low, float high) {
+                    return low + ((high - low) * ((noise.Next() + 1.0f) * 0.5f));
+                };
+                std::vector<Vec2> path;
+                const int points = 2 + (seed % 9);
+                for (int point = 0; point < points; ++point) {
+                    path.push_back({ coordinate(-100.0f, 300.0f), coordinate(-100.0f, 200.0f) });
+                }
+                if (seed % 4 == 0) {
+                    // A long segment far from the hull: the coverage pass can
+                    // end before sampling it.
+                    path.push_back({ coordinate(600.0f, 900.0f), coordinate(500.0f, 800.0f) });
+                }
+                const bool pathAnswer = scratch.CoversPath(path, margin);
+                const bool pathReference = RefCoversPath(hull, path, margin);
+                ++cases;
+                if (pathAnswer != pathReference) {
+                    ++mismatches;
+                    if (firstMismatch.empty()) {
+                        firstMismatch = "CoversPath seed " + std::to_string(seed)
+                            + " margin " + std::to_string(margin);
+                    }
+                }
+
+                const float centerX = coordinate(-40.0f, 240.0f);
+                const float centerY = coordinate(-40.0f, 140.0f);
+                const float halfWidth = coordinate(1.0f, 110.0f);
+                const float halfHeight = coordinate(1.0f, 80.0f);
+                std::vector<Vec2> box {
+                    { centerX - halfWidth, centerY - halfHeight },
+                    { centerX + halfWidth, centerY - halfHeight },
+                    { centerX + halfWidth, centerY + halfHeight },
+                    { centerX - halfWidth, centerY + halfHeight },
+                };
+                box = Rotated(box, { centerX, centerY }, coordinate(-0.8f, 0.8f));
+                const std::array<Vec2, 4> corners { box[0], box[1], box[2], box[3] };
+                const bool areaAnswer = scratch.CoversArea(corners, margin);
+                const bool areaReference = RefCoversArea(hull, corners, margin);
+                ++cases;
+                if (areaAnswer != areaReference) {
+                    ++mismatches;
+                    if (firstMismatch.empty()) {
+                        firstMismatch = "CoversArea seed " + std::to_string(seed)
+                            + " margin " + std::to_string(margin);
+                    }
+                }
+            }
+        }
+    }
+    Check(mismatches == 0, "coverage matches the reference math (" + std::to_string(cases) + " cases"
+        + (firstMismatch.empty() ? ")" : ", first mismatch: " + firstMismatch + ")"));
+}
+
 // Every seed must give `expected`; reports the first mismatch.
 void CheckEverySeed(const std::string& what, bool expected, const std::vector<Vec2>& ideal, float amplitude) {
     int hits = 0;
@@ -271,6 +440,9 @@ int main() {
         "a tiny scribble is too short to be a scratch-out");
     Check(!RecognizeScratchOut({}).has_value() && !RecognizeScratchOut({ { 1.0f, 1.0f } }).has_value(),
         "an empty or one-point stroke is not a scratch-out");
+
+    // --- coverage parity ----------------------------------------------------
+    CheckCoverageParity();
 
     // --- coverage -----------------------------------------------------------
     const std::optional<ScratchOut> scratch = RecognizeScratchOut(overWord);

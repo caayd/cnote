@@ -3389,49 +3389,58 @@ std::vector<ObjectRef> CanvasWidget::EraseTargetsAt(std::size_t pageIndex, Vec2 
     }
     const Document& document = controller_.DocumentRef();
     const Page& page = document.PageAt(pageIndex);
+    // Conservative page-space bounds cached by page epoch and the session's
+    // transient generation: a distant object is rejected by a four-float box
+    // test before its text/LaTeX is measured or its stroke is smoothed.
+    const PageObjectBounds& bounds =
+        objectBoundsCache_.ForPage(document, pageIndex, controller_.TransientGeneration());
 
     // Reference App::EraseAt (App.cpp:5713-5799): the eraser radius is
     // max(3.5, eraseBrushSize * 4) logical pixels (App::EraserRadiusPixels,
     // App.cpp:7426-7428) scaled into page units, swept along the segment from
     // the previous sample to this one.
     const float radiusPage = std::max(kEraserMinRadiusPixels, eraseBrushSize_ * 4.0f) / std::max(0.1f, view.scale);
+    const auto near = [start, end, radiusPage](const ObjectBounds& object) {
+        return object.valid
+            && SegmentHitsRect(object.left, object.top, object.right, object.bottom, start, end, radiusPage);
+    };
 
     for (std::size_t index = 0; index < page.images.size(); ++index) {
-        if (ImageHitsSegment(page.images[index], start, end, radiusPage)) {
+        if (near(bounds.images[index]) && ImageHitsSegment(page.images[index], start, end, radiusPage)) {
             targets.push_back(ObjectRef { pageIndex, ObjectKind::Image, index });
         }
     }
     for (std::size_t index = 0; index < page.texts.size(); ++index) {
+        if (!near(bounds.texts[index])) {
+            continue;
+        }
         const PageText& text = page.texts[index];
-        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page.width);
-        if (RotatedRectHitsSegment(bounds.left, bounds.top, bounds.right, bounds.bottom,
+        const text::QtTextBounds textBounds = text::MeasurePageTextBoundsQt(text, page.width);
+        if (RotatedRectHitsSegment(textBounds.left, textBounds.top, textBounds.right, textBounds.bottom,
                 text.rotationDegrees, start, end, radiusPage)) {
             targets.push_back(ObjectRef { pageIndex, ObjectKind::Text, index });
         }
     }
     for (std::size_t index = 0; index < page.latexes.size(); ++index) {
+        if (!near(bounds.latexes[index])) {
+            continue;
+        }
         const PageLatex& latex = page.latexes[index];
-        const LatexBounds bounds = MeasurePageLatexBounds(latex, page.width);
-        if (RotatedRectHitsSegment(bounds.left, bounds.top, bounds.right, bounds.bottom,
+        const LatexBounds latexBounds = MeasurePageLatexBounds(latex, page.width);
+        if (RotatedRectHitsSegment(latexBounds.left, latexBounds.top, latexBounds.right, latexBounds.bottom,
                 latex.rotationDegrees, start, end, radiusPage)) {
             targets.push_back(ObjectRef { pageIndex, ObjectKind::Latex, index });
         }
     }
     for (std::size_t index = 0; index < page.strokes.size(); ++index) {
-        const Stroke& stroke = page.strokes[index];
-        // Cheap reject before the smoothing pass: the smoothed curve stays
-        // within the raw points' bounds inflated by the pen half-width plus
-        // a slack for the smoothing deviation (a quadratic midpoint chain
-        // never leaves the convex hull of its raw neighbours).
-        float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
-        if (StrokeBounds(stroke, &minX, &minY, &maxX, &maxY)) {
-            const float margin = stroke.style.width * 0.5f + 8.0f;
-            if (!SegmentHitsRect(minX - margin, minY - margin, maxX + margin, maxY + margin,
-                    start, end, radiusPage)) {
-                continue;
-            }
+        // The cached stroke bounds hold the raw points' convex hull plus the
+        // pen half-width; the smoothed centreline never leaves that hull, so
+        // this rejects distant strokes before BuildStrokeRenderPath.
+        if (!near(bounds.strokes[index])) {
+            continue;
         }
-        if (StrokeHitsSegment(stroke, start, end, radiusPage, controller_.InputSettings().strokeSmoothing)) {
+        if (StrokeHitsSegment(page.strokes[index], start, end, radiusPage,
+                controller_.InputSettings().strokeSmoothing)) {
             targets.push_back(ObjectRef { pageIndex, ObjectKind::Stroke, index });
         }
     }
@@ -3446,32 +3455,13 @@ std::vector<ObjectRef> CanvasWidget::ScratchOutTargets(std::size_t pageIndex, co
     }
     const Document& document = controller_.DocumentRef();
     const Page& page = document.PageAt(pageIndex);
+    const PageObjectBounds& bounds =
+        objectBoundsCache_.ForPage(document, pageIndex, controller_.TransientGeneration());
     // The scratch's ink reaches half its width past the points it was drawn with.
     const float margin = pending->style.width * 0.5f;
-
-    for (std::size_t index = 0; index < page.images.size(); ++index) {
-        const PageImage& image = page.images[index];
-        if (scratch.CoversArea(RotatedRectCorners(image.x, image.y, image.x + image.width, image.y + image.height,
-                image.rotationDegrees), margin)) {
-            targets.push_back(ObjectRef { pageIndex, ObjectKind::Image, index });
-        }
-    }
-    for (std::size_t index = 0; index < page.texts.size(); ++index) {
-        const PageText& text = page.texts[index];
-        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page.width);
-        if (scratch.CoversArea(RotatedRectCorners(bounds.left, bounds.top, bounds.right, bounds.bottom,
-                text.rotationDegrees), margin)) {
-            targets.push_back(ObjectRef { pageIndex, ObjectKind::Text, index });
-        }
-    }
-    for (std::size_t index = 0; index < page.latexes.size(); ++index) {
-        const PageLatex& latex = page.latexes[index];
-        const LatexBounds bounds = MeasurePageLatexBounds(latex, page.width);
-        if (scratch.CoversArea(RotatedRectCorners(bounds.left, bounds.top, bounds.right, bounds.bottom,
-                latex.rotationDegrees), margin)) {
-            targets.push_back(ObjectRef { pageIndex, ObjectKind::Latex, index });
-        }
-    }
+    // A negative margin can only cover points inside the hull, so bounds
+    // rejection uses zero reach: outside the hull box it cannot be covered.
+    const float reach = std::max(0.0f, margin);
 
     float hullLeft = scratch.hull.front().x, hullTop = scratch.hull.front().y;
     float hullRight = hullLeft, hullBottom = hullTop;
@@ -3481,13 +3471,50 @@ std::vector<ObjectRef> CanvasWidget::ScratchOutTargets(std::size_t pageIndex, co
         hullRight = std::max(hullRight, point.x);
         hullBottom = std::max(hullBottom, point.y);
     }
+    // Conservative reject before CoversArea measures or CoversPath smooths:
+    // an object whose bounds do not reach the scratch's hull box cannot be
+    // half under it.
+    const auto near = [&](const ObjectBounds& object) {
+        return object.valid
+            && object.right + reach >= hullLeft && object.left - reach <= hullRight
+            && object.bottom + reach >= hullTop && object.top - reach <= hullBottom;
+    };
+
+    for (std::size_t index = 0; index < page.images.size(); ++index) {
+        if (!near(bounds.images[index])) {
+            continue;
+        }
+        const PageImage& image = page.images[index];
+        if (scratch.CoversArea(RotatedRectCorners(image.x, image.y, image.x + image.width, image.y + image.height,
+                image.rotationDegrees), margin)) {
+            targets.push_back(ObjectRef { pageIndex, ObjectKind::Image, index });
+        }
+    }
+    for (std::size_t index = 0; index < page.texts.size(); ++index) {
+        if (!near(bounds.texts[index])) {
+            continue;
+        }
+        const PageText& text = page.texts[index];
+        const text::QtTextBounds textBounds = text::MeasurePageTextBoundsQt(text, page.width);
+        if (scratch.CoversArea(RotatedRectCorners(textBounds.left, textBounds.top, textBounds.right, textBounds.bottom,
+                text.rotationDegrees), margin)) {
+            targets.push_back(ObjectRef { pageIndex, ObjectKind::Text, index });
+        }
+    }
+    for (std::size_t index = 0; index < page.latexes.size(); ++index) {
+        if (!near(bounds.latexes[index])) {
+            continue;
+        }
+        const PageLatex& latex = page.latexes[index];
+        const LatexBounds latexBounds = MeasurePageLatexBounds(latex, page.width);
+        if (scratch.CoversArea(RotatedRectCorners(latexBounds.left, latexBounds.top, latexBounds.right, latexBounds.bottom,
+                latex.rotationDegrees), margin)) {
+            targets.push_back(ObjectRef { pageIndex, ObjectKind::Latex, index });
+        }
+    }
     for (std::size_t index = 0; index < page.strokes.size(); ++index) {
         const Stroke& stroke = page.strokes[index];
-        // Cheap reject before the smoothing pass, as in EraseTargetsAt: a
-        // stroke whose bounds miss the scratch's cannot be half under it.
-        float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
-        if (!StrokeBounds(stroke, &minX, &minY, &maxX, &maxY) || maxX < hullLeft - margin
-            || minX > hullRight + margin || maxY < hullTop - margin || minY > hullBottom + margin) {
+        if (!near(bounds.strokes[index])) {
             continue;
         }
         if (scratch.CoversPath(BuildStrokeRenderPath(stroke, controller_.InputSettings().strokeSmoothing).points, margin)) {

@@ -207,6 +207,9 @@ public:
     // --- ui::CanvasController --------------------------------------------
     [[nodiscard]] const Document& DocumentRef() const override;
     [[nodiscard]] ui::CanvasInputSettings InputSettings() const override { return input_; }
+    [[nodiscard]] std::uint64_t TransientGeneration() const override {
+        return session_ != nullptr ? session_->transientGeneration : 0U;
+    }
 
     void BeginStroke(std::size_t pageIndex, Vec2 point, StrokeSampling sampling, std::optional<float> pressure) override;
     void ExtendStroke(Vec2 point, std::optional<float> pressure) override;
@@ -368,6 +371,13 @@ private:
     // page, or nullopt when nothing changed (or the page is gone).  Compares
     // only captured/inserted/removed objects, never the whole page.
     [[nodiscard]] std::optional<HistoryAction> BuildPageGestureAction() const;
+    // In-place gesture edits do not bump Document::PageEpoch until commit, so
+    // every view's content-derived caches key on this session counter instead.
+    void TouchTransient() {
+        if (session_ != nullptr) {
+            ++session_->transientGeneration;
+        }
+    }
 
     AppManager& manager_;
     std::shared_ptr<ProjectSession> session_;
