@@ -44,6 +44,8 @@
 #include "latex/LatexEngine.h"
 #include "qt/QtDocumentController.h"
 #include "shell/AppManager.h"
+#include "Unicode.h"
+#include "text/TextEditingQt.h"
 #include "text/TextLayoutQt.h"
 #include <QTextBlock>
 #include <QKeyEvent>
@@ -487,6 +489,29 @@ int main(int argc, char** argv) {
             CheckNear(std::abs(editingText->y - expectedText.y) <= pageTolerance,
                       "created text page y at zoom " + std::to_string(zoom), editingText->y, expectedText.y, pageTolerance);
 
+            // A caret entering a rendered formula expands its source; the
+            // live editor must widen for it without refitting the model box
+            // (the internal swap emits QTextEdit::textChanged but not a
+            // content edit).
+            canvas.TextEditor()->setPlainText(QStringLiteral("Hi $x$ ok"));
+            QCoreApplication::processEvents();
+            const cnote::text::DocumentContent formulaRead =
+                cnote::text::ReadDocumentContent(*canvas.TextEditor()->document());
+            Check(formulaRead.map.math.size() == 1U,
+                  "the live-editor probe formula renders at zoom " + std::to_string(zoom));
+            if (formulaRead.map.math.size() == 1U) {
+                QTextCursor caret = canvas.TextEditor()->textCursor();
+                caret.setPosition(static_cast<int>(
+                    cnote::text::DocumentOffsetForModel(formulaRead.map, formulaRead.map.math.front().start)));
+                canvas.TextEditor()->setTextCursor(caret);
+                QCoreApplication::processEvents();
+                const int idealWidth = static_cast<int>(std::ceil(canvas.TextEditor()->document()->idealWidth()));
+                Check(canvas.TextEditor()->geometry().width() >= idealWidth,
+                      "the live editor widens for an expanded formula at zoom " + std::to_string(zoom)
+                          + " (width " + std::to_string(canvas.TextEditor()->geometry().width())
+                          + ", ideal " + std::to_string(idealWidth) + ")");
+            }
+
             canvas.TextEditor()->setPlainText(QStringLiteral("placement probe"));
             canvas.CommitActiveEdit();
             QCoreApplication::processEvents();
@@ -498,7 +523,7 @@ int main(int argc, char** argv) {
                           "committed text page x at zoom " + std::to_string(zoom), committedText.x, expectedText.x, pageTolerance);
                 CheckNear(std::abs(committedText.y - expectedText.y) <= pageTolerance,
                           "committed text page y at zoom " + std::to_string(zoom), committedText.y, expectedText.y, pageTolerance);
-                Check(committedText.content == u"placement probe", "committed text content kept at zoom " + std::to_string(zoom));
+                Check(committedText.content == u"placement probe", "committed text content kept at zoom " + std::to_string(zoom) + " got '" + cnote::Utf16ToUtf8(committedText.content) + "'");
             }
             Check(controller.Undo(), "undo removes the geometry-test text at zoom " + std::to_string(zoom));
             QCoreApplication::processEvents();
@@ -533,9 +558,16 @@ int main(int argc, char** argv) {
             // formula grows (a new object starts empty, so measuring the
             // object as it was when the edit began put the box over it).
             const QString tallSource = QStringLiteral("\\sum_{i=0}^{n}\\frac{\\frac{a_i}{b_i}}{\\frac{c_i}{d_i}}");
+            const std::uint64_t parsesBeforeSource = canvas.LatexPreviewParseCount();
+            const std::uint64_t popupRefreshesBeforeSource = canvas.LatexPopupRefreshCount();
             canvas.LatexEditor()->setPlainText(tallSource);
             canvas.repaint();
             QCoreApplication::processEvents();
+            Check(canvas.LatexPreviewParseCount() == parsesBeforeSource + 1U,
+                "one live-preview parse per source change at zoom " + std::to_string(zoom));
+            Check(canvas.LatexPopupRefreshCount() == popupRefreshesBeforeSource + 1U,
+                "textChanged and cursorPositionChanged coalesce to one completion refresh at zoom "
+                    + std::to_string(zoom));
             const cnote::latex::FormulaMetrics tall = cnote::latex::Measure(
                 cnote::latex::Parse(tallSource.toStdU16String(), editingLatex->fontSize, true));
             Check(tall.height > 0.0f, "tall probe formula parses at zoom " + std::to_string(zoom));
@@ -551,12 +583,37 @@ int main(int argc, char** argv) {
             Check(!QRectF(tallBox).intersects(previewRect),
                 "LaTeX source box does not cover the live preview at zoom " + std::to_string(zoom));
 
+            // A repaint is not a preview or placement trigger.
+            const std::uint64_t parsesBeforeRepaint = canvas.LatexPreviewParseCount();
+            const std::uint64_t placementsBeforeRepaint = canvas.OverlayPlacementCount();
+            for (int frame = 0; frame < 3; ++frame) {
+                canvas.repaint();
+            }
+            QCoreApplication::processEvents();
+            Check(canvas.LatexPreviewParseCount() == parsesBeforeRepaint,
+                "repaint does not re-parse the live LaTeX preview at zoom " + std::to_string(zoom));
+            Check(canvas.OverlayPlacementCount() == placementsBeforeRepaint,
+                "repaint does not reapply overlay masks/geometry at zoom " + std::to_string(zoom));
+
             // Half-typed source that does not parse keeps the box in place.
             canvas.LatexEditor()->setPlainText(tallSource + QStringLiteral("+\\frac{}{}"));
             canvas.repaint();
             QCoreApplication::processEvents();
             Check(canvas.LatexEditor()->geometry() == tallBox,
                 "unparsable LaTeX source keeps the source box in place at zoom " + std::to_string(zoom));
+
+            // A mid-edit zoom repositions the box without re-parsing.
+            const std::uint64_t parsesBeforeZoom = canvas.LatexPreviewParseCount();
+            canvas.SetZoom(canvas.Zoom() * 1.5f);
+            QCoreApplication::processEvents();
+            Check(canvas.LatexPreviewParseCount() == parsesBeforeZoom,
+                "zoom does not re-parse the live LaTeX preview at zoom " + std::to_string(zoom));
+            const ui::CanvasPageView zoomedView = canvas.CalculatePageView(0);
+            const double zoomedLeft = zoomedView.rect.left()
+                + static_cast<double>(editingLatex->x) * zoomedView.scale;
+            CheckNear(std::abs(canvas.LatexEditor()->geometry().left() - zoomedLeft) <= 1.0,
+                "LaTeX source box follows a mid-edit zoom at zoom " + std::to_string(zoom),
+                canvas.LatexEditor()->geometry().left(), zoomedLeft, 1.0);
         }
         canvas.CancelActiveEdit();
         QCoreApplication::processEvents();

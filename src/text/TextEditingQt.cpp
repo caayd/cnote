@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <QColor>
 #include <QFont>
@@ -273,23 +274,42 @@ void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, cons
     }
 }
 
-std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& document, const PageText& text, float displayScale) {
+namespace {
+
+// Shared span capture.  The public whole-document call passes the whole range;
+// the editor's local update passes the inserted fragment range.  Keeping one
+// loop is what makes the incremental result provably the same as a full
+// capture (the editor also asserts that parity in its tests).
+std::vector<PageTextStyleSpan> CaptureFormatting(const QTextDocument& document, const PageText& text,
+    const TextOffsetMap& map, std::uint32_t rangeStart, std::uint32_t rangeEnd, float displayScale) {
     const PageTextStyle defaultStyle = DefaultStyleFor(text);
-    const TextOffsetMap map = ReadDocumentContent(document).map;
     std::vector<PageTextStyleSpan> spans;
     std::optional<PageTextStyleSpan> active;
 
-    for (QTextBlock block = document.begin(); block.isValid(); block = block.next()) {
+    // Start at the first block the range touches: an edit near the end of a
+    // long document must not walk every earlier block.
+    QTextBlock block = document.findBlock(static_cast<int>(std::min<std::uint32_t>(
+        rangeStart, static_cast<std::uint32_t>(document.characterCount()))));
+    for (; block.isValid(); block = block.next()) {
+        const std::uint32_t blockStart = static_cast<std::uint32_t>(block.position());
+        if (blockStart >= rangeEnd) {
+            break;
+        }
         for (QTextBlock::iterator iterator = block.begin(); !iterator.atEnd(); ++iterator) {
             const QTextFragment fragment = iterator.fragment();
             if (!fragment.isValid() || fragment.length() == 0) {
                 continue;
             }
-            const PageTextStyle style = StyleForCharFormat(fragment.charFormat(), defaultStyle, displayScale);
             const std::uint32_t documentStart = static_cast<std::uint32_t>(fragment.position());
             const std::uint32_t documentEnd = documentStart + static_cast<std::uint32_t>(fragment.length());
-            const std::uint32_t modelStart = ModelOffsetForDocument(map, documentStart);
-            const std::uint32_t modelEnd = ModelOffsetForDocument(map, documentEnd);
+            const std::uint32_t from = std::max(documentStart, rangeStart);
+            const std::uint32_t to = std::min(documentEnd, rangeEnd);
+            if (to <= from) {
+                continue;
+            }
+            const PageTextStyle style = StyleForCharFormat(fragment.charFormat(), defaultStyle, displayScale);
+            const std::uint32_t modelStart = ModelOffsetForDocument(map, from);
+            const std::uint32_t modelEnd = ModelOffsetForDocument(map, to);
             if (modelEnd <= modelStart) {
                 continue;
             }
@@ -315,6 +335,22 @@ std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& do
         spans.push_back(*active);
     }
     return spans;
+}
+
+}  // namespace
+
+std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& document, const PageText& text, float displayScale) {
+    return CapturePageTextFormatting(document, text, ReadDocumentContent(document).map, displayScale);
+}
+
+std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& document, const PageText& text,
+    const TextOffsetMap& map, float displayScale) {
+    return CaptureFormatting(document, text, map, 0U, std::numeric_limits<std::uint32_t>::max(), displayScale);
+}
+
+std::vector<PageTextStyleSpan> CapturePageTextFormattingRange(const QTextDocument& document, const PageText& text,
+    const TextOffsetMap& map, std::uint32_t documentStart, std::uint32_t documentEnd, float displayScale) {
+    return CaptureFormatting(document, text, map, documentStart, documentEnd, displayScale);
 }
 
 DocumentContent ReadDocumentContent(const QTextDocument& document) {
@@ -365,6 +401,67 @@ DocumentContent ReadDocumentContent(const QTextDocument& document) {
     map.modelToDocument.push_back(static_cast<std::uint32_t>(map.normalized.size()));
     map.documentToModel.push_back(static_cast<std::uint32_t>(read.content.size()));
     return read;
+}
+
+std::u16string ReadDocumentTextRange(const QTextDocument& document,
+    std::uint32_t documentStart, std::uint32_t documentEnd) {
+    std::u16string content;
+    if (documentEnd <= documentStart) {
+        return content;
+    }
+    content.reserve(documentEnd - documentStart);
+    const auto appendConverted = [&](char16_t character) {
+        // Same conversions as QTextDocument::toPlainText.
+        content.push_back(character == u'\u00A0' ? u' ' : (character == u'\u2028' ? u'\n' : character));
+    };
+    QTextBlock block = document.findBlock(static_cast<int>(std::min<std::uint32_t>(
+        documentStart, static_cast<std::uint32_t>(document.characterCount()))));
+    for (; block.isValid(); block = block.next()) {
+        const std::uint32_t blockStart = static_cast<std::uint32_t>(block.position());
+        if (blockStart >= documentEnd) {
+            break;
+        }
+        for (QTextBlock::iterator iterator = block.begin(); !iterator.atEnd(); ++iterator) {
+            const QTextFragment fragment = iterator.fragment();
+            if (!fragment.isValid()) {
+                continue;
+            }
+            const std::uint32_t fragmentStart = static_cast<std::uint32_t>(fragment.position());
+            const std::uint32_t fragmentEnd = fragmentStart + static_cast<std::uint32_t>(fragment.length());
+            const std::uint32_t from = std::max(fragmentStart, documentStart);
+            const std::uint32_t to = std::min(fragmentEnd, documentEnd);
+            if (to <= from) {
+                continue;
+            }
+            const QTextCharFormat format = fragment.charFormat();
+            const bool isMath = format.objectType() == kInlineMathObjectType;
+            const std::u16string source = isMath
+                ? format.stringProperty(kInlineMathSourceProperty).toStdU16String()
+                : std::u16string();
+            const QString text = fragment.text();
+            for (std::uint32_t documentIndex = from; documentIndex < to; ++documentIndex) {
+                const qsizetype offset = static_cast<qsizetype>(documentIndex - fragmentStart);
+                if (offset >= text.size()) {
+                    continue;
+                }
+                const char16_t character = text.at(offset).unicode();
+                if (isMath && character == u'\uFFFC') {
+                    content.push_back(u'$');
+                    content.append(source);
+                    content.push_back(u'$');
+                } else {
+                    appendConverted(character);
+                }
+            }
+        }
+        if (block.next().isValid()) {
+            const std::uint32_t separator = blockStart + static_cast<std::uint32_t>(block.length()) - 1U;
+            if (separator >= documentStart && separator < documentEnd) {
+                content.push_back(u'\n');
+            }
+        }
+    }
+    return content;
 }
 
 TextOffsetMap BuildTextOffsetMap(std::u16string_view content) {

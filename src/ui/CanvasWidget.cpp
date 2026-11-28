@@ -2009,18 +2009,18 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
             }
         }
 
-        // Live LaTeX preview while the source box is open.
+        // Live LaTeX preview while the source box is open.  The formula is
+        // parsed once when the source/style changes (RefreshLatexPreview);
+        // painting only draws it.
         if (latexEditor_ != nullptr && latexEditor_->isVisible()
             && editOverlay_.has_value() && editOverlay_->page == view.pageIndex
             && editOverlay_->kind == EditOverlayKey::Kind::Latex) {
-            if (const PageLatex* object = controller_.EditingLatexObject(); object != nullptr) {
-                const PageLatex preview = LiveLatexPreview(*object);
-                if (const latex::FormulaHandle formula = latex::Parse(preview); formula != nullptr) {
-                    painter.save();
-                    painter.translate(view.rect.topLeft());
-                    latex::Draw(formula, painter, preview.x * view.scale, preview.y * view.scale, view.scale, preview.color);
-                    painter.restore();
-                }
+            if (const PageLatex* object = controller_.EditingLatexObject();
+                object != nullptr && latexPreviewFormula_ != nullptr) {
+                painter.save();
+                painter.translate(view.rect.topLeft());
+                latex::Draw(latexPreviewFormula_, painter, object->x * view.scale, object->y * view.scale, view.scale, object->color);
+                painter.restore();
             }
         }
         painter.restore();
@@ -2059,7 +2059,8 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     }
     PaintTextCreatePreview(painter);
     PaintSelectionOverlay(painter);
-    PositionOverlays();
+    // Overlay placement follows geometry/source changes, not paint: a repaint
+    // must not re-parse the live preview or reapply mask/geometry.
 }
 
 void CanvasWidget::resizeEvent(QResizeEvent* event) {
@@ -2274,7 +2275,12 @@ void CanvasWidget::EnsureTextEditor() {
     textEditor_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     textEditor_->installEventFilter(this);
     textEditor_->hide();
-    connect(textEditor_, &QTextEdit::textChanged, this, [this]() { FitTextEditor(); });
+    // Only real user edits refit the box; the editor's internal placeholder
+    // swaps also emit QTextEdit::textChanged but must not.
+    connect(textEditor_, &InlineMathTextEdit::ContentEdited, this, [this]() { FitTextEditor(); });
+    // A caret-driven formula expansion/collapse changes the editor's laid-out
+    // size but not the model; resize/place without refitting the box.
+    connect(textEditor_, &InlineMathTextEdit::FormulaLayoutChanged, this, [this]() { PositionOverlays(); });
 }
 
 void CanvasWidget::EnsureLatexEditor() {
@@ -2284,10 +2290,13 @@ void CanvasWidget::EnsureLatexEditor() {
         latexEditor_->installEventFilter(this);
         latexEditor_->hide();
         connect(latexEditor_, &QPlainTextEdit::textChanged, this, [this]() {
-            RefreshLatexPopup();
+            // The source changed: re-parse the live preview once, then queue
+            // one completion refresh (a keystroke also moves the cursor).
+            RefreshLatexPreview();
+            ScheduleLatexPopupRefresh();
             update();
         });
-        connect(latexEditor_, &QPlainTextEdit::cursorPositionChanged, this, [this]() { RefreshLatexPopup(); });
+        connect(latexEditor_, &QPlainTextEdit::cursorPositionChanged, this, [this]() { ScheduleLatexPopupRefresh(); });
     }
     if (latexPopup_ == nullptr) {
         latexPopup_ = new QListView(this);
@@ -2421,7 +2430,6 @@ void CanvasWidget::SetTextEditAlignment(TextAlignment alignment) {
 
 void CanvasWidget::ShowLatexOverlay(const PageLatex& object) {
     EnsureLatexEditor();
-    latexPreviewMetrics_ = latex::Measure(latex::Parse(object));
     {
         QSignalBlocker blocker(latexEditor_);
         latexEditor_->setPlainText(FromUtf16(object.content));
@@ -2432,14 +2440,44 @@ void CanvasWidget::ShowLatexOverlay(const PageLatex& object) {
     latexEditor_->show();
     latexEditor_->raise();
     latexEditor_->setFocus(Qt::OtherFocusReason);
+    RefreshLatexPreview();
     RefreshLatexPopup();
-    PositionOverlays();
     update();
+}
+
+void CanvasWidget::RefreshLatexPreview() {
+    const PageLatex* object = controller_.EditingLatexObject();
+    if (latexEditor_ == nullptr || object == nullptr) {
+        latexPreviewFormula_ = nullptr;
+        latexPreviewMetrics_ = latex::FormulaMetrics {};
+        return;
+    }
+    const PageLatex preview = LiveLatexPreview(*object);
+    ++latexPreviewParses_;
+    const latex::FormulaHandle formula = latex::Parse(preview);
+    latexPreviewFormula_ = formula;
+    if (formula != nullptr) {
+        latexPreviewMetrics_ = latex::Measure(formula);
+    }
+    // The source box and popup sit around the parsed formula.
+    PositionOverlays();
+}
+
+void CanvasWidget::ScheduleLatexPopupRefresh() {
+    if (latexPopupRefreshScheduled_) {
+        return;
+    }
+    latexPopupRefreshScheduled_ = true;
+    QTimer::singleShot(0, this, [this]() {
+        latexPopupRefreshScheduled_ = false;
+        RefreshLatexPopup();
+    });
 }
 
 void CanvasWidget::HideOverlays() {
     editOverlay_.reset();
     textEditScale_ = 1.0f;
+    latexPreviewFormula_ = nullptr;
     latexPreviewMetrics_ = latex::FormulaMetrics {};
     latexSuggestions_.clear();
     if (latexPopupModel_ != nullptr) {
@@ -2470,6 +2508,7 @@ void CanvasWidget::PositionOverlays() {
     if (!view.valid || view.scale <= 0.0f) {
         return;
     }
+    ++overlayPlacements_;
 
     if (textEditor_ != nullptr && textEditor_->isVisible() && controller_.EditingTextObject() != nullptr) {
         const PageText& object = *controller_.EditingTextObject();
@@ -2512,16 +2551,16 @@ void CanvasWidget::PositionOverlays() {
                 textEditor_->setLineWrapColumnOrWidth(wrapWidth);
             }
         }
-        textEditor_->setMask(QRegion(clip));
-    }
-    if (latexEditor_ != nullptr && latexEditor_->isVisible() && controller_.EditingLatexObject() != nullptr) {
-        // Measure what the preview draws (the typed source), not the object
-        // as it was when the edit began, or a growing formula slides under
-        // the box.
-        const PageLatex object = LiveLatexPreview(*controller_.EditingLatexObject());
-        if (const latex::FormulaHandle formula = latex::Parse(object); formula != nullptr) {
-            latexPreviewMetrics_ = latex::Measure(formula);
+        const QRegion mask(clip);
+        if (textEditor_->mask() != mask) {
+            textEditor_->setMask(mask);
         }
+    }
+    if (const PageLatex* editing = controller_.EditingLatexObject();
+        latexEditor_ != nullptr && latexEditor_->isVisible() && editing != nullptr) {
+        // Placement only: the live formula and its metrics were produced by
+        // RefreshLatexPreview when the source/style changed.
+        const PageLatex& object = *editing;
         const latex::FormulaMetrics& metrics = latexPreviewMetrics_;
         const qreal objectLeft = view.rect.left() + (static_cast<qreal>(object.x) * view.scale);
         const qreal objectTop = view.rect.top() + (static_cast<qreal>(object.y) * view.scale);
@@ -2593,6 +2632,7 @@ void CanvasWidget::SetLatexSource(const QString& source, int cursorPosition) {
     QTextCursor cursor = latexEditor_->textCursor();
     cursor.setPosition(std::min(cursorPosition, static_cast<int>(source.size())));
     latexEditor_->setTextCursor(cursor);
+    RefreshLatexPreview();
     RefreshLatexPopup();
     update();
 }
@@ -2627,6 +2667,7 @@ void CanvasWidget::RefreshLatexPopup() {
     if (latexEditor_ == nullptr || latexPopup_ == nullptr || !latexEditor_->isVisible()) {
         return;
     }
+    ++latexPopupRefreshes_;
 
     const std::u16string content = ToUtf16(latexEditor_->toPlainText());
     const std::size_t cursor = static_cast<std::size_t>(latexEditor_->textCursor().position());
@@ -2667,8 +2708,8 @@ bool CanvasWidget::AcceptLatexSuggestion() {
         return false;
     }
 
+    // SetLatexSource refreshes the preview and the completion list.
     SetLatexSource(FromUtf16(result->content), static_cast<int>(result->cursor));
-    RefreshLatexPopup();
     return true;
 }
 
