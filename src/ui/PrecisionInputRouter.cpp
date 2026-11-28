@@ -91,7 +91,12 @@ void PrecisionInputRouter::FinishGesture() {
 }
 
 void PrecisionInputRouter::ApplyZoom(qreal cumulativeScale, const QPoint& globalAnchor) {
-    if (std::abs(cumulativeScale - 1.0) > static_cast<qreal>(kScaleEpsilon)) {
+    // Compare against the scale last applied, not the gesture's base scale: a
+    // pinch that returns to 1.0 (or repeats a frame) must still reach the sink
+    // when it differs from what the canvas currently shows, otherwise the
+    // canvas stays at the last intermediate scale.  Frames closer than
+    // kScaleEpsilon to the applied scale stay no-ops (PERF-014).
+    if (std::abs(cumulativeScale - gestureScale_) > static_cast<qreal>(kScaleEpsilon)) {
         gestureScale_ = cumulativeScale;
         sink_.ZoomAtAnchor(cumulativeScale, globalAnchor);
     }

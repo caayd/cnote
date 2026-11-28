@@ -50,6 +50,7 @@
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QEnterEvent>
+#include <QEvent>
 #include <QEventLoop>
 #include <QImage>
 #include <QMouseEvent>
@@ -631,6 +632,63 @@ void SelectionHandlesShowSystemCursors(ui::CanvasWidget& canvas, const cnote::qt
     SendMouse(canvas, QEvent::MouseButtonRelease, corner + QPointF(-150.0, 300.0), Qt::LeftButton, Qt::NoButton);
     Check(canvas.cursor().shape() == Qt::ArrowCursor, "releasing away from the handles restores the arrow");
 }
+
+// A pan or zoom that leaves the viewport exactly as it was (a zero delta, a pan
+// pinned by the document edge, a repeated zoom command) must not request a
+// canvas paint or notify the chrome: the notification now costs only the
+// viewport chrome, but the paint itself is still a full canvas repaint
+// (PERF-014).
+void ViewportNoOpsAreSilent(ui::CanvasWidget& canvas) {
+    std::printf("-- no-op pan/zoom paints and notifies nothing\n");
+
+    struct PaintProbe final : QObject {
+        int paints = 0;
+        bool eventFilter(QObject*, QEvent* event) override {
+            if (event->type() == QEvent::Paint) {
+                ++paints;
+            }
+            return false;
+        }
+    } probe;
+    canvas.installEventFilter(&probe);
+
+    int viewportChanges = 0;
+    const QMetaObject::Connection connection = QObject::connect(
+        &canvas, &ui::CanvasWidget::ViewportChanged, &canvas, [&viewportChanges]() { ++viewportChanges; });
+
+    canvas.ResetView();
+    Pump(200);
+    probe.paints = 0;
+    viewportChanges = 0;
+
+    canvas.SetZoom(canvas.Zoom());
+    canvas.PanBy(QPointF(0.0, 0.0));
+    Pump(50);
+    Check(viewportChanges == 0, "a no-op zoom and pan emit no ViewportChanged");
+    Check(probe.paints == 0, "a no-op zoom and pan paint nothing");
+    std::printf("NOOP sameZoom+zeroPan: viewportChanges=%d paints=%d\n", viewportChanges, probe.paints);
+
+    // A pan past the document edge still moves the view once; the same pan
+    // again is pinned and must be silent.
+    canvas.PanBy(QPointF(0.0, 100000.0));
+    Pump(400);
+    Check(viewportChanges == 1, "the pan that reaches the edge notifies once");
+    Check(probe.paints > 0, "the pan that moves paints the canvas");
+    std::printf("NOOP pan-to-edge: viewportChanges=%d paints=%d\n", viewportChanges, probe.paints);
+    const QPointF pinned = ViewportPan(canvas);
+    probe.paints = 0;
+    viewportChanges = 0;
+    canvas.PanBy(QPointF(0.0, 100000.0));
+    Pump(50);
+    Check(ViewportPan(canvas) == pinned, "the repeated pan is clamped where the first stopped");
+    Check(viewportChanges == 0, "a pan the document edge pins emits no ViewportChanged");
+    Check(probe.paints == 0, "a pan the document edge pins paints nothing");
+    std::printf("NOOP clampedPan: viewportChanges=%d paints=%d\n", viewportChanges, probe.paints);
+
+    QObject::disconnect(connection);
+    canvas.removeEventFilter(&probe);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -676,6 +734,7 @@ int main(int argc, char** argv) {
     NoGestureIsAppliedTwice(canvas);
     ConfiguredCursorIsShown(canvas);
     SelectionHandlesShowSystemCursors(canvas, controller);
+    ViewportNoOpsAreSilent(canvas);
 
     std::printf(
         "\nDESKTOP CHECKS (cannot be automated: no touchpad, and a widget grab cannot\n"

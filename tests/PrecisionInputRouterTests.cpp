@@ -394,6 +394,41 @@ void InertiaRouteIsCached() {
     Check(sink.Count("pan") == pansAtPassThrough, "an off-canvas inertia run pans nothing");
 }
 
+// 8. A pinch that returns to its base scale applies that final frame, and
+//    frames that repeat the applied scale stay no-ops.  Comparing the zoom to
+//    1.0 instead of the applied scale swallowed the return frame, leaving the
+//    canvas at the last intermediate scale (PERF-014).
+void PinchReturnsToBaseScale() {
+    FakeSink sink;
+    cnote::ui::PrecisionInputRouter router(sink);
+    router.SetNativeAdapterAvailable(true);
+
+    router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::Begin));
+    cnote::ui::TouchpadGestureSample frame = Sample(cnote::ui::TouchpadGestureSample::Phase::Update);
+    frame.cumulativeScale = 1.5f;
+    router.HandleTouchpadSample(frame);
+    Check(sink.Count("zoom") == 1U && std::abs(sink.calls.back().a - 1.5) < 1e-9,
+        "the pinch applies its first accumulated scale");
+
+    const std::size_t zoomsAfterFirstFrame = sink.Count("zoom");
+    router.HandleTouchpadSample(frame);
+    Check(sink.Count("zoom") == zoomsAfterFirstFrame, "repeating the applied scale zooms nothing");
+
+    frame.cumulativeScale = 1.0f;
+    router.HandleTouchpadSample(frame);
+    Check(sink.Count("zoom") == zoomsAfterFirstFrame + 1U && std::abs(sink.calls.back().a - 1.0) < 1e-9,
+        "returning to the base scale reaches the sink");
+    Check(std::abs(router.CumulativeGestureScale() - 1.0) < 1e-9,
+        "the applied scale is tracked for the gesture's next frame");
+
+    frame.cumulativeScale = 1.0001f;
+    router.HandleTouchpadSample(frame);
+    Check(sink.Count("zoom") == zoomsAfterFirstFrame + 1U,
+        "a frame inside kScaleEpsilon of the applied scale stays a no-op");
+
+    router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::End));
+}
+
 }  // namespace
 
 int main() {
@@ -404,6 +439,7 @@ int main() {
     TouchLifecycleIsolation();
     ThresholdsAndAnchoring();
     InertiaRouteIsCached();
+    PinchReturnsToBaseScale();
 
     std::printf(g_failures == 0 ? "ALL PRECISION ROUTER CHECKS PASSED\n" : "%d PRECISION ROUTER CHECK(S) FAILED\n", g_failures);
     return g_failures == 0 ? 0 : 1;

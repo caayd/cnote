@@ -315,11 +315,18 @@ void NewPageDialogQt::syncDraftFromDefaults() {
 }
 
 void NewPageDialogQt::setDefaults(NewPageDefaults defaults, std::vector<std::uint32_t> recentColors) {
+    if (recentColors.size() > kMaxRecentPageColors) {
+        recentColors.resize(kMaxRecentPageColors);
+    }
+    // Broad chrome refreshes call this with the same model: rebuilding the
+    // recent swatches then throws away and recreates every button for nothing
+    // (PERF-039).  The swatch widgets stay valid right after the call, so a
+    // hidden dialog keeps its refresh-on-setDefaults contract.
+    if (defaults == defaults_ && recentColors == recentColors_) {
+        return;
+    }
     defaults_ = std::move(defaults);
     recentColors_ = std::move(recentColors);
-    if (recentColors_.size() > kMaxRecentPageColors) {
-        recentColors_.resize(kMaxRecentPageColors);
-    }
     refreshRecentColors();
 }
 

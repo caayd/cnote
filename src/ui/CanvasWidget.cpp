@@ -212,7 +212,8 @@ void CanvasWidget::SetZoom(float zoom, std::optional<QPointF> anchor) {
     StopSmoothScroll();
     const float clamped = std::clamp(zoom, kMinZoom, kMaxZoom);
     if (std::abs(clamped - zoom_) < 0.001f) {
-        update();
+        // The requested scale is the displayed scale: no zoom session, pan
+        // adjustment, repaint or chrome notification is owed (PERF-014).
         return;
     }
 
@@ -310,9 +311,16 @@ void CanvasWidget::PanBy(const QPointF& delta) {
     // or a pixelDelta event) must land 1:1 and must not fight the notch chase
     // of an earlier wheel notch for the same viewport.
     StopSmoothScroll();
+    const float beforeX = panX_;
+    const float beforeY = panY_;
     panX_ += static_cast<float>(delta.x());
     panY_ += static_cast<float>(delta.y());
     ClampViewportPan();
+    if (panX_ == beforeX && panY_ == beforeY) {
+        // A zero frame or a pan the document edge clamps pins the viewport
+        // where it was: nothing to paint and no chrome to refresh (PERF-014).
+        return;
+    }
     NotifyViewportChanged();
 }
 

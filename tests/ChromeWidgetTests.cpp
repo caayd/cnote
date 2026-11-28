@@ -284,6 +284,63 @@ void TestToolbarIntentsAndHover() {
     Check(committedZoom == QStringLiteral("150"), "zoom edit reports the typed value");
 }
 
+// PERF-038: a broad chrome refresh re-applies the same text format and palette
+// index on every command; those setters used to repaint the whole band for
+// state that did not change.
+void TestUnchangedToolbarStateDoesNotRepaint() {
+    QWidget host;
+    host.resize(1000, 700);
+    cnote::ui::ToolbarWidget* toolbar = new cnote::ui::ToolbarWidget(&host);
+    toolbar->SetSettings(BuildSettings());
+    toolbar->resize(1000, 34);
+    host.show();
+    QApplication::processEvents();
+
+    struct PaintProbe final : QObject {
+        int paints = 0;
+        bool eventFilter(QObject*, QEvent* event) override {
+            if (event->type() == QEvent::Paint) {
+                ++paints;
+            }
+            return false;
+        }
+    } probe;
+    toolbar->installEventFilter(&probe);
+    toolbar->update();
+    QApplication::processEvents();
+    probe.paints = 0;
+
+    cnote::PageTextStyle style;
+    style.fontSize = 24.0f;
+    style.bold = true;
+    style.underline = true;
+    toolbar->SetTextFormatState(style, cnote::TextAlignment::Center, 1U);
+    QApplication::processEvents();
+    Check(probe.paints > 0, "a changed text-format state repaints the toolbar");
+    probe.paints = 0;
+    toolbar->SetTextFormatState(style, cnote::TextAlignment::Center, 1U);
+    QApplication::processEvents();
+    Check(probe.paints == 0, "an unchanged text-format state paints nothing");
+    std::printf("TOOLBAR unchanged format: paints=%d\n", probe.paints);
+    toolbar->SetTextFormatState(style, cnote::TextAlignment::Right, 1U);
+    QApplication::processEvents();
+    Check(probe.paints > 0, "a changed alignment repaints the toolbar");
+
+    const std::size_t first = toolbar->Settings().colorIndex;
+    const std::size_t other = (first + 1U) % toolbar->Settings().palette.size();
+    probe.paints = 0;
+    toolbar->SetColorIndex(other);
+    QApplication::processEvents();
+    Check(probe.paints > 0, "a changed palette colour repaints the toolbar");
+    probe.paints = 0;
+    toolbar->SetColorIndex(other);
+    QApplication::processEvents();
+    Check(probe.paints == 0, "an unchanged palette colour paints nothing");
+    std::printf("TOOLBAR unchanged colour: paints=%d\n", probe.paints);
+
+    toolbar->removeEventFilter(&probe);
+}
+
 void TestPaletteWheelIntents() {
     QWidget host;
     host.resize(1400, 900);
@@ -1172,6 +1229,7 @@ int main(int argc, char** argv) {
 
     TestToolbarLayoutMatrix();
     TestToolbarIntentsAndHover();
+    TestUnchangedToolbarStateDoesNotRepaint();
     TestPaletteWheelIntents();
     TestPaletteWheelAnchor();
     TestPopupPlacementAndClamping();

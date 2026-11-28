@@ -112,6 +112,24 @@ QString FormatFontSizeValue(float size) {
     return value;
 }
 
+// The toolbar's cached text-format state is only a repaint trigger when it
+// differs from what the popup already shows (PERF-038: every chrome refresh
+// used to repaint for the same style).
+bool SameTextStyle(const std::optional<PageTextStyle>& left, const std::optional<PageTextStyle>& right) {
+    if (left.has_value() != right.has_value()) {
+        return false;
+    }
+    if (!left.has_value()) {
+        return true;
+    }
+    return left->fontSize == right->fontSize
+        && left->color == right->color
+        && left->fontFamily == right->fontFamily
+        && left->bold == right->bold
+        && left->italic == right->italic
+        && left->underline == right->underline;
+}
+
 QString ToolIconName(settings::Tool tool) {
     switch (tool) {
     case settings::Tool::Select:
@@ -1575,6 +1593,9 @@ void ToolbarWidget::SetTextFormatAvailable(bool available) {
 }
 
 void ToolbarWidget::SetTextFormatState(const std::optional<PageTextStyle>& style, TextAlignment alignment, std::size_t sizePreset) {
+    if (SameTextStyle(formatStyle_, style) && formatAlignment_ == alignment && formatSizePreset_ == sizePreset) {
+        return;
+    }
     formatStyle_ = style;
     formatAlignment_ = alignment;
     formatSizePreset_ = sizePreset;
@@ -2540,14 +2561,22 @@ void ToolbarWidget::SetColorIndex(std::size_t index) {
     if (index >= settings_.palette.size()) {
         return;
     }
+    const bool changed = settings_.colorIndex != index;
     settings_.colorIndex = index;
-    if (paletteMenuPopup_ != nullptr) {
+    // Only the open palette surface shows the index; a hidden popup is
+    // re-seeded with the current palette/index by its own open path
+    // (TogglePaletteMenu/TogglePaletteWheel).  Skipping it here keeps every
+    // broad chrome refresh from copying the palette into hidden overlays and
+    // repainting them (PERF-038).
+    if (activeOverlay_ == OverlayId::PaletteMenu && paletteMenuPopup_ != nullptr) {
         paletteMenuPopup_->SetState(settings_.palette, index);
     }
-    if (paletteWheel_ != nullptr) {
+    if (activeOverlay_ == OverlayId::PaletteWheel && paletteWheel_ != nullptr) {
         paletteWheel_->SetEntries(settings_.palette, PaletteWheelDisplayedTools(), index, paletteWheel_->ZoomPresetMode(), settings_.zoomPresets);
     }
-    update();
+    if (changed) {
+        update();
+    }
 }
 
 void ToolbarWidget::SetTextFormatFontMenuOpen(bool open) {
