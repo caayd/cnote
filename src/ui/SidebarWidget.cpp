@@ -120,6 +120,16 @@ bool ContainsPixel(const QRect& rect, const QPoint& point) {
         && point.y() >= rect.top() && point.y() < rect.bottom();
 }
 
+// One list row's thumbnail height: the item width times the page aspect,
+// floored at the metric minimum (the reference math).  The item rect and the
+// cached prefix table both use this, so their heights cannot drift apart.
+int ThumbHeightFor(const qt::SidebarMetrics& metrics, int itemWidth, float pageWidth, float pageHeight) {
+    const qreal aspect = pageWidth > 0.0f ? (pageHeight / pageWidth) : (11.0f / 8.5f);
+    return std::max(
+        static_cast<int>(metrics.minThumbHeight),
+        static_cast<int>(std::lround(static_cast<qreal>(itemWidth) * aspect)));
+}
+
 }  // namespace
 
 SidebarWidget::SidebarWidget(QWidget* parent)
@@ -249,6 +259,7 @@ void SidebarWidget::SetDocument(const Document* document, render::PdfBackgroundP
     document_ = document;
     pdfBackground_ = pdfBackground;
     documentPageCount_ = pageCount;
+    InvalidatePageLayout();
     InvalidateThumbnails();
     SnapshotPageRevisions();
     // Removed pages shorten the list: keep the scroll inside it.  Whichever of
@@ -266,6 +277,7 @@ void SidebarWidget::NotifyDocumentChanged() {
         documentPageCount_ = document_->PageCount();
         CancelPageJumpEdit();
         CancelPageDrag();
+        InvalidatePageLayout();
         InvalidateThumbnails();
         SnapshotPageRevisions();
         // Removed pages shorten the list: keep the scroll inside it.
@@ -279,6 +291,7 @@ void SidebarWidget::NotifyDocumentChanged() {
     QRect dirty;
     bool layoutChanged = false;
     if (document_ == nullptr || knownPageEpochs_.size() != document_->PageCount()) {
+        InvalidatePageLayout();
         SnapshotPageRevisions();
         ClearPageSelection();
         update();
@@ -299,6 +312,11 @@ void SidebarWidget::NotifyDocumentChanged() {
             }
             if (sizeChanged) {
                 // The item's height changed, so every page below it moved.
+                // Drop the prefix table before any later PageItemRect in this
+                // loop reads it; the full-band dirty below covers the move.
+                if (!layoutChanged) {
+                    InvalidatePageLayout();
+                }
                 layoutChanged = true;
             } else if (const std::optional<QRect> item = PageItemRect(index); item.has_value()) {
                 dirty = dirty.isNull() ? *item : dirty.united(*item);
@@ -414,39 +432,122 @@ int SidebarWidget::ItemWidth() const {
     return std::max(1, static_cast<int>(layout.headerRect.width() - (metrics.itemInset * 2.0)));
 }
 
-int SidebarWidget::ItemTop(std::size_t index) const {
+const SidebarWidget::PageLayoutCache& SidebarWidget::EnsurePageLayout() const {
+    PageLayoutCache& layout = pageLayout_;
     if (document_ == nullptr) {
-        return 0;
+        layout.valid = false;
+        layout.document = nullptr;
+        layout.pageCount = 0;
+        layout.itemTops.assign(1, 0);
+        layout.thumbHeights.clear();
+        return layout;
     }
-    const qt::SidebarHeaderLayout layout = HeaderLayout();
     const qt::SidebarMetrics metrics = Metrics();
+    const qt::SidebarHeaderLayout headerLayout = HeaderLayout();
     const int itemWidth = ItemWidth();
-    int top = static_cast<int>(layout.contentRect.top() + metrics.contentPadding) - scrollY_;
-    for (std::size_t pageIndex = 0; pageIndex < index && pageIndex < document_->PageCount(); ++pageIndex) {
-        const Page& page = document_->PageAt(pageIndex);
-        const qreal aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
-        const int thumbHeight = std::max(
-            static_cast<int>(metrics.minThumbHeight),
-            static_cast<int>(std::lround(static_cast<qreal>(itemWidth) * aspect)));
-        top += thumbHeight + static_cast<int>(metrics.labelHeight + metrics.itemGap);
+    // The old per-item math, split into the two pieces that vary: the origin
+    // (panel height/maximized) and the row prefix (page aspects).
+    const int contentTop = static_cast<int>(headerLayout.contentRect.top() + metrics.contentPadding);
+    const int contentPadding = static_cast<int>(metrics.contentPadding);
+    const int labelHeight = static_cast<int>(metrics.labelHeight);
+    const int rowAdvance = static_cast<int>(metrics.labelHeight + metrics.itemGap);
+    const int minThumbHeight = static_cast<int>(metrics.minThumbHeight);
+    const std::size_t pageCount = document_->PageCount();
+    if (layout.valid && layout.document == document_ && layout.pageCount == pageCount
+        && layout.itemWidth == itemWidth && layout.contentTop == contentTop
+        && layout.contentPadding == contentPadding && layout.labelHeight == labelHeight
+        && layout.rowAdvance == rowAdvance && layout.minThumbHeight == minThumbHeight) {
+        return layout;
     }
-    return top;
+
+    layout.itemTops.resize(pageCount + 1U);
+    layout.thumbHeights.resize(pageCount);
+    layout.itemTops[0] = 0;
+    int offset = 0;
+    for (std::size_t index = 0; index < pageCount; ++index) {
+        const Page& page = document_->PageAt(index);
+        const int thumbHeight = ThumbHeightFor(metrics, itemWidth, page.width, page.height);
+        layout.thumbHeights[index] = thumbHeight;
+        layout.itemTops[index] = offset;
+        offset += thumbHeight + rowAdvance;
+    }
+    layout.itemTops[pageCount] = offset;
+    layout.valid = true;
+    layout.document = document_;
+    layout.pageCount = pageCount;
+    layout.itemWidth = itemWidth;
+    layout.contentTop = contentTop;
+    layout.contentPadding = contentPadding;
+    layout.labelHeight = labelHeight;
+    layout.rowAdvance = rowAdvance;
+    layout.minThumbHeight = minThumbHeight;
+    ++pageLayoutBuildCount_;
+    return layout;
+}
+
+void SidebarWidget::InvalidatePageLayout() {
+    pageLayout_.valid = false;
+}
+
+int SidebarWidget::CachedItemTop(const PageLayoutCache& layout, std::size_t index) const {
+    ++pageLayoutRowReads_;
+    return layout.contentTop + layout.itemTops[index] - scrollY_;
+}
+
+int SidebarWidget::CachedItemRectHeight(const PageLayoutCache& layout, std::size_t index) const {
+    ++pageLayoutRowReads_;
+    return layout.thumbHeights[index] + layout.labelHeight;
+}
+
+std::size_t SidebarWidget::FirstItemWithBottomAfter(const PageLayoutCache& layout, int y) const {
+    // QRect items are ordered and disjoint: each row advances by its thumbnail
+    // height plus the label/gap, so `bottom` strictly increases with index.
+    std::size_t low = 0;
+    std::size_t high = layout.pageCount;
+    while (low < high) {
+        const std::size_t mid = low + ((high - low) / 2U);
+        // QRect::bottom() is top + height - 1.
+        const int bottom = layout.contentTop + layout.itemTops[mid]
+            + layout.thumbHeights[mid] + layout.labelHeight - 1 - scrollY_;
+        ++pageLayoutRowReads_;
+        if (bottom > y) {
+            high = mid;
+        } else {
+            low = mid + 1U;
+        }
+    }
+    return low;
+}
+
+std::size_t SidebarWidget::FirstItemWithCenterAfter(const PageLayoutCache& layout, int y) const {
+    std::size_t low = 0;
+    std::size_t high = layout.pageCount;
+    while (low < high) {
+        const std::size_t mid = low + ((high - low) / 2U);
+        const int top = layout.contentTop + layout.itemTops[mid] - scrollY_;
+        const int height = layout.thumbHeights[mid] + layout.labelHeight;
+        // QRect::center().y() is (top + (top + height - 1)) / 2, truncated.
+        const int center = (top + (top + height - 1)) / 2;
+        ++pageLayoutRowReads_;
+        if (center > y) {
+            high = mid;
+        } else {
+            low = mid + 1U;
+        }
+    }
+    return low;
 }
 
 std::optional<QRect> SidebarWidget::PageItemRect(std::size_t index) const {
     if (document_ == nullptr || index >= document_->PageCount()) {
         return std::nullopt;
     }
-    const qt::SidebarMetrics metrics = Metrics();
-    const int itemWidth = ItemWidth();
-    const int left = ((rect().left() + rect().right()) - itemWidth) / 2;
-    const Page& page = document_->PageAt(index);
-    const qreal aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
-    const int thumbHeight = std::max(
-        static_cast<int>(metrics.minThumbHeight),
-        static_cast<int>(std::lround(static_cast<qreal>(itemWidth) * aspect)));
-    const int top = ItemTop(index);
-    return QRect(left, top, itemWidth, thumbHeight + static_cast<int>(metrics.labelHeight));
+    const PageLayoutCache& layout = EnsurePageLayout();
+    if (index >= layout.pageCount) {
+        return std::nullopt;
+    }
+    const int left = ((rect().left() + rect().right()) - layout.itemWidth) / 2;
+    return QRect(left, CachedItemTop(layout, index), layout.itemWidth, CachedItemRectHeight(layout, index));
 }
 
 std::optional<std::size_t> SidebarWidget::PageAtWidgetPosition(const QPoint& position) const {
@@ -457,32 +558,34 @@ std::optional<std::size_t> SidebarWidget::PageAtWidgetPosition(const QPoint& pos
     if (!content.contains(position)) {
         return std::nullopt;
     }
-    for (std::size_t index = 0; index < document_->PageCount(); ++index) {
-        const std::optional<QRect> item = PageItemRect(index);
-        if (item.has_value() && ContainsPixel(*item, position)) {
-            return index;
-        }
+    const PageLayoutCache& layout = EnsurePageLayout();
+    if (layout.pageCount == 0U) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    const int left = ((rect().left() + rect().right()) - layout.itemWidth) / 2;
+    // ContainsPixel() is half-open, so the item's last column/row is a miss.
+    if (position.x() < left || position.x() >= left + layout.itemWidth - 1) {
+        return std::nullopt;
+    }
+    // Rows are ordered: the first item whose bottom is past the y is the only
+    // candidate, and a y in the gap between rows is a miss.
+    const std::size_t index = FirstItemWithBottomAfter(layout, position.y());
+    if (index >= layout.pageCount) {
+        return std::nullopt;
+    }
+    if (position.y() < CachedItemTop(layout, index)) {
+        return std::nullopt;
+    }
+    return index;
 }
 
 int SidebarWidget::MaxScroll() const {
     if (document_ == nullptr || document_->PageCount() == 0U) {
         return 0;
     }
-    const qt::SidebarHeaderLayout layout = HeaderLayout();
-    const qt::SidebarMetrics metrics = Metrics();
-    const int itemWidth = ItemWidth();
-    int contentHeight = static_cast<int>(metrics.contentPadding);
-    for (std::size_t pageIndex = 0; pageIndex < document_->PageCount(); ++pageIndex) {
-        const Page& page = document_->PageAt(pageIndex);
-        const qreal aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
-        const int thumbHeight = std::max(
-            static_cast<int>(metrics.minThumbHeight),
-            static_cast<int>(std::lround(static_cast<qreal>(itemWidth) * aspect)));
-        contentHeight += thumbHeight + static_cast<int>(metrics.labelHeight + metrics.itemGap);
-    }
-    const int viewportHeight = std::max(1, layout.contentRect.toAlignedRect().height());
+    const PageLayoutCache& layout = EnsurePageLayout();
+    const int contentHeight = layout.contentPadding + layout.itemTops.back();
+    const int viewportHeight = std::max(1, HeaderLayout().contentRect.toAlignedRect().height());
     return std::max(0, contentHeight - viewportHeight);
 }
 
@@ -527,11 +630,11 @@ void SidebarWidget::EnsureCurrentPageVisible() {
     if (!item.has_value()) {
         return;
     }
-    // PageItemRect is widget-space (ItemTop already subtracts scrollY_), so
-    // compare against the widget-space content band and fold the current
-    // scroll back into the target.  Comparing against scroll-space edges used
-    // to add scrollY_ twice, so any ensure-visible beyond the first page
-    // jumped the list to an unrelated place.
+    // PageItemRect is widget-space (the cached item top already subtracts
+    // scrollY_), so compare against the widget-space content band and fold the
+    // current scroll back into the target.  Comparing against scroll-space
+    // edges used to add scrollY_ twice, so any ensure-visible beyond the first
+    // page jumped the list to an unrelated place.
     const int visibleTop = static_cast<int>(layout.contentRect.top() + metrics.contentPadding);
     const int visibleBottom = static_cast<int>(layout.contentRect.bottom() - metrics.contentPadding);
     if (item->top() < visibleTop) {
@@ -668,19 +771,23 @@ void SidebarWidget::paintEvent(QPaintEvent* event) {
     // App::PaintPdfSidebarContents (App.cpp:7135 IntersectClipRect).
     painter.save();
     painter.setClipRect(contentRect, Qt::IntersectClip);
-    for (std::size_t pageIndex = 0; pageIndex < PageCount(); ++pageIndex) {
-        const std::optional<QRect> item = PageItemRect(pageIndex);
-        if (!item.has_value()) {
+    const PageLayoutCache& pageLayout = EnsurePageLayout();
+    const int itemLeft = ((rect().left() + rect().right()) - pageLayout.itemWidth) / 2;
+    // Rows are ordered, so start at the first whose bottom is inside the band
+    // and stop after the last; only the visible rows are touched.
+    for (std::size_t pageIndex = FirstItemWithBottomAfter(pageLayout, contentRect.top() - 1);
+         pageIndex < pageLayout.pageCount; ++pageIndex) {
+        const int itemTop = CachedItemTop(pageLayout, pageIndex);
+        if (itemTop > contentRect.bottom()) {
+            break;
+        }
+        const QRect item(
+            itemLeft, itemTop, pageLayout.itemWidth, CachedItemRectHeight(pageLayout, pageIndex));
+        if (!item.intersects(paintRect)) {
             continue;
         }
-        if (item->bottom() < contentRect.top() || item->top() > contentRect.bottom()) {
-            continue;
-        }
-        if (!item->intersects(paintRect)) {
-            continue;
-        }
-        const QRect labelRect(item->left(), item->bottom() - static_cast<int>(metrics.labelHeight), item->width(), static_cast<int>(metrics.labelHeight));
-        const QRect thumbRect(item->left(), item->top(), item->width(), item->height() - static_cast<int>(metrics.labelHeight));
+        const QRect labelRect(item.left(), item.bottom() - pageLayout.labelHeight, item.width(), pageLayout.labelHeight);
+        const QRect thumbRect(item.left(), item.top(), item.width(), item.height() - pageLayout.labelHeight);
         const bool selected = pageIndex == currentPage_
             || std::binary_search(selectedPages_.begin(), selectedPages_.end(), pageIndex);
         // Dragged pages stay in place, faded, until they are dropped.
@@ -689,7 +796,7 @@ void SidebarWidget::paintEvent(QPaintEvent* event) {
         painter.setOpacity(dragged ? 0.4 : 1.0);
 
         if (selected) {
-            painter.fillRect(*item, ChromeColor(kChromeSidebarSelected));
+            painter.fillRect(item, ChromeColor(kChromeSidebarSelected));
         }
 
         painter.fillRect(thumbRect, QColor(Qt::white));
@@ -1020,12 +1127,14 @@ std::size_t SidebarWidget::VisibleThumbnailCount() const {
         return 0;
     }
     const QRect content = ContentRect();
+    const PageLayoutCache& layout = EnsurePageLayout();
     std::size_t count = 0;
-    for (std::size_t index = 0; index < document_->PageCount(); ++index) {
-        const std::optional<QRect> item = PageItemRect(index);
-        if (item.has_value() && item->bottom() >= content.top() && item->top() <= content.bottom()) {
-            ++count;
+    for (std::size_t index = FirstItemWithBottomAfter(layout, content.top() - 1);
+         index < layout.pageCount; ++index) {
+        if (CachedItemTop(layout, index) > content.bottom()) {
+            break;
         }
+        ++count;
     }
     return count;
 }
@@ -1107,18 +1216,21 @@ void SidebarWidget::UpdatePageDrag(const QPoint& position) {
     // the last centre, the gap after the last page.
     const std::size_t pageCount = PageCount();
     std::size_t slot = pageCount;
-    for (std::size_t index = 0; index < pageCount; ++index) {
-        if (position.y() < PageItemRect(index)->center().y()) {
-            slot = index;
-            break;
-        }
+    if (pageCount > 0U) {
+        slot = std::min(pageCount, FirstItemWithCenterAfter(EnsurePageLayout(), position.y()));
     }
     // A slot that would leave every page where it is (a single page's own
     // gaps, or inside or around an already contiguous block) is no drop.
-    const std::vector<std::size_t> order = Document::MovedPageOrder(pageCount, pageDrag_->pages, slot);
+    // Checking that directly is O(1): only a contiguous block can land back
+    // in its own place, and only in the gaps from its first top through its
+    // last bottom.  (Building Document::MovedPageOrder here allocated and
+    // scanned every page on each pointer sample.)
     bool moves = false;
-    for (std::size_t index = 0; index < order.size() && !moves; ++index) {
-        moves = order[index] != index;
+    if (!pageDrag_->pages.empty()) {
+        const std::size_t firstPage = pageDrag_->pages.front();
+        const std::size_t lastPage = pageDrag_->pages.back();
+        const bool contiguous = lastPage - firstPage + 1U == pageDrag_->pages.size();
+        moves = !contiguous || slot < firstPage || slot > lastPage + 1U;
     }
     pageDrag_->dropSlot = moves ? std::optional<std::size_t>(slot) : std::nullopt;
 
