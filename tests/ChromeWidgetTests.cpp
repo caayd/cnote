@@ -1336,6 +1336,368 @@ void TestSidebarMultiSelectDrag() {
     Check(sidebar.SelectedPages().empty(), "a document change clears the selection");
 }
 
+// --- sidebar layout parity and scaling -------------------------------
+//
+// The page list used to sum every preceding page's height for each item.
+// These tests pin the cached prefix table to the old formulas (rects, hit
+// targets, drop slots, MaxScroll) and count the rows a warm query reads, so
+// paint, hit tests and drags cannot regress to a per-page scan.
+
+struct ReferenceSidebarGeometry {
+    int itemWidth = 0;
+    int left = 0;
+    std::vector<QRect> items;
+};
+
+ReferenceSidebarGeometry ReferenceGeometry(
+    const cnote::ui::SidebarWidget& sidebar, const cnote::Document& document, int scrollY) {
+    const qt::SidebarMetrics metrics = sidebar.Metrics();
+    const qt::SidebarHeaderLayout header = sidebar.HeaderLayout();
+    ReferenceSidebarGeometry reference;
+    reference.itemWidth = std::max(
+        1, static_cast<int>(header.headerRect.width() - (metrics.itemInset * 2.0)));
+    reference.left = ((sidebar.rect().left() + sidebar.rect().right()) - reference.itemWidth) / 2;
+    int top = static_cast<int>(header.contentRect.top() + metrics.contentPadding) - scrollY;
+    reference.items.reserve(document.PageCount());
+    for (std::size_t index = 0; index < document.PageCount(); ++index) {
+        const cnote::Page& page = document.PageAt(index);
+        const qreal aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
+        const int thumbHeight = std::max(
+            static_cast<int>(metrics.minThumbHeight),
+            static_cast<int>(std::lround(static_cast<qreal>(reference.itemWidth) * aspect)));
+        reference.items.emplace_back(
+            reference.left, top, reference.itemWidth, thumbHeight + static_cast<int>(metrics.labelHeight));
+        top += thumbHeight + static_cast<int>(metrics.labelHeight + metrics.itemGap);
+    }
+    return reference;
+}
+
+int ReferenceMaxScroll(const cnote::ui::SidebarWidget& sidebar, const cnote::Document& document) {
+    const qt::SidebarMetrics metrics = sidebar.Metrics();
+    const qt::SidebarHeaderLayout header = sidebar.HeaderLayout();
+    const int itemWidth = std::max(
+        1, static_cast<int>(header.headerRect.width() - (metrics.itemInset * 2.0)));
+    int contentHeight = static_cast<int>(metrics.contentPadding);
+    for (std::size_t index = 0; index < document.PageCount(); ++index) {
+        const cnote::Page& page = document.PageAt(index);
+        const qreal aspect = page.width > 0.0f ? (page.height / page.width) : (11.0f / 8.5f);
+        const int thumbHeight = std::max(
+            static_cast<int>(metrics.minThumbHeight),
+            static_cast<int>(std::lround(static_cast<qreal>(itemWidth) * aspect)));
+        contentHeight += thumbHeight + static_cast<int>(metrics.labelHeight + metrics.itemGap);
+    }
+    const int viewportHeight = std::max(1, header.contentRect.toAlignedRect().height());
+    return std::max(0, contentHeight - viewportHeight);
+}
+
+bool ReferenceContainsPixel(const QRect& rect, const QPoint& point) {
+    return rect.isValid() && point.x() >= rect.left() && point.x() < rect.right()
+        && point.y() >= rect.top() && point.y() < rect.bottom();
+}
+
+std::optional<std::size_t> ReferencePageAt(
+    const cnote::ui::SidebarWidget& sidebar, const ReferenceSidebarGeometry& geometry, const QPoint& position) {
+    const QRect content = sidebar.HeaderLayout().contentRect.toAlignedRect();
+    if (!content.contains(position)) {
+        return std::nullopt;
+    }
+    for (std::size_t index = 0; index < geometry.items.size(); ++index) {
+        if (ReferenceContainsPixel(geometry.items[index], position)) {
+            return index;
+        }
+    }
+    return std::nullopt;
+}
+
+std::size_t ReferenceVisibleCount(
+    const cnote::ui::SidebarWidget& sidebar, const ReferenceSidebarGeometry& geometry) {
+    const QRect content = sidebar.HeaderLayout().contentRect.toAlignedRect();
+    std::size_t count = 0;
+    for (const QRect& item : geometry.items) {
+        if (item.bottom() >= content.top() && item.top() <= content.bottom()) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+void CheckSidebarLayoutParity(
+    cnote::ui::SidebarWidget& sidebar, const cnote::Document& document, const std::string& label) {
+    Check(sidebar.PageCount() == document.PageCount(), label + ": sidebar reports the document page count");
+    Check(sidebar.MaxScroll() == ReferenceMaxScroll(sidebar, document), label + ": MaxScroll matches the old sum");
+    const int maxScroll = sidebar.MaxScroll();
+    for (const int scroll : { 0, maxScroll / 2, maxScroll }) {
+        sidebar.SetScrollY(scroll);
+        const ReferenceSidebarGeometry reference = ReferenceGeometry(sidebar, document, scroll);
+        const std::string where = label + " at scroll " + std::to_string(scroll);
+        bool rectsMatch = true;
+        for (std::size_t index = 0; index < document.PageCount(); ++index) {
+            const std::optional<QRect> actual = sidebar.PageItemRect(index);
+            rectsMatch = rectsMatch && actual.has_value() && *actual == reference.items[index];
+        }
+        Check(rectsMatch, where + ": every item rect matches the old formula");
+        Check(sidebar.VisibleThumbnailCount() == ReferenceVisibleCount(sidebar, reference),
+            where + ": visible item count matches the old band test");
+
+        // Hit-test every item edge, centre and the gaps between rows.
+        bool hitsMatch = true;
+        std::vector<QPoint> probes;
+        for (const QRect& item : reference.items) {
+            const QPoint center = item.center();
+            probes.push_back(center);
+            probes.emplace_back(item.left(), item.top());
+            probes.emplace_back(item.left(), item.bottom() - 1);
+            probes.emplace_back(item.right() - 1, item.top());
+            probes.emplace_back(item.right() - 1, item.bottom() - 1);
+            probes.emplace_back(item.left() - 1, center.y());
+            probes.emplace_back(item.right(), center.y());
+            probes.emplace_back(center.x(), item.top() - 1);
+        }
+        for (const QPoint& probe : probes) {
+            const std::optional<std::size_t> expected = ReferencePageAt(sidebar, reference, probe);
+            const std::optional<std::size_t> actual = sidebar.PageAtWidgetPosition(probe);
+            if (actual != expected) {
+                hitsMatch = false;
+                std::printf("FAIL: %s: hit at (%d,%d) was %d, old formula says %d\n", where.c_str(),
+                    probe.x(), probe.y(), actual.has_value() ? static_cast<int>(*actual) : -1,
+                    expected.has_value() ? static_cast<int>(*expected) : -1);
+                break;
+            }
+        }
+        Check(hitsMatch, where + ": every hit target matches the old scan");
+    }
+}
+
+void TestSidebarLayoutParity() {
+    QWidget host;
+    host.resize(1400, 900);
+    cnote::ui::SidebarWidget sidebar(&host);
+    std::vector<cnote::Page> pages;
+    for (std::size_t index = 0; index < 9; ++index) {
+        cnote::Page page;
+        switch (index % 4U) {
+        case 0: page.width = 612.0f; page.height = 792.0f; break;   // portrait
+        case 1: page.width = 792.0f; page.height = 612.0f; break;   // landscape
+        case 2: page.width = 400.0f; page.height = 1200.0f; break;  // tall
+        default: page.width = 0.0f; page.height = 0.0f; break;      // fallback aspect
+        }
+        pages.push_back(std::move(page));
+    }
+    cnote::Document document = cnote::Document::CreateEditable(
+        std::filesystem::path("sidebar-layout-parity.cnote"), std::move(pages), 0,
+        cnote::Document::PageDefaults {});
+    sidebar.SetDocument(&document, nullptr);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    sidebar.SetOpen(true);
+    host.show();
+    QApplication::processEvents();
+    Check(WaitFor([&]() { return sidebar.SlideProgress() >= 0.999; }, 3000), "sidebar opens before layout parity");
+
+    CheckSidebarLayoutParity(sidebar, document, "initial");
+
+    // Rotation swaps the page frame and records the angle; both must refresh
+    // the cached heights.
+    for (int quarter = 0; quarter < 2; ++quarter) {
+        cnote::Page& page = document.PageAt(2);
+        std::swap(page.width, page.height);
+        page.rotationDegrees += 90.0f;
+    }
+    sidebar.NotifyDocumentChanged();
+    CheckSidebarLayoutParity(sidebar, document, "rotated page");
+
+    // A resize that crosses the min-thumb clamp.
+    document.PageAt(5).width = 900.0f;
+    document.PageAt(5).height = 120.0f;
+    sidebar.NotifyDocumentChanged();
+    CheckSidebarLayoutParity(sidebar, document, "resized page");
+
+    // Insert/remove/reorder keep the Document object; the prefix table must
+    // follow the page slots.
+    document.InsertPage(3, cnote::Page {});
+    sidebar.NotifyDocumentChanged();
+    CheckSidebarLayoutParity(sidebar, document, "inserted page");
+    document.RemovePage(7);
+    sidebar.NotifyDocumentChanged();
+    CheckSidebarLayoutParity(sidebar, document, "removed page");
+    std::vector<std::size_t> order(document.PageCount());
+    for (std::size_t index = 0; index < order.size(); ++index) {
+        order[index] = index;
+    }
+    std::swap(order[0], order.back());
+    Check(document.ReorderPages(order), "the parity document reorders");
+    sidebar.NotifyDocumentChanged();
+    CheckSidebarLayoutParity(sidebar, document, "reordered pages");
+
+    // Panel geometry: maximized changes the header/content origin, a resize
+    // changes the viewport and could change the item width.
+    sidebar.SetMaximized(true);
+    CheckSidebarLayoutParity(sidebar, document, "maximized panel");
+    sidebar.SetMaximized(false);
+    host.resize(1400, 760);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    QApplication::processEvents();
+    CheckSidebarLayoutParity(sidebar, document, "resized host");
+
+    // The drag probes need the first rows comfortably inside the band again.
+    host.resize(1400, 900);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    QApplication::processEvents();
+
+    // Drag drop slots: the old scan picked the first page whose centre is
+    // below the pointer, and Document::MovedPageOrder decided when a slot is
+    // a no-op.  Compare one single-page drag and one contiguous block drag.
+    const QRect content = sidebar.HeaderLayout().contentRect.toAlignedRect();
+    const auto checkDragSlots = [&](std::size_t pressedPage, const std::vector<std::size_t>& dragged,
+                                    const std::string& what) {
+        sidebar.SetScrollY(0);
+        const ReferenceSidebarGeometry reference = ReferenceGeometry(sidebar, document, 0);
+        const QRect pressed = *sidebar.PageItemRect(pressedPage);
+        SendMouse(sidebar, QEvent::MouseButtonPress, QPointF(pressed.center()), Qt::LeftButton, Qt::LeftButton);
+        bool slotsMatch = true;
+        const int step = std::max(1, (content.bottom() - content.top()) / 48);
+        for (int y = content.top(); y <= content.bottom(); y += step) {
+            SendMouse(sidebar, QEvent::MouseMove, QPointF(pressed.center().x(), y), Qt::NoButton, Qt::LeftButton);
+            if (!sidebar.PageDragActive()) {
+                continue;
+            }
+            std::size_t slot = reference.items.size();
+            for (std::size_t index = 0; index < reference.items.size(); ++index) {
+                if (y < reference.items[index].center().y()) {
+                    slot = index;
+                    break;
+                }
+            }
+            const std::vector<std::size_t> movedOrder
+                = cnote::Document::MovedPageOrder(document.PageCount(), dragged, slot);
+            bool moves = false;
+            for (std::size_t index = 0; index < movedOrder.size(); ++index) {
+                moves = moves || movedOrder[index] != index;
+            }
+            const std::optional<std::size_t> expected = moves ? std::optional<std::size_t>(slot) : std::nullopt;
+            if (sidebar.DropSlot() != expected) {
+                slotsMatch = false;
+                std::printf("FAIL: %s: drop slot at y=%d was %d, old formula says %d\n", what.c_str(), y,
+                    sidebar.DropSlot().has_value() ? static_cast<int>(*sidebar.DropSlot()) : -1,
+                    expected.has_value() ? static_cast<int>(*expected) : -1);
+                break;
+            }
+        }
+        SendMouse(sidebar, QEvent::MouseButtonRelease, QPointF(pressed.center().x(), content.top()), Qt::LeftButton, Qt::NoButton);
+        Check(slotsMatch, what + ": every drop slot matches the old scan");
+    };
+    checkDragSlots(0, { 0 }, "single-page drag");
+    {
+        const QPointF first = QPointF(sidebar.PageItemRect(0)->center());
+        const QPointF last = QPointF(sidebar.PageItemRect(1)->center());
+        SendMouse(sidebar, QEvent::MouseButtonPress, first, Qt::LeftButton, Qt::LeftButton);
+        SendMouse(sidebar, QEvent::MouseButtonRelease, first, Qt::LeftButton, Qt::NoButton);
+        SendMouse(sidebar, QEvent::MouseButtonPress, last, Qt::LeftButton, Qt::LeftButton, Qt::ShiftModifier);
+        SendMouse(sidebar, QEvent::MouseButtonRelease, last, Qt::LeftButton, Qt::NoButton, Qt::ShiftModifier);
+        Check(sidebar.SelectedPages() == std::vector<std::size_t> { 0, 1 },
+            "shift-click selects the block the drag comparison uses");
+    }
+    checkDragSlots(0, { 0, 1 }, "contiguous block drag");
+
+    sidebar.SetScrollY(0);
+    const ReferenceSidebarGeometry indicatorReference = ReferenceGeometry(sidebar, document, 0);
+    for (std::size_t slot = 0; slot <= document.PageCount(); ++slot) {
+        const std::optional<int> actual = sidebar.DropIndicatorY(slot);
+        const int halfGap = static_cast<int>(std::lround(sidebar.Metrics().itemGap / 2.0));
+        const int expected = slot < indicatorReference.items.size()
+            ? indicatorReference.items[slot].top() - halfGap
+            : indicatorReference.items.back().bottom() + 1 + halfGap;
+        Check(actual.has_value() && *actual == expected, "drop indicator y matches the old item edges");
+    }
+}
+
+void TestSidebarLayoutScaling() {
+    std::vector<std::uint64_t> paintReadsByCount;
+    std::vector<std::uint64_t> hitReadsByCount;
+    std::vector<std::uint64_t> dragReadsByCount;
+    for (const std::size_t pageCount : { 10U, 100U, 1000U }) {
+        QWidget host;
+        host.resize(1400, 900);
+        cnote::ui::SidebarWidget sidebar(&host);
+        std::vector<cnote::Page> pages(pageCount);
+        cnote::Document document = cnote::Document::CreateEditable(
+            std::filesystem::path("sidebar-layout-scale.cnote"), std::move(pages), 0,
+            cnote::Document::PageDefaults {});
+        sidebar.SetDocument(&document, nullptr);
+        sidebar.SetHostClientRect(host.rect(), 34);
+        sidebar.SetOpen(true);
+        host.show();
+        QApplication::processEvents();
+        Check(WaitFor([&]() { return sidebar.SlideProgress() >= 0.999; }, 3000),
+            "sidebar opens before the scaling measurement");
+        Check(sidebar.MaxScroll() == ReferenceMaxScroll(sidebar, document),
+            "scaled list MaxScroll matches the old sum");
+        const std::uint64_t builds = sidebar.PageLayoutBuildCount();
+
+        // Warm paint: one prefix table, no rebuilds, reads bounded by the
+        // visible rows and the binary search - never by the page count.
+        std::uint64_t before = sidebar.PageLayoutRowReads();
+        static_cast<void>(sidebar.grab());
+        const std::uint64_t paintReads = sidebar.PageLayoutRowReads() - before;
+        Check(paintReads <= 64U, "a warm paint reads a bounded number of layout rows");
+
+        // Scrolled paint and visible-count parity at both ends of the list.
+        for (const int scroll : { 0, sidebar.MaxScroll() }) {
+            sidebar.SetScrollY(scroll);
+            const QRect content = sidebar.HeaderLayout().contentRect.toAlignedRect();
+            std::size_t bruteVisible = 0;
+            for (std::size_t index = 0; index < pageCount; ++index) {
+                const std::optional<QRect> item = sidebar.PageItemRect(index);
+                bruteVisible += item.has_value() && item->bottom() >= content.top()
+                        && item->top() <= content.bottom()
+                    ? 1U
+                    : 0U;
+            }
+            Check(sidebar.VisibleThumbnailCount() == bruteVisible,
+                "scaled visible count matches the full scan");
+            before = sidebar.PageLayoutRowReads();
+            static_cast<void>(sidebar.grab());
+            Check(sidebar.PageLayoutRowReads() - before <= 64U,
+                "a scrolled paint reads a bounded number of layout rows");
+        }
+
+        // Hit-testing the last page is a binary search plus one candidate.
+        const QRect lastItem = *sidebar.PageItemRect(pageCount - 1U);
+        before = sidebar.PageLayoutRowReads();
+        const std::optional<std::size_t> hit = sidebar.PageAtWidgetPosition(lastItem.center());
+        const std::uint64_t hitReads = sidebar.PageLayoutRowReads() - before;
+        Check(hitReads <= 64U, "a hit test reads a bounded number of layout rows");
+        Check(hit.has_value() && *hit == pageCount - 1U, "the last page hit-tests correctly");
+
+        // One drag pointer sample: binary search + the O(1) no-op check.
+        SendMouse(sidebar, QEvent::MouseButtonPress, QPointF(lastItem.center()), Qt::LeftButton, Qt::LeftButton);
+        before = sidebar.PageLayoutRowReads();
+        SendMouse(sidebar, QEvent::MouseMove,
+            QPointF(lastItem.center().x(), lastItem.center().y() - 20), Qt::NoButton, Qt::LeftButton);
+        const std::uint64_t dragReads = sidebar.PageLayoutRowReads() - before;
+        Check(sidebar.PageDragActive(), "the scaling drag starts");
+        Check(dragReads <= 64U, "a drag pointer sample reads a bounded number of layout rows");
+        SendMouse(sidebar, QEvent::MouseButtonRelease,
+            QPointF(lastItem.center().x(), lastItem.center().y() - 20), Qt::LeftButton, Qt::NoButton);
+
+        Check(sidebar.PageLayoutBuildCount() == builds,
+            "warm paint, hit tests and drags reuse the prefix table");
+        paintReadsByCount.push_back(paintReads);
+        hitReadsByCount.push_back(hitReads);
+        dragReadsByCount.push_back(dragReads);
+        std::printf("INFO  sidebar layout pages=%s paintRows=%s hitRows=%s dragRows=%s\n",
+            std::to_string(pageCount).c_str(), std::to_string(paintReads).c_str(),
+            std::to_string(hitReads).c_str(), std::to_string(dragReads).c_str());
+    }
+    // A one-page change in the query counts is the binary search's log term;
+    // a per-page scan would have grown by ~100x from 10 to 1000 pages.
+    const auto barelyGrows = [](const std::vector<std::uint64_t>& reads) {
+        return reads.back() <= reads.front() + 24U;
+    };
+    Check(barelyGrows(paintReadsByCount), "paint row reads do not grow with page count");
+    Check(barelyGrows(hitReadsByCount), "hit-test row reads do not grow with page count");
+    Check(barelyGrows(dragReadsByCount), "drag row reads do not grow with page count");
+}
+
 void TestSidebarScrollClampsAfterPageRemoval() {
     QWidget host;
     host.resize(1400, 900);
@@ -1537,6 +1899,8 @@ int main(int argc, char** argv) {
     TestSidebarSlideState();
     TestSidebarDragReorder();
     TestSidebarMultiSelectDrag();
+    TestSidebarLayoutParity();
+    TestSidebarLayoutScaling();
     TestSidebarScrollClampsAfterPageRemoval();
     TestSidebarThumbnailCacheInvalidation();
     TestSidebarThumbnailRenderingIsDeferred();

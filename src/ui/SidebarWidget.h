@@ -136,6 +136,12 @@ public:
     [[nodiscard]] std::size_t ThumbnailCacheBytes() const { return thumbnailCacheBytes_; }
     [[nodiscard]] std::uint64_t ThumbnailRenderCount() const { return thumbnailRenderCount_; }
     static constexpr std::size_t kThumbnailCacheBudgetBytes = 4U * 1024U * 1024U;
+    // List-geometry counters.  `PageLayoutBuildCount` counts prefix-table
+    // rebuilds (one cold pass over the document, then reused by paint, hit
+    // tests and drops); `PageLayoutRowReads` counts cached rows examined by
+    // geometry queries, so tests can prove those stop growing with page count.
+    [[nodiscard]] std::uint64_t PageLayoutBuildCount() const { return pageLayoutBuildCount_; }
+    [[nodiscard]] std::uint64_t PageLayoutRowReads() const { return pageLayoutRowReads_; }
     [[nodiscard]] bool PageJumpEditing() const { return pageJump_.active; }
     [[nodiscard]] QString PageIndicatorLabel() const;
     // Shift-click selects the range from the anchor (the last plain-clicked
@@ -206,7 +212,6 @@ private:
     [[nodiscard]] std::uint64_t TransientGeneration() const;
     [[nodiscard]] int ItemWidth() const;
     [[nodiscard]] QRect ContentRect() const;
-    [[nodiscard]] int ItemTop(std::size_t index) const;
     void UpdatePageDrag(const QPoint& position);
     void CancelPageDrag();
     void AutoScrollPageDrag();
@@ -300,6 +305,45 @@ private:
     // (rotate/resize/reorder) that move the pages below.
     std::vector<std::uint64_t> knownPageEpochs_ {};
     std::vector<std::pair<float, float>> knownPageSizes_ {};
+
+    // Prefix table for the page list.  A row's height depends only on the
+    // page's aspect and the item width, so the whole list is a running sum
+    // that paint, hit tests, drops and MaxScroll binary-search instead of
+    // re-summing every preceding page.  The table records the exact integer
+    // inputs its heights and origin were built from: a changed item width,
+    // content origin, panel metric or page count rebuilds it; page size
+    // changes are detected once per commit by NotifyDocumentChanged and
+    // invalidate it (insert/remove/reorder arrive as a page-count or size
+    // change).  Device pixel ratio is absent on purpose - the sidebar lays
+    // out in logical pixels, so a DPR change cannot move an item.
+    struct PageLayoutCache {
+        bool valid = false;
+        const Document* document = nullptr;
+        std::size_t pageCount = 0;
+        int itemWidth = 0;
+        int contentTop = 0;      // int(contentRect.top() + contentPadding)
+        int contentPadding = 0;  // int(metrics.contentPadding)
+        int labelHeight = 0;     // int(metrics.labelHeight)
+        int rowAdvance = 0;      // int(metrics.labelHeight + metrics.itemGap)
+        int minThumbHeight = 0;  // int(metrics.minThumbHeight)
+        // itemTops[i] is page i's scroll-space offset from contentTop; the
+        // extra trailing entry is the total row extent (MaxScroll).  Row i
+        // advances by thumbHeights[i] + rowAdvance.
+        std::vector<int> itemTops {};
+        std::vector<int> thumbHeights {};
+    };
+    [[nodiscard]] const PageLayoutCache& EnsurePageLayout() const;
+    void InvalidatePageLayout();
+    // Widget-space item top and rect height from the prefix table.
+    [[nodiscard]] int CachedItemTop(const PageLayoutCache& layout, std::size_t index) const;
+    [[nodiscard]] int CachedItemRectHeight(const PageLayoutCache& layout, std::size_t index) const;
+    // First page whose item bottom is below `y` and first whose centre is
+    // below `y` (scroll-space rows are ordered, so both are binary searches).
+    [[nodiscard]] std::size_t FirstItemWithBottomAfter(const PageLayoutCache& layout, int y) const;
+    [[nodiscard]] std::size_t FirstItemWithCenterAfter(const PageLayoutCache& layout, int y) const;
+    mutable PageLayoutCache pageLayout_ {};
+    mutable std::uint64_t pageLayoutBuildCount_ = 0;
+    mutable std::uint64_t pageLayoutRowReads_ = 0;
 };
 
 }  // namespace cnote::ui
