@@ -1,7 +1,10 @@
 #include "ui/SidebarWidget.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <iterator>
+#include <utility>
 
 #include <QApplication>
 #include <QFocusEvent>
@@ -33,6 +36,77 @@ QString FormatPageJumpLabel(std::size_t currentPage, std::size_t pageCount) {
 
 qreal Smoothstep(qreal linear) {
     return linear * linear * (3.0 - (2.0 * linear));
+}
+
+// --- thumbnail input fingerprint ----------------------------------------
+//
+// Thumbnails paint the PDF/raster background, images and strokes only (text
+// and LaTeX are deliberately absent), so their cache key hashes exactly those
+// inputs.  Pixel buffers hash their stable identity instead of their bytes;
+// stroke points have no shared identity, so they are hashed directly.  The
+// check only runs when a page epoch moved, and a text-only commit then keeps
+// the raster.  Add any new field the thumbnail painter reads to this hash.
+std::uint64_t HashValue(std::uint64_t hash, std::uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ULL;
+    return hash;
+}
+
+std::uint64_t HashFloat(std::uint64_t hash, float value) {
+    return HashValue(hash, std::bit_cast<std::uint32_t>(value));
+}
+
+std::uint64_t ThumbnailInputFingerprint(const Page& page, const render::PdfBackgroundProvider* pdfBackground) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    hash = HashFloat(hash, page.width);
+    hash = HashFloat(hash, page.height);
+    hash = HashFloat(hash, page.rotationDegrees);
+    hash = HashValue(hash, static_cast<std::uint32_t>(page.sourcePdfSourceIndex));
+    hash = HashValue(hash, static_cast<std::uint32_t>(page.sourcePdfPageIndex));
+    if (pdfBackground != nullptr) {
+        hash = HashValue(hash, reinterpret_cast<std::uintptr_t>(pdfBackground));
+    }
+    hash = HashValue(hash, page.raster.width);
+    hash = HashValue(hash, page.raster.height);
+    hash = HashValue(hash, page.raster.stride);
+    hash = HashValue(hash, page.raster.pixels.size());
+    hash = HashValue(hash, page.raster.pixels.Identity());
+    hash = HashValue(hash, page.images.size());
+    for (std::size_t index = 0; index < page.images.size(); ++index) {
+        const PageImage& image = page.images[index];
+        hash = HashValue(hash, index);
+        hash = HashFloat(hash, image.x);
+        hash = HashFloat(hash, image.y);
+        hash = HashFloat(hash, image.width);
+        hash = HashFloat(hash, image.height);
+        hash = HashFloat(hash, image.rotationDegrees);
+        hash = HashValue(hash, image.pixelWidth);
+        hash = HashValue(hash, image.pixelHeight);
+        hash = HashValue(hash, image.stride);
+        hash = HashValue(hash, image.pixels.size());
+        hash = HashValue(hash, image.pixels.Identity());
+    }
+    hash = HashValue(hash, page.strokes.size());
+    for (std::size_t index = 0; index < page.strokes.size(); ++index) {
+        const Stroke& stroke = page.strokes[index];
+        hash = HashValue(hash, index);
+        hash = HashValue(hash, stroke.style.color);
+        hash = HashFloat(hash, stroke.style.width);
+        hash = HashValue(hash, stroke.style.dotted ? 1U : 0U);
+        hash = HashFloat(hash, stroke.smoothing);
+        hash = HashFloat(hash, stroke.sampling.streamline);
+        hash = HashFloat(hash, stroke.sampling.spacing);
+        hash = HashValue(hash, stroke.points.size());
+        for (const Vec2& point : stroke.points) {
+            hash = HashFloat(hash, point.x);
+            hash = HashFloat(hash, point.y);
+        }
+        hash = HashValue(hash, stroke.pressures.size());
+        for (const float pressure : stroke.pressures) {
+            hash = HashFloat(hash, pressure);
+        }
+    }
+    return hash;
 }
 
 // Drag-to-reorder auto-scroll: the band at each end of the content area that
@@ -77,6 +151,7 @@ SidebarWidget::SidebarWidget(QWidget* parent)
         }
         UpdateGeometry();
         UpdateVisibility();
+        RequestThumbnailRenders();
         emit SlideProgressChanged(slideProgress_);
     });
     connect(slideAnimation_, &QVariantAnimation::finished, this, [this]() {
@@ -92,6 +167,7 @@ SidebarWidget::SidebarWidget(QWidget* parent)
         slideState_ = slideTarget_ >= 1.0 ? SlideState::Open : SlideState::Closed;
         UpdateGeometry();
         UpdateVisibility();
+        RequestThumbnailRenders();
         if (changed) {
             emit SlideProgressChanged(slideProgress_);
         }
@@ -127,6 +203,14 @@ SidebarWidget::SidebarWidget(QWidget* parent)
     dragScrollTimer_->setInterval(16);
     connect(dragScrollTimer_, &QTimer::timeout, this, &SidebarWidget::AutoScrollPageDrag);
 
+    // Thumbnail misses are composed here, never inside paint: frames of the
+    // opening slide stay budgeted by the animation, and a burst of scroll or
+    // commit paints coalesces into one pass over the visible pages.
+    thumbnailTimer_ = new QTimer(this);
+    thumbnailTimer_->setSingleShot(true);
+    thumbnailTimer_->setInterval(0);
+    connect(thumbnailTimer_, &QTimer::timeout, this, &SidebarWidget::RenderVisibleThumbnails);
+
     hide();
 }
 
@@ -158,6 +242,7 @@ void SidebarWidget::SetDocument(const Document* document, render::PdfBackgroundP
     pdfBackground_ = pdfBackground;
     documentPageCount_ = pageCount;
     InvalidateThumbnails();
+    SnapshotPageRevisions();
     // Removed pages shorten the list: keep the scroll inside it.  Whichever of
     // SetDocument/NotifyDocumentChanged sees the new page count first clamps.
     SetScrollY(scrollY_);
@@ -166,40 +251,99 @@ void SidebarWidget::SetDocument(const Document* document, render::PdfBackgroundP
 }
 
 void SidebarWidget::NotifyDocumentChanged() {
-    // Repaint only for an ordinary content commit: ThumbnailAt re-renders an
-    // entry whose page epoch changed, so a commit on one page does not
-    // re-rasterize every visible thumbnail.  A page-count change is structural
-    // and does invalidate the cache and the page-jump editor.
+    // Repaint only the item rects this commit touched; thumbnails validate
+    // against their own input fingerprint, so a text-only commit on one page
+    // does not re-rasterize it and the panel is not fully repainted.
     if (document_ != nullptr && document_->PageCount() != documentPageCount_) {
         documentPageCount_ = document_->PageCount();
         CancelPageJumpEdit();
         CancelPageDrag();
         InvalidateThumbnails();
+        SnapshotPageRevisions();
         // Removed pages shorten the list: keep the scroll inside it.
         SetScrollY(scrollY_);
+        // Any commit (an undo included) may have moved the selected pages; the
+        // host reselects a block it just moved (SelectPages).
+        ClearPageSelection();
+        update();
+        return;
+    }
+    QRect dirty;
+    bool layoutChanged = false;
+    if (document_ == nullptr || knownPageEpochs_.size() != document_->PageCount()) {
+        SnapshotPageRevisions();
+        ClearPageSelection();
+        update();
+        return;
+    }
+    {
+        const std::size_t pageCount = document_->PageCount();
+        for (std::size_t index = 0; index < pageCount; ++index) {
+            const Page& page = document_->PageAt(index);
+            const std::uint64_t epoch = document_->PageEpoch(index);
+            const bool contentChanged = epoch != knownPageEpochs_[index];
+            const bool sizeChanged = page.width != knownPageSizes_[index].first
+                || page.height != knownPageSizes_[index].second;
+            knownPageEpochs_[index] = epoch;
+            knownPageSizes_[index] = { page.width, page.height };
+            if (!contentChanged && !sizeChanged) {
+                continue;
+            }
+            if (sizeChanged) {
+                // The item's height changed, so every page below it moved.
+                layoutChanged = true;
+            } else if (const std::optional<QRect> item = PageItemRect(index); item.has_value()) {
+                dirty = dirty.isNull() ? *item : dirty.united(*item);
+            }
+        }
+    }
+    if (layoutChanged) {
+        const QRect content = ContentRect();
+        dirty = dirty.isNull() ? content : dirty.united(content);
     }
     // Any commit (an undo included) may have moved the selected pages; the
     // host reselects a block it just moved (SelectPages).
     ClearPageSelection();
-    update();
+    if (!dirty.isNull()) {
+        update(dirty);
+    }
 }
 
 void SidebarWidget::SelectPages(std::size_t first, std::size_t count) {
     const std::size_t pageCount = PageCount();
+    QRect dirty;
+    for (const std::size_t index : selectedPages_) {
+        if (const std::optional<QRect> item = PageItemRect(index); item.has_value()) {
+            dirty = dirty.isNull() ? *item : dirty.united(*item);
+        }
+    }
     selectedPages_.clear();
     for (std::size_t index = first; index < first + count && index < pageCount; ++index) {
         selectedPages_.push_back(index);
+        if (const std::optional<QRect> item = PageItemRect(index); item.has_value()) {
+            dirty = dirty.isNull() ? *item : dirty.united(*item);
+        }
     }
     selectionAnchor_ = first < pageCount ? std::optional<std::size_t>(first) : std::nullopt;
-    update();
+    if (!dirty.isNull()) {
+        update(dirty);
+    }
 }
 
 void SidebarWidget::ClearPageSelection() {
     if (selectedPages_.empty()) {
         return;
     }
+    QRect dirty;
+    for (const std::size_t index : selectedPages_) {
+        if (const std::optional<QRect> item = PageItemRect(index); item.has_value()) {
+            dirty = dirty.isNull() ? *item : dirty.united(*item);
+        }
+    }
     selectedPages_.clear();
-    update();
+    if (!dirty.isNull()) {
+        update(dirty);
+    }
 }
 
 void SidebarWidget::SetCurrentPage(std::size_t index) {
@@ -216,6 +360,27 @@ void SidebarWidget::SetCurrentPage(std::size_t index) {
 
 void SidebarWidget::InvalidateThumbnails() {
     thumbnails_.clear();
+    thumbnailCacheBytes_ = 0;
+    pendingThumbnailPages_.clear();
+    if (thumbnailTimer_ != nullptr) {
+        thumbnailTimer_->stop();
+    }
+}
+
+void SidebarWidget::SnapshotPageRevisions() {
+    knownPageEpochs_.clear();
+    knownPageSizes_.clear();
+    if (document_ == nullptr) {
+        return;
+    }
+    const std::size_t pageCount = document_->PageCount();
+    knownPageEpochs_.reserve(pageCount);
+    knownPageSizes_.reserve(pageCount);
+    for (std::size_t index = 0; index < pageCount; ++index) {
+        const Page& page = document_->PageAt(index);
+        knownPageEpochs_.push_back(document_->PageEpoch(index));
+        knownPageSizes_.emplace_back(page.width, page.height);
+    }
 }
 
 std::size_t SidebarWidget::PageCount() const {
@@ -396,6 +561,7 @@ void SidebarWidget::StartSlideAnimation(qreal target) {
         slideState_ = clamped >= 1.0 ? SlideState::Open : SlideState::Closed;
         UpdateGeometry();
         UpdateVisibility();
+        RequestThumbnailRenders();
         return;
     }
 
@@ -474,7 +640,7 @@ void SidebarWidget::resizeEvent(QResizeEvent* event) {
     update();
 }
 
-void SidebarWidget::paintEvent(QPaintEvent*) {
+void SidebarWidget::paintEvent(QPaintEvent* event) {
     if (!SidebarVisible()) {
         return;
     }
@@ -488,6 +654,7 @@ void SidebarWidget::paintEvent(QPaintEvent*) {
     const qt::SidebarHeaderLayout headerLayout = HeaderLayout();
     const qt::SidebarMetrics metrics = Metrics();
     const QRect contentRect = headerLayout.contentRect.toAlignedRect();
+    const QRect paintRect = event->rect();
 
     // Thumbnail list, clipped to the content band exactly like
     // App::PaintPdfSidebarContents (App.cpp:7135 IntersectClipRect).
@@ -499,6 +666,9 @@ void SidebarWidget::paintEvent(QPaintEvent*) {
             continue;
         }
         if (item->bottom() < contentRect.top() || item->top() > contentRect.bottom()) {
+            continue;
+        }
+        if (!item->intersects(paintRect)) {
             continue;
         }
         const QRect labelRect(item->left(), item->bottom() - static_cast<int>(metrics.labelHeight), item->width(), static_cast<int>(metrics.labelHeight));
@@ -519,6 +689,15 @@ void SidebarWidget::paintEvent(QPaintEvent*) {
         if (const QImage* thumbnail = ThumbnailAt(pageIndex, thumbRect.width(), thumbRect.height()); thumbnail != nullptr) {
             painter.drawImage(thumbRect, *thumbnail);
         } else {
+            // Composing a thumbnail can load and rasterize a PDF page, so it
+            // never happens here: the frame shows the placeholder and the
+            // zero-timer composes visible misses once the event returns.
+            const Page& page = document_->PageAt(pageIndex);
+            if (page.width > 0.0f && page.height > 0.0f && !thumbRect.isEmpty()
+                && std::find(pendingThumbnailPages_.begin(), pendingThumbnailPages_.end(), pageIndex)
+                    == pendingThumbnailPages_.end()) {
+                pendingThumbnailPages_.push_back(pageIndex);
+            }
             painter.setPen(QPen(ChromeColor(kChromeThumbPlaceholder), 1.0));
             const int inset = static_cast<int>(metrics.placeholderInset);
             const int lineGap = static_cast<int>(metrics.placeholderLineGap);
@@ -590,27 +769,53 @@ void SidebarWidget::paintEvent(QPaintEvent*) {
         painter.setPen(ChromeColor(kChromeTextMuted));
         painter.drawText(pageLabel.adjusted(2, 0, -2, 0), Qt::AlignCenter, label);
     }
+    RequestThumbnailRenders();
 }
 
 const QImage* SidebarWidget::ThumbnailAt(std::size_t index, int width, int height) {
     if (document_ == nullptr || index >= document_->PageCount() || width <= 0 || height <= 0) {
         return nullptr;
     }
-    if (thumbnails_.size() < document_->PageCount()) {
-        thumbnails_.resize(document_->PageCount());
-    }
-    Thumbnail& entry = thumbnails_[index];
-    const ThumbnailKey key { document_, document_->PageEpoch(index), width, height };
-    if (entry.key == key && entry.key.IsValid()) {
-        return &entry.image;
-    }
-
-    const Page& page = document_->PageAt(index);
-    if (page.width <= 0.0f || page.height <= 0.0f) {
+    const auto found = thumbnails_.find(index);
+    if (found == thumbnails_.end()) {
         return nullptr;
     }
+    Thumbnail& entry = found->second;
+    if (!entry.key.IsValid() || entry.key.document != document_
+        || entry.key.width != width || entry.key.height != height) {
+        return nullptr;
+    }
+    const std::uint64_t epoch = document_->PageEpoch(index);
+    if (entry.sourceEpoch == epoch) {
+        entry.lastUse = ++thumbnailUseClock_;
+        return &entry.image;
+    }
+    // The page epoch moved, but thumbnails depict images and strokes only: a
+    // text/LaTeX-only commit hashes equal and keeps the existing raster.
+    if (ThumbnailInputFingerprint(document_->PageAt(index), pdfBackground_) == entry.key.fingerprint) {
+        entry.sourceEpoch = epoch;
+        entry.lastUse = ++thumbnailUseClock_;
+        return &entry.image;
+    }
+    return nullptr;
+}
+
+bool SidebarWidget::RenderThumbnail(std::size_t index, int width, int height) {
+    if (document_ == nullptr || index >= document_->PageCount() || width <= 0 || height <= 0) {
+        return false;
+    }
+    const Page& page = document_->PageAt(index);
+    if (page.width <= 0.0f || page.height <= 0.0f) {
+        return false;
+    }
+    const Document* const renderingDocument = document_;
+    const render::PdfBackgroundProvider* const renderingBackground = pdfBackground_;
+    const std::uint64_t renderingEpoch = document_->PageEpoch(index);
 
     QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
+    if (image.isNull()) {
+        return false;
+    }
     image.fill(Qt::white);
     QPainter painter(&image);
     painter.setRenderHint(QPainter::Antialiasing, true);
@@ -658,32 +863,128 @@ const QImage* SidebarWidget::ThumbnailAt(std::size_t index, int width, int heigh
     }
     painter.end();
 
-    entry.key = key;
+    // A nested event loop inside a background provider could have replaced
+    // the document or committed the page; never cache a mixed render.
+    if (document_ != renderingDocument || pdfBackground_ != renderingBackground
+        || index >= document_->PageCount()
+        || document_->PageEpoch(index) != renderingEpoch) {
+        return false;
+    }
+
+    const ThumbnailKey key {
+        document_,
+        ThumbnailInputFingerprint(page, pdfBackground_),
+        width,
+        height,
+    };
+    const std::size_t bytes = static_cast<std::size_t>(image.sizeInBytes());
+    Thumbnail& entry = thumbnails_[index];
+    if (!entry.image.isNull()) {
+        thumbnailCacheBytes_ -= static_cast<std::size_t>(entry.image.sizeInBytes());
+    }
     entry.image = std::move(image);
-    return &entry.image;
+    entry.key = key;
+    entry.sourceEpoch = document_->PageEpoch(index);
+    entry.lastUse = ++thumbnailUseClock_;
+    thumbnailCacheBytes_ += bytes;
+    ++thumbnailRenderCount_;
+    TrimThumbnailCache();
+    return true;
+}
+
+void SidebarWidget::TrimThumbnailCache() {
+    while (thumbnailCacheBytes_ > kThumbnailCacheBudgetBytes && !thumbnails_.empty()) {
+        auto victim = thumbnails_.begin();
+        for (auto candidate = std::next(thumbnails_.begin()); candidate != thumbnails_.end(); ++candidate) {
+            if (candidate->second.lastUse < victim->second.lastUse) {
+                victim = candidate;
+            }
+        }
+        thumbnailCacheBytes_ -= static_cast<std::size_t>(victim->second.image.sizeInBytes());
+        thumbnails_.erase(victim);
+    }
+}
+
+void SidebarWidget::RequestThumbnailRenders() {
+    if (pendingThumbnailPages_.empty() || document_ == nullptr) {
+        return;
+    }
+    // The opening/closing slide owns the frame budget: misses stay
+    // placeholders, and the slide's completion schedules the pass.
+    if (slideState_ == SlideState::Opening || slideState_ == SlideState::Closing) {
+        return;
+    }
+    if (!SidebarVisible()) {
+        return;
+    }
+    if (!thumbnailTimer_->isActive()) {
+        thumbnailTimer_->start();
+    }
+}
+
+void SidebarWidget::RenderVisibleThumbnails() {
+    if (document_ == nullptr || !SidebarVisible()) {
+        pendingThumbnailPages_.clear();
+        return;
+    }
+    if (slideState_ == SlideState::Opening || slideState_ == SlideState::Closing) {
+        // A slide started between scheduling and this tick; its completion
+        // requests the next pass.
+        return;
+    }
+    std::vector<std::size_t> pending;
+    pending.swap(pendingThumbnailPages_);
+    const QRect content = ContentRect();
+    const int labelHeight = static_cast<int>(Metrics().labelHeight);
+    QRect dirty;
+    for (const std::size_t index : pending) {
+        if (index >= PageCount()) {
+            continue;
+        }
+        const std::optional<QRect> item = PageItemRect(index);
+        if (!item.has_value() || item->bottom() < content.top() || item->top() > content.bottom()) {
+            continue;
+        }
+        const int width = item->width();
+        const int height = item->height() - labelHeight;
+        if (width <= 0 || height <= 0 || ThumbnailAt(index, width, height) != nullptr) {
+            continue;
+        }
+        if (RenderThumbnail(index, width, height)) {
+            dirty = dirty.isNull() ? *item : dirty.united(*item);
+        }
+    }
+    if (!dirty.isNull()) {
+        update(dirty);
+    }
 }
 
 bool SidebarWidget::HasThumbnail(std::size_t index) const {
-    if (document_ == nullptr || index >= document_->PageCount() || index >= thumbnails_.size()) {
+    if (document_ == nullptr || index >= document_->PageCount()) {
+        return false;
+    }
+    const auto found = thumbnails_.find(index);
+    if (found == thumbnails_.end()) {
+        return false;
+    }
+    const Thumbnail& entry = found->second;
+    if (!entry.key.IsValid() || entry.key.document != document_
+        || entry.sourceEpoch != document_->PageEpoch(index)) {
         return false;
     }
     const std::optional<QRect> item = PageItemRect(index);
     if (!item.has_value()) {
         return false;
     }
-    const ThumbnailKey key {
-        document_,
-        document_->PageEpoch(index),
-        item->width(),
-        item->height() - static_cast<int>(Metrics().labelHeight),
-    };
-    return key == thumbnails_[index].key && key.IsValid();
+    return entry.key.width == item->width()
+        && entry.key.height == item->height() - static_cast<int>(Metrics().labelHeight);
 }
 
 std::size_t SidebarWidget::RenderedThumbnailCount() const {
     std::size_t count = 0;
-    for (const Thumbnail& thumbnail : thumbnails_) {
-        if (thumbnail.key.IsValid()) {
+    for (const auto& [index, thumbnail] : thumbnails_) {
+        static_cast<void>(index);
+        if (thumbnail.key.IsValid() && thumbnail.key.document == document_ && !thumbnail.image.isNull()) {
             ++count;
         }
     }

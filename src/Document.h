@@ -69,6 +69,11 @@ public:
     [[nodiscard]] std::size_t size() const noexcept { return bytes_ != nullptr ? bytes_->size() : 0U; }
     [[nodiscard]] const std::uint8_t* data() const noexcept { return bytes_ != nullptr ? bytes_->data() : nullptr; }
     [[nodiscard]] const std::vector<std::uint8_t>& bytes() const noexcept;
+    // Stable identity of the shared byte allocation: copies share it, every
+    // newly constructed non-empty buffer gets a fresh value, and a dead
+    // buffer's identity is never reused.  Cache keys can therefore pin buffer
+    // contents without hashing the pixels.  0 means empty.
+    [[nodiscard]] std::uint64_t Identity() const noexcept { return identity_; }
 
     // Equal when both share one buffer or hold the same bytes.
     friend bool operator==(const PixelBuffer& a, const PixelBuffer& b) noexcept;
@@ -76,6 +81,7 @@ public:
 private:
     // Null for an empty buffer, so `empty()` is a pointer test.
     std::shared_ptr<const std::vector<std::uint8_t>> bytes_;
+    std::uint64_t identity_ = 0;
 };
 
 struct PageImage {

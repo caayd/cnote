@@ -25,6 +25,7 @@
 #include <QImage>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QPaintEvent>
 #include <QPixmap>
 #include <QWheelEvent>
 #include <QDir>
@@ -101,6 +102,18 @@ bool WaitFor(const std::function<bool()>& predicate, int timeoutMs) {
     }
     return predicate();
 }
+
+class PaintRegionWatcher : public QObject {
+public:
+    QRect lastRegion {};
+
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::Paint) {
+            lastRegion = static_cast<QPaintEvent*>(event)->region().boundingRect();
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
 
 cnote::Document BuildDocument(std::size_t pageCount) {
     std::vector<cnote::Page> pages;
@@ -636,7 +649,8 @@ void TestSidebarListAndNavigation() {
 
     const QPixmap grabbed = sidebar.grab();
     Check(!grabbed.isNull(), "sidebar paints offscreen");
-    Check(sidebar.RenderedThumbnailCount() >= visibleBefore, "every visible page composes a thumbnail");
+    Check(WaitFor([&]() { return sidebar.RenderedThumbnailCount() >= visibleBefore; }, 3000),
+        "every visible page composes a thumbnail outside paint");
     Check(sidebar.HasThumbnail(0), "first page has a composed thumbnail");
 
     // Page navigation intent from a click on a visible item.
@@ -839,7 +853,8 @@ void TestSidebarThumbnailCacheInvalidation() {
     Check(WaitFor([&]() { return sidebar.SlideProgress() >= 0.999; }, 3000), "sidebar opens before thumbnail test");
 
     static_cast<void>(sidebar.grab());
-    Check(sidebar.HasThumbnail(0), "first page thumbnail is cached after paint");
+    Check(WaitFor([&]() { return sidebar.HasThumbnail(0); }, 3000),
+        "first page thumbnail is composed outside paint");
     Check(sidebar.RenderedThumbnailCount() > 0U, "the thumbnail cache is populated");
 
     // Insert/remove keep the Document object (and its address) but change the
@@ -850,12 +865,185 @@ void TestSidebarThumbnailCacheInvalidation() {
     Check(!sidebar.HasThumbnail(0), "no stale thumbnail survives a page insert");
 
     static_cast<void>(sidebar.grab());
-    Check(sidebar.HasThumbnail(0), "the shifted page re-renders its thumbnail");
+    Check(WaitFor([&]() { return sidebar.HasThumbnail(0); }, 3000), "the shifted page re-renders its thumbnail");
 
     document.RemovePage(0);
     sidebar.NotifyDocumentChanged();
     Check(sidebar.RenderedThumbnailCount() == 0U, "NotifyDocumentChanged invalidates thumbnails on page removal");
     Check(!sidebar.HasThumbnail(0), "no stale thumbnail survives a page removal");
+}
+
+void TestSidebarThumbnailRenderingIsDeferred() {
+    QWidget host;
+    host.resize(1400, 900);
+    cnote::ui::SidebarWidget sidebar(&host);
+    cnote::Document document = BuildDocument(6);
+    sidebar.SetDocument(&document, nullptr);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    host.show();
+    QApplication::processEvents();
+
+    sidebar.SetOpen(true);
+    Check(sidebar.State() == cnote::ui::SidebarWidget::SlideState::Opening, "opening starts on the transient slide state");
+    // grab() paints synchronously without advancing the animation, so these
+    // are genuine opening frames.
+    bool paintedOpeningFrame = false;
+    for (int frame = 0; frame < 5; ++frame) {
+        const QPixmap openingFrame = sidebar.grab();
+        paintedOpeningFrame = paintedOpeningFrame || !openingFrame.isNull();
+        Check(sidebar.ThumbnailRenderCount() == 0U, "an opening paint frame composes no thumbnail");
+    }
+    Check(paintedOpeningFrame, "the opening frames painted");
+    Check(sidebar.State() == cnote::ui::SidebarWidget::SlideState::Opening,
+        "painting frames does not advance the slide");
+    bool renderedWhileOpening = false;
+    QElapsedTimer slideTimer;
+    slideTimer.start();
+    while (sidebar.State() == cnote::ui::SidebarWidget::SlideState::Opening && slideTimer.elapsed() < 3000) {
+        // A render may only land once the slide has settled; if one is seen
+        // while the transient state is still current, the paint gate leaked.
+        if (sidebar.ThumbnailRenderCount() > 0U) {
+            renderedWhileOpening = true;
+            break;
+        }
+        static_cast<void>(sidebar.grab());  // one visible animation frame
+        QApplication::processEvents(QEventLoop::AllEvents, 5);
+    }
+    Check(sidebar.State() == cnote::ui::SidebarWidget::SlideState::Open, "the slide settles open");
+    Check(!renderedWhileOpening, "opening animation frames compose no thumbnails");
+    Check(WaitFor([&]() { return sidebar.ThumbnailRenderCount() > 0U; }, 3000),
+        "visible thumbnails compose after the slide, outside paint");
+    const std::uint64_t warmCount = sidebar.ThumbnailRenderCount();
+
+    sidebar.SetOpen(false);
+    Check(WaitFor([&]() { return sidebar.State() == cnote::ui::SidebarWidget::SlideState::Closed; }, 3000),
+        "the sidebar closes");
+    sidebar.SetOpen(true);
+    Check(WaitFor([&]() { return sidebar.State() == cnote::ui::SidebarWidget::SlideState::Open; }, 3000),
+        "the sidebar opens again");
+    static_cast<void>(sidebar.grab());
+    QApplication::processEvents(QEventLoop::AllEvents, 20);
+    Check(sidebar.ThumbnailRenderCount() == warmCount, "a warm reopen reuses cached thumbnails");
+}
+
+void TestSidebarThumbnailKeyIgnoresText() {
+    QWidget host;
+    host.resize(1400, 900);
+    cnote::ui::SidebarWidget sidebar(&host);
+    cnote::Document document = BuildDocument(3);
+    sidebar.SetDocument(&document, nullptr);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    sidebar.SetOpen(true);
+    host.show();
+    QApplication::processEvents();
+    Check(WaitFor([&]() { return sidebar.SlideProgress() >= 0.999; }, 3000), "sidebar opens before the thumbnail-key test");
+    static_cast<void>(sidebar.grab());
+    Check(WaitFor([&]() { return sidebar.HasThumbnail(0); }, 3000), "the first thumbnail is ready");
+
+    const std::uint64_t before = sidebar.ThumbnailRenderCount();
+    cnote::PageText text;
+    text.id = 1;
+    text.content = u"not painted by thumbnails";
+    document.PageAt(0).texts.push_back(std::move(text));
+    document.TouchPage(0);
+    sidebar.NotifyDocumentChanged();
+    static_cast<void>(sidebar.grab());
+    Check(sidebar.HasThumbnail(0), "a text-only commit keeps the existing thumbnail");
+    Check(sidebar.ThumbnailRenderCount() == before, "a text-only commit does not re-rasterize the thumbnail");
+
+    document.PageAt(0).strokes.front().points.front().x += 5.0f;
+    document.TouchPage(0);
+    sidebar.NotifyDocumentChanged();
+    static_cast<void>(sidebar.grab());
+    Check(WaitFor([&]() { return sidebar.ThumbnailRenderCount() > before; }, 3000),
+        "a stroke commit re-rasterizes the thumbnail");
+}
+
+void TestSidebarCommitRepaintsOnlyChangedItems() {
+    QWidget host;
+    host.resize(1400, 900);
+    cnote::ui::SidebarWidget sidebar(&host);
+    cnote::Document document = BuildDocument(8);
+    sidebar.SetDocument(&document, nullptr);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    sidebar.SetOpen(true);
+    host.show();
+    QApplication::processEvents();
+    Check(WaitFor([&]() { return sidebar.SlideProgress() >= 0.999; }, 3000), "sidebar opens before the repaint test");
+    static_cast<void>(sidebar.grab());
+    Check(WaitFor([&]() { return sidebar.HasThumbnail(0); }, 3000), "the first thumbnail is ready");
+
+    PaintRegionWatcher watcher;
+    sidebar.installEventFilter(&watcher);
+    QApplication::processEvents();  // drain any paint queued before the commit
+
+    cnote::PageText text;
+    text.id = 1;
+    text.content = u"text-only commit";
+    document.PageAt(0).texts.push_back(std::move(text));
+    document.TouchPage(0);
+    watcher.lastRegion = QRect();
+    sidebar.NotifyDocumentChanged();
+    QApplication::processEvents();
+
+    const QRect changedItem = *sidebar.PageItemRect(0);
+    Check(!watcher.lastRegion.isNull(), "the commit paints");
+    Check(changedItem.contains(watcher.lastRegion),
+        "a one-page commit repaints only that page's item (painted "
+            + std::to_string(watcher.lastRegion.width()) + "x"
+            + std::to_string(watcher.lastRegion.height()) + ")");
+    sidebar.removeEventFilter(&watcher);
+}
+
+void TestSidebarThumbnailCacheBudget() {
+    QWidget host;
+    host.resize(1400, 900);
+    cnote::ui::SidebarWidget sidebar(&host);
+    cnote::Document document = BuildDocument(80);
+    sidebar.SetDocument(&document, nullptr);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    sidebar.SetOpen(true);
+    host.show();
+    QApplication::processEvents();
+    Check(WaitFor([&]() { return sidebar.SlideProgress() >= 0.999; }, 3000), "sidebar opens before the cache-budget test");
+
+    const auto thumbnailImage = [&](std::size_t index) {
+        const QRect item = *sidebar.PageItemRect(index);
+        const QImage full = sidebar.grab().toImage();
+        return full.copy(QRect(item.left(), item.top(), item.width(),
+            item.height() - static_cast<int>(sidebar.Metrics().labelHeight)));
+    };
+
+    static_cast<void>(sidebar.grab());
+    Check(WaitFor([&]() { return sidebar.HasThumbnail(0); }, 3000), "the first page thumbnail is ready");
+    const QImage firstImage = thumbnailImage(0);
+
+    const QRect content = sidebar.HeaderLayout().contentRect.toAlignedRect();
+    const int contentPadding = static_cast<int>(sidebar.Metrics().contentPadding);
+    for (std::size_t index = 0; index < sidebar.PageCount(); ++index) {
+        const int offset = sidebar.PageItemRect(index)->top() - content.top() - contentPadding + sidebar.ScrollY();
+        sidebar.SetScrollY(offset);
+        static_cast<void>(sidebar.grab());
+        Check(WaitFor([&]() { return sidebar.HasThumbnail(index); }, 3000),
+            "page " + std::to_string(index) + " composes its thumbnail");
+    }
+
+    Check(sidebar.ThumbnailCacheBytes() <= cnote::ui::SidebarWidget::kThumbnailCacheBudgetBytes,
+        "the thumbnail cache stays inside its byte budget");
+    const QRect firstItem = *sidebar.PageItemRect(0);
+    const std::size_t bytesPerThumbnail = static_cast<std::size_t>(firstItem.width())
+        * static_cast<std::size_t>(firstItem.height() - static_cast<int>(sidebar.Metrics().labelHeight)) * 4U;
+    Check(sidebar.ThumbnailCacheBytes() == sidebar.RenderedThumbnailCount() * bytesPerThumbnail,
+        "the cache accounts exactly the retained thumbnail bytes");
+    Check(sidebar.RenderedThumbnailCount() < sidebar.PageCount(), "visited thumbnails are evicted, not retained forever");
+    Check(sidebar.HasThumbnail(sidebar.PageCount() - 1U), "the most recently visited page stays cached");
+    Check(!sidebar.HasThumbnail(0), "the least recently visited page was evicted");
+
+    // Revisiting an evicted page recomposes the same pixels.
+    sidebar.SetScrollY(0);
+    static_cast<void>(sidebar.grab());
+    Check(WaitFor([&]() { return sidebar.HasThumbnail(0); }, 3000), "the evicted page recomposes when visible again");
+    Check(thumbnailImage(0) == firstImage, "a recomposed thumbnail is pixel-identical");
 }
 
 void TestSidebarDragReorder() {
@@ -1186,6 +1374,10 @@ int main(int argc, char** argv) {
     TestSidebarMultiSelectDrag();
     TestSidebarScrollClampsAfterPageRemoval();
     TestSidebarThumbnailCacheInvalidation();
+    TestSidebarThumbnailRenderingIsDeferred();
+    TestSidebarThumbnailKeyIgnoresText();
+    TestSidebarCommitRepaintsOnlyChangedItems();
+    TestSidebarThumbnailCacheBudget();
     TestToolbarAutoHide();
     TestOverlayDismissalConsumesPaletteMenu();
     TestToolbarToolIconsAreBundled();
