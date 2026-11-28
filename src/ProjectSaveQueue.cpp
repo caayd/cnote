@@ -2,6 +2,8 @@
 
 #include <QThread>
 
+#include <exception>
+#include <new>
 #include <utility>
 
 #include "ProjectFile.h"
@@ -16,11 +18,23 @@ namespace {
 // that contract; QFile/QSaveFile are safe off the GUI thread.
 ProjectSaveResult WriteProjectFile(const Document& document, const std::filesystem::path& path) {
     ProjectSaveResult result;
-    if (ProjectFile::Save(document, path)) {
-        result.success = true;
-        return result;
+    try {
+        if (ProjectFile::Save(document, path)) {
+            result.success = true;
+            return result;
+        }
+        result.error = "cannot write " + PathToUtf8(path);
+    } catch (const std::bad_alloc&) {
+        // Serialization allocates multiples of the document size.  The atomic
+        // QSaveFile still holds the previous destination, and the failure
+        // reaches the same error path as an I/O failure instead of terminating
+        // the process on this thread.
+        result.error = "cannot write " + PathToUtf8(path) + ": out of memory";
+    } catch (const std::exception& error) {
+        result.error = "cannot write " + PathToUtf8(path) + ": " + error.what();
+    } catch (...) {
+        result.error = "cannot write " + PathToUtf8(path);
     }
-    result.error = "cannot write " + PathToUtf8(path);
     return result;
 }
 
@@ -52,7 +66,6 @@ void ProjectSaveQueue::Enqueue(Job job, Completion completion) {
 
 void ProjectSaveQueue::WaitForIdle() {
     Q_ASSERT(thread() == QThread::currentThread());
-    Q_ASSERT(!delivering_);
     for (;;) {
         {
             std::unique_lock lock(mutex_);
@@ -110,28 +123,25 @@ void ProjectSaveQueue::WorkerLoop() {
 
 void ProjectSaveQueue::DeliverPending() {
     Q_ASSERT(thread() == QThread::currentThread());
-    if (delivering_) {
-        // Re-entered from a completion (a modal error dialog can spin the
-        // event loop); the outer loop below picks the new results up.
-        return;
-    }
-    delivering_ = true;
+    // One result at a time, not a batch: a completion can run a nested event
+    // loop (ReportError shows a modal dialog on a failed save), whose
+    // WaitForIdle or queued invocation re-enters here.  Every entry pops the
+    // next written result, so the nested call makes progress instead of
+    // waiting on a delivery the outer call has not finished.
     for (;;) {
-        std::vector<FinishedJob> ready;
+        FinishedJob finished;
         {
             std::lock_guard lock(mutex_);
-            ready.swap(finished_);
-        }
-        if (ready.empty()) {
-            break;
-        }
-        for (FinishedJob& finished : ready) {
-            if (finished.completion) {
-                finished.completion(finished.result);
+            if (finished_.empty()) {
+                return;
             }
+            finished = std::move(finished_.front());
+            finished_.pop_front();
+        }
+        if (finished.completion) {
+            finished.completion(finished.result);
         }
     }
-    delivering_ = false;
 }
 
 }  // namespace cnote

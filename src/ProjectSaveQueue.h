@@ -9,7 +9,6 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <vector>
 
 #include <QObject>
 
@@ -49,10 +48,15 @@ public:
 
     // Queues `job`. `completion` runs on the GUI thread after the write: from
     // the queued delivery of a finished job, or inline from WaitForIdle.
+    // Results run in write order, but a completion may spin a nested event
+    // loop (a modal error dialog) whose WaitForIdle delivers a later result
+    // before that completion returns.  Each completion's own session
+    // bookkeeping is already applied when it is called.
     void Enqueue(Job job, Completion completion);
 
     // Waits until every queued job has been written and every completion has
-    // run, so a close cannot outrun its own save.  Not re-entrant.
+    // run, so a close cannot outrun its own save.  May be called from inside a
+    // completion (its nested event loop can reach a second SaveTo/close).
     void WaitForIdle();
 
     // Jobs queued, writing, or written but whose completion has not run yet.
@@ -76,12 +80,10 @@ private:
     std::condition_variable workAvailable_;
     std::condition_variable idle_;
     std::deque<PendingJob> jobs_;
-    std::vector<FinishedJob> finished_;
-    // Jobs the worker has taken but not finished; not guarded by being empty
-    // in the same predicate as jobs_ because the worker decrements both.
+    std::deque<FinishedJob> finished_;
+    // Jobs the worker has taken but not finished yet.
     std::size_t active_ = 0;
     bool stopping_ = false;
-    bool delivering_ = false;
     bool workerStarted_ = false;
     std::thread worker_;
 };

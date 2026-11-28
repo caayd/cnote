@@ -27,6 +27,7 @@
 #include <QWindow>
 #include <qpa/qwindowsysteminterface.h>
 
+#include "ProjectSaveQueue.h"
 #include "Unicode.h"
 #include "document/SelectionClipboardQt.h"
 #include "settings/KeyBindingQt.h"
@@ -1434,6 +1435,10 @@ void QtMainWindow::OpenNewView() {
 }
 
 void QtMainWindow::Save() {
+    // FilePath/dirty only change when a queued write's completion runs, so
+    // settle any in-flight write before deciding between Save and Save As:
+    // Ctrl+S right after Save As must not reopen the file dialog.
+    manager_.ProjectSaves().WaitForIdle();
     // A PDF-backed document's FilePath is the PDF: an in-place save would
     // overwrite it, so it always goes through Save As.
     if (controller_.CanSaveInPlace() && controller_.HasSavedPath()) {
@@ -1448,6 +1453,7 @@ void QtMainWindow::Save() {
 }
 
 bool QtMainWindow::SaveAs() {
+    manager_.ProjectSaves().WaitForIdle();
     const QString selected = AskFileName(this, true, QStringLiteral("Save As"), QStringLiteral("cnote project (*.cnote)"));
     if (selected.isEmpty()) {
         return false;
@@ -1592,6 +1598,10 @@ void QtMainWindow::closeEvent(QCloseEvent* event) {
 }
 
 bool QtMainWindow::RetainCurrentSession() {
+    // A Save As that is still queued already chose a destination: settle it
+    // before the close decision reads dirty/FilePath, or the last view would
+    // treat the document as untitled and prompt again.
+    manager_.ProjectSaves().WaitForIdle();
     if (!controller_.Dirty()) {
         return true;
     }

@@ -25,8 +25,10 @@
 //     edit made while a save is in flight stays dirty for the next save, a
 //     Save As during an in-flight save commits both destinations, a failed
 //     asynchronous save keeps the old bytes and reports through the
-//     completion, a close waits for the queued write, and destroying the
-//     manager still commits a requested save;
+//     completion, a close waits for the queued write, destroying the manager
+//     still commits a requested save, a save started from inside a completion
+//     makes delivery progress, and Save/close settle a queued Save As before
+//     deciding whether they already have a destination;
 //   * SaveTo refuses to overwrite a PDF container (and the save policy routes
 //     PDF-backed documents through Save As), and the viewed page a controller
 //     sets is what ProjectFile serializes.
@@ -662,6 +664,105 @@ void DestroyingManagerDrainsAPendingSave() {
         Check(controller.RequestSave(target, nullptr), "queue a save and quit before it completes");
     }
     Check(ProjectContains(target, u"quit"), "destroying the manager finished the queued write");
+}
+
+// A completion may run a nested event loop - ReportError shows a modal dialog
+// on failure - and that loop can reach a second save while another written
+// result is still undelivered.  Delivery must make progress from the nested
+// call instead of waiting on itself.
+void SaveFromInsideACompletionDeliversQueuedResults() {
+    const std::filesystem::path dir = MakeTempDir("save-reentrant");
+    const std::filesystem::path first = dir / "first.cnote";
+    const std::filesystem::path second = dir / "second.cnote";
+
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    const std::shared_ptr<cnote::ProjectSession> session = controller.Session();
+    session->document = MakeProject(u"snapshot");
+    session->revision = 1U;
+    session->dirty = true;
+
+    Check(controller.RequestSave(first, nullptr), "queue the first save");
+    bool innerRan = false;
+    bool innerSaved = false;
+    std::string innerError;
+    Check(controller.RequestSave(second, nullptr,
+              [&](const cnote::qt::QtDocumentController::SaveOutcome&) {
+                  innerRan = true;
+                  innerSaved = controller.SaveTo(first, &innerError);
+              }),
+        "queue a save whose completion saves again");
+    manager.ProjectSaves().WaitForIdle();
+
+    Check(innerRan, "the completion ran");
+    Check(innerSaved, "a save requested from inside a completion commits: " + innerError);
+    Check(ProjectContains(first, u"snapshot") && ProjectContains(second, u"snapshot"),
+        "the nested save and the queued save both wrote their snapshots");
+    Check(!session->dirty, "the nested save cleared dirty for the saved revision");
+    Check(session->document.FilePath() == first, "the nested save recorded its destination");
+    Check(controller.SavedChangeCount() == 3U, "every committed write reported a Saved change");
+}
+
+// Save As queues its write and only then records the destination.  A Save that
+// follows immediately must settle that write and save in place instead of
+// reopening the file dialog.
+void SaveAfterSaveAsUsesTheChosenPath() {
+    const std::filesystem::path dir = MakeTempDir("save-after-save-as");
+    const std::filesystem::path target = dir / "chosen.cnote";
+
+    cnote::AppManager manager;
+    cnote::qt::QtMainWindow window(manager);
+    const std::shared_ptr<cnote::ProjectSession> session = window.Controller().Session();
+    session->document = MakeProject(u"first");
+    session->revision = 1U;
+    session->dirty = true;
+
+    // What Save As does after the dialog: queue the write to the chosen path.
+    Check(window.Controller().RequestSave(target, nullptr), "queue the Save As write");
+    session->document.CurrentPage().texts.front().content = u"second";
+    session->revision = 2U;
+    session->dirty = true;
+
+    const bool headless = cnote::qt::QtMainWindow::HeadlessModals();
+    cnote::qt::QtMainWindow::SetHeadlessModals(true);
+    window.Save();
+    cnote::qt::QtMainWindow::SetHeadlessModals(headless);
+    manager.ProjectSaves().WaitForIdle();
+
+    Check(window.Controller().FilePath() == target, "Save keeps the Save As destination");
+    Check(ProjectContains(target, u"second"), "Save wrote the current revision to the chosen path");
+    Check(!session->dirty, "the in-place save cleared dirty");
+    Check(window.Controller().SavedChangeCount() == 2U, "both writes reported a Saved change");
+}
+
+// The same stale state in the close decision: the queued Save As already chose
+// a path, so the last view must save in place, not ask "save changes?" again.
+void CloseAfterSaveAsUsesTheChosenPath() {
+    const std::filesystem::path dir = MakeTempDir("close-after-save-as");
+    const std::filesystem::path target = dir / "close-chosen.cnote";
+
+    cnote::AppManager manager;
+    cnote::qt::QtMainWindow window(manager);
+    const std::shared_ptr<cnote::ProjectSession> session = window.Controller().Session();
+    session->document = MakeProject(u"first");
+    session->revision = 1U;
+    session->dirty = true;
+
+    Check(window.Controller().RequestSave(target, nullptr), "queue the Save As write");
+    session->document.CurrentPage().texts.front().content = u"second";
+    session->revision = 2U;
+    session->dirty = true;
+
+    bool prompted = false;
+    window.SetCloseDecisionProvider([&prompted]() {
+        prompted = true;
+        return cnote::qt::CloseDecision::Cancel;
+    });
+    Check(window.close(), "closing the last view after Save As succeeds");
+    Check(!prompted, "the close used the chosen Save As destination instead of prompting");
+    Check(ProjectContains(target, u"second"), "the close save wrote the current revision to the chosen path");
+    Check(!session->dirty, "the close save cleared dirty");
 }
 
 // --- PDF export ---------------------------------------------------------------
@@ -1374,6 +1475,9 @@ int main(int argc, char** argv) {
     SaveAsDuringInFlightSaveCommitsBothDestinations();
     FailedAsynchronousSaveKeepsDirtyAndReports();
     DestroyingManagerDrainsAPendingSave();
+    SaveFromInsideACompletionDeliversQueuedResults();
+    SaveAfterSaveAsUsesTheChosenPath();
+    CloseAfterSaveAsUsesTheChosenPath();
 
     PdfExportReplacesOnlyOnSuccess();
     PdfExportFailureKeepsDestination();
