@@ -118,6 +118,13 @@ QtDocumentController::QtDocumentController(AppManager& manager, QObject* parent)
 
 QtDocumentController::~QtDocumentController() {
     manager_.UnregisterView(this);
+    // Drop the provider (it references this session's document) before
+    // releasing the session, then sweep: if this view was the last owner, the
+    // cached PDF handles are now collectable and are closed before their
+    // source bytes are freed.
+    pdfBackground_.reset();
+    session_.reset();
+    PdfiumBackend::ReleaseUnreferencedDocuments();
 }
 
 // --- session ---------------------------------------------------------------
@@ -126,6 +133,10 @@ void QtDocumentController::AttachSession(std::shared_ptr<ProjectSession> session
     AbortTransientState();
     manager_.UnregisterView(this);
     session_ = std::move(session);
+    // A replaced session may have just released the previous document's PDF
+    // sources. Close their cached handles now (before the bytes go away) rather
+    // than waiting for the next PDF operation.
+    PdfiumBackend::ReleaseUnreferencedDocuments();
     if (session_ != nullptr) {
         manager_.RegisterView(this, this, session_);
     }
@@ -1095,14 +1106,17 @@ const std::vector<PdfTextCharBox>* QtDocumentController::PdfTextCharBoxesFor(std
         static_cast<int>(std::lround(page->rotationDegrees / 90.0f)) & 3,
     };
     if (const auto cached = pdfTextCache_.find(key); cached != pdfTextCache_.end()) {
-        return &cached->second;
+        cached->second.lastUse = ++pdfTextCacheTick_;
+        return &cached->second.boxes;
     }
-    const std::optional<std::vector<PdfTextCharBox>> extracted = pdfBackend_->ExtractTextCharBoxes(
+    ++pdfTextExtractionCount_;
+    std::optional<std::vector<PdfTextCharBox>> extracted = pdfBackend_->ExtractTextCharBoxes(
         pdfSource->pdfData, static_cast<std::size_t>(page->sourcePdfPageIndex));
     if (!extracted.has_value()) {
         return nullptr;
     }
-    std::vector<PdfTextCharBox> boxes = *extracted;
+    // Extraction output moves straight into the cache instead of being copied.
+    std::vector<PdfTextCharBox> boxes = std::move(*extracted);
     if (key.quarterTurns != 0) {
         // Boxes come back in source-page space; the page already swapped its
         // frame, so the source dims are the swapped-back page dims.
@@ -1117,13 +1131,17 @@ const std::vector<PdfTextCharBox>* QtDocumentController::PdfTextCharBoxesFor(std
             box.bottom = std::max(tl.y, br.y);
         }
     }
-    // Extraction reads the whole PDF text page (pdfium LoadMemDocument + text
-    // page walk), so hit-testing without this cache cost ~10 ms per probe.
+    // Extraction reads the whole PDF text page (PDFium text-page walk), so
+    // hit-testing without this cache cost ~10 ms per probe.
     if (pdfTextCache_.size() >= kPdfTextCacheCapacity) {
-        pdfTextCache_.clear();
+        const auto leastRecent = std::min_element(pdfTextCache_.begin(), pdfTextCache_.end(),
+            [](const auto& a, const auto& b) { return a.second.lastUse < b.second.lastUse; });
+        if (leastRecent != pdfTextCache_.end()) {
+            pdfTextCache_.erase(leastRecent);
+        }
     }
-    const auto inserted = pdfTextCache_.emplace(key, std::move(boxes));
-    return &inserted.first->second;
+    const auto inserted = pdfTextCache_.emplace(key, PdfTextCacheEntry { std::move(boxes), ++pdfTextCacheTick_ });
+    return &inserted.first->second.boxes;
 }
 
 bool QtDocumentController::HasSelectedPdfText() const {

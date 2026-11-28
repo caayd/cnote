@@ -33,18 +33,25 @@ void Check(bool condition, const std::string& what) {
     }
 }
 
-// A single-page PDF with two text lines, same shape as the background tests.
-std::vector<std::uint8_t> BuildTextPdf() {
+// A generated PDF with two text lines on every page, same shape as the
+// background tests.
+std::vector<std::uint8_t> BuildTextPdf(int pageCount = 1) {
     std::vector<std::string> objects;
     objects.push_back("<< /Type /Catalog /Pages 2 0 R >>");
-    objects.push_back("<< /Type /Pages /Kids [4 0 R] /Count 1 >>");
+    std::string kids;
+    for (int index = 0; index < pageCount; ++index) {
+        kids += std::to_string(4 + (index * 2)) + " 0 R ";
+    }
+    objects.push_back("<< /Type /Pages /Kids [" + kids + "] /Count " + std::to_string(pageCount) + " >>");
     objects.push_back("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
-    const std::string content =
-        "BT /F1 24 Tf 72 720 Td (Hello pdf world) Tj ET\n"
-        "BT /F1 24 Tf 72 660 Td (Second line here) Tj ET\n";
-    objects.push_back("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R"
-                      " /Resources << /Font << /F1 3 0 R >> >> >>");
-    objects.push_back("<< /Length " + std::to_string(content.size()) + " >>\nstream\n" + content + "endstream");
+    for (int index = 0; index < pageCount; ++index) {
+        const std::string content =
+            "BT /F1 24 Tf 72 720 Td (Hello pdf world) Tj ET\n"
+            "BT /F1 24 Tf 72 660 Td (Second line here " + std::to_string(index + 1) + ") Tj ET\n";
+        objects.push_back("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents "
+            + std::to_string(5 + (index * 2)) + " 0 R /Resources << /Font << /F1 3 0 R >> >> >>");
+        objects.push_back("<< /Length " + std::to_string(content.size()) + " >>\nstream\n" + content + "endstream");
+    }
 
     std::string pdf = "%PDF-1.4\n";
     std::vector<std::size_t> offsets(1, 0);
@@ -261,7 +268,48 @@ int main(int argc, char** argv) {
         controller.ClearSelection();
     }
 
+    // --- one text-cache miss evicts one entry, not the whole cache ----------
     std::error_code ec;
+    {
+        const std::filesystem::path manyPath =
+            std::filesystem::temp_directory_path() / "cnote-pdf-text-many.pdf";
+        {
+            const std::vector<std::uint8_t> bytes = BuildTextPdf(70);
+            FILE* file = std::fopen(manyPath.string().c_str(), "wb");
+            Check(file != nullptr, "the 70-page text fixture is writable");
+            if (file != nullptr) {
+                std::fwrite(bytes.data(), 1U, bytes.size(), file);
+                std::fclose(file);
+            }
+        }
+        cnote::qt::QtDocumentController evictionController(manager);
+        std::string evictionError;
+        Check(evictionController.OpenFile(manyPath, &evictionError),
+              "the 70-page PDF opens through a fresh controller");
+        Check(evictionController.DocumentRef().PageCount() == 70U,
+              "the eviction fixture has 70 pages");
+        const std::uint64_t base = evictionController.PdfTextExtractionCount();
+        for (std::size_t page = 0; page < 64U; ++page) {
+            Check(evictionController.PdfTextCharBoxesFor(page) != nullptr,
+                  "each page of the eviction fixture extracts text");
+        }
+        Check(evictionController.PdfTextExtractionCount() == base + 64U,
+              "64 pages fill the text cache with one extraction each");
+        Check(evictionController.PdfTextCharBoxesFor(0) != nullptr
+                && evictionController.PdfTextExtractionCount() == base + 64U,
+              "a cached page is a cache hit");
+        Check(evictionController.PdfTextCharBoxesFor(64) != nullptr
+                && evictionController.PdfTextExtractionCount() == base + 65U,
+              "one miss at capacity evicts a single entry instead of clearing the cache");
+        Check(evictionController.PdfTextCharBoxesFor(0) != nullptr
+                && evictionController.PdfTextExtractionCount() == base + 65U,
+              "the recently used page survives the single-entry eviction");
+        Check(evictionController.PdfTextCharBoxesFor(1) != nullptr
+                && evictionController.PdfTextExtractionCount() == base + 66U,
+              "the least recently used page was the one evicted");
+        std::filesystem::remove(manyPath, ec);
+    }
+
     std::filesystem::remove(pdfPath, ec);
     std::printf(g_failures == 0 ? "ALL PDF TEXT CHECKS PASSED\n" : "%d PDF TEXT CHECK(S) FAILED\n", g_failures);
     return g_failures == 0 ? 0 : 1;

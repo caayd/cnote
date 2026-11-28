@@ -100,6 +100,9 @@ public:
     // Diagnostics: Saved changes broadcast by this view's controller (plan 6.6);
     // a successful save is exactly one, a failed save none.
     [[nodiscard]] std::uint64_t SavedChangeCount() const { return savedChangeCount_; }
+    // Diagnostics: PDFium text-page walks performed for PdfTextCharBoxesFor.
+    // A cache hit adds nothing, so one miss per uncached page is the floor.
+    [[nodiscard]] std::uint64_t PdfTextExtractionCount() const { return pdfTextExtractionCount_; }
     [[nodiscard]] bool HasSavedPath() const;
     [[nodiscard]] const std::filesystem::path& FilePath() const;
     // True when the document's current path is a real project destination.  A
@@ -420,7 +423,18 @@ private:
             return quarterTurns < other.quarterTurns;
         }
     };
-    mutable std::map<PdfTextCacheKey, std::vector<PdfTextCharBox>> pdfTextCache_;
+    struct PdfTextCacheEntry {
+        std::vector<PdfTextCharBox> boxes;
+        // Capacity is per view and shared by every source; one miss evicts
+        // only the least recently used page instead of dropping the whole
+        // cache (which re-extracted all 64 on the next probe).
+        std::uint64_t lastUse = 0;
+    };
+    mutable std::map<PdfTextCacheKey, PdfTextCacheEntry> pdfTextCache_;
+    mutable std::uint64_t pdfTextCacheTick_ = 0;
+    // Diagnostics for the extraction evidence: one count per PDFium text-page
+    // walk, cache hits included as zero.
+    mutable std::uint64_t pdfTextExtractionCount_ = 0;
     std::uint64_t savedChangeCount_ = 0;
     std::function<void(const QString&)> autoSaveErrorHandler_;
 };

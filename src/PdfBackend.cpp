@@ -2,12 +2,17 @@
 
 #include <algorithm>
 #include <bit>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <list>
+#include <memory>
 #include <numbers>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include <QSaveFile>
@@ -29,8 +34,6 @@ namespace cnote {
 namespace {
 
 constexpr float kStrokeRenderWidthDivisor = 2.15f;
-// Matches the stored-raster convention (representative 612x792 -> 918x1188).
-constexpr float kHydratedPdfRasterScale = 1.5f;
 constexpr char16_t kEmbeddedCnoteAttachmentName[] = u"cnote-edit-data.cnote";
 
 // PDFium wide strings are UTF-16 code units; build a null-terminated
@@ -120,6 +123,38 @@ int CheckedPdfPixelSize(float pageSize, float renderScale) {
     return static_cast<int>(std::lround(value));
 }
 
+// Renders one page bitmap straight into the raster's own pixel buffer. Passing
+// that buffer to FPDFBitmap_CreateEx means PDFium writes the final pixels
+// exactly once: the caller gets owned BGRA bytes instead of a PDFium bitmap
+// copied through an intermediate vector.
+std::optional<RasterImage> RenderPageIntoOwnedRaster(FPDF_PAGE pageHandle,
+    int bitmapWidth, int bitmapHeight, float renderScale,
+    int drawX, int drawY, int drawWidth, int drawHeight) {
+    if (pageHandle == nullptr || bitmapWidth <= 0 || bitmapHeight <= 0 || renderScale <= 0.0f) {
+        return std::nullopt;
+    }
+
+    const int stride = bitmapWidth * 4;
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(stride) * static_cast<std::size_t>(bitmapHeight));
+    FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(
+        bitmapWidth, bitmapHeight, FPDFBitmap_BGRA, pixels.data(), stride);
+    if (bitmap == nullptr) {
+        return std::nullopt;
+    }
+
+    FPDFBitmap_FillRect(bitmap, 0, 0, bitmapWidth, bitmapHeight, 0xFFFFFFFF);
+    FPDF_RenderPageBitmap(bitmap, pageHandle, drawX, drawY, drawWidth, drawHeight, 0, FPDF_ANNOT);
+
+    RasterImage raster {};
+    raster.width = bitmapWidth;
+    raster.height = bitmapHeight;
+    raster.stride = FPDFBitmap_GetStride(bitmap);
+    raster.scale = renderScale;
+    FPDFBitmap_Destroy(bitmap);
+    raster.pixels = PixelBuffer(std::move(pixels));
+    return raster;
+}
+
 std::optional<RasterImage> RenderPageBitmap(FPDF_PAGE pageHandle, float renderScale) {
     if (pageHandle == nullptr || renderScale <= 0.0f) {
         return std::nullopt;
@@ -133,25 +168,8 @@ std::optional<RasterImage> RenderPageBitmap(FPDF_PAGE pageHandle, float renderSc
         return std::nullopt;
     }
 
-    FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(bitmapWidth, bitmapHeight, FPDFBitmap_BGRA, nullptr, 0);
-    if (bitmap == nullptr) {
-        return std::nullopt;
-    }
-
-    RasterImage raster {};
-    FPDFBitmap_FillRect(bitmap, 0, 0, bitmapWidth, bitmapHeight, 0xFFFFFFFF);
-    FPDF_RenderPageBitmap(bitmap, pageHandle, 0, 0, bitmapWidth, bitmapHeight, 0, FPDF_ANNOT);
-
-    raster.width = bitmapWidth;
-    raster.height = bitmapHeight;
-    raster.stride = FPDFBitmap_GetStride(bitmap);
-    raster.scale = renderScale;
-
-    const auto* source = static_cast<const std::uint8_t*>(FPDFBitmap_GetBuffer(bitmap));
-    const std::size_t totalBytes = static_cast<std::size_t>(raster.stride) * static_cast<std::size_t>(bitmapHeight);
-    raster.pixels = PixelBuffer(std::vector<std::uint8_t>(source, source + totalBytes));
-    FPDFBitmap_Destroy(bitmap);
-    return raster;
+    return RenderPageIntoOwnedRaster(
+        pageHandle, bitmapWidth, bitmapHeight, renderScale, 0, 0, bitmapWidth, bitmapHeight);
 }
 float ToPdfY(float pageHeight, float pageY) {
     return pageHeight - pageY;
@@ -436,6 +454,135 @@ struct ExportPageScope {
 
 }  // namespace
 
+namespace {
+
+// One open PDFium document per PDF source byte buffer. PDFium keeps parsing
+// from the caller's memory, so the entry holds a strong reference to those
+// bytes: the buffer is guaranteed to outlive the handle, and it is only
+// released after the handle has been closed. An entry is dropped as soon as
+// the cache is its only owner (every Acquire, the explicit release hook, and
+// shutdown check that), so a closed document's parsed memory does not linger.
+// Reacquiring by a different shared_ptr to the same buffer (the controller and
+// Document share one) reuses the handle; the stored address is the live
+// vector's, and a strong reference means the allocator cannot reuse it.
+//
+// All calls are GUI-thread-only, like PDFium itself, and completion/modal
+// nested event loops still run on that thread. The cache is an LRU of a few
+// documents, because holding every PDF a session ever opened would retain
+// parsed page trees and font caches.
+class PdfDocumentCache {
+public:
+    static constexpr std::size_t kMaxCachedDocuments = 8;
+
+    [[nodiscard]] FPDF_DOCUMENT Acquire(const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes) {
+        assert(ThreadId() == std::this_thread::get_id());
+        if (!pdfBytes) {
+            return nullptr;
+        }
+        SweepUnreferenced();
+        const std::vector<std::uint8_t>* address = pdfBytes.get();
+        for (auto entry = entries_.begin(); entry != entries_.end(); ++entry) {
+            if (entry->address != address) {
+                continue;
+            }
+            // Same live buffer object: a hit. Keep it MRU without touching the
+            // handle.
+            entries_.splice(entries_.end(), entries_, entry);
+            return entries_.back().handle;
+        }
+
+        if (pdfBytes->empty()) {
+            return nullptr;
+        }
+        ++loadCount_;
+        FPDF_DOCUMENT handle = FPDF_LoadMemDocument64(pdfBytes->data(), pdfBytes->size(), nullptr);
+        entries_.push_back(CachedDocument {
+            std::shared_ptr<const std::vector<std::uint8_t>>(pdfBytes),
+            address,
+            handle,
+        });
+        while (entries_.size() > kMaxCachedDocuments) {
+            // Close before the entry's reference to the bytes is released.
+            Close(entries_.front());
+            entries_.pop_front();
+        }
+        return handle;
+    }
+
+    [[nodiscard]] std::size_t LoadCount() const noexcept { return loadCount_; }
+    [[nodiscard]] std::size_t CloseCount() const noexcept { return closeCount_; }
+    [[nodiscard]] std::size_t EntryCount() const noexcept { return entries_.size(); }
+
+    void Start() {
+        // The library was initialized for the first time; nothing can be open.
+        entries_.clear();
+        loadCount_ = 0;
+        closeCount_ = 0;
+    }
+
+    // Closes every open document. Must run before FPDF_DestroyLibrary.
+    void Shutdown() {
+        for (CachedDocument& entry : entries_) {
+            Close(entry);
+        }
+        entries_.clear();
+    }
+
+    // Drops every entry whose bytes no Document references any more. Callers
+    // must have released their own references first.
+    void ReleaseUnreferenced() {
+        SweepUnreferenced();
+    }
+
+private:
+    struct CachedDocument {
+        // Strong: the buffer outlives the handle. Only the cache holding it is
+        // what makes the entry collectable.
+        std::shared_ptr<const std::vector<std::uint8_t>> bytes;
+        const std::vector<std::uint8_t>* address = nullptr;
+        // Null records a failed open, so a broken source is not reparsed per
+        // render or pointer probe. It expires with the buffer like a success.
+        FPDF_DOCUMENT handle = nullptr;
+    };
+
+    static const std::thread::id& ThreadId() {
+        static const std::thread::id id = std::this_thread::get_id();
+        return id;
+    }
+
+    void Close(CachedDocument& entry) {
+        if (entry.handle != nullptr) {
+            FPDF_CloseDocument(entry.handle);
+            entry.handle = nullptr;
+            ++closeCount_;
+        }
+    }
+
+    // Closes and removes entries only the cache still references, then lets the
+    // entry's shared_ptr release the bytes. Close always runs first.
+    void SweepUnreferenced() {
+        for (auto entry = entries_.begin(); entry != entries_.end();) {
+            if (entry->bytes.use_count() == 1) {
+                Close(*entry);
+                entry = entries_.erase(entry);
+            } else {
+                ++entry;
+            }
+        }
+    }
+
+    std::list<CachedDocument> entries_;
+    std::size_t loadCount_ = 0;
+    std::size_t closeCount_ = 0;
+};
+
+PdfDocumentCache& PdfDocuments() {
+    static PdfDocumentCache cache;
+    return cache;
+}
+
+}  // namespace
+
 RasterImage CreateBlankRaster(float pageWidth, float pageHeight, float renderScale) {
     const int bitmapWidth = CheckedPdfPixelSize(std::max(1.0f, pageWidth), renderScale);
     const int bitmapHeight = CheckedPdfPixelSize(std::max(1.0f, pageHeight), renderScale);
@@ -460,7 +607,7 @@ std::optional<std::vector<std::uint8_t>> PdfiumBackend::ExtractEmbeddedProject(
     if (!pdfBytes || pdfBytes->empty()) {
         return std::nullopt;
     }
-    FPDF_DOCUMENT documentHandle = FPDF_LoadMemDocument64(pdfBytes->data(), pdfBytes->size(), nullptr);
+    FPDF_DOCUMENT documentHandle = PdfDocuments().Acquire(pdfBytes);
     if (documentHandle == nullptr) {
         return std::nullopt;
     }
@@ -480,19 +627,23 @@ std::optional<std::vector<std::uint8_t>> PdfiumBackend::ExtractEmbeddedProject(
         }
     }
 
-    FPDF_CloseDocument(documentHandle);
     return projectBytes;
 }
 
 namespace { unsigned int pdfiumUsers = 0; }
 
 PdfiumBackend::PdfiumBackend() {
-    if (pdfiumUsers++ == 0) FPDF_InitLibrary();
+    if (pdfiumUsers++ == 0) {
+        FPDF_InitLibrary();
+        PdfDocuments().Start();
+    }
     initialized_ = true;
 }
 
 PdfiumBackend::~PdfiumBackend() {
     if (initialized_ && --pdfiumUsers == 0) {
+        // Cached documents must close while the library still exists.
+        PdfDocuments().Shutdown();
         FPDF_DestroyLibrary();
     }
 }
@@ -504,105 +655,71 @@ std::optional<Document> PdfiumBackend::OpenFromMemory(
         return std::nullopt;
     }
 
-    FPDF_DOCUMENT documentHandle = FPDF_LoadMemDocument64(pdfBytes->data(), pdfBytes->size(), nullptr);
+    FPDF_DOCUMENT documentHandle = PdfDocuments().Acquire(pdfBytes);
     if (documentHandle == nullptr) {
         return std::nullopt;
     }
 
     const int pageCount = FPDF_GetPageCount(documentHandle);
     if (pageCount <= 0) {
-        FPDF_CloseDocument(documentHandle);
         return std::nullopt;
     }
 
+    // Page sizes come from the page dictionaries; no page is loaded (and its
+    // content parsed) just to build the page list, and no raster is allocated.
+    // A page whose dictionary cannot be read keeps the default size, claims no
+    // source, and paints as blank paper, so later pages keep their indices.
     std::vector<Page> pages;
     pages.reserve(static_cast<std::size_t>(pageCount));
-
     for (int pageIndex = 0; pageIndex < pageCount; ++pageIndex) {
-        FPDF_PAGE pageHandle = FPDF_LoadPage(documentHandle, pageIndex);
-        if (pageHandle == nullptr) {
-            // A page that cannot be opened becomes raster-only with a solid
-            // fallback instead of silently shifting later page indices: the
-            // page must never claim a PDF source it cannot render.
-            Page page {};
-            FS_SIZEF size {};
-            if (FPDF_GetPageSizeByIndexF(documentHandle, pageIndex, &size) != 0) {
-                page.width = std::max(1.0f, size.width);
-                page.height = std::max(1.0f, size.height);
-            }
+        Page page {};
+        FS_SIZEF size {};
+        if (FPDF_GetPageSizeByIndexF(documentHandle, pageIndex, &size) != 0) {
+            page.width = std::max(1.0f, size.width);
+            page.height = std::max(1.0f, size.height);
+            page.sourcePdfSourceIndex = 0;
+            page.sourcePdfPageIndex = pageIndex;
+        } else {
             page.sourcePdfSourceIndex = -1;
             page.sourcePdfPageIndex = -1;
-            page.raster = CreateSolidRaster(page.width, page.height, kHydratedPdfRasterScale, 0xFFFFFFFFU);
-            pages.push_back(std::move(page));
-            continue;
         }
-
-        Page page {};
-        page.width = std::max(1.0f, FPDF_GetPageWidthF(pageHandle));
-        page.height = std::max(1.0f, FPDF_GetPageHeightF(pageHandle));
-        page.sourcePdfSourceIndex = 0;
-        page.sourcePdfPageIndex = pageIndex;
-
         pages.push_back(std::move(page));
-        FPDF_ClosePage(pageHandle);
-    }
-
-    FPDF_CloseDocument(documentHandle);
-
-    if (pages.empty()) {
-        return std::nullopt;
     }
 
     return Document::CreatePdfDocument(sourcePath, std::move(pdfBytes), std::move(pages), 0, {});
 }
 
 void PdfiumBackend::HydrateProject(Document& document) const {
-    std::vector<std::optional<Document>> openedSources;
-    openedSources.reserve(document.PdfSourceCount());
-    for (std::size_t sourceIndex = 0; sourceIndex < document.PdfSourceCount(); ++sourceIndex) {
-        const Document::PdfSource& pdfSource = document.PdfSourceAt(sourceIndex);
-        if (!pdfSource.pdfData || pdfSource.pdfData->empty()) {
-            openedSources.push_back(std::nullopt);
-            continue;
-        }
-        openedSources.push_back(OpenFromMemory(pdfSource.sourcePath, pdfSource.pdfData));
-    }
-
+    // The open handles live in the shared document cache, so every source is
+    // parsed once per session; pages are validated individually and only when
+    // a page actually references them.
     for (std::size_t pageIndex = 0; pageIndex < document.PageCount(); ++pageIndex) {
         // Hydration mutates page contents on a document that may already be
         // attached to a session; keep the page-epoch caches honest.
         document.TouchPage(pageIndex);
         Page& page = document.PageAt(pageIndex);
-        const bool hasValidPdfSource = page.sourcePdfSourceIndex >= 0
-            && static_cast<std::size_t>(page.sourcePdfSourceIndex) < openedSources.size()
-            && openedSources[static_cast<std::size_t>(page.sourcePdfSourceIndex)].has_value()
-            && page.sourcePdfPageIndex >= 0
-            && static_cast<std::size_t>(page.sourcePdfPageIndex)
-                < openedSources[static_cast<std::size_t>(page.sourcePdfSourceIndex)]->PageCount();
-        if (hasValidPdfSource) {
-            const Document& sourceDocument = *openedSources[static_cast<std::size_t>(page.sourcePdfSourceIndex)];
-            const Page& sourcePage = sourceDocument.PageAt(static_cast<std::size_t>(page.sourcePdfPageIndex));
-            if (sourcePage.sourcePdfPageIndex < 0) {
-                // OpenFromMemory marked this source page as unreadable with a
-                // raster-only placeholder; this page must not keep claiming it.
-                page.sourcePdfSourceIndex = -1;
-                page.sourcePdfPageIndex = -1;
-                if (page.raster.pixels.empty()) {
-                    page.raster = CreateSolidRaster(page.width, page.height, kHydratedPdfRasterScale, 0xFFFFFFFFU);
+        bool hasValidPdfSource = false;
+        if (page.sourcePdfSourceIndex >= 0 && page.sourcePdfPageIndex >= 0) {
+            const Document::PdfSource* pdfSource = document.PdfSourceAtIndex(page.sourcePdfSourceIndex);
+            if (pdfSource != nullptr && pdfSource->pdfData && !pdfSource->pdfData->empty()) {
+                FPDF_DOCUMENT documentHandle = PdfDocuments().Acquire(pdfSource->pdfData);
+                const std::size_t sourcePageIndex = static_cast<std::size_t>(page.sourcePdfPageIndex);
+                if (documentHandle != nullptr
+                    && sourcePageIndex < static_cast<std::size_t>(FPDF_GetPageCount(documentHandle))) {
+                    FPDF_PAGE pageHandle = FPDF_LoadPage(documentHandle, page.sourcePdfPageIndex);
+                    if (pageHandle != nullptr) {
+                        hasValidPdfSource = true;
+                        FPDF_ClosePage(pageHandle);
+                    }
                 }
-            } else if (!sourcePage.raster.pixels.empty()) {
-                // A source raster that exists replaces the stored snapshot.
-                page.raster = sourcePage.raster;
             }
-            // Otherwise the background stays lazy: the source page raster is
-            // materialized on demand by the PDF background provider, so the
-            // stored raster must not be overwritten with an empty one.
-        } else {
+        }
+        if (!hasValidPdfSource) {
+            // The page must not claim a source it cannot render. Its stored
+            // raster (if any) stays; with none, the renderer paints blank paper
+            // instead of this allocating a full-page fallback raster.
             page.sourcePdfSourceIndex = -1;
             page.sourcePdfPageIndex = -1;
-            if (page.raster.pixels.empty()) {
-                page.raster = CreateSolidRaster(page.width, page.height, kHydratedPdfRasterScale, 0xFFFFFFFFU);
-            }
         }
     }
 }
@@ -615,27 +732,24 @@ std::optional<RasterImage> PdfiumBackend::RenderPage(
         return std::nullopt;
     }
 
-    FPDF_DOCUMENT documentHandle = FPDF_LoadMemDocument64(pdfBytes->data(), pdfBytes->size(), nullptr);
+    FPDF_DOCUMENT documentHandle = PdfDocuments().Acquire(pdfBytes);
     if (documentHandle == nullptr) {
         return std::nullopt;
     }
 
     const int pageCount = FPDF_GetPageCount(documentHandle);
     if (pageCount <= 0 || pageIndex >= static_cast<std::size_t>(pageCount)) {
-        FPDF_CloseDocument(documentHandle);
         return std::nullopt;
     }
 
     FPDF_PAGE pageHandle = FPDF_LoadPage(documentHandle, static_cast<int>(pageIndex));
     if (pageHandle == nullptr) {
-        FPDF_CloseDocument(documentHandle);
         return std::nullopt;
     }
 
     const auto raster = RenderPageBitmap(pageHandle, renderScale);
 
     FPDF_ClosePage(pageHandle);
-    FPDF_CloseDocument(documentHandle);
     return raster;
 }
 
@@ -648,20 +762,18 @@ std::optional<RasterImage> PdfiumBackend::RenderPageRegion(
         return std::nullopt;
     }
 
-    FPDF_DOCUMENT documentHandle = FPDF_LoadMemDocument64(pdfBytes->data(), pdfBytes->size(), nullptr);
+    FPDF_DOCUMENT documentHandle = PdfDocuments().Acquire(pdfBytes);
     if (documentHandle == nullptr) {
         return std::nullopt;
     }
 
     const int pageCount = FPDF_GetPageCount(documentHandle);
     if (pageCount <= 0 || pageIndex >= static_cast<std::size_t>(pageCount)) {
-        FPDF_CloseDocument(documentHandle);
         return std::nullopt;
     }
 
     FPDF_PAGE pageHandle = FPDF_LoadPage(documentHandle, static_cast<int>(pageIndex));
     if (pageHandle == nullptr) {
-        FPDF_CloseDocument(documentHandle);
         return std::nullopt;
     }
 
@@ -671,7 +783,6 @@ std::optional<RasterImage> PdfiumBackend::RenderPageRegion(
     const int fullHeight = CheckedPdfPixelSize(pageHeight, renderScale);
     if (fullWidth == 0 || fullHeight == 0) {
         FPDF_ClosePage(pageHandle);
-        FPDF_CloseDocument(documentHandle);
         return std::nullopt;
     }
 
@@ -684,34 +795,14 @@ std::optional<RasterImage> PdfiumBackend::RenderPageRegion(
     const int bitmapWidth = right - left;
     const int bitmapHeight = bottom - top;
 
-    FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(bitmapWidth, bitmapHeight, FPDFBitmap_BGRA, nullptr, 0);
-    if (bitmap == nullptr) {
-        FPDF_ClosePage(pageHandle);
-        FPDF_CloseDocument(documentHandle);
-        return std::nullopt;
-    }
-
-    RasterImage raster {};
-    FPDFBitmap_FillRect(bitmap, 0, 0, bitmapWidth, bitmapHeight, 0xFFFFFFFF);
     // Same call and same page -> bitmap mapping as the full RenderPage path,
     // with the excerpt's integer device origin as the start position: PDFium
     // then rasterizes each pixel exactly as the full-page render does, so
     // bounded excerpts composite without seams.
-    FPDF_RenderPageBitmap(
-        bitmap, pageHandle, -left, -top, fullWidth, fullHeight, 0, FPDF_ANNOT);
-
-    raster.width = bitmapWidth;
-    raster.height = bitmapHeight;
-    raster.stride = FPDFBitmap_GetStride(bitmap);
-    raster.scale = renderScale;
-
-    const auto* source = static_cast<const std::uint8_t*>(FPDFBitmap_GetBuffer(bitmap));
-    const std::size_t totalBytes = static_cast<std::size_t>(raster.stride) * static_cast<std::size_t>(bitmapHeight);
-    raster.pixels = PixelBuffer(std::vector<std::uint8_t>(source, source + totalBytes));
-    FPDFBitmap_Destroy(bitmap);
+    const auto raster = RenderPageIntoOwnedRaster(
+        pageHandle, bitmapWidth, bitmapHeight, renderScale, -left, -top, fullWidth, fullHeight);
 
     FPDF_ClosePage(pageHandle);
-    FPDF_CloseDocument(documentHandle);
     return raster;
 }
 std::optional<std::vector<PdfTextCharBox>> PdfiumBackend::ExtractTextCharBoxes(
@@ -721,20 +812,18 @@ std::optional<std::vector<PdfTextCharBox>> PdfiumBackend::ExtractTextCharBoxes(
         return std::nullopt;
     }
 
-    FPDF_DOCUMENT documentHandle = FPDF_LoadMemDocument64(pdfBytes->data(), pdfBytes->size(), nullptr);
+    FPDF_DOCUMENT documentHandle = PdfDocuments().Acquire(pdfBytes);
     if (documentHandle == nullptr) {
         return std::nullopt;
     }
 
     const int pageCount = FPDF_GetPageCount(documentHandle);
     if (pageCount <= 0 || pageIndex >= static_cast<std::size_t>(pageCount)) {
-        FPDF_CloseDocument(documentHandle);
         return std::nullopt;
     }
 
     FPDF_PAGE pageHandle = FPDF_LoadPage(documentHandle, static_cast<int>(pageIndex));
     if (pageHandle == nullptr) {
-        FPDF_CloseDocument(documentHandle);
         return std::nullopt;
     }
 
@@ -792,8 +881,23 @@ std::optional<std::vector<PdfTextCharBox>> PdfiumBackend::ExtractTextCharBoxes(
     }
 
     FPDF_ClosePage(pageHandle);
-    FPDF_CloseDocument(documentHandle);
     return boxes;
+}
+
+std::size_t PdfiumBackend::DocumentLoadCount() const {
+    return PdfDocuments().LoadCount();
+}
+
+std::size_t PdfiumBackend::DocumentCloseCount() const {
+    return PdfDocuments().CloseCount();
+}
+
+std::size_t PdfiumBackend::CachedDocumentCount() const {
+    return PdfDocuments().EntryCount();
+}
+
+void PdfiumBackend::ReleaseUnreferencedDocuments() {
+    PdfDocuments().ReleaseUnreferenced();
 }
 
 bool PdfiumBackend::ExportPdf(

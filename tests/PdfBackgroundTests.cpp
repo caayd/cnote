@@ -5,6 +5,7 @@
 // (zoom re-renders), and the cache stays bounded while panning a 50-page PDF.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -23,6 +24,12 @@
 namespace {
 
 int g_failures = 0;
+
+double NowMilliseconds() {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 void Check(bool condition, const std::string& message) {
     if (!condition) {
@@ -82,10 +89,14 @@ int main(int argc, char** argv) {
     QGuiApplication app(argc, argv);
 
     cnote::PdfiumBackend backend;
+    const std::size_t loadsBeforeOpen = backend.DocumentLoadCount();
+    const double openStart = NowMilliseconds();
     auto document = backend.OpenFromMemory(
         std::filesystem::path("multi-page.pdf"),
         std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(50)));
+    const double openEnd = NowMilliseconds();
     Check(document.has_value() && document->PageCount() == 50U, "50-page PDF opens");
+    Check(backend.DocumentLoadCount() == loadsBeforeOpen + 1U, "opening the PDF loads its document once");
     if (!document.has_value()) {
         return 1;
     }
@@ -98,7 +109,11 @@ int main(int argc, char** argv) {
     params.scale = 1.0f;
     params.pdfBackground = &provider;
 
+    const double firstRenderStart = NowMilliseconds();
     const QImage page0 = cnote::render::RenderPageSurface(document->PageAt(0), params);
+    const double firstRenderEnd = NowMilliseconds();
+    std::printf("TIMING load50=%.2fms firstRender=%.2fms\n",
+        openEnd - openStart, firstRenderEnd - firstRenderStart);
     Check(provider.RenderCount() == 1U, "rendering one page renders exactly one PDF page");
     Check(provider.CachedPageCount() == 1U, "one page is cached");
     Check(page0.width() == 612 && page0.height() == 792, "page surface uses the page size");
@@ -115,6 +130,46 @@ int main(int argc, char** argv) {
     zoomed.scale = 2.0f;
     static_cast<void>(cnote::render::RenderPageSurface(document->PageAt(0), zoomed));
     Check(provider.RenderCount() == 3U, "zooming re-renders at the new raster scale");
+
+    // --- every operation on one PdfSource shares one open document handle ---
+    {
+        const std::size_t loadsAfterOpen = backend.DocumentLoadCount();
+        // The provider's renders above, a direct render, text extraction and
+        // hydration must all reuse the handle the open created.
+        const float parityScale = 3.0f;
+        const auto direct = backend.RenderPage(document->PdfData(), 0U, parityScale);
+        Check(direct.has_value(), "a direct PDF render succeeds");
+        const QImage viaProvider = provider.PageBackground(0, 0, parityScale);
+        Check(!viaProvider.isNull(), "the provider renders at the parity scale");
+        if (direct.has_value() && !viaProvider.isNull()) {
+            Check(viaProvider.width() == direct->width && viaProvider.height() == direct->height,
+                "provider output has the direct raster's size");
+            Check(viaProvider.bytesPerLine() == direct->stride
+                    && viaProvider.format() == QImage::Format_ARGB32,
+                "provider output keeps the direct raster's stride and format");
+            bool identical = viaProvider.bytesPerLine() == direct->stride;
+            for (int row = 0; identical && row < direct->height; ++row) {
+                identical = std::memcmp(viaProvider.constScanLine(row),
+                                direct->pixels.data() + (static_cast<std::size_t>(row) * static_cast<std::size_t>(direct->stride)),
+                                static_cast<std::size_t>(direct->stride))
+                    == 0;
+            }
+            Check(identical, "provider output is byte-identical to the direct PDF raster");
+        }
+        Check(backend.DocumentLoadCount() == loadsAfterOpen, "page renders reuse the open document");
+
+        Check(backend.ExtractTextCharBoxes(document->PdfData(), 0U).has_value(),
+            "PDF text boxes extract from page 0");
+        Check(backend.DocumentLoadCount() == loadsAfterOpen,
+            "text extraction reuses the open document instead of reloading it");
+
+        backend.HydrateProject(*document);
+        Check(backend.DocumentLoadCount() == loadsAfterOpen,
+            "hydration reuses the open document instead of reloading it");
+        Check(document->PageAt(0).sourcePdfSourceIndex == 0
+                && document->PageAt(0).sourcePdfPageIndex == 0,
+            "hydration keeps a referenced, readable source page");
+    }
 
     // Bounded region renders: the canvas tiles above the raster budget with
     // these.  A region starting at the page origin must equal the full raster
@@ -198,6 +253,39 @@ int main(int argc, char** argv) {
     Check(panProvider.RenderCount() == 50U, "panning renders each page once");
     Check(panProvider.CachedPageCount() <= 8U, "cache stays bounded while panning a 50-page PDF");
 
+    // Thumbnail and canvas renders have separate budgets: scrolling the
+    // sidebar must not evict the canvas page the user is looking at, and a
+    // canvas pan must not evict every thumbnail.
+    {
+        cnote::render::PdfiumBackgroundProvider splitProvider(backend, *document, 2);
+        cnote::render::PageRenderParams splitParams = params;
+        splitParams.pdfBackground = &splitProvider;
+        static_cast<void>(cnote::render::RenderPageSurface(document->PageAt(0), splitParams));
+        static_cast<void>(cnote::render::RenderPageSurface(document->PageAt(1), splitParams));
+        Check(splitProvider.RenderCount() == 2U, "split budget: two canvas pages render");
+        for (int page = 0; page < 12; ++page) {
+            Check(!splitProvider.PageBackground(0, page, 0.2f, cnote::render::PdfBackgroundUse::Thumbnail).isNull(),
+                "split budget: a thumbnail renders");
+        }
+        Check(splitProvider.RenderCount() == 14U, "split budget: each thumbnail rendered once");
+        const std::size_t beforeCanvasHit = splitProvider.RenderCount();
+        static_cast<void>(cnote::render::RenderPageSurface(document->PageAt(0), splitParams));
+        static_cast<void>(cnote::render::RenderPageSurface(document->PageAt(1), splitParams));
+        Check(splitProvider.RenderCount() == beforeCanvasHit,
+            "thumbnail churn does not evict canvas entries from their own budget");
+        const std::size_t beforeThumbnailHit = splitProvider.RenderCount();
+        Check(!splitProvider.PageBackground(0, 0, 0.2f, cnote::render::PdfBackgroundUse::Thumbnail).isNull(),
+            "split budget: an early thumbnail is still cached");
+        Check(splitProvider.RenderCount() == beforeThumbnailHit,
+            "canvas entries do not evict thumbnails from their own budget");
+        Check(splitProvider.CachedBytes(cnote::render::PdfBackgroundUse::Canvas)
+                <= cnote::render::kPdfBackgroundCacheBytes,
+            "canvas background bytes stay within the canvas budget");
+        Check(splitProvider.CachedBytes(cnote::render::PdfBackgroundUse::Thumbnail)
+                <= cnote::render::kPdfThumbnailCacheBytes,
+            "thumbnail background bytes stay within the thumbnail budget");
+    }
+
     // --- a failed provider render is retried after the source identity changes
     {
         auto retrySource = std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(1));
@@ -252,6 +340,89 @@ int main(int argc, char** argv) {
         retryProvider.Invalidate();
         Check(retryProvider.CachedPageCount() == 0U,
             "Invalidate drops positive and negative entries");
+    }
+
+    // --- the cached handle owns the source bytes until it closes ------------
+    // PDFium parses from the caller's buffer, so the cache must keep the bytes
+    // alive until after FPDF_CloseDocument. Dropping the document and releasing
+    // it closes the handle first and only then frees the buffer.
+    {
+        // Settle entries left behind by earlier blocks so the counters below
+        // measure this block only.
+        cnote::PdfiumBackend::ReleaseUnreferencedDocuments();
+        auto ownedBytes = std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(1));
+        std::weak_ptr<std::vector<std::uint8_t>> ownedBytesAlive = ownedBytes;
+        const std::size_t loadsBefore = backend.DocumentLoadCount();
+        const std::size_t closesBefore = backend.DocumentCloseCount();
+        const std::size_t cachedBefore = backend.CachedDocumentCount();
+        {
+            auto ownedDocument = backend.OpenFromMemory(
+                std::filesystem::path("owned.pdf"), ownedBytes);
+            Check(ownedDocument.has_value(), "a PDF whose bytes the test owns opens");
+            Check(backend.DocumentLoadCount() == loadsBefore + 1U,
+                "opening that PDF loads its document once");
+            Check(backend.CachedDocumentCount() == cachedBefore + 1U,
+                "the open handle is cached");
+            if (ownedDocument.has_value()) {
+                cnote::render::PdfiumBackgroundProvider ownedProvider(backend, *ownedDocument, 8);
+                Check(!ownedProvider.PageBackground(0, 0, 1.0f).isNull(),
+                    "the cached handle renders the page");
+                Check(backend.DocumentLoadCount() == loadsBefore + 1U,
+                    "rendering through the cache does not reload");
+            }
+            ownedBytes.reset();
+            ownedDocument.reset();
+        }
+        Check(!ownedBytesAlive.expired(),
+            "the cache keeps the source bytes alive while its handle is open");
+        Check(backend.DocumentCloseCount() == closesBefore,
+            "the handle is still open before the release hook");
+        Check(backend.CachedDocumentCount() == cachedBefore + 1U,
+            "the unreleased handle is still cached");
+        cnote::PdfiumBackend::ReleaseUnreferencedDocuments();
+        Check(backend.DocumentCloseCount() == closesBefore + 1U,
+            "the release hook closes the unreferenced handle");
+        Check(ownedBytesAlive.expired(),
+            "the source bytes are freed only after the handle closed");
+        Check(backend.CachedDocumentCount() == cachedBefore,
+            "the release hook drops the cached entry");
+    }
+
+    // Replacing a document's source drops the old handle on the next acquire,
+    // closing it before the old bytes are released.
+    {
+        auto replacedBytes = std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(1));
+        std::weak_ptr<std::vector<std::uint8_t>> replacedBytesAlive = replacedBytes;
+        cnote::Page replacedPage;
+        replacedPage.width = 612.0f;
+        replacedPage.height = 792.0f;
+        replacedPage.sourcePdfSourceIndex = 0;
+        replacedPage.sourcePdfPageIndex = 0;
+        cnote::Document replacedDocument = cnote::Document::CreateProjectDocument(
+            std::filesystem::path("replaced.cnote"),
+            { { std::filesystem::path("replaced.pdf"), replacedBytes } },
+            { replacedPage },
+            0,
+            {});
+        Check(backend.RenderPage(replacedDocument.PdfData(), 0U, 1.0f).has_value(),
+            "the replaced document's source renders");
+        const std::size_t closesBefore = backend.DocumentCloseCount();
+        replacedDocument.ReplaceWithProject(
+            std::filesystem::path("replaced.cnote"),
+            { { std::filesystem::path("replacement.pdf"),
+                std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(1)) } },
+            { replacedDocument.PageAt(0) },
+            0,
+            {});
+        replacedBytes.reset();
+        Check(!replacedBytesAlive.expired(),
+            "the replaced source is still pinned by its cached handle");
+        Check(backend.RenderPage(replacedDocument.PdfData(), 0U, 1.0f).has_value(),
+            "the replacement source renders");
+        Check(replacedBytesAlive.expired(),
+            "the next acquire closed the replaced handle before freeing its bytes");
+        Check(backend.DocumentCloseCount() > closesBefore,
+            "the replaced document's handle was closed");
     }
 
     // --- hydration never leaves a page claiming a source it cannot show -----
@@ -336,6 +507,54 @@ int main(int argc, char** argv) {
             "hydration keeps valid source indices");
         Check(lazyDocument.PageAt(0).raster.pixels.empty(),
             "hydration leaves a valid source background lazy");
+
+        // A page whose referenced source page cannot be read must keep its
+        // size, rotation and slot, claim no source, and represent the blank
+        // background without allocating a full fallback raster.
+        cnote::Page unreadablePage;
+        unreadablePage.width = 300.0f;
+        unreadablePage.height = 400.0f;
+        unreadablePage.rotationDegrees = 90.0f;
+        unreadablePage.sourcePdfSourceIndex = 0;
+        unreadablePage.sourcePdfPageIndex = 7;  // the source has one page
+        cnote::Page readableNeighbour;
+        readableNeighbour.width = 612.0f;
+        readableNeighbour.height = 792.0f;
+        readableNeighbour.sourcePdfSourceIndex = 0;
+        readableNeighbour.sourcePdfPageIndex = 0;
+        cnote::Document unreadableDocument = cnote::Document::CreateProjectDocument(
+            std::filesystem::path("unreadable.cnote"),
+            { { std::filesystem::path("one-page.pdf"),
+                std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(1)) } },
+            { unreadablePage, readableNeighbour },
+            0,
+            {});
+        backend.HydrateProject(unreadableDocument);
+        Check(unreadableDocument.PageCount() == 2U,
+            "hydration keeps the page list, so page indices do not shift");
+        const cnote::Page& unreadable = unreadableDocument.PageAt(0);
+        Check(unreadable.sourcePdfSourceIndex == -1 && unreadable.sourcePdfPageIndex == -1,
+            "an unreadable source page claims no source");
+        Check(unreadable.raster.pixels.empty(),
+            "an unreadable source page allocates no full fallback raster");
+        Check(unreadable.width == 300.0f && unreadable.height == 400.0f
+                && unreadable.rotationDegrees == 90.0f,
+            "an unreadable source page keeps its size and rotation");
+        Check(unreadableDocument.PageAt(1).sourcePdfSourceIndex == 0
+                && unreadableDocument.PageAt(1).sourcePdfPageIndex == 0,
+            "a readable referenced neighbour keeps its source page");
+        Check(unreadableDocument.PageAt(1).raster.pixels.empty(),
+            "a readable neighbour's background stays lazy");
+
+        cnote::render::PdfiumBackgroundProvider unreadableProvider(backend, unreadableDocument, 8);
+        cnote::render::PageRenderParams unreadableParams;
+        unreadableParams.scale = 1.0f;
+        unreadableParams.pdfBackground = &unreadableProvider;
+        const QImage blankSurface = cnote::render::RenderPageSurface(
+            unreadableDocument.PageAt(0), unreadableParams);
+        Check(blankSurface.width() == 300 && blankSurface.height() == 400,
+            "an unreadable page renders at its own size");
+        Check(!HasNonWhitePixel(blankSurface), "an unreadable page renders as blank paper");
 
         cnote::Page storedRasterPage = lazyPage;
         const cnote::RasterImage validStoredRaster =

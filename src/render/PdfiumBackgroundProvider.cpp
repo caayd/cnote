@@ -10,49 +10,74 @@
 
 namespace cnote::render {
 
-PdfiumBackgroundProvider::PdfiumBackgroundProvider(const PdfiumBackend& backend, const Document& document,
-    std::size_t capacity, std::size_t maxBytes)
-    : backend_(backend),
-      document_(&document),
-      capacity_(std::max<std::size_t>(1U, capacity)),
-      maxBytes_(std::max<std::size_t>(1U, maxBytes)) {}
+namespace {
 
-void PdfiumBackgroundProvider::Invalidate() {
-    cache_.clear();
-    cachedBytes_ = 0;
+// Hands the backend's owned BGRA pixels to QImage without copying: the heap
+// PixelBuffer kept as the cleanup info holds the (shared) buffer alive until
+// the last QImage reference is released. The image is read-only, so painting on
+// a detached copy cannot write into the shared raster.
+QImage WrapOwnedBgraImage(RasterImage raster) {
+    if (raster.width <= 0 || raster.height <= 0 || raster.pixels.empty()) {
+        return {};
+    }
+    auto* owner = new PixelBuffer(std::move(raster.pixels));
+    return QImage(owner->data(), raster.width, raster.height,
+        raster.stride > 0 ? raster.stride : raster.width * 4, QImage::Format_ARGB32,
+        [](void* info) { delete static_cast<PixelBuffer*>(info); }, owner);
 }
 
-bool PdfiumBackgroundProvider::Lookup(const Key& key, QImage* image) const {
-    const auto existing = std::find_if(cache_.begin(), cache_.end(), [&](const Entry& entry) {
+}  // namespace
+
+PdfiumBackgroundProvider::PdfiumBackgroundProvider(const PdfiumBackend& backend, const Document& document,
+    std::size_t capacity, std::size_t maxBytes,
+    std::size_t thumbnailCapacity, std::size_t thumbnailMaxBytes)
+    : backend_(backend),
+      document_(&document) {
+    canvas_.capacity = std::max<std::size_t>(1U, capacity);
+    canvas_.maxBytes = std::max<std::size_t>(1U, maxBytes);
+    thumbnails_.capacity = std::max<std::size_t>(1U, thumbnailCapacity);
+    thumbnails_.maxBytes = std::max<std::size_t>(1U, thumbnailMaxBytes);
+}
+
+void PdfiumBackgroundProvider::Invalidate() {
+    canvas_.entries.clear();
+    canvas_.bytes = 0;
+    thumbnails_.entries.clear();
+    thumbnails_.bytes = 0;
+}
+
+bool PdfiumBackgroundProvider::Lookup(Cache& cache, const Key& key, QImage* image) const {
+    const auto existing = std::find_if(cache.entries.begin(), cache.entries.end(), [&](const Entry& entry) {
         return entry.key == key;
     });
-    if (existing == cache_.end()) {
+    if (existing == cache.entries.end()) {
         return false;
     }
     Entry entry = std::move(*existing);
-    cache_.erase(existing);
-    cache_.push_back(std::move(entry));
-    const EntryStatus status = cache_.back().status;
+    cache.entries.erase(existing);
+    cache.entries.push_back(std::move(entry));
+    const EntryStatus status = cache.entries.back().status;
     if (image != nullptr) {
-        *image = status == EntryStatus::Ready ? cache_.back().image : QImage {};
+        *image = status == EntryStatus::Ready ? cache.entries.back().image : QImage {};
     }
     return true;
 }
 
-void PdfiumBackgroundProvider::Store(const Key& key, QImage image, EntryStatus status) {
-    cachedBytes_ += static_cast<std::size_t>(image.isNull() ? 0 : image.sizeInBytes());
-    cache_.push_back({ key, std::move(image), status });
-    while (cache_.size() > 1U
-        && (cache_.size() > capacity_ || cachedBytes_ > maxBytes_)) {
-        const Entry& oldest = cache_.front();
+void PdfiumBackgroundProvider::Store(Cache& cache, const Key& key, QImage image, EntryStatus status) const {
+    cache.bytes += static_cast<std::size_t>(image.isNull() ? 0 : image.sizeInBytes());
+    cache.entries.push_back({ key, std::move(image), status });
+    while (cache.entries.size() > 1U
+        && (cache.entries.size() > cache.capacity || cache.bytes > cache.maxBytes)) {
+        const Entry& oldest = cache.entries.front();
         if (!oldest.image.isNull()) {
-            cachedBytes_ -= static_cast<std::size_t>(oldest.image.sizeInBytes());
+            cache.bytes -= static_cast<std::size_t>(oldest.image.sizeInBytes());
         }
-        cache_.pop_front();
+        cache.entries.pop_front();
     }
 }
 
-QImage PdfiumBackgroundProvider::PageBackground(std::int32_t sourceIndex, std::int32_t pageIndex, float rasterScale) {
+QImage PdfiumBackgroundProvider::PageBackground(std::int32_t sourceIndex, std::int32_t pageIndex,
+    float rasterScale, PdfBackgroundUse use) {
     if (document_ == nullptr || sourceIndex < 0 || pageIndex < 0 || rasterScale <= 0.0f) {
         return {};
     }
@@ -64,6 +89,7 @@ QImage PdfiumBackgroundProvider::PageBackground(std::int32_t sourceIndex, std::i
         return {};
     }
 
+    Cache& cache = CacheFor(use);
     const Key key {
         document_,
         source->pdfData.get(),
@@ -73,20 +99,20 @@ QImage PdfiumBackgroundProvider::PageBackground(std::int32_t sourceIndex, std::i
         QRect(),
     };
     QImage cached;
-    if (Lookup(key, &cached)) {
+    if (Lookup(cache, key, &cached)) {
         return cached;
     }
 
-    const auto raster = backend_.RenderPage(source->pdfData, static_cast<std::size_t>(pageIndex), rasterScale);
+    auto raster = backend_.RenderPage(source->pdfData, static_cast<std::size_t>(pageIndex), rasterScale);
     if (!raster.has_value() || raster->pixels.empty() || raster->width <= 0 || raster->height <= 0) {
         ++failedRenderCount_;
-        Store(key, QImage {}, EntryStatus::Failed);
+        Store(cache, key, QImage {}, EntryStatus::Failed);
         return {};
     }
 
     ++renderCount_;
-    QImage image = WrapBgraImage(raster->pixels.data(), raster->width, raster->height, raster->stride).copy();
-    Store(key, image, EntryStatus::Ready);
+    QImage image = WrapOwnedBgraImage(std::move(*raster));
+    Store(cache, key, image, EntryStatus::Ready);
     return image;
 }
 
@@ -110,24 +136,24 @@ std::optional<QImage> PdfiumBackgroundProvider::PageBackgroundRegion(
         pixelRect,
     };
     QImage cached;
-    if (Lookup(key, &cached)) {
+    if (Lookup(canvas_, key, &cached)) {
         return cached.isNull() ? std::nullopt : std::optional<QImage>(std::move(cached));
     }
 
-    const auto raster = backend_.RenderPageRegion(
+    auto raster = backend_.RenderPageRegion(
         source->pdfData,
         static_cast<std::size_t>(pageIndex),
         rasterScale,
         PdfPixelRect { pixelRect.x(), pixelRect.y(), pixelRect.width(), pixelRect.height() });
     if (!raster.has_value() || raster->pixels.empty() || raster->width <= 0 || raster->height <= 0) {
         ++failedRenderCount_;
-        Store(key, QImage {}, EntryStatus::Failed);
+        Store(canvas_, key, QImage {}, EntryStatus::Failed);
         return std::nullopt;
     }
 
     ++renderCount_;
-    QImage image = WrapBgraImage(raster->pixels.data(), raster->width, raster->height, raster->stride).copy();
-    Store(key, image, EntryStatus::Ready);
+    QImage image = WrapOwnedBgraImage(std::move(*raster));
+    Store(canvas_, key, image, EntryStatus::Ready);
     return image;
 }
 

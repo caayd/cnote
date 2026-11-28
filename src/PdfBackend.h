@@ -27,6 +27,17 @@ struct PdfPixelRect {
     int height = 0;
 };
 
+// PDFium wrapper. PDFium parses from the caller's byte buffer for as long as a
+// document is open, so every operation goes through one process-wide handle
+// cache keyed by the exact PdfSource byte buffer. The cache holds a strong
+// reference to those bytes, so the buffer always outlives its handle: an entry
+// is only closed after no Document references the buffer any more, and the
+// buffer is released after the close. A source replaced by a different
+// allocation is a different buffer, so a handle can never be reused for it.
+//
+// PDFium is not thread-safe: every method here must run on the GUI thread, the
+// only thread that ever calls PDFium (the background save worker serializes the
+// model and never touches this class).
 class PdfiumBackend final {
 public:
     PdfiumBackend();
@@ -38,11 +49,13 @@ public:
         const std::filesystem::path& sourcePath,
         std::shared_ptr<std::vector<std::uint8_t>> pdfBytes) const;
 
-    // Reopens each stored PDF source and validates page backgrounds. A valid
-    // source keeps its indices and any stored raster; a missing or invalid
-    // source (or an unreadable source page) clears the page's indices so it is
-    // raster-only, preserving the stored raster, with a solid fallback when
-    // none exists. Model decode stays usable without calling this.
+    // Opens each stored PDF source once (reusing the handle cache) and
+    // validates every page that still references it. A valid source keeps its
+    // indices and any stored raster; a missing or invalid source (or an
+    // unreadable source page) clears the page's indices while keeping its size,
+    // rotation and stored raster. A page left without a raster paints as blank
+    // paper; no full-page fallback raster is allocated for it. Model decode
+    // stays usable without calling this.
     void HydrateProject(Document& document) const;
 
     // Returns the embedded cnote project attachment bytes, if present.
@@ -64,6 +77,20 @@ public:
     [[nodiscard]] std::optional<std::vector<PdfTextCharBox>> ExtractTextCharBoxes(
         const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
         std::size_t pageIndex) const;
+    // Number of FPDF_LoadMemDocument64 calls this process made since PDFium
+    // was initialized. Diagnostics only; the handle cache should keep it flat
+    // while one source is used repeatedly.
+    [[nodiscard]] std::size_t DocumentLoadCount() const;
+    // Number of cached document handles closed since PDFium was initialized.
+    [[nodiscard]] std::size_t DocumentCloseCount() const;
+    // Open (or failed-open) document handles currently cached.
+    [[nodiscard]] std::size_t CachedDocumentCount() const;
+    // Closes cached handles whose PdfSource bytes are no longer referenced by
+    // any Document (only the cache still holds them), releasing the bytes after
+    // the close. The cache also does this on every acquire and at shutdown;
+    // owners call it when they release a session so a closed document's parse
+    // memory does not linger. Requires an initialized PDFium (any live backend).
+    static void ReleaseUnreferencedDocuments();
     [[nodiscard]] bool ExportPdf(
         const Document& document,
         const std::filesystem::path& filePath,

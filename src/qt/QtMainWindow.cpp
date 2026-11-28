@@ -357,6 +357,19 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
     // it inserted): the controller owns the selection state.
     connect(&controller_, &QtDocumentController::SelectionChanged, this, &QtMainWindow::UpdateChrome);
     connect(&controller_, &QtDocumentController::SessionChanged, this, [this]() {
+        // Session replacement (AttachSession frees the previous session) or a
+        // rebuilt PDF background leaves these widgets pointing at a destroyed
+        // Document/provider until the open path rebinds them after this
+        // signal. Rebind before anything dereferences the old pointers; the
+        // same-document commits that also emit this signal compare equal and
+        // skip the work.
+        canvas_->SetPdfBackgroundProvider(controller_.PdfBackground());
+        if (sidebar_ != nullptr) {
+            if (sidebar_->BoundDocument() != &controller_.DocumentRef()
+                || sidebar_->BoundBackground() != controller_.PdfBackground()) {
+                sidebar_->SetDocument(&controller_.DocumentRef(), controller_.PdfBackground());
+            }
+        }
         canvas_->NotifyDocumentChanged();
         if (sidebar_ != nullptr) {
             sidebar_->NotifyDocumentChanged();
