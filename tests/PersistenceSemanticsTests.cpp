@@ -1193,6 +1193,84 @@ void StrokeFormatRoundTripsAndLegacyReads() {
         "a version-16 stroke reads its stored points with the identity sampling");
 }
 
+// Saved bytes are pinned against the pre-PERF-057 writer: the header layout,
+// the payload order and the compressed/raw decision must not change.  The hash
+// was captured from the writer before the staging copies were removed, so a
+// regression in the rewritten save path shows up as a mismatch here.
+void SerializedProjectBytesAreStable() {
+    const auto hashBytes = [](const std::vector<std::uint8_t>& bytes) {
+        std::uint64_t hash = 1469598103934665603ULL;
+        for (const std::uint8_t byte : bytes) {
+            hash ^= byte;
+            hash *= 1099511628211ULL;
+        }
+        return hash;
+    };
+    const auto makeDocument = [](const bool compressiblePdf) {
+        std::vector<std::uint8_t> pdfBytes(65536U, 0U);
+        if (!compressiblePdf) {
+            std::uint32_t state = 12345U;
+            for (std::uint8_t& byte : pdfBytes) {
+                state ^= state << 13U; state ^= state >> 17U; state ^= state << 5U;
+                byte = static_cast<std::uint8_t>(state & 255U);
+            }
+        }
+        auto pdf = std::make_shared<std::vector<std::uint8_t>>(std::move(pdfBytes));
+        std::vector<cnote::Document::PdfSource> sources;
+        sources.push_back({ std::filesystem::path(u"golden.pdf"), pdf });
+        std::vector<cnote::Page> pages(1);
+        cnote::Page& page = pages.front();
+        page.width = 612.0f;
+        page.height = 792.0f;
+        page.rotationDegrees = 90.0f;
+        page.sourcePdfSourceIndex = 0;
+        page.sourcePdfPageIndex = 2;
+        cnote::Stroke stroke;
+        stroke.style = { 0xFF204060U, 2.0f, false };
+        stroke.sampling = { 0.25f, 0.75f };
+        stroke.points = { { 1.0f, 2.0f }, { 3.5f, 4.25f } };
+        stroke.pressures = { 0.5f, 0.75f };
+        page.strokes.push_back(stroke);
+        cnote::PageText text;
+        text.id = 9;
+        text.x = 5.0f;
+        text.y = 6.0f;
+        text.width = 100.0f;
+        text.content = u"Golden";
+        page.texts.push_back(text);
+        cnote::Document::PageDefaults defaults;
+        defaults.width = 612.0f;
+        defaults.height = 792.0f;
+        defaults.sizeOverridden = true;
+        return cnote::Document::CreateProjectDocument(
+            std::filesystem::path(u"golden.cnote"), std::move(sources), std::move(pages), 0, defaults);
+    };
+
+    struct Case {
+        bool compressiblePdf;
+        std::size_t size;
+        std::uint64_t hash;
+        std::uint32_t encoding;
+        const char* name;
+    };
+    for (const Case& item : {
+             Case { true, 648U, 0x1DA8DA4F57DFF01AULL, 1U, "compressed" },
+             Case { false, 65765U, 0x4C8161D4E218DF58ULL, 0U, "raw" } }) {
+        const cnote::Document document = makeDocument(item.compressiblePdf);
+        const std::vector<std::uint8_t> bytes = cnote::ProjectFile::Serialize(document);
+        std::uint32_t encoding = 0;
+        if (bytes.size() >= 16U) {
+            std::memcpy(&encoding, bytes.data() + 12, sizeof(encoding));
+        }
+        Check(bytes.size() == item.size && hashBytes(bytes) == item.hash && encoding == item.encoding,
+            std::string(item.name) + " project bytes are unchanged");
+        const std::optional<cnote::Document> loaded =
+            cnote::ProjectFile::LoadFromBytes(bytes, "golden.cnote");
+        Check(loaded.has_value() && cnote::ProjectFile::Serialize(*loaded) == bytes,
+            std::string(item.name) + " project round-trips byte-for-byte");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1237,6 +1315,7 @@ int main(int argc, char** argv) {
     PageClipboardActsOnSeveralPages();
     MovePagesUndoRedoKeepsOrderAndViewedPage();
     StrokeFormatRoundTripsAndLegacyReads();
+    SerializedProjectBytesAreStable();
 
     if (gFailures != 0) {
         std::printf("%d check(s) failed\n", gFailures);

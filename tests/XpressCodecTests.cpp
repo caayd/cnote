@@ -63,6 +63,17 @@ int main() {
         auto badCrc = *encoded; badCrc[6] ^= 1U;
         Require(!cnote::DecompressXpressBuffer(badCrc, input.size()), "bad CRC accepted");
         Require(!cnote::DecompressXpressBuffer(*encoded, input.size() + 1U), "wrong size accepted");
+        // The encoded frame is pinned: removing the encode staging buffers must
+        // not change a single output byte (the hash is from the pre-change
+        // encoder, so this is exact-output parity with the old path).
+        const auto pinned = cnote::CompressXpressBuffer(Probe(65537U));
+        Require(pinned.has_value() && pinned->size() == 29366U, "pinned frame size changed");
+        std::uint64_t pinnedHash = 1469598103934665603ULL;
+        for (const std::uint8_t byte : *pinned) {
+            pinnedHash ^= byte;
+            pinnedHash *= 1099511628211ULL;
+        }
+        Require(pinnedHash == 0x7BC6BBDB69F2892BULL, "pinned encoded frame bytes changed");
         // Windows Compression API buffer framing above the 64 MiB chunk limit:
         // the outer header keeps chunk == 64 MiB and each following record is a
         // little-endian uint32 body size followed by that body. The pre-fix
@@ -111,6 +122,20 @@ int main() {
                 "single frame above the chunk limit accepted");
             Require(!cnote::DecompressXpressBuffer(*encoded, input.size() + 1U), "false larger size accepted");
             Require(!cnote::DecompressXpressBuffer(*encoded, input.size() - 1U), "false smaller size accepted");
+        }
+        {
+            // A compressible multi-chunk payload used to be decoded through a
+            // staged block plus a growing insert, peaking at twice the declared
+            // size.  Decoding writes straight into the final buffer and caps its
+            // growth at the declared payload, so the working set stays within
+            // the payload plus one block of slack.
+            const std::vector<std::uint8_t> input(chunkLimit + 1U, 0U);
+            const auto encoded = cnote::CompressXpressBuffer(input);
+            Require(encoded.has_value(), "64 MiB + 1 zeros encode failed");
+            const auto decoded = cnote::DecompressXpressBuffer(*encoded, input.size());
+            Require(decoded.has_value() && *decoded == input, "64 MiB + 1 zeros round trip failed");
+            Require(decoded->capacity() <= input.size() + 65536U,
+                "decode grew past the declared payload");
         }
         {
             // A 28-byte header declaring a huge size must fail without trusting it.
