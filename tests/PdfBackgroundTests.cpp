@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
@@ -114,6 +115,77 @@ int main(int argc, char** argv) {
     zoomed.scale = 2.0f;
     static_cast<void>(cnote::render::RenderPageSurface(document->PageAt(0), zoomed));
     Check(provider.RenderCount() == 3U, "zooming re-renders at the new raster scale");
+
+    // Bounded region renders: the canvas tiles above the raster budget with
+    // these.  A region starting at the page origin must equal the full raster
+    // exactly; a shifted origin draws the same content (PDFium re-rasterizes
+    // glyph anti-aliasing for the new device position, so allow a small
+    // anti-aliasing delta).  Every tile of a tiled page shares one region
+    // render for the PDF background, so shifted renders never abut each other.
+    {
+        const auto pdfBytes = std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(1));
+        const float scale = 1.75f;
+        const auto full = backend.RenderPage(pdfBytes, 0U, scale);
+        Check(full.has_value() && full->width == 1071 && full->height == 1386,
+            "region probe: full PDF raster has the expected size");
+        if (full.has_value()) {
+            const auto wholeRegion = backend.RenderPageRegion(
+                pdfBytes, 0U, scale, cnote::PdfPixelRect { 0, 0, full->width, full->height });
+            Check(wholeRegion.has_value()
+                    && std::memcmp(wholeRegion->pixels.data(), full->pixels.data(),
+                           static_cast<std::size_t>(full->height) * static_cast<std::size_t>(full->stride)) == 0,
+                "a region covering the whole page equals the full PDF raster");
+
+            const QRect shiftRect(196, 0, full->width - 196, full->height);
+            const auto shifted = backend.RenderPageRegion(pdfBytes, 0U, scale,
+                cnote::PdfPixelRect { shiftRect.x(), shiftRect.y(), shiftRect.width(), shiftRect.height() });
+            Check(shifted.has_value(), "a shifted PDF region renders");
+            if (shifted.has_value()) {
+                int differingPixels = 0;
+                int maxChannelDelta = 0;
+                for (int row = 0; row < shiftRect.height(); ++row) {
+                    const std::uint8_t* expected = full->pixels.data()
+                        + (static_cast<std::size_t>(row) * static_cast<std::size_t>(full->stride))
+                        + (static_cast<std::size_t>(shiftRect.x()) * 4U);
+                    const std::uint8_t* actual = shifted->pixels.data()
+                        + (static_cast<std::size_t>(row) * static_cast<std::size_t>(shifted->stride));
+                    for (int column = 0; column < shiftRect.width(); ++column) {
+                        bool differs = false;
+                        for (int channel = 0; channel < 4; ++channel) {
+                            const int delta = std::abs(static_cast<int>(expected[(column * 4) + channel])
+                                - static_cast<int>(actual[(column * 4) + channel]));
+                            maxChannelDelta = std::max(maxChannelDelta, delta);
+                            differs = differs || delta != 0;
+                        }
+                        differingPixels += differs ? 1 : 0;
+                    }
+                }
+                const int totalPixels = shiftRect.width() * shiftRect.height();
+                std::printf("PDF-REGION shifted differing=%d/%d maxChannelDelta=%d\n",
+                    differingPixels, totalPixels, maxChannelDelta);
+                Check(differingPixels * 20 < totalPixels,
+                    "a shifted PDF region differs only in glyph anti-aliasing");
+                Check(maxChannelDelta <= 96, "shifted PDF region anti-aliasing delta stays small");
+            }
+        }
+
+        // The provider caches region rasters, serves them from that cache, and
+        // charges them to its byte budget.
+        const QImage fullBackground = provider.PageBackground(0, 0, scale);
+        Check(!fullBackground.isNull(), "region probe: full background renders through the provider");
+        const QRect regionRect(0, 0, 196, 140);
+        const std::optional<QImage> region = provider.PageBackgroundRegion(0, 0, scale, regionRect);
+        Check(region.has_value(), "region probe: the provider serves a bounded region");
+        if (region.has_value()) {
+            Check(region->size() == regionRect.size(), "provider region has the requested size");
+            const std::size_t rendersBefore = provider.RenderCount();
+            const std::optional<QImage> again = provider.PageBackgroundRegion(0, 0, scale, regionRect);
+            Check(again.has_value() && provider.RenderCount() == rendersBefore,
+                "a repeated region request is served from the provider cache");
+        }
+        Check(provider.CachedBytes() <= cnote::render::kPdfBackgroundCacheBytes,
+            "provider cache bytes stay within the budget");
+    }
 
     // Pan across all 50 pages with a fresh provider: each page renders once and
     // the cache stays bounded.

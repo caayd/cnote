@@ -32,6 +32,83 @@ QColor StrokeColor(const Stroke& stroke, float opacity) {
     return color;
 }
 
+// Draws the slice of a lazy PDF background a region render needs.  The full
+// background is the source page at the raster scale, centred on the page and
+// rotated by Page::rotationDegrees (exactly like the full-page branch in
+// PaintPageBackground); this maps the raster's visible rect back into that
+// background's pixel space and asks the provider for only that rectangle.
+// Returns false when the provider has no region path, so the caller falls back.
+bool PaintPdfBackgroundRegion(QPainter& painter, const Page& page, const PageRenderParams& params,
+    const QRectF& pageRect, const QRect& deviceRegion) {
+    if (params.pdfBackground == nullptr || deviceRegion.isEmpty()) {
+        return false;
+    }
+    const qreal backgroundWidth = pageRect.width();
+    const qreal backgroundHeight = pageRect.height();
+    if (backgroundWidth < 1.0 || backgroundHeight < 1.0) {
+        return false;
+    }
+
+    // The painter origin is this raster's top-left (deviceRegion's top-left),
+    // so the region whose background is wanted lands here.  For a tile of a
+    // tiled page this is the whole visible page region: every tile requests the
+    // same background and draws its own slice, so split glyphs are not
+    // re-rasterized per tile.  (Pixels a tile covers outside that region are
+    // clipped by the canvas' visible bounds.)
+    const QRect backgroundRegion = params.pdfBackgroundRegion.value_or(deviceRegion);
+    const QRectF visible = QRectF(backgroundRegion).translated(
+        -deviceRegion.x(), -deviceRegion.y());
+    const QPointF center = pageRect.center();
+    const qreal radians = static_cast<qreal>(page.rotationDegrees) * (3.14159265358979323846 / 180.0);
+    const qreal sine = std::sin(-radians);
+    const qreal cosine = std::cos(-radians);
+
+    qreal minX = std::numeric_limits<qreal>::max();
+    qreal minY = std::numeric_limits<qreal>::max();
+    qreal maxX = std::numeric_limits<qreal>::lowest();
+    qreal maxY = std::numeric_limits<qreal>::lowest();
+    const QPointF corners[] = { visible.topLeft(), visible.topRight(), visible.bottomRight(), visible.bottomLeft() };
+    for (const QPointF& corner : corners) {
+        const qreal dx = corner.x() - center.x();
+        const qreal dy = corner.y() - center.y();
+        const qreal localX = (dx * cosine) - (dy * sine) + (backgroundWidth * 0.5);
+        const qreal localY = (dx * sine) + (dy * cosine) + (backgroundHeight * 0.5);
+        minX = std::min(minX, localX);
+        minY = std::min(minY, localY);
+        maxX = std::max(maxX, localX);
+        maxY = std::max(maxY, localY);
+    }
+
+    // Round out and pad by a pixel so the provider's own edge clipping cannot
+    // shave the visible pixels, then clamp to the background.
+    QRect sourceRect = QRectF(minX, minY, maxX - minX, maxY - minY)
+        .toAlignedRect()
+        .adjusted(-1, -1, 1, 1)
+        .intersected(QRect(0, 0,
+            std::max(1, static_cast<int>(std::lround(backgroundWidth))),
+            std::max(1, static_cast<int>(std::lround(backgroundHeight)))));
+    if (sourceRect.isEmpty()) {
+        return false;
+    }
+
+    const std::optional<QImage> region = params.pdfBackground->PageBackgroundRegion(
+        page.sourcePdfSourceIndex, page.sourcePdfPageIndex, std::max(0.01f, params.scale), sourceRect);
+    if (!region.has_value() || region->isNull()) {
+        return false;
+    }
+
+    painter.save();
+    painter.translate(center);
+    painter.rotate(static_cast<qreal>(page.rotationDegrees));
+    // The provider's pixels are the background raster's own pixels, so the
+    // slice's top-left is shifted from the image's centred top-left.
+    painter.drawImage(
+        QPointF(sourceRect.x() - (backgroundWidth * 0.5), sourceRect.y() - (backgroundHeight * 0.5)),
+        *region);
+    painter.restore();
+    return true;
+}
+
 void PaintPageBackground(QPainter& painter, const Page& page, const PageRenderParams& params) {
     const float scale = std::max(0.01f, params.scale);
     const QRectF pageRect(0.0, 0.0, static_cast<qreal>(page.width * scale), static_cast<qreal>(page.height * scale));
@@ -46,6 +123,10 @@ void PaintPageBackground(QPainter& painter, const Page& page, const PageRenderPa
         return;
     }
     if (params.pdfBackground != nullptr && page.sourcePdfSourceIndex >= 0 && page.sourcePdfPageIndex >= 0) {
+        if (params.deviceRegion.has_value()
+            && PaintPdfBackgroundRegion(painter, page, params, pageRect, *params.deviceRegion)) {
+            return;
+        }
         const QImage background = params.pdfBackground->PageBackground(
             page.sourcePdfSourceIndex,
             page.sourcePdfPageIndex,
@@ -474,46 +555,137 @@ void PaintPageSubset(QPainter& painter, const Page& page, const QPointF& pageOri
     painter.restore();
 }
 
-QImage RenderPageSurface(const Page& page, const PageRenderParams& params) {
+int RegionAlignment(const PageRenderParams& params) {
+    const float devicePixelRatio = std::max(0.01f, params.devicePixelRatio);
+    const double ratio = params.textPixelRatio.has_value()
+        ? static_cast<double>(*params.textPixelRatio) * static_cast<double>(devicePixelRatio)
+        : static_cast<double>(std::max(0.01f, params.scale)) * static_cast<double>(devicePixelRatio);
+    // Smallest numerator of a rational approximation whose error is far below
+    // one 26.6 subpixel step.  Real display ratios (1, 1.25, 1.5, 1.75, 2, 2.5)
+    // all resolve with a denominator <= 4.
+    for (int denominator = 1; denominator <= 16; ++denominator) {
+        const long long numerator = std::llround(ratio * denominator);
+        if (numerator >= 1 && numerator <= 4096
+            && std::abs(static_cast<double>(numerator) / denominator - ratio) < 1.0e-3) {
+            return static_cast<int>(numerator);
+        }
+    }
+    return 1;
+}
+
+int PageTileSize(const PageRenderParams& params) {
+    const int alignment = RegionAlignment(params);
+    const int aligned = (kPageTileSize / alignment) * alignment;
+    return std::max(alignment, aligned);
+}
+
+QSize PageSurfacePixelSize(const Page& page, const PageRenderParams& params) {
     const float deviceScale = std::max(0.01f, params.scale * params.devicePixelRatio);
-    const int width = std::max(1, static_cast<int>(std::lround(page.width * deviceScale)));
-    const int height = std::max(1, static_cast<int>(std::lround(page.height * deviceScale)));
+    // Saturate instead of casting an out-of-range double to int (undefined).
+    constexpr double kSizeLimit = 1.0e7;
+    const auto roundSize = [](double value) {
+        return std::max(1, static_cast<int>(std::min(std::lround(value), static_cast<long>(kSizeLimit))));
+    };
+    return QSize(roundSize(static_cast<double>(page.width) * static_cast<double>(deviceScale)),
+        roundSize(static_cast<double>(page.height) * static_cast<double>(deviceScale)));
+}
 
-    QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
-    image.fill(Qt::transparent);
+namespace {
 
-    QPainter painter(&image);
+PageRenderParams DeviceParams(const PageRenderParams& params) {
     PageRenderParams deviceParams = params;
-    deviceParams.scale = deviceScale;
+    deviceParams.scale = std::max(0.01f, params.scale * params.devicePixelRatio);
     deviceParams.devicePixelRatio = 1.0f;
     if (params.textPixelRatio.has_value()) {
         deviceParams.textPixelRatio = *params.textPixelRatio * params.devicePixelRatio;
     }
+    return deviceParams;
+}
+
+QImage RenderPageSurfaceOfSize(const Page& page, const PageRenderParams& params, const QSize& size) {
+    QImage image(size, QImage::Format_ARGB32_Premultiplied);
+    if (image.isNull()) {
+        return {};
+    }
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    PageRenderParams deviceParams = DeviceParams(params);
+    deviceParams.deviceRegion.reset();
     PaintPage(painter, page, QPointF(0.0, 0.0), deviceParams);
     painter.end();
     return image;
 }
 
-QImage RenderPageSurfaceRegion(const Page& page, const PageRenderParams& params, const QRectF& region) {
+}  // namespace
+
+QImage RenderPageSurface(const Page& page, const PageRenderParams& params, RasterBudget budget) {
+    const QSize size = PageSurfacePixelSize(page, params);
+    if (!RasterFitsBudget(size.width(), size.height(), budget)) {
+        return {};
+    }
+    return RenderPageSurfaceOfSize(page, params, size);
+}
+
+QImage RenderPageSurfaceRegion(const Page& page, const PageRenderParams& params, const QRectF& region,
+    RasterBudget budget) {
     const float deviceScale = std::max(0.01f, params.scale * params.devicePixelRatio);
     const QRectF clipped = region.intersected(QRectF(0.0, 0.0, page.width, page.height));
-    const int width = std::max(1, static_cast<int>(std::lround(clipped.width() * deviceScale)));
-    const int height = std::max(1, static_cast<int>(std::lround(clipped.height() * deviceScale)));
+    if (clipped.isEmpty()) {
+        return {};
+    }
+    const std::optional<QSize> size = CheckedRasterSize(
+        clipped.width() * static_cast<double>(deviceScale),
+        clipped.height() * static_cast<double>(deviceScale), budget);
+    if (!size.has_value()) {
+        return {};
+    }
 
-    QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
+    QImage image(*size, QImage::Format_ARGB32_Premultiplied);
+    if (image.isNull()) {
+        return {};
+    }
     image.fill(Qt::transparent);
 
     QPainter painter(&image);
-    PageRenderParams deviceParams = params;
-    deviceParams.scale = deviceScale;
-    deviceParams.devicePixelRatio = 1.0f;
-    if (params.textPixelRatio.has_value()) {
-        deviceParams.textPixelRatio = *params.textPixelRatio * params.devicePixelRatio;
-    }
+    PageRenderParams deviceParams = DeviceParams(params);
     deviceParams.cullRect = clipped;
+    deviceParams.deviceRegion = QRect(
+        static_cast<int>(std::lround(clipped.x() * deviceScale)),
+        static_cast<int>(std::lround(clipped.y() * deviceScale)),
+        size->width(), size->height());
     // The image's origin is the region's top-left: shift the page so the
     // region lands at (0,0) in device pixels.
     PaintPage(painter, page, QPointF(-clipped.x() * deviceScale, -clipped.y() * deviceScale), deviceParams);
+    painter.end();
+    return image;
+}
+
+QImage RenderPageSurfaceRegionPixels(const Page& page, const PageRenderParams& params, const QRect& deviceRect,
+    RasterBudget budget) {
+    const QSize pageSize = PageSurfacePixelSize(page, params);
+    const QRect clipped = deviceRect.intersected(QRect(QPoint(0, 0), pageSize));
+    if (clipped.isEmpty() || !RasterFitsBudget(clipped.width(), clipped.height(), budget)) {
+        return {};
+    }
+
+    QImage image(clipped.size(), QImage::Format_ARGB32_Premultiplied);
+    if (image.isNull()) {
+        return {};
+    }
+    image.fill(Qt::transparent);
+
+    QPainter painter(&image);
+    PageRenderParams deviceParams = DeviceParams(params);
+    const float deviceScale = deviceParams.scale;
+    deviceParams.cullRect = QRectF(
+        static_cast<qreal>(clipped.x()) / deviceScale,
+        static_cast<qreal>(clipped.y()) / deviceScale,
+        static_cast<qreal>(clipped.width()) / deviceScale,
+        static_cast<qreal>(clipped.height()) / deviceScale);
+    deviceParams.deviceRegion = clipped;
+    // Integer translation: the tile's pixels are the full surface's pixels at
+    // the same device coordinates, so adjacent tiles join without seams.
+    PaintPage(painter, page, QPointF(-clipped.x(), -clipped.y()), deviceParams);
     painter.end();
     return image;
 }
@@ -657,14 +829,34 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
     return hash;
 }
 
-void EnsurePageSurface(PageSurfaceCache& cache, const Page& page, const PageRenderParams& params) {
+void EnsurePageSurface(PageSurfaceCache& cache, const Page& page, const PageRenderParams& params,
+    RasterBudget budget) {
     const std::uint64_t signature = PageSurfaceSignature(page, params);
     if (cache.valid && cache.signature == signature && !cache.image.isNull()) {
         return;
     }
-    cache.image = RenderPageSurface(page, params);
+    if (cache.failed && cache.failedSignature == signature) {
+        // A refused/failed allocation is not retried on every paint; the
+        // previous image (if any) stays available to the caller.
+        return;
+    }
+    const QSize size = PageSurfacePixelSize(page, params);
+    if (!RasterFitsBudget(size.width(), size.height(), budget)) {
+        cache.failed = true;
+        cache.failedSignature = signature;
+        return;
+    }
+    QImage image = RenderPageSurfaceOfSize(page, params, size);
+    if (image.isNull()) {
+        cache.failed = true;
+        cache.failedSignature = signature;
+        return;
+    }
+    cache.image = std::move(image);
     cache.signature = signature;
     cache.valid = true;
+    cache.failed = false;
+    cache.failedSignature = 0;
 }
 
 }  // namespace cnote::render

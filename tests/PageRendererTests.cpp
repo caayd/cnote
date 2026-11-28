@@ -8,7 +8,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <QByteArray>
@@ -581,6 +583,114 @@ int main(int argc, char** argv) {
         }
         std::printf("     math next line top=%d formula ink bottom=%d\n", secondLineTop, deepInkBottom);
         Check(secondLineTop > deepInkBottom, "the line after a deep formula starts below its ink");
+    }
+
+    // --- Raster budget and tiled page surfaces --------------------------------
+    // Above the per-surface budget a page renders as bounded tiles.  Tiling
+    // must be pixel-exact and seam-free: compositing the tiles reproduces the
+    // full RenderPageSurface raster byte for byte (the canvas blits those tiles
+    // 1:1, so any seam would be visible at high zoom).
+    {
+        const auto tiledSurface = [&page](const cnote::render::PageRenderParams& params) {
+            const QImage full = cnote::render::RenderPageSurface(page, params);
+            Check(!full.isNull(), "tile probe: full surface renders");
+            const int tileSize = cnote::render::PageTileSize(params);
+            QImage composed(full.size(), QImage::Format_ARGB32_Premultiplied);
+            composed.fill(Qt::transparent);
+            QPainter painter(&composed);
+            const int columns = (full.width() + tileSize - 1) / tileSize;
+            const int rows = (full.height() + tileSize - 1) / tileSize;
+            for (int row = 0; row < rows; ++row) {
+                for (int column = 0; column < columns; ++column) {
+                    const QRect rect(
+                        column * tileSize, row * tileSize,
+                        std::min(tileSize, full.width() - (column * tileSize)),
+                        std::min(tileSize, full.height() - (row * tileSize)));
+                    const QImage tile =
+                        cnote::render::RenderPageSurfaceRegionPixels(page, params, rect);
+                    if (tile.isNull() || tile.size() != rect.size()) {
+                        Check(false, "tile probe: every tile renders at its rect size");
+                        continue;
+                    }
+                    painter.drawImage(rect.topLeft(), tile);
+                }
+            }
+            painter.end();
+            return std::make_pair(full, composed);
+        };
+        const auto mismatchedPixels = [](const QImage& full, const QImage& composed) {
+            int mismatches = 0;
+            if (full.size() != composed.size()) {
+                return -1;
+            }
+            for (int y = 0; y < full.height(); ++y) {
+                if (std::memcmp(full.constScanLine(y), composed.constScanLine(y),
+                        static_cast<std::size_t>(full.width()) * 4U) == 0) {
+                    continue;
+                }
+                for (int x = 0; x < full.width(); ++x) {
+                    if (full.pixel(x, y) != composed.pixel(x, y)) {
+                        ++mismatches;
+                    }
+                }
+            }
+            return mismatches;
+        };
+
+        cnote::render::PageRenderParams tileParams = params;
+        tileParams.scale = 1.0f;
+        tileParams.devicePixelRatio = 1.0f;
+        tileParams.textPixelRatio = 1.0f;
+        const auto [full, composed] = tiledSurface(tileParams);
+        const int tileMismatches = mismatchedPixels(full, composed);
+        std::printf("TILE-PARITY scale=%.2f dpr=%.2f size=%dx%d mismatchedPixels=%d\n",
+            static_cast<double>(tileParams.scale), static_cast<double>(tileParams.devicePixelRatio),
+            full.width(), full.height(), tileMismatches);
+        Check(tileMismatches == 0, "tiles composite to the exact full-page surface (seam-free)");
+
+        // Fractional device pixel ratio and zoom, with the canvas' text pixel
+        // ratio: the tile grid must keep Qt's glyph subpixel phase identical to
+        // the full raster, or text re-rasterizes a fraction of a pixel off.
+        cnote::render::PageRenderParams dprParams = params;
+        dprParams.scale = 1.35f;
+        dprParams.devicePixelRatio = 1.75f;
+        dprParams.textPixelRatio = 1.0f;
+        Check(cnote::render::RegionAlignment(dprParams) == 7,
+            "region alignment resolves a 1.75 device pixel ratio to 7 device pixels");
+        const auto [fullDpr, composedDpr] = tiledSurface(dprParams);
+        const int dprMismatches = mismatchedPixels(fullDpr, composedDpr);
+        std::printf("TILE-PARITY dpr size=%dx%d tile=%d mismatchedPixels=%d\n",
+            fullDpr.width(), fullDpr.height(), cnote::render::PageTileSize(dprParams), dprMismatches);
+        Check(dprMismatches == 0, "tiles stay pixel-exact at a fractional device pixel ratio");
+
+        // Refusals: the full size is checked before allocating, and a refused
+        // render keeps the prior raster instead of retrying every paint.
+        cnote::render::RasterBudget tiny;
+        tiny.maxSurfaceBytes = 64U * 1024U;
+        cnote::render::PageRenderParams bigger = params;
+        bigger.scale = 1.5f;
+        const QSize biggerSize = cnote::render::PageSurfacePixelSize(page, bigger);
+        Check(!cnote::render::RasterFitsBudget(biggerSize.width(), biggerSize.height(), tiny),
+            "budget probe size exceeds the tiny budget");
+        Check(cnote::render::RenderPageSurface(page, bigger, tiny).isNull(),
+            "a full surface above the budget is refused before allocating");
+        Check(cnote::render::RenderPageSurfaceRegionPixels(
+                  page, bigger, QRect(0, 0, biggerSize.width(), biggerSize.height()), tiny).isNull(),
+            "a region above the budget is refused before allocating");
+
+        cnote::render::PageSurfaceCache budgetCache;
+        cnote::render::EnsurePageSurface(budgetCache, page, params);
+        Check(!budgetCache.image.isNull() && !budgetCache.failed, "a surface inside the budget renders");
+        const uchar* const priorBits = budgetCache.image.constBits();
+        const std::uint64_t failedSignature = cnote::render::PageSurfaceSignature(page, bigger);
+        cnote::render::EnsurePageSurface(budgetCache, page, bigger, tiny);
+        Check(budgetCache.failed && budgetCache.failedSignature == failedSignature,
+            "a refused render is recorded for its signature");
+        Check(budgetCache.image.constBits() == priorBits && Sha256(budgetCache.image) == firstHash,
+            "a refused render keeps the usable prior raster");
+        cnote::render::EnsurePageSurface(budgetCache, page, bigger, tiny);
+        Check(budgetCache.image.constBits() == priorBits && budgetCache.failedSignature == failedSignature,
+            "a known-impossible allocation is not retried for the same signature");
     }
 
     std::printf("surface sha256: %s\n", firstHash.c_str());

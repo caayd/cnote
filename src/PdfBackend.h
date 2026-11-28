@@ -19,6 +19,14 @@ struct PdfTextCharBox {
     float bottom = 0.0f;
 };
 
+// Top-down device-pixel rect in a full-page PDF raster (RenderPage's space).
+struct PdfPixelRect {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+};
+
 class PdfiumBackend final {
 public:
     PdfiumBackend();
@@ -45,6 +53,14 @@ public:
         const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
         std::size_t pageIndex,
         float renderScale) const;
+    // Renders only `region` (device pixels of the full RenderPage raster) into
+    // a bitmap exactly that size.  Lets callers above the full-page raster
+    // budget compose a page from bounded excerpts.
+    [[nodiscard]] std::optional<RasterImage> RenderPageRegion(
+        const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
+        std::size_t pageIndex,
+        float renderScale,
+        PdfPixelRect region) const;
     [[nodiscard]] std::optional<std::vector<PdfTextCharBox>> ExtractTextCharBoxes(
         const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
         std::size_t pageIndex) const;

@@ -253,6 +253,15 @@ public:
     [[nodiscard]] float ZoomReferenceWidth() const { return ZoomReferenceCanvasWidth(); }
     [[nodiscard]] std::uint64_t SurfaceScaleMissCount() const { return surfaceScaleMisses_; }
     [[nodiscard]] std::size_t CachedSurfaceCount() const;
+    // Byte accounting for the page-surface cache: current aggregate, the peak
+    // observed (the raster budget evidence), how many entries are tiles, and
+    // how many raster bytes the most recent paint rendered (the per-paint
+    // budget that spreads zoom-settle replacements across frames).
+    [[nodiscard]] std::size_t CachedSurfaceBytes() const;
+    [[nodiscard]] std::size_t PeakSurfaceBytes() const { return peakSurfaceBytes_; }
+    [[nodiscard]] std::size_t CachedTileCount() const;
+    [[nodiscard]] std::size_t LastPaintSurfaceBytes() const { return lastPaintSurfaceBytes_; }
+    [[nodiscard]] std::size_t PeakPaintSurfaceBytes() const { return peakPaintSurfaceBytes_; }
     [[nodiscard]] std::size_t LastPaintPageCount() const { return lastPaintPageCount_; }
     // Logical-pixel area of the last repaint region queued by the
     // transient-state path (diagnostics for the dirty-rect work: full-widget
@@ -298,7 +307,20 @@ private:
         std::uint64_t pageEpoch = 0;
         float scale = 0.0f;
         float devicePixelRatio = 1.0f;
+        // Full-page raster when it fits the raster budget.
         render::PageSurfaceCache cache {};
+        // Pages whose full-page raster exceeds the budget cache visible tiles
+        // instead.  Tiles are raw device-pixel excerpts of the full-page raster
+        // at this scale/DPR (see render::RenderPageSurfaceRegionPixels), keyed
+        // by their integer device rect; `tileSignature` is the page signature
+        // they were rendered for.
+        struct Tile {
+            QRect deviceRect;
+            QImage image;
+        };
+        std::uint64_t tileSignature = 0;
+        bool tiled = false;
+        std::vector<Tile> tiles;
     };
     struct PageSurfaces {
         // Newest first; bounded to kScalesPerPage entries.
@@ -315,8 +337,11 @@ private:
         // Raster of the object rendered at scale * DPR, plus where its
         // top-left sits in page units.  `trackX/trackY` is the object's
         // position at gesture begin (stroke first point, otherwise x/y), so
-        // the live offset is current - track.
+        // the live offset is current - track.  `live` marks an object whose
+        // raster would exceed the raster budget: it paints vector-live every
+        // frame instead of allocating an impossible image.
         QImage image;
+        bool live = false;
         float originX = 0.0f;
         float originY = 0.0f;
         float width = 0.0f;
@@ -336,10 +361,14 @@ private:
         float scale = 0.0f;
         float devicePixelRatio = 0.0f;
         QImage patch;
-        // Fallback when no committed raster exists to reuse (e.g. a DPR change
-        // mid-gesture): rendered once with the selection excluded so later
-        // moves cannot ghost.
+        // Fallback when no committed raster (or no patch inside the raster
+        // budget) exists to reuse: a bounded device-pixel region of the page
+        // rendered once with the selection excluded so later moves cannot
+        // ghost.  `fallbackRegion` is that region in full-page device pixels.
         render::PageSurfaceCache fallback {};
+        QRect fallbackRegion;
+        float fallbackScale = 0.0f;
+        float fallbackDevicePixelRatio = 0.0f;
         // Move gestures blit one cached raster per object (exact for pure
         // translation); transforms paint the subset live because scaling and
         // rotation change stroke widths and text layout.
@@ -388,18 +417,45 @@ private:
     void PaintStrokeTail(QPainter& painter, const Stroke& stroke, const InkPath& path, const CanvasPageView& view);
 
     [[nodiscard]] render::PageRenderParams RenderParamsFor(const CanvasPageView& view) const;
-    const render::PageSurfaceCache* FindSurface(std::size_t pageIndex, float scale, float devicePixelRatio) const;
+    // Finds the cached entry for exactly this scale/DPR, if any.
+    [[nodiscard]] SurfaceEntry* FindSurfaceEntry(std::size_t pageIndex, float scale, float devicePixelRatio);
+    // Newest entry whose full-page raster exists (the zoom-session snapshot).
+    [[nodiscard]] SurfaceEntry* NewestFullSurfaceEntry(std::size_t pageIndex);
+    // True when the page's full raster fits the per-surface budget.
+    [[nodiscard]] bool PageSurfaceFits(const CanvasPageView& view, const Page& page) const;
     // Prepares the gesture overlay for `pageIndex` (sorted selection index
     // lists, vacated-region patch, per-object rasters for moves) and clears
     // it on commit.
     void BeginGestureOverlay(std::size_t pageIndex, bool transform);
-    const render::PageSurfaceCache* NewestSurface(std::size_t pageIndex) const;
-    const render::PageSurfaceCache& EnsureSurface(const CanvasPageView& view, const Page& page);
+    // Ensures the page's raster at `view`'s scale exists (full surface, or the
+    // visible tiles above the budget).  Consumes `renderBudget` bytes; sets
+    // `deferred` when the budget ran out before the page was complete.
+    SurfaceEntry* EnsureSurfaceEntry(const CanvasPageView& view, const Page& page, const QRect& clip,
+        std::size_t& renderBudget, bool& deferred);
+    // Blits a cached entry 1:1 in device pixels (full image or visible tiles).
+    // The 1:1 rules are documented at the definition.
+    bool BlitSurface(QPainter& painter, const CanvasPageView& view, const SurfaceEntry& entry, const QRect& clip);
+    // Bounded page region, rendered with the gesture's selection excluded, used
+    // when no committed raster or patch can be reused.
+    void EnsureGestureFallback(const CanvasPageView& view, const Page& page, const QRect& clip);
+    // The page's visible region in full-page device pixels, or nullopt when
+    // the page is off screen.
+    [[nodiscard]] std::optional<QRect> VisiblePageDeviceRect(
+        const CanvasPageView& view, const Page& page, const QRect& clip) const;
+    void EnsureVisibleTiles(SurfaceEntry& entry, const CanvasPageView& view, const Page& page,
+        const QRect& visibleDeviceRect, std::uint64_t signature, std::size_t& renderBudget, bool& deferred);
+    // Device-pixel tile edge for this view: kPageTileSize aligned to the
+    // region quantum that keeps text glyph phases identical to the full raster.
+    [[nodiscard]] int SurfaceTileSize(const CanvasPageView& view) const;
+    void TrimEntryTiles(SurfaceEntry& entry, const QRect& visibleDeviceRect);
     void PaintPageContents(QPainter& painter, const Page& page, const CanvasPageView& view);
     void EndGestureOverlay();
     // Widget-space dirty rect covering the selection frame plus handles.
     [[nodiscard]] QRect SelectionDirtyRect(std::size_t pageIndex) const;
-    void PruneSurfaces(const std::vector<std::size_t>& visiblePages);
+    // Byte-bounded nearby-page cache: keeps pages that left the viewport while
+    // the aggregate raster bytes stay under kCanvasSurfaceCacheBytes, evicting
+    // the pages farthest from the viewport first.
+    void TrimSurfaceCache(const std::vector<std::size_t>& visiblePages);
 
     // Wheel-notch smooth scroll: notches accumulate onto the target and a
     // frame-rate-independent exponential chase moves the pan toward it, so a
@@ -675,6 +731,9 @@ private:
     std::size_t lastPaintPageCount_ = 0;
     std::uint64_t surfaceRenders_ = 0;
     std::uint64_t surfaceScaleMisses_ = 0;
+    std::size_t peakSurfaceBytes_ = 0;
+    std::size_t lastPaintSurfaceBytes_ = 0;
+    std::size_t peakPaintSurfaceBytes_ = 0;
     std::uint64_t lastTransientRepaintArea_ = 0;
     // Pending-erase fade patch: re-rendered region of the page under the
     // erase cursor, keyed by the page's signature (which includes the pending

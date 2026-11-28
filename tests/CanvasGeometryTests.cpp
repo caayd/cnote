@@ -48,6 +48,7 @@
 #include <QTextBlock>
 #include <QKeyEvent>
 #include "ui/CanvasWidget.h"
+#include "ui/PageDefaultsQt.h"
 
 namespace {
 
@@ -933,6 +934,199 @@ int main(int argc, char** argv) {
     QCoreApplication::processEvents();
 
 
+
+    // (i) Raster budget at max zoom and high DPR.  A page whose full raster
+    // exceeds the per-surface budget renders visible tiles (bounded bytes, and
+    // at most one paint's worth of them per frame so a zoom settle spreads
+    // across frames).  A nearby page that leaves the viewport stays cached, so
+    // scrolling back blits instead of re-rendering.
+    {
+        cnote::AppManager budgetManager;
+        cnote::qt::QtDocumentController budgetController(budgetManager);
+        budgetController.NewBlankDocument();
+        ui::CanvasWidget budgetCanvas(budgetController);
+        budgetCanvas.resize(1400, 1400);
+        budgetCanvas.SetTool(ui::Tool::Draw);
+        budgetCanvas.SetZoom(ui::CanvasWidget::kMaxZoom);
+        budgetCanvas.show();
+        budgetCanvas.CenterOnPage(0);
+        Pump(300);
+        budgetCanvas.repaint();
+        const std::size_t tiledCount = budgetCanvas.CachedTileCount();
+        const std::size_t tiledBytes = budgetCanvas.CachedSurfaceBytes();
+        const std::size_t lastPaintBytes = budgetCanvas.LastPaintSurfaceBytes();
+        std::printf("RASTER-BUDGET dpr=%.2f zoom=%.2f tiles=%zu bytes=%zu peak=%zu lastPaint=%zu peakPaint=%zu renders=%llu\n",
+            devicePixelRatio, static_cast<double>(ui::CanvasWidget::kMaxZoom),
+            tiledCount, tiledBytes, budgetCanvas.PeakSurfaceBytes(), lastPaintBytes,
+            budgetCanvas.PeakPaintSurfaceBytes(),
+            static_cast<unsigned long long>(budgetCanvas.SurfaceRenderCount()));
+        Check(tiledCount > 0U, "the max-zoom page renders as tiles above the surface budget");
+        Check(budgetCanvas.PeakPaintSurfaceBytes() <= cnote::render::kSurfaceRenderBytesPerPaint,
+            "every paint's raster bytes stay inside the per-paint budget");
+        Check(tiledBytes <= cnote::render::kCanvasSurfaceCacheBytes,
+            "the settled raster cache stays inside the canvas budget");
+        Check(budgetCanvas.PeakSurfaceBytes()
+                <= cnote::render::kCanvasSurfaceCacheBytes + cnote::render::kSurfaceRenderBytesPerPaint,
+            "peak raster bytes stay bounded at max zoom");
+        if (devicePixelRatio > 1.5) {
+            // The visible tiles need more bytes than one paint may render, so
+            // they only all exist because deferred frames filled in the rest.
+            Check(tiledBytes > cnote::render::kSurfaceRenderBytesPerPaint,
+                "the tile set spans more than one paint's budget (spread across frames)");
+        }
+
+        // Tiles draw the real page content at the right place: a red stroke
+        // committed at the page centre shows up in the grab.  The commit fast
+        // path must composite into the cached tiles (no page re-render) and the
+        // composited tiles must match a fresh tiled render of the same page.
+        const cnote::Page& page = budgetController.DocumentRef().PageAt(0);
+        cnote::StrokeStyle budgetStyle;
+        budgetStyle.color = 0xFFFF0000U;
+        budgetStyle.width = 8.0f;
+        budgetController.SetActiveStrokeStyle(budgetStyle);
+        const QPointF center = budgetCanvas.PageToScreen(0, { page.width * 0.5f, page.height * 0.5f });
+
+        // Draw a few strokes first so the page is not trivially sparse when the
+        // timing below re-renders it.
+        for (int index = 0; index < 12; ++index) {
+            const QPointF offset(0.0, -40.0 + (static_cast<double>(index) * 6.0));
+            SendMouse(budgetCanvas, QEvent::MouseButtonPress, center + offset + QPointF(-18.0, 0.0),
+                Qt::LeftButton, Qt::LeftButton);
+            SendMouse(budgetCanvas, QEvent::MouseMove, center + offset + QPointF(18.0, 0.0),
+                Qt::NoButton, Qt::LeftButton);
+            SendMouse(budgetCanvas, QEvent::MouseButtonRelease, center + offset + QPointF(18.0, 0.0),
+                Qt::LeftButton, Qt::NoButton);
+        }
+        QCoreApplication::processEvents();
+        Pump(300);
+        budgetCanvas.repaint();
+        const std::size_t tilesBeforeCommit = budgetCanvas.CachedTileCount();
+        const std::uint64_t rendersBeforeCommit = budgetCanvas.SurfaceRenderCount();
+
+        // A stroke spanning a tile edge (tile origins are multiples of
+        // render::PageTileSize's aligned grid in device pixels).
+        const ui::CanvasPageView commitView = budgetCanvas.CalculatePageView(0);
+        cnote::render::PageRenderParams tileParams;
+        tileParams.scale = commitView.scale;
+        tileParams.devicePixelRatio = static_cast<float>(devicePixelRatio);
+        tileParams.textPixelRatio = 1.0f;
+        const int tileSize = cnote::render::PageTileSize(tileParams);
+        const double deviceScale = static_cast<double>(commitView.scale) * devicePixelRatio;
+        const double centerDeviceX = (static_cast<double>(page.width) * 0.5) * deviceScale;
+        const int boundary = std::max(1, static_cast<int>(std::llround(centerDeviceX / tileSize))) * tileSize;
+        const double boundaryPageX = boundary / deviceScale;
+        const QPointF spanCenter = budgetCanvas.PageToScreen(
+            0, { static_cast<float>(boundaryPageX), page.height * 0.5f });
+
+        QElapsedTimer commitClock;
+        commitClock.start();
+        SendMouse(budgetCanvas, QEvent::MouseButtonPress, spanCenter + QPointF(-8.0, 0.0),
+            Qt::LeftButton, Qt::LeftButton);
+        SendMouse(budgetCanvas, QEvent::MouseMove, spanCenter + QPointF(8.0, 0.0),
+            Qt::NoButton, Qt::LeftButton);
+        SendMouse(budgetCanvas, QEvent::MouseButtonRelease, spanCenter + QPointF(8.0, 0.0),
+            Qt::LeftButton, Qt::NoButton);
+        const qint64 commitMicros = commitClock.nsecsElapsed() / 1000;
+        QCoreApplication::processEvents();
+        budgetCanvas.repaint();
+        const std::uint64_t rendersAfterCommit = budgetCanvas.SurfaceRenderCount();
+        const QImage composited = budgetCanvas.grab().toImage();
+        const InkBox tiledInk = RedInk(composited);
+        std::printf("RASTER-BUDGET commit us=%lld rendersBefore=%llu rendersAfter=%llu tiles=%zu->%zu tiledInk=%s\n",
+            static_cast<long long>(commitMicros),
+            static_cast<unsigned long long>(rendersBeforeCommit),
+            static_cast<unsigned long long>(rendersAfterCommit),
+            tilesBeforeCommit, budgetCanvas.CachedTileCount(), FormatBox(tiledInk).c_str());
+        Check(tiledInk.valid(), "the tiled surface paints committed ink at max zoom");
+        Check(rendersAfterCommit == rendersBeforeCommit,
+            "committing a stroke on a tiled page composites instead of re-rendering it");
+        Check(budgetCanvas.CachedTileCount() >= tilesBeforeCommit,
+            "committing keeps the cached tiles");
+
+        // Reference: a fresh tiled render of the same page.  Undo then redo
+        // bumps the epoch twice, invalidating the tiles; the next paints
+        // rasterize them from the page content (what the old commit fallback
+        // forced).  Time that re-render for the latency comparison.
+        QElapsedTimer rerenderClock;
+        rerenderClock.start();
+        Check(budgetController.Undo(), "tiled-commit probe: undo removes the stroke");
+        Check(budgetController.Redo(), "tiled-commit probe: redo restores the stroke");
+        std::size_t rerenderTiles = budgetCanvas.CachedTileCount();
+        for (int attempt = 0; attempt < 12; ++attempt) {
+            Pump(20);
+            budgetCanvas.repaint();
+            const std::size_t now = budgetCanvas.CachedTileCount();
+            if (now == rerenderTiles && attempt > 0) {
+                break;
+            }
+            rerenderTiles = now;
+        }
+        const qint64 rerenderMicros = rerenderClock.nsecsElapsed() / 1000;
+        const QImage fresh = budgetCanvas.grab().toImage();
+        const std::uint64_t rendersAfterFresh = budgetCanvas.SurfaceRenderCount();
+        int differingPixels = 0;
+        int maxChannelDelta = 0;
+        for (int y = 0; y < fresh.height(); ++y) {
+            if (std::memcmp(fresh.constScanLine(y), composited.constScanLine(y),
+                    static_cast<std::size_t>(fresh.width()) * 4U) == 0) {
+                continue;
+            }
+            for (int x = 0; x < fresh.width(); ++x) {
+                const QRgb a = composited.pixel(x, y);
+                const QRgb b = fresh.pixel(x, y);
+                if (a != b) {
+                    ++differingPixels;
+                    for (int shift = 0; shift <= 24; shift += 8) {
+                        maxChannelDelta = std::max(maxChannelDelta,
+                            std::abs((static_cast<int>((a >> shift) & 0xFFU))
+                                - static_cast<int>((b >> shift) & 0xFFU)));
+                    }
+                }
+            }
+        }
+        std::printf("TILED-COMMIT freshRender us=%lld freshRenders=%llu differingPixels=%d maxChannelDelta=%d\n",
+            static_cast<long long>(rerenderMicros),
+            static_cast<unsigned long long>(rendersAfterFresh - rendersAfterCommit),
+            differingPixels, maxChannelDelta);
+        Check(rendersAfterFresh > rendersAfterCommit,
+            "tiled-commit probe: the epoch bump really re-rendered the tiles");
+        Check(differingPixels == 0,
+            "composited tiles match a fresh tiled render (no seam at the tile edge)");
+        Check(budgetCanvas.PeakSurfaceBytes()
+                <= cnote::render::kCanvasSurfaceCacheBytes + cnote::render::kSurfaceRenderBytesPerPaint,
+            "committed-ink repaint keeps peak raster bytes bounded");
+    }
+    {
+        cnote::AppManager nearbyManager;
+        cnote::qt::QtDocumentController nearbyController(nearbyManager);
+        nearbyController.NewBlankDocument();
+        ui::CanvasWidget nearbyCanvas(nearbyController);
+        nearbyCanvas.resize(1200, 900);
+        nearbyCanvas.SetTool(ui::Tool::Select);
+        nearbyCanvas.show();
+        QCoreApplication::processEvents();
+        ui::NewPageDraft draft {};
+        Check(nearbyController.InsertPages(1, 1, draft) == 1U, "nearby-cache probe: second page appended");
+        nearbyCanvas.SetZoom(1.0f);
+        Pump(200);
+        nearbyCanvas.CenterOnPage(0);
+        nearbyCanvas.repaint();
+        nearbyCanvas.CenterOnPage(1);
+        Pump(20);
+        nearbyCanvas.repaint();
+        const std::uint64_t beforeReturn = nearbyCanvas.SurfaceRenderCount();
+        const std::size_t cachedBeforeReturn = nearbyCanvas.CachedSurfaceCount();
+        nearbyCanvas.CenterOnPage(0);
+        Pump(20);
+        nearbyCanvas.repaint();
+        std::printf("NEARBY-CACHE cachedPages=%zu rendersBefore=%llu rendersAfter=%llu bytes=%zu\n",
+            cachedBeforeReturn, static_cast<unsigned long long>(beforeReturn),
+            static_cast<unsigned long long>(nearbyCanvas.SurfaceRenderCount()),
+            nearbyCanvas.CachedSurfaceBytes());
+        Check(cachedBeforeReturn >= 2U, "the page that left the viewport stays cached");
+        Check(nearbyCanvas.SurfaceRenderCount() == beforeReturn,
+            "scrolling back to a nearby page reuses its cached raster");
+    }
 
     cnote::latex::Shutdown();
     std::printf(g_failures == 0 ? "ALL CANVAS GEOMETRY CHECKS PASSED\n" : "%d CANVAS GEOMETRY CHECK(S) FAILED\n", g_failures);
