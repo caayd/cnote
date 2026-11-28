@@ -21,6 +21,12 @@
 //   * an edit session commits the captured overlay content (and cancels, never
 //     erases, without a content source), undo during an edit keeps the object,
 //     and a remote commit cancels a stale edit/gesture;
+//   * saves serialize an immutable snapshot on the background writer, so an
+//     edit made while a save is in flight stays dirty for the next save, a
+//     Save As during an in-flight save commits both destinations, a failed
+//     asynchronous save keeps the old bytes and reports through the
+//     completion, a close waits for the queued write, and destroying the
+//     manager still commits a requested save;
 //   * SaveTo refuses to overwrite a PDF container (and the save policy routes
 //     PDF-backed documents through Save As), and the viewed page a controller
 //     sets is what ProjectFile serializes.
@@ -56,6 +62,7 @@
 #include "Document.h"
 #include "PdfBackend.h"
 #include "ProjectFile.h"
+#include "ProjectSaveQueue.h"
 #include "ProjectSession.h"
 #include "Unicode.h"
 #include "qt/QtDocumentController.h"
@@ -537,6 +544,126 @@ void SuccessfulSaveReplacesTheDestination() {
     Check(DirectoryEntries(dir).size() == 2U, "no temporary file is left after the replacing save");
 }
 
+// --- background save ----------------------------------------------------------
+
+void EditDuringSaveKeepsSessionDirty() {
+    const std::filesystem::path dir = MakeTempDir("save-in-flight-edit");
+    const std::filesystem::path target = dir / "in-flight.cnote";
+
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    const std::shared_ptr<cnote::ProjectSession> session = controller.Session();
+    session->document = MakeProject(u"before-save");
+    session->document.SetFilePath(target);
+    session->revision = 1U;
+    session->dirty = true;
+    session->autoSaveIntervalSeconds = 60U;
+    manager.SetSessionAutoSaveInterval(session, 60U);
+    manager.UpdateAutoSaveTimer(session);
+
+    Check(controller.RequestSave(target, nullptr), "an asynchronous save request starts");
+    Check(manager.ProjectSaves().PendingCount() > 0U,
+        "the save request returns while its write is still queued");
+
+    // The edit lands after the request took its snapshot and before the
+    // completion applies it.
+    session->document.CurrentPage().texts.front().content = u"after-save";
+    session->revision = 2U;
+    session->dirty = true;
+    manager.ProjectSaves().WaitForIdle();
+
+    Check(ProjectContains(target, u"before-save"), "the save wrote the snapshot taken when it started");
+    Check(session->dirty, "an edit made during the save keeps the session dirty");
+    Check(session->document.FilePath() == target, "the committed write records its destination");
+    Check(manager.IsAutoSaveTimerActive(session),
+        "the autosave timer stays armed for the revision written after the save");
+    Check(controller.SavedChangeCount() == 1U, "the committed save broadcasts one Saved change");
+
+    std::string error;
+    Check(controller.SaveTo(target, &error), "saving again writes the current revision");
+    Check(!session->dirty && ProjectContains(target, u"after-save"),
+        "the next save commits the edit and clears dirty");
+}
+
+void SaveAsDuringInFlightSaveCommitsBothDestinations() {
+    const std::filesystem::path dir = MakeTempDir("save-as-in-flight");
+    const std::filesystem::path first = dir / "first.cnote";
+    const std::filesystem::path second = dir / "second.cnote";
+
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    const std::shared_ptr<cnote::ProjectSession> session = controller.Session();
+    session->document = MakeProject(u"first");
+    session->document.SetFilePath(first);
+    session->revision = 1U;
+    session->dirty = true;
+
+    Check(controller.RequestSave(first, nullptr), "start a save of the current revision");
+    session->document.CurrentPage().texts.front().content = u"second";
+    session->revision = 2U;
+    Check(controller.RequestSave(second, nullptr), "start Save As while the first write is queued");
+    manager.ProjectSaves().WaitForIdle();
+
+    Check(ProjectContains(first, u"first"), "the queued save wrote its own snapshot");
+    Check(ProjectContains(second, u"second"), "the Save As wrote the later snapshot");
+    Check(session->document.FilePath() == second, "the newest destination is the session path");
+    Check(!session->dirty, "the newest revision's save clears dirty");
+    Check(controller.SavedChangeCount() == 2U, "both committed writes broadcast a Saved change");
+}
+
+void FailedAsynchronousSaveKeepsDirtyAndReports() {
+    const std::filesystem::path dir = MakeTempDir("save-async-failure");
+    const std::filesystem::path target = dir / "locked.cnote";
+    Check(MakeReadOnlyFile(target, "PREVIOUS-BYTES"), "prepare the read-only destination");
+
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    const std::shared_ptr<cnote::ProjectSession> session = controller.Session();
+    session->document = MakeProject(u"new-content");
+    session->revision = 1U;
+    session->dirty = true;
+
+    bool completed = false;
+    bool failed = false;
+    std::string reported;
+    Check(controller.RequestSave(target, nullptr,
+              [&](const cnote::qt::QtDocumentController::SaveOutcome& outcome) {
+                  completed = true;
+                  failed = !outcome.success;
+                  reported = outcome.error;
+              }),
+        "the asynchronous save request starts");
+    Check(!completed, "the request returns before the completion runs");
+    manager.ProjectSaves().WaitForIdle();
+
+    Check(completed && failed, "the completion reports the write failure");
+    Check(!reported.empty(), "the asynchronous failure carries an error message");
+    Check(session->dirty, "a failed asynchronous save keeps dirty");
+    Check(ReadFile(target) == "PREVIOUS-BYTES", "the read-only destination is unchanged");
+    Check(controller.SavedChangeCount() == 0U, "a failed save broadcasts no Saved change");
+    MakeWritable(target);
+}
+
+void DestroyingManagerDrainsAPendingSave() {
+    const std::filesystem::path dir = MakeTempDir("save-quit-drain");
+    const std::filesystem::path target = dir / "quit.cnote";
+    {
+        cnote::AppManager manager;
+        cnote::qt::QtDocumentController controller(manager);
+        controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+        const std::shared_ptr<cnote::ProjectSession> session = controller.Session();
+        session->document = MakeProject(u"quit");
+        session->document.SetFilePath(target);
+        session->revision = 1U;
+        session->dirty = true;
+        Check(controller.RequestSave(target, nullptr), "queue a save and quit before it completes");
+    }
+    Check(ProjectContains(target, u"quit"), "destroying the manager finished the queued write");
+}
+
 // --- PDF export ---------------------------------------------------------------
 
 void PdfExportReplacesOnlyOnSuccess() {
@@ -795,6 +922,30 @@ void SuccessfulCloseSavesAndCloses() {
     Check(closed, "closing the last view succeeds when the auto-save succeeds");
     Check(!session->dirty, "the successful close-save clears dirty state");
     Check(ProjectContains(target, u"changed"), "the successful close-save wrote the new content");
+}
+
+// A manual save returns to the event loop before its write commits; closing
+// the last view while that write is queued must still finish it, so the window
+// never goes away ahead of its own save.
+void CloseWaitsForInFlightSave() {
+    const std::filesystem::path dir = MakeTempDir("close-in-flight");
+    const std::filesystem::path target = dir / "close-in-flight.cnote";
+    Check(cnote::ProjectFile::Save(MakeProject(u"before"), target), "prepare the close-during-save target");
+
+    cnote::AppManager manager;
+    cnote::qt::QtMainWindow window(manager);
+    Check(window.OpenPath(target), "open the project in a window");
+    const std::shared_ptr<cnote::ProjectSession> session = window.Controller().Session();
+    session->document.CurrentPage().texts.front().content = u"during-save";
+    ++session->revision;
+    session->dirty = true;
+
+    window.Save();
+    Check(manager.ProjectSaves().PendingCount() > 0U,
+        "the manual save is still queued when the window closes");
+    Check(window.close(), "closing the last view during an in-flight save succeeds");
+    Check(ProjectContains(target, u"during-save"), "the close waited for the queued write to commit");
+    Check(!session->dirty, "the successful close save cleared dirty");
 }
 
 void CancelledUnsavedPromptKeepsWindowAlive() {
@@ -1219,6 +1370,10 @@ int main(int argc, char** argv) {
     SaveAfterDestinationDisappears();
     SaveAsToNonAsciiAndLongPaths();
     SuccessfulSaveReplacesTheDestination();
+    EditDuringSaveKeepsSessionDirty();
+    SaveAsDuringInFlightSaveCommitsBothDestinations();
+    FailedAsynchronousSaveKeepsDirtyAndReports();
+    DestroyingManagerDrainsAPendingSave();
 
     PdfExportReplacesOnlyOnSuccess();
     PdfExportFailureKeepsDestination();
@@ -1227,6 +1382,7 @@ int main(int argc, char** argv) {
 
     FailedCloseSaveKeepsWindowAlive();
     SuccessfulCloseSavesAndCloses();
+    CloseWaitsForInFlightSave();
     CancelledUnsavedPromptKeepsWindowAlive();
 
     EditSessionCommitsAndUndoKeepsTheObject();

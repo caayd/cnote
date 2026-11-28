@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -54,6 +55,27 @@ public:
     void NewBlankDocument();
     // App-level fallback; does not resize existing pages or override project settings.
     void SetDefaultPageSize(float width, float height);
+
+    // What one save produced.  `path`/`revision` are the request's, so a
+    // completion can tell which revision of the document reached the disk.
+    struct SaveOutcome {
+        bool success = false;
+        std::string error;
+        std::filesystem::path path;
+        std::uint64_t revision = 0;
+    };
+    using SaveCompletion = std::function<void(const SaveOutcome&)>;
+
+    // Starts a save and returns without waiting: the immutable document
+    // snapshot is taken here (cheap; rasters and PDF bytes stay shared) and
+    // serialization, compression and the atomic replacement run on the
+    // background writer.  `onDone` runs on the GUI thread, after the session's
+    // dirty/path bookkeeping, never on the worker.  Returns false - with
+    // *error set - only when the request is refused up front (PDF destination).
+    [[nodiscard]] bool RequestSave(const std::filesystem::path& path, std::string* error,
+        SaveCompletion onDone = {});
+    // Saves and waits for the write to commit: the last-view close and tests
+    // use it where continuing before the destination exists would lose data.
     [[nodiscard]] bool SaveTo(const std::filesystem::path& path, std::string* error);
     [[nodiscard]] bool ExportPdf(const std::filesystem::path& path, bool embedProject, std::string* error);
 
@@ -303,9 +325,6 @@ private:
     };
 
     void NotifySessionChanged(bool originating);
-    // Committed vs Saved change broadcast (plan 6.6: commit before broadcasting
-    // Saved); a failed save broadcasts nothing.
-    void BroadcastChange(ProjectChange::Kind kind);
     void RebuildPdfBackground();
     [[nodiscard]] std::uint64_t NextObjectId() const;
     [[nodiscard]] Page* PageAt(std::size_t pageIndex);

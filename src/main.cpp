@@ -94,9 +94,22 @@ void AdoptParentConsole() {
 }
 #endif
 
-// Autosave: the manager's initiating view saves its session and only clears the
-// dirty flag when the write succeeded (cnote::QtDocumentController::SaveTo does
-// both).
+// Autosave: the manager's initiating view hands an immutable snapshot of its
+// session to the background writer; dirty is cleared (and the timer disarmed)
+// by the completion, only when the write succeeded for the current revision.
+// The initiating view only enqueues, so the timer never serializes a project on
+// the GUI thread.
+void AutoSaveSession(const std::shared_ptr<cnote::ProjectSession>& session, QObject* owner) {
+    if (session == nullptr || session->document.FilePath().empty()) {
+        return;
+    }
+    auto* controller = qobject_cast<cnote::qt::QtDocumentController*>(owner);
+    if (controller == nullptr) {
+        return;
+    }
+    static_cast<void>(controller->RequestSave(session->document.FilePath(), nullptr));
+}
+
 // macOS delivers file-open requests (Finder double-click, a file dropped on the
 // dock icon) as QFileOpenEvent; they can arrive before the window exists, so the
 // path is buffered until the window's open handler is registered.  Other
@@ -138,18 +151,6 @@ private:
     // Several file-open requests can arrive before the window's handler exists.
     std::deque<std::filesystem::path> pendingOpen_;
 };
-
-void AutoSaveSession(const std::shared_ptr<cnote::ProjectSession>& session, QObject* owner) {
-    if (session == nullptr || session->document.FilePath().empty()) {
-        return;
-    }
-    auto* controller = qobject_cast<cnote::qt::QtDocumentController*>(owner);
-    if (controller == nullptr) {
-        return;
-    }
-    std::string error;
-    static_cast<void>(controller->SaveTo(session->document.FilePath(), &error));
-}
 
 enum class StartupMode {
     Interactive,
