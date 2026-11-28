@@ -38,9 +38,11 @@ namespace cnote::ui {
 // then assigned to `settings`; a failed persist leaves the live model and the
 // controls unchanged.  A slider drag instead applies each tick to `settings`
 // directly and emits settingsChanged() so the shell follows live, then writes
-// the file once on release; a failed release write reverts the live values to
-// the last persisted model.  Failures are reported through
-// lastSaveSucceeded() and settingsSaveFailed().
+// the file once on release; the auto-save slider is the exception, previewing
+// its 15 s bucket in the readout only and committing the interval on release
+// so the manager's deadline is never re-derived mid-drag.  A failed release
+// write reverts the live values to the last persisted model.  Failures are
+// reported through lastSaveSucceeded() and settingsSaveFailed().
 class CNOTE_UI_EXPORT SettingsDialogQt : public QDialog {
     Q_OBJECT
 
@@ -123,6 +125,10 @@ private:
     // every value the drag changed and reports once.
     void beginDrag();
     void commitDrag();
+    // Commits the auto-save slider: the drag's readout was live, but the
+    // interval reaches the model and the manager only here (release, or a
+    // flush on hide/close).
+    void commitAutoSaveDrag();
     void syncAutoSaveControls();
     void notifyShortcutHint();
 

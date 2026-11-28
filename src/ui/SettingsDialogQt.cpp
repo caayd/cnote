@@ -96,6 +96,12 @@ void ClampSettings(settings::Settings& values) {
     values.textSizePreset = std::min(values.textSizePreset, settings::kTextSizePresetCount - 1U);
 }
 
+// Auto-save slider positions snap to 15-second buckets; 0 is Off.
+unsigned int AutoSaveBucket(int sliderValue) {
+    return static_cast<unsigned int>(
+        std::clamp(std::lround(static_cast<float>(sliderValue) / 15.0f) * 15, 0L, 300L));
+}
+
 // Settings pages are a column of titled groups.  Every form label gets the same
 // minimum width so the fields of all groups on a page line up.
 constexpr int kFormLabelWidth = 140;
@@ -552,11 +558,8 @@ void SettingsDialogQt::buildDocumentsPage() {
     });
     // The handle shows the raw drag position while held; it snaps to the
     // committed 15 s bucket (the live readout already showed that value) when
-    // the pointer is released, and only then is the file written.
-    connect(autoSaveSlider_, &QSlider::sliderReleased, this, [this] {
-        commitDrag();
-        syncAutoSaveControls();
-    });
+    // the pointer is released, and only then is the model/file written.
+    connect(autoSaveSlider_, &QSlider::sliderReleased, this, [this] { commitAutoSaveDrag(); });
     connectCheck(embedProjectInPdfCheck_, &settings::Settings::embedProjectInExportedPdfs);
 }
 
@@ -833,6 +836,9 @@ void SettingsDialogQt::syncAutoSaveControls() {
 
 void SettingsDialogQt::flushPendingDrag() {
     commitDrag();
+    if (autoSaveSlider_ != nullptr && autoSaveSlider_->isSliderDown()) {
+        commitAutoSaveDrag();
+    }
 }
 
 std::optional<std::size_t> SettingsDialogQt::selectedSavedPaletteIndex() const {
@@ -1111,19 +1117,15 @@ void SettingsDialogQt::applyTextSizePresetEdit(QLineEdit* edit, std::size_t inde
 
 
 void SettingsDialogQt::applyAutoSaveSlider() {
-    const int value = autoSaveSlider_->value();
-    const unsigned int seconds = static_cast<unsigned int>(
-        std::clamp(std::lround(static_cast<float>(value) / 15.0f) * 15, 0L, 300L));
+    const unsigned int seconds = AutoSaveBucket(autoSaveSlider_->value());
     if (autoSaveSlider_->isSliderDown()) {
-        // Live drag: the model and readout follow the 15 s bucket while the
-        // handle keeps the raw pointer position.  Ticks inside one bucket are
-        // no-ops.  sliderReleased() writes the file and snaps the handle.
-        if (seconds != settings_.autoSaveIntervalSeconds) {
-            beginDrag();
-            settings_.autoSaveIntervalSeconds = seconds;
-            emit settingsChanged();
-        }
-        autoSaveLabel_->setText(FormatAutoSaveLabel(DecodeAutoSaveInterval(settings_.autoSaveIntervalSeconds)));
+        // Live drag: only the readout follows the bucket and the handle keeps
+        // the raw pointer position.  The model (and therefore the app-wide
+        // auto-save deadline) is deliberately untouched: unlike the other
+        // sliders there is no visual to preview, and re-deriving the manager's
+        // maximum dirty age mid-drag could fire a real auto-save for a bucket
+        // the user is only passing through.  sliderReleased() commits.
+        autoSaveLabel_->setText(FormatAutoSaveLabel(DecodeAutoSaveInterval(seconds)));
         return;
     }
     if (seconds != settings_.autoSaveIntervalSeconds) {
@@ -1133,6 +1135,16 @@ void SettingsDialogQt::applyAutoSaveSlider() {
     }
     // Keyboard/wheel steps are discrete edits: snap the handle to the bucket
     // immediately (or back to the stored value when nothing changed/failed).
+    syncAutoSaveControls();
+}
+
+void SettingsDialogQt::commitAutoSaveDrag() {
+    const unsigned int seconds = AutoSaveBucket(autoSaveSlider_->value());
+    if (seconds != settings_.autoSaveIntervalSeconds) {
+        settings::Settings candidate = settings_;
+        candidate.autoSaveIntervalSeconds = seconds;
+        persist(std::move(candidate));
+    }
     syncAutoSaveControls();
 }
 

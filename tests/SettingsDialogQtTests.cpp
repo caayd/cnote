@@ -347,18 +347,21 @@ void DrawingOperations(const std::filesystem::path& scratch) {
 
     auto* autoSave = Find<QSlider>(dialog, "autoSaveSlider");
     auto* autoSaveLabel = Find<QLabel>(dialog, "autoSaveLabel");
-    // A held drag keeps the raw handle position but applies the 15 s bucket
-    // live; the handle snaps and the file is written only on release.
+    // A held drag keeps the raw handle position and previews the 15 s bucket in
+    // the readout; the interval reaches the model (and the app-wide auto-save
+    // deadline) only on release.
     autoSave->setSliderDown(true);
     autoSave->setValue(37);
-    Check(settings.autoSaveIntervalSeconds == 30U, "an auto-save drag applies the snapped interval live");
+    Check(settings.autoSaveIntervalSeconds == 60U, "an auto-save drag leaves the live interval untouched");
     Check(autoSave->value() == 37, "the auto-save handle keeps the raw drag position");
     Check(autoSaveLabel->text() == QStringLiteral("30 sec"), "the readout shows the snapped bucket during the drag");
     const std::string beforeRelease = ReadFile(path);
     autoSave->setValue(41);
-    Check(settings.autoSaveIntervalSeconds == 45U, "the next bucket applies live");
+    Check(settings.autoSaveIntervalSeconds == 60U, "later auto-save buckets also stay out of the live model");
+    Check(autoSaveLabel->text() == QStringLiteral("45 sec"), "the readout follows the next bucket");
     Check(ReadFile(path) == beforeRelease, "an auto-save drag writes nothing before release");
     autoSave->setSliderDown(false);
+    Check(settings.autoSaveIntervalSeconds == 45U, "release applies the dragged bucket to the model");
     Check(autoSave->value() == 45, "release snaps the auto-save handle to the bucket");
     Check(s::SettingsStoreQt(path).Load().autoSaveIntervalSeconds == 45U, "release persists the bucket");
     autoSave->setValue(37);
@@ -671,6 +674,22 @@ void HideOrCloseMidDragPersists(const std::filesystem::path& scratch) {
     Check(settings.inputSpacing == 2.8f, "closing keeps the dragged value in the live model");
     Check(store.Load().inputSpacing == 2.8f, "closing mid-drag persists the dragged value");
     spacing->setSliderDown(false);
+
+    // The auto-save interval is model-committed on release/flush too, not while
+    // the drag is held.
+    auto* autoSave = Find<QSlider>(dialog, "autoSaveSlider");
+    dialog.show();
+    QApplication::processEvents();
+    const unsigned int committedInterval = settings.autoSaveIntervalSeconds;
+    autoSave->setSliderDown(true);
+    autoSave->setValue(120);
+    Check(settings.autoSaveIntervalSeconds == committedInterval,
+        "an auto-save drag leaves the model untouched before hiding");
+    dialog.hide();
+    Check(settings.autoSaveIntervalSeconds == 120U, "hiding commits the previewed auto-save bucket");
+    Check(store.Load().autoSaveIntervalSeconds == 120U, "hiding mid auto-save drag persists the bucket");
+    autoSave->setSliderDown(false);
+    Check(store.Load().autoSaveIntervalSeconds == 120U, "the later auto-save release writes no second value");
 }
 
 // 6. A failed persist reports failure, keeps the file and leaves live settings unchanged.
