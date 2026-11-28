@@ -133,6 +133,15 @@ private:
         QElapsedTimer since;
     };
 
+    // Route ownership for one coasting run.  Inertia frames have no pointer
+    // owner that can move to another window, so the first frame's decision
+    // holds until the run ends instead of hit-testing every frame.
+    enum class InertiaRoute {
+        Unknown,
+        Canvas,
+        PassThrough,
+    };
+
     // Starts a gesture from Idle for the given source.  Later Begin attempts
     // while any gesture is live are rejected so no source can steal another's
     // active gesture.
@@ -157,10 +166,13 @@ private:
     void FinishGesture();
     void ApplyZoom(qreal cumulativeScale, const QPoint& globalAnchor);
     void ApplyPan(qreal deltaX, qreal deltaY);
+    // Route query for the idle inertia frames, answered once per run.
+    [[nodiscard]] bool InertiaRoutesToCanvas(const QPoint& globalPosition);
 
     PrecisionInputSink& sink_;
     bool nativeAvailable_ = false;
     Suppression suppression_ {};
+    InertiaRoute inertiaRoute_ = InertiaRoute::Unknown;
     GesturePhase phase_ = GesturePhase::Idle;
     GestureSource source_ = GestureSource::None;
     bool inertiaActive_ = false;

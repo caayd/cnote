@@ -5,8 +5,6 @@
 #include <QObject>
 #include <QTimer>
 
-#include <QtGui/qwindowdefs.h>
-
 #include <memory>
 
 #include <windows.h>
@@ -15,6 +13,8 @@
 #include "platform/windows/PrecisionTouchpad.h"
 #include "ui/PrecisionInputRouter.h"
 #include "ui/PrecisionInputSink.h"
+
+class QWindow;
 
 namespace cnote::ui {
 
@@ -43,7 +43,10 @@ public:
     // Installs the native filter and initialises the adapter for the top-level
     // window.  Returns false when the touchpad APIs are unavailable; the app
     // then relies on Qt wheel/native-gesture events (the portable filter).
-    bool Install(WId windowHandle);
+    // The real QWindow is kept for coordinate mapping and its HWND is used only
+    // for the Win32 adapter: a QWindow::fromWinId() wrapper per gesture would
+    // leak and could go stale when the window moves to another screen.
+    bool Install(QWindow* window);
     void Uninstall();
 
     [[nodiscard]] bool Available() const { return available_; }
@@ -77,6 +80,9 @@ private:
     PrecisionInputRouter router_;
     std::unique_ptr<PrecisionTouchpad> touchpad_;
     QTimer inertiaTimer_;
+    // The Qt window this adapter is bound to, and its handle for Win32 calls.
+    // Both are cleared by Uninstall(); the QWindow is not owned.
+    QWindow* qtWindow_ = nullptr;
     HWND window_ = nullptr;
     bool available_ = false;
     bool installed_ = false;

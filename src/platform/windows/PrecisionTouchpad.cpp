@@ -244,32 +244,8 @@ struct PrecisionTouchpad::State {
 
         UINT32 entriesCount = 0;
         UINT32 pointerCount = 0;
-        if (api.getPointerFrameTouchpadInfoHistory == nullptr
-            || api.getPointerFrameTouchpadInfoHistory(pointerId, &entriesCount, &pointerCount, nullptr) == FALSE
-            || entriesCount == 0U
-            || pointerCount == 0U
-            || static_cast<std::size_t>(entriesCount) > std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(pointerCount)) {
-            return false;
-        }
-
-        const std::size_t sampleCount = static_cast<std::size_t>(entriesCount) * static_cast<std::size_t>(pointerCount);
-        touchInfo.resize(sampleCount);
-        if (api.getPointerFrameTouchpadInfoHistory(pointerId, &entriesCount, &pointerCount, touchInfo.data()) == FALSE
-            || entriesCount == 0U
-            || pointerCount == 0U
-            || static_cast<std::size_t>(entriesCount) > std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(pointerCount)) {
-            return false;
-        }
-
-        const std::size_t updatedSampleCount = static_cast<std::size_t>(entriesCount) * static_cast<std::size_t>(pointerCount);
-        touchInfo.resize(updatedSampleCount);
-        typeInfo.resize(updatedSampleCount);
-        for (std::size_t index = 0; index < updatedSampleCount; ++index) {
-            typeInfo[index].type = kPointerInputTypeTouchpad;
-            typeInfo[index].touchInfo = touchInfo[index];
-        }
-
-        if (api.processPointerFramesInteractionContext2 == nullptr
+        if (!QueryTouchFrame(pointerId, entriesCount, pointerCount)
+            || api.processPointerFramesInteractionContext2 == nullptr
             || FAILED(api.processPointerFramesInteractionContext2(
                 interactionContext,
                 entriesCount,
@@ -290,6 +266,88 @@ struct PrecisionTouchpad::State {
         return true;
     }
 
+    // Fills touchInfo/typeInfo for this frame.  The history size is stable
+    // across the messages of one gesture, so the buffers kept between messages
+    // usually let a single query replace the old size-probe-plus-fill pair;
+    // only the first frame and a frame that outgrows them ask for the size.
+    bool QueryTouchFrame(UINT32 pointerId, UINT32& entriesCount, UINT32& pointerCount) {
+        const PrecisionTouchpadApi& loadedApi = api;
+        if (loadedApi.getPointerFrameTouchpadInfoHistory == nullptr) {
+            return false;
+        }
+
+        entriesCount = frameEntries;
+        pointerCount = framePointers;
+        if (entriesCount == 0U || pointerCount == 0U) {
+            // No cached size yet: ask for the required dimensions, then fill.
+            entriesCount = 0U;
+            pointerCount = 0U;
+            if (loadedApi.getPointerFrameTouchpadInfoHistory(
+                    pointerId, &entriesCount, &pointerCount, nullptr) == FALSE
+                || !ResizeTouchFrame(entriesCount, pointerCount)) {
+                return false;
+            }
+            entriesCount = frameEntries;
+            pointerCount = framePointers;
+        }
+
+        if (loadedApi.getPointerFrameTouchpadInfoHistory(
+                pointerId, &entriesCount, &pointerCount, touchInfo.data()) == FALSE
+            || entriesCount == 0U
+            || pointerCount == 0U) {
+            // The frame is gone: do not trust the cached size for the next one.
+            ResetTouchFrame();
+            return false;
+        }
+
+        if (entriesCount > frameEntries || pointerCount != framePointers) {
+            // The API reports the totals it needs when the buffer was too
+            // small; size it exactly and query the full history once more.
+            if (!ResizeTouchFrame(entriesCount, pointerCount)) {
+                ResetTouchFrame();
+                return false;
+            }
+            entriesCount = frameEntries;
+            pointerCount = framePointers;
+            if (loadedApi.getPointerFrameTouchpadInfoHistory(
+                    pointerId, &entriesCount, &pointerCount, touchInfo.data()) == FALSE
+                || entriesCount == 0U
+                || pointerCount != framePointers
+                || entriesCount > frameEntries) {
+                ResetTouchFrame();
+                return false;
+            }
+        }
+
+        const std::size_t sampleCount =
+            static_cast<std::size_t>(entriesCount) * static_cast<std::size_t>(pointerCount);
+        typeInfo.resize(sampleCount);
+        for (std::size_t index = 0; index < sampleCount; ++index) {
+            typeInfo[index].type = kPointerInputTypeTouchpad;
+            typeInfo[index].touchInfo = touchInfo[index];
+        }
+        return true;
+    }
+
+    bool ResizeTouchFrame(UINT32 entriesCount, UINT32 pointerCount) {
+        if (entriesCount == 0U
+            || pointerCount == 0U
+            || static_cast<std::size_t>(entriesCount) > std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(pointerCount)) {
+            return false;
+        }
+        frameEntries = entriesCount;
+        framePointers = pointerCount;
+        touchInfo.resize(static_cast<std::size_t>(entriesCount) * static_cast<std::size_t>(pointerCount));
+        return true;
+    }
+
+    void ResetTouchFrame() {
+        frameEntries = 0U;
+        framePointers = 0U;
+        touchInfo.clear();
+        typeInfo.clear();
+    }
+
     PrecisionTouchpadGestureCallback gestureCallback = nullptr;
     PrecisionTouchpadRouteCallback routeCallback = nullptr;
     void* clientData = nullptr;
@@ -299,6 +357,8 @@ struct PrecisionTouchpad::State {
     HINTERACTIONCONTEXT interactionContext = nullptr;
     std::vector<POINTER_TOUCH_INFO> touchInfo {};
     std::vector<POINTER_TYPE_INFO> typeInfo {};
+    UINT32 frameEntries = 0U;
+    UINT32 framePointers = 0U;
     Phase phase = Phase::Disabled;
 };
 

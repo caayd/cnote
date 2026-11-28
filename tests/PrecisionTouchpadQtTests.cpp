@@ -73,7 +73,7 @@ void UnavailableFallback() {
     FakeSink sink;
     cnote::ui::PrecisionTouchpadQt touchpad(sink);
 
-    Check(!touchpad.Install(0), "installing without a window reports unavailable");
+    Check(!touchpad.Install(nullptr), "installing without a window reports unavailable");
     Check(!touchpad.Available(), "adapter reports unavailable");
     Check(!touchpad.Installed(), "no native filter is installed when unavailable");
     Check(!touchpad.Router().NativeAdapterAvailable(), "router follows the adapter availability");
@@ -103,7 +103,7 @@ void InstallLifecycle() {
     int availabilitySignals = 0;
     QObject::connect(&touchpad, &cnote::ui::PrecisionTouchpadQt::availabilityChanged, [&](bool) { ++availabilitySignals; });
 
-    const bool available = touchpad.Install(window.winId());
+    const bool available = touchpad.Install(window.windowHandle());
     std::printf("precision touchpad adapter available: %s\n", available ? "yes" : "no");
     Check(touchpad.Available() == available, "Available() matches Install()");
     Check(touchpad.Installed() == available, "Installed() matches Install()");
@@ -189,8 +189,8 @@ void MultipleWindowDispatch() {
     FakeSink secondSink;
     cnote::ui::PrecisionTouchpadQt firstTouchpad(firstSink);
     cnote::ui::PrecisionTouchpadQt secondTouchpad(secondSink);
-    const bool firstAvailable = firstTouchpad.Install(first.winId());
-    const bool secondAvailable = secondTouchpad.Install(second.winId());
+    const bool firstAvailable = firstTouchpad.Install(first.windowHandle());
+    const bool secondAvailable = secondTouchpad.Install(second.windowHandle());
     std::printf("multi-window adapters available: %s / %s\n",
         firstAvailable ? "yes" : "no", secondAvailable ? "yes" : "no");
 

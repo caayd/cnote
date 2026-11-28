@@ -38,9 +38,11 @@ struct Call {
 
 struct FakeSink final : cnote::ui::PrecisionInputSink {
     cnote::ui::PrecisionInputRoute route = cnote::ui::PrecisionInputRoute::Canvas;
+    mutable int routeProbes = 0;
     std::vector<Call> calls;
 
     [[nodiscard]] cnote::ui::PrecisionInputRoute RoutePrecisionInput(const QPoint&) const override {
+        ++routeProbes;
         return route;
     }
     void BeginPrecisionGesture() override { calls.push_back({ "begin" }); }
@@ -347,6 +349,51 @@ void ThresholdsAndAnchoring() {
     Check(!router.HandleTouchEnd(), "a second touch end is not consumed");
 }
 
+// 7. One coast resolves its canvas route once instead of per frame.
+void InertiaRouteIsCached() {
+    FakeSink sink;
+    cnote::ui::PrecisionInputRouter router(sink);
+    router.SetNativeAdapterAvailable(true);
+
+    router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::Begin));
+    cnote::ui::TouchpadGestureSample end = Sample(cnote::ui::TouchpadGestureSample::Phase::End);
+    end.inertiaActive = true;
+    router.HandleTouchpadSample(end);
+
+    const int probesAtCoastStart = sink.routeProbes;
+    const std::size_t pansAtCoastStart = sink.Count("pan");
+    for (int frame = 0; frame < 8; ++frame) {
+        cnote::ui::TouchpadGestureSample coast = Sample(cnote::ui::TouchpadGestureSample::Phase::Update);
+        coast.inertiaActive = true;
+        coast.translationX = 4.0f;
+        coast.translationY = -2.0f;
+        router.HandleTouchpadSample(coast);
+    }
+    Check(sink.routeProbes == probesAtCoastStart + 1, "one route probe covers a whole inertia run");
+    Check(sink.Count("pan") == pansAtCoastStart + 8U, "every inertia frame still pans");
+
+    // A route that rejects the anchor is cached for the run too: no frame
+    // starts panning and the hit test is not repeated.
+    router.SetInertiaActive(false);
+    sink.route = cnote::ui::PrecisionInputRoute::PassThrough;
+    const QPoint sidebarAnchor(5, 5);
+    router.HandleTouchpadSample(Sample(cnote::ui::TouchpadGestureSample::Phase::Begin, sidebarAnchor));
+    end = Sample(cnote::ui::TouchpadGestureSample::Phase::End, sidebarAnchor);
+    end.inertiaActive = true;
+    router.HandleTouchpadSample(end);
+    const int probesAtPassThrough = sink.routeProbes;
+    const std::size_t pansAtPassThrough = sink.Count("pan");
+    for (int frame = 0; frame < 4; ++frame) {
+        cnote::ui::TouchpadGestureSample coast =
+            Sample(cnote::ui::TouchpadGestureSample::Phase::Update, sidebarAnchor);
+        coast.inertiaActive = true;
+        coast.translationX = 4.0f;
+        router.HandleTouchpadSample(coast);
+    }
+    Check(sink.routeProbes == probesAtPassThrough + 1, "a rejected inertia anchor is probed once for the run");
+    Check(sink.Count("pan") == pansAtPassThrough, "an off-canvas inertia run pans nothing");
+}
+
 }  // namespace
 
 int main() {
@@ -356,6 +403,7 @@ int main() {
     InertiaLifecycle();
     TouchLifecycleIsolation();
     ThresholdsAndAnchoring();
+    InertiaRouteIsCached();
 
     std::printf(g_failures == 0 ? "ALL PRECISION ROUTER CHECKS PASSED\n" : "%d PRECISION ROUTER CHECK(S) FAILED\n", g_failures);
     return g_failures == 0 ? 0 : 1;
