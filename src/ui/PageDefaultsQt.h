@@ -62,9 +62,22 @@ bool ApplyPaletteProfileToPage(Page& page, const std::vector<std::uint32_t>& tar
 
 // Clamps width/height to >= 72pt, replaces the page raster (flattening any PDF
 // source page) and, when requested, remaps existing stroke colours.  Returns
-// true when the page changed.
+// true when the page changed.  The raster comparison is a scan of the stored
+// raster (no replacement raster is built for a page that already has the right
+// solid fill), so a no-op call allocates nothing.
 bool ApplyConfiguredSettingsToPage(
     Page& page,
+    float width,
+    float height,
+    std::uint32_t backgroundColor,
+    const std::vector<std::uint32_t>& paletteProfile,
+    bool applyPaletteProfileToExistingStrokes);
+
+// Whether ApplyConfiguredSettingsToPage would return true for `page`, without
+// mutating it and without building the replacement raster.  The caller uses it
+// to snapshot history only for pages that actually change.
+[[nodiscard]] bool PageSettingsWouldChange(
+    const Page& page,
     float width,
     float height,
     std::uint32_t backgroundColor,

@@ -426,10 +426,42 @@ bool RasterImageEqual(const RasterImage& a, const RasterImage& b) {
         && a.pixels == b.pixels;
 }
 
+namespace {
+
+// Geometry of the image CreateSolidRaster builds: the shared rounding and
+// clamping rule, so the matcher below can never disagree about dimensions.
+struct SolidRasterGeometry {
+    int width = 0;
+    int height = 0;
+    int stride = 0;
+};
+
+SolidRasterGeometry SolidRasterGeometryFor(float pageWidth, float pageHeight, float renderScale) {
+    SolidRasterGeometry geometry;
+    geometry.width = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageWidth) * renderScale)));
+    geometry.height = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageHeight) * renderScale)));
+    geometry.stride = geometry.width * 4;
+    return geometry;
+}
+
+std::uint64_t g_solidRasterBuildCount = 0;
+
+}  // namespace
+
+std::uint64_t SolidRasterBuildCount() noexcept {
+    return g_solidRasterBuildCount;
+}
+
+void ResetSolidRasterBuildCount() noexcept {
+    g_solidRasterBuildCount = 0;
+}
+
 RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderScale, std::uint32_t argb) {
-    const int bitmapWidth = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageWidth) * renderScale)));
-    const int bitmapHeight = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageHeight) * renderScale)));
-    const int stride = bitmapWidth * 4;
+    ++g_solidRasterBuildCount;
+    const SolidRasterGeometry geometry = SolidRasterGeometryFor(pageWidth, pageHeight, renderScale);
+    const int bitmapWidth = geometry.width;
+    const int bitmapHeight = geometry.height;
+    const int stride = geometry.stride;
 
     RasterImage raster {};
     raster.width = bitmapWidth;
@@ -451,6 +483,40 @@ RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderSca
     raster.pixels = PixelBuffer(std::move(pixels));
 
     return raster;
+}
+
+bool RasterImageMatchesSolidColor(
+    const RasterImage& raster, float pageWidth, float pageHeight, float renderScale, std::uint32_t argb) {
+    const SolidRasterGeometry geometry = SolidRasterGeometryFor(pageWidth, pageHeight, renderScale);
+    if (raster.width != geometry.width
+        || raster.height != geometry.height
+        || raster.stride != geometry.stride
+        || raster.scale != renderScale) {
+        return false;
+    }
+    const std::size_t expectedBytes =
+        static_cast<std::size_t>(geometry.stride) * static_cast<std::size_t>(geometry.height);
+    if (raster.pixels.size() != expectedBytes) {
+        return false;
+    }
+    const std::uint8_t* pixels = raster.pixels.data();
+    if (pixels == nullptr) {
+        return false;
+    }
+
+    const std::uint8_t alpha = static_cast<std::uint8_t>((argb >> 24U) & 0xFFU);
+    const std::uint8_t red = static_cast<std::uint8_t>((argb >> 16U) & 0xFFU);
+    const std::uint8_t green = static_cast<std::uint8_t>((argb >> 8U) & 0xFFU);
+    const std::uint8_t blue = static_cast<std::uint8_t>(argb & 0xFFU);
+    for (std::size_t offset = 0; offset < expectedBytes; offset += 4U) {
+        if (pixels[offset] != blue
+            || pixels[offset + 1U] != green
+            || pixels[offset + 2U] != red
+            || pixels[offset + 3U] != alpha) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool Vec2Equal(const Vec2& a, const Vec2& b) {

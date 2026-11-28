@@ -45,6 +45,57 @@ bool ApplyPaletteProfileToPage(Page& page, const std::vector<std::uint32_t>& tar
     return changed;
 }
 
+namespace {
+
+// The raster scale page defaults have always applied (legacy 1.5x bitmap).
+constexpr float kPageApplyRasterScale = 1.5f;
+
+// The work ApplyConfiguredSettingsToPage would do, decided once for both the
+// predicate and the mutation so the two can never disagree.
+struct PendingPageChanges {
+    bool dimensions = false;
+    bool raster = false;
+    bool palette = false;
+
+    [[nodiscard]] bool Any() const noexcept { return dimensions || raster || palette; }
+};
+
+PendingPageChanges ConfiguredSettingsChanges(
+    const Page& page,
+    float width,
+    float height,
+    std::uint32_t backgroundColor,
+    const std::vector<std::uint32_t>& paletteProfile,
+    bool applyPaletteProfileToExistingStrokes) {
+    const float clampedWidth = std::max(kMinPageSize, width);
+    const float clampedHeight = std::max(kMinPageSize, height);
+
+    PendingPageChanges changes;
+    changes.dimensions = page.width != clampedWidth || page.height != clampedHeight;
+    // A PDF-backed page is flattened to its solid fill even when the stored
+    // raster already looks like that fill, so its source indices are dropped.
+    changes.raster = page.sourcePdfSourceIndex != -1
+        || page.sourcePdfPageIndex != -1
+        || !RasterImageMatchesSolidColor(
+            page.raster, clampedWidth, clampedHeight, kPageApplyRasterScale, backgroundColor);
+    if (applyPaletteProfileToExistingStrokes) {
+        changes.palette = page.paletteProfile != paletteProfile;
+        if (!changes.palette) {
+            // Mirror ApplyPaletteProfileToPage exactly: it reports a change if
+            // the profile differs or any stroke colour remaps.
+            for (const Stroke& stroke : page.strokes) {
+                if (RemapPaletteColor(stroke.style.color, page.paletteProfile, paletteProfile) != stroke.style.color) {
+                    changes.palette = true;
+                    break;
+                }
+            }
+        }
+    }
+    return changes;
+}
+
+}  // namespace
+
 bool ApplyConfiguredSettingsToPage(
     Page& page,
     float width,
@@ -52,33 +103,36 @@ bool ApplyConfiguredSettingsToPage(
     std::uint32_t backgroundColor,
     const std::vector<std::uint32_t>& paletteProfile,
     bool applyPaletteProfileToExistingStrokes) {
-    bool changed = false;
-    const float clampedWidth = std::max(kMinPageSize, width);
-    const float clampedHeight = std::max(kMinPageSize, height);
-    if (page.width != clampedWidth) {
-        page.width = clampedWidth;
-        changed = true;
-    }
-    if (page.height != clampedHeight) {
-        page.height = clampedHeight;
-        changed = true;
+    const PendingPageChanges changes = ConfiguredSettingsChanges(
+        page, width, height, backgroundColor, paletteProfile, applyPaletteProfileToExistingStrokes);
+    if (!changes.Any()) {
+        return false;
     }
 
-    RasterImage raster = CreateSolidRaster(page.width, page.height, 1.5f, backgroundColor);
-    if (page.sourcePdfSourceIndex != -1
-        || page.sourcePdfPageIndex != -1
-        || !RasterImageEqual(page.raster, raster)) {
+    if (changes.dimensions) {
+        page.width = std::max(kMinPageSize, width);
+        page.height = std::max(kMinPageSize, height);
+    }
+    if (changes.raster) {
         page.sourcePdfSourceIndex = -1;
         page.sourcePdfPageIndex = -1;
-        page.raster = std::move(raster);
-        changed = true;
+        page.raster = CreateSolidRaster(page.width, page.height, kPageApplyRasterScale, backgroundColor);
     }
-
-    if (applyPaletteProfileToExistingStrokes) {
-        changed = ApplyPaletteProfileToPage(page, paletteProfile) || changed;
+    if (changes.palette) {
+        ApplyPaletteProfileToPage(page, paletteProfile);
     }
+    return true;
+}
 
-    return changed;
+bool PageSettingsWouldChange(
+    const Page& page,
+    float width,
+    float height,
+    std::uint32_t backgroundColor,
+    const std::vector<std::uint32_t>& paletteProfile,
+    bool applyPaletteProfileToExistingStrokes) {
+    return ConfiguredSettingsChanges(
+        page, width, height, backgroundColor, paletteProfile, applyPaletteProfileToExistingStrokes).Any();
 }
 
 void RecordPreviousPageColor(
