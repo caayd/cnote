@@ -98,16 +98,16 @@ void AdoptParentConsole() {
 // session to the background writer; dirty is cleared (and the timer disarmed)
 // by the completion, only when the write succeeded for the current revision.
 // The initiating view only enqueues, so the timer never serializes a project on
-// the GUI thread.
+// the GUI thread.  A failure is reported once per streak through the view.
 void AutoSaveSession(const std::shared_ptr<cnote::ProjectSession>& session, QObject* owner) {
-    if (session == nullptr || session->document.FilePath().empty()) {
+    if (session == nullptr) {
         return;
     }
     auto* controller = qobject_cast<cnote::qt::QtDocumentController*>(owner);
     if (controller == nullptr) {
         return;
     }
-    static_cast<void>(controller->RequestSave(session->document.FilePath(), nullptr));
+    controller->AutoSave();
 }
 
 // macOS delivers file-open requests (Finder double-click, a file dropped on the

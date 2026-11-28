@@ -76,16 +76,16 @@ int main(int argc, char** argv) {
         ++autoSaveCalls;
         if (autoSaveSucceeds) {
             session->dirty = false;
-            manager.NotifySessionSaved(session);
-        } else {
-            manager.UpdateAutoSaveTimer(session);
+            manager.NotifySaveFinished(session, true);
         }
+        // A failure leaves the session dirty; the manager re-arms the retry at
+        // the interval itself.
     });
 
     // --- two views on one session share one autosave timer ------------------
+    manager.SetAutoSaveInterval(1);
     auto session = MakeSession(projectPath);
     session->dirty = true;
-    session->autoSaveIntervalSeconds = 1;
     StubView first;
     StubView second;
     manager.RegisterView(&first, &first, session);
@@ -116,6 +116,62 @@ int main(int argc, char** argv) {
     autoSaveSucceeds = true;
     SpinFor(1400);
     Check(autoSaveCalls == 3 && !session->dirty, "a later successful autosave clears dirty");
+
+    // --- the interval is a maximum dirty age, not an idle delay -------------
+    // The commit halfway to the deadline must not move it: continuous editing
+    // still autosaves one interval after the first unsaved edit.
+    session->revision = 10U;
+    session->dirty = true;
+    manager.SetAutoSaveInterval(2);
+    manager.UpdateAutoSaveTimer(session);
+    SpinFor(1200);
+    session->revision = 11U;
+    session->dirty = true;
+    manager.UpdateAutoSaveTimer(session);
+    SpinFor(1400);
+    Check(autoSaveCalls == 4 && !session->dirty, "a commit does not push the autosave deadline back");
+
+    // --- shortening the interval applies to a dirty open session -----------
+    session->revision = 12U;
+    session->dirty = true;
+    manager.SetAutoSaveInterval(10);
+    manager.UpdateAutoSaveTimer(session);
+    SpinFor(300);
+    manager.SetAutoSaveInterval(1);
+    Check(manager.IsAutoSaveTimerActive(session), "a shortened interval keeps a dirty session armed");
+    SpinFor(1200);
+    Check(autoSaveCalls == 5 && !session->dirty, "shortening the interval applies to an open dirty session");
+
+    // --- Off disables auto-save; turning it back on re-arms -----------------
+    session->revision = 13U;
+    session->dirty = true;
+    manager.UpdateAutoSaveTimer(session);
+    manager.SetAutoSaveInterval(0);
+    Check(!manager.IsAutoSaveTimerActive(session), "Off disarms the autosave timer");
+    SpinFor(1200);
+    Check(autoSaveCalls == 5, "Off never autosaves a dirty session");
+    manager.SetAutoSaveInterval(1);
+    Check(manager.IsAutoSaveTimerActive(session), "turning auto-save back on re-arms a dirty session");
+    SpinFor(1200);
+    Check(autoSaveCalls == 6 && !session->dirty, "the re-enabled interval autosaves the dirty session");
+
+    // --- the app interval reaches every open session ------------------------
+    session->revision = 14U;
+    session->dirty = true;
+    manager.UpdateAutoSaveTimer(session);
+    auto otherSession = MakeSession(scratch / "other.cnote");
+    otherSession->dirty = true;
+    StubView otherView;
+    manager.RegisterView(&otherView, &otherView, otherSession);
+    Check(manager.IsAutoSaveTimerActive(otherSession), "a session opened while auto-save is on is armed");
+    manager.SetAutoSaveInterval(0);
+    Check(!manager.IsAutoSaveTimerActive(session) && !manager.IsAutoSaveTimerActive(otherSession),
+        "Off reaches every open session");
+    manager.SetAutoSaveInterval(1);
+    Check(manager.IsAutoSaveTimerActive(session) && manager.IsAutoSaveTimerActive(otherSession),
+        "an interval change reaches every open session");
+    manager.SetAutoSaveInterval(0);
+    manager.UnregisterView(&otherView);
 
     // --- owner reassignment on close ----------------------------------------
     manager.UnregisterView(&first);

@@ -87,7 +87,10 @@ struct ProjectSession {
     std::vector<HistoryAction> redoActions;
     bool dirty = false;
     std::uint64_t revision = 0;
-    unsigned int autoSaveIntervalSeconds = 60;
+    // Set when an auto-save failure has been reported, so a persistently
+    // unwritable file raises one dialog per failure streak; cleared by the
+    // next successful write.
+    bool autoSaveFailureReported = false;
     // Bumped by every in-place page gesture mutation (move/transform/clone/
     // cancel), which does not bump Document::PageEpoch until it commits.  Any
     // view's cache keyed on page contents must include it so a gesture started
