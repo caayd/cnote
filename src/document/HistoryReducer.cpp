@@ -185,7 +185,6 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
         auto& strokes = document.PageAt(action.pageIndex).strokes;
         // Undo AddStroke / redo RemoveStroke remove the committed stroke; the
         // opposite direction reinserts it at its recorded index.
-        document.TouchPage(action.pageIndex);
         const bool remove = undo == (action.type == HistoryActionType::AddStroke);
         if (remove) {
             if (action.index >= strokes.size()) {
@@ -198,6 +197,7 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
             }
             strokes.insert(strokes.begin() + static_cast<std::ptrdiff_t>(action.index), action.stroke);
         }
+        document.TouchPage(action.pageIndex);
         return true;
     }
     case HistoryActionType::AddText:
@@ -207,7 +207,6 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
             return false;
         }
         Page& page = document.PageAt(action.pageIndex);
-        document.TouchPage(action.pageIndex);
         if (action.type == HistoryActionType::UpdateText) {
             // Undo restores the previous text, redo reapplies the replacement;
             // the object is located by the id that was current in that state.
@@ -217,6 +216,7 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
                 return false;
             }
             page.texts[*textIndex] = undo ? action.text : action.replacementText;
+            document.TouchPage(action.pageIndex);
             return true;
         }
         const bool insert = undo == (action.type == HistoryActionType::RemoveText);
@@ -225,6 +225,7 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
                 return false;
             }
             page.texts.insert(page.texts.begin() + static_cast<std::ptrdiff_t>(action.index), action.text);
+            document.TouchPage(action.pageIndex);
             return true;
         }
         const auto textIndex = FindTextIndexById(page, action.text.id);
@@ -232,6 +233,7 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
             return false;
         }
         page.texts.erase(page.texts.begin() + static_cast<std::ptrdiff_t>(*textIndex));
+        document.TouchPage(action.pageIndex);
         return true;
     }
     case HistoryActionType::AddLatex:
@@ -241,7 +243,6 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
             return false;
         }
         Page& page = document.PageAt(action.pageIndex);
-        document.TouchPage(action.pageIndex);
         if (action.type == HistoryActionType::UpdateLatex) {
             const std::uint64_t fromId = undo ? action.replacementLatex.id : action.latex.id;
             const auto latexIndex = FindLatexIndexById(page, fromId);
@@ -249,6 +250,7 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
                 return false;
             }
             page.latexes[*latexIndex] = undo ? action.latex : action.replacementLatex;
+            document.TouchPage(action.pageIndex);
             return true;
         }
         const bool insert = undo == (action.type == HistoryActionType::RemoveLatex);
@@ -257,6 +259,7 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
                 return false;
             }
             page.latexes.insert(page.latexes.begin() + static_cast<std::ptrdiff_t>(action.index), action.latex);
+            document.TouchPage(action.pageIndex);
             return true;
         }
         const auto latexIndex = FindLatexIndexById(page, action.latex.id);
@@ -264,6 +267,7 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
             return false;
         }
         page.latexes.erase(page.latexes.begin() + static_cast<std::ptrdiff_t>(*latexIndex));
+        document.TouchPage(action.pageIndex);
         return true;
     }
     case HistoryActionType::AddPages:
@@ -283,10 +287,7 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
             if (positions.back() >= document.PageCount() || positions.size() >= document.PageCount()) {
                 return false;
             }
-            for (auto position = positions.rbegin(); position != positions.rend(); ++position) {
-                document.RemovePage(*position);
-            }
-            return true;
+            return document.RemovePages(positions);
         }
         // Ascending inserts: each index counts the pages inserted before it.
         for (std::size_t offset = 0; offset < positions.size(); ++offset) {
@@ -294,10 +295,7 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
                 return false;
             }
         }
-        for (std::size_t offset = 0; offset < positions.size(); ++offset) {
-            document.InsertPage(positions[offset], action.pages[offset]);
-        }
-        return true;
+        return document.InsertPages(positions, action.pages);
     }
     case HistoryActionType::ReplaceObjects: {
         if (action.pageIndices.empty()
@@ -320,8 +318,10 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
         }
         for (std::size_t index = 0; index < action.pageIndices.size(); ++index) {
             Page& page = document.PageAt(action.pageIndices[index]);
-            static_cast<void>(ApplyPageObjectDelta(
-                page, action.beforeObjects[index], action.afterObjects[index], undo, true));
+            if (!ApplyPageObjectDelta(
+                    page, action.beforeObjects[index], action.afterObjects[index], undo, true)) {
+                return false;
+            }
             document.TouchPage(action.pageIndices[index]);
         }
         return true;
@@ -336,11 +336,11 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
                 return false;
             }
         }
-        for (const std::size_t pageIndex : action.pageIndices) {
-            document.TouchPage(pageIndex);
-        }
         for (std::size_t index = 0; index < action.pageIndices.size(); ++index) {
             document.PageAt(action.pageIndices[index]) = targetPages[index];
+        }
+        for (const std::size_t pageIndex : action.pageIndices) {
+            document.TouchPage(pageIndex);
         }
         return true;
     }

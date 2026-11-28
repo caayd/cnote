@@ -283,7 +283,20 @@ public:
     void TouchPage(std::size_t index) noexcept;
     bool SetCurrentPageIndex(std::size_t index);
     std::size_t InsertPage(std::size_t index, Page page);
+    // Inserts `pages` in one pass: `positions[offset]` is the index the page
+    // takes in the document that holds the previous `offset` insertions, so
+    // the list is ascending and unique.  Each inserted slot gets a fresh
+    // epoch, and the current page keeps pointing at the same page (it moves
+    // right past every insertion at or before it).  False, changing nothing,
+    // for a malformed list or a position past the document's end.
+    bool InsertPages(const std::vector<std::size_t>& positions, const std::vector<Page>& pages);
     std::size_t RemovePage(std::size_t index);
+    // Removes the sorted, unique `indices` in one pass, keeping every
+    // survivor's epoch.  False (and no change) when the list is malformed,
+    // out of range or would empty the document; the current page keeps
+    // pointing at the same page and clamps to the new last page when its own
+    // page is removed.
+    bool RemovePages(const std::vector<std::size_t>& indices);
     // Rearranges the pages so new index `i` holds the page that was at
     // `order[i]`.  Epochs travel with their pages and the current page index
     // keeps pointing at the same page.  False (nothing changes) unless `order`

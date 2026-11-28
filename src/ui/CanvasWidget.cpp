@@ -4480,15 +4480,21 @@ void CanvasWidget::UpdatePendingErase(const std::vector<ObjectRef>& pending) {
 
 void CanvasWidget::CommitErase(const std::vector<ObjectRef>& pending) {
     const QRect dirty = PendingEraseDirtyRect();
-    std::map<std::size_t, std::vector<ObjectRef>> perPage;
+    // The controller records the whole drag, including pages other than the
+    // one under the pointer, as one history action; this view only has to drop
+    // the surfaces of the pages it touched.
+    std::vector<std::size_t> pages;
+    pages.reserve(pending.size());
     for (const ObjectRef& object : pending) {
-        perPage[object.pageIndex].push_back(object);
+        pages.push_back(object.pageIndex);
     }
-    for (const auto& entry : perPage) {
-        controller_.CommitErase(entry.first, entry.second);
-        if (const auto page = surfaces_.find(entry.first); page != surfaces_.end()) {
-            surfaces_.erase(page);
-        }
+    std::sort(pages.begin(), pages.end());
+    pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
+    if (!pending.empty()) {
+        controller_.CommitErase(pending);
+    }
+    for (const std::size_t pageIndex : pages) {
+        surfaces_.erase(pageIndex);
     }
     pendingErase_.clear();
     update(dirty.isEmpty() ? rect() : dirty);

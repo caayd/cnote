@@ -184,7 +184,11 @@ public:
     // bounds captured at BeginTransform; `to` is the dragged bounds; `rotateDegrees`
     // is the additional rotation about the `from` center (0 for pure resizes).
     virtual void TransformSelection(std::size_t pageIndex, const SelectionTransform& transform) = 0;
-    virtual void CommitErase(std::size_t pageIndex, const std::vector<ObjectRef>& targets) = 0;
+    // Removes every target, wherever it lives, as one transaction: one
+    // ReplaceObjects action carrying one delta per affected page, one page
+    // epoch bump per affected page and one change notification for the whole
+    // erase drag.
+    virtual void CommitErase(const std::vector<ObjectRef>& targets) = 0;
     // Recolors every selected stroke/text/LaTeX object to `color` as one undo
     // step (the palette-click path); false when nothing was recolored.
     virtual bool RecolorSelection(std::uint32_t color) = 0;

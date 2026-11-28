@@ -1223,25 +1223,9 @@ std::optional<HistoryAction> QtDocumentController::BuildPageGestureAction() cons
         before.latexIndices, before.latexes,
         after.latexIndices, after.latexes, PageLatexEqual);
 
-    // Erased objects belong to the before side only; cloned objects to the
-    // after side only.  Both maps/sets iterate ascending, so each side's index
-    // list stays sorted for the reducer.
-    for (const auto& [index, object] : gesture.removedStrokes) {
-        before.strokeIndices.push_back(index);
-        before.strokes.push_back(object);
-    }
-    for (const auto& [index, object] : gesture.removedImages) {
-        before.imageIndices.push_back(index);
-        before.images.push_back(object);
-    }
-    for (const auto& [index, object] : gesture.removedTexts) {
-        before.textIndices.push_back(index);
-        before.texts.push_back(object);
-    }
-    for (const auto& [index, object] : gesture.removedLatexes) {
-        before.latexIndices.push_back(index);
-        before.latexes.push_back(object);
-    }
+    // Erased objects never pass through a page gesture: QtDocumentController::
+    // CommitErase erases a whole drag (across pages) and records its own
+    // ReplaceObjects action.  Cloned objects belong to the after side only.
     for (const std::size_t index : gesture.insertedStrokes) {
         if (index < page->strokes.size()) {
             after.strokeIndices.push_back(index);
@@ -1700,66 +1684,142 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
     }
 }
 
-void QtDocumentController::CommitErase(std::size_t pageIndex, const std::vector<ui::ObjectRef>& targets) {
-    Page* page = PageAt(pageIndex);
-    if (page == nullptr || targets.empty()) {
+namespace {
+
+// One page's pending erase targets, collected before any page is mutated.
+struct PendingErasePage {
+    std::vector<std::size_t> strokes {};
+    std::vector<std::size_t> images {};
+    std::vector<std::size_t> texts {};
+    std::vector<std::size_t> latexes {};
+};
+
+// Records the objects at `indices` (which the caller may pass unsorted or with
+// stale duplicates) and removes them from `objects` in one compaction pass,
+// instead of erasing each index and shifting the tail every time.
+template <typename T>
+void EraseObjectsAt(std::vector<T>& objects, std::vector<std::size_t>& indices,
+    std::vector<std::size_t>& recordedIndices, std::vector<T>& recordedObjects) {
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    indices.erase(
+        std::remove_if(indices.begin(), indices.end(),
+            [&objects](std::size_t index) { return index >= objects.size(); }),
+        indices.end());
+    recordedIndices = indices;
+    if (indices.empty()) {
+        return;
+    }
+    recordedObjects.reserve(indices.size());
+    for (const std::size_t index : indices) {
+        // The slot is dropped below, so moving it into history is the one copy
+        // the undo delta needs.
+        recordedObjects.push_back(std::move(objects[index]));
+    }
+    std::size_t write = 0;
+    std::size_t erased = 0;
+    for (std::size_t read = 0; read < objects.size(); ++read) {
+        if (erased < indices.size() && indices[erased] == read) {
+            ++erased;
+            continue;
+        }
+        if (write != read) {
+            objects[write] = std::move(objects[read]);
+        }
+        ++write;
+    }
+    objects.erase(objects.begin() + static_cast<std::ptrdiff_t>(write), objects.end());
+}
+
+// Remaps a page selection after an erase: an erased object leaves the
+// selection and every survivor moves down by the erased objects before it.
+void RemapErasedSelection(std::vector<std::size_t>& selected,
+    const std::vector<std::size_t>& erased, std::size_t objectCount) {
+    std::vector<std::size_t> kept;
+    kept.reserve(selected.size());
+    for (const std::size_t index : selected) {
+        if (index >= objectCount) {
+            continue;
+        }
+        const auto position = std::lower_bound(erased.begin(), erased.end(), index);
+        if (position != erased.end() && *position == index) {
+            continue;
+        }
+        kept.push_back(index - static_cast<std::size_t>(position - erased.begin()));
+    }
+    selected = std::move(kept);
+}
+
+}  // namespace
+
+void QtDocumentController::CommitErase(const std::vector<ui::ObjectRef>& targets) {
+    if (session_ == nullptr || targets.empty()) {
         return;
     }
 
-    std::vector<std::size_t> strokes;
-    std::vector<std::size_t> images;
-    std::vector<std::size_t> texts;
-    std::vector<std::size_t> latexes;
+    std::map<std::size_t, PendingErasePage> pending;
     for (const ui::ObjectRef& target : targets) {
-        if (target.pageIndex != pageIndex) {
-            continue;
-        }
+        PendingErasePage& page = pending[target.pageIndex];
         switch (target.kind) {
-        case ui::ObjectKind::Stroke: strokes.push_back(target.objectIndex); break;
-        case ui::ObjectKind::Image: images.push_back(target.objectIndex); break;
-        case ui::ObjectKind::Text: texts.push_back(target.objectIndex); break;
-        case ui::ObjectKind::Latex: latexes.push_back(target.objectIndex); break;
+        case ui::ObjectKind::Stroke: page.strokes.push_back(target.objectIndex); break;
+        case ui::ObjectKind::Image: page.images.push_back(target.objectIndex); break;
+        case ui::ObjectKind::Text: page.texts.push_back(target.objectIndex); break;
+        case ui::ObjectKind::Latex: page.latexes.push_back(target.objectIndex); break;
         }
     }
 
-    BeginPageGesture(pageIndex);
-    const auto removeDescending = [&](auto& objects, std::vector<std::size_t>& indices, auto& removed) {
-        std::sort(indices.begin(), indices.end());
-        indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
-        // Capture the deleted objects (pre-removal index) for the undo delta.
-        for (const std::size_t index : indices) {
-            if (index < objects.size()) {
-                removed.emplace(index, objects[index]);
-            }
-        }
-        for (auto it = indices.rbegin(); it != indices.rend(); ++it) {
-            if (*it < objects.size()) {
-                objects.erase(objects.begin() + static_cast<std::ptrdiff_t>(*it));
-            }
-        }
-    };
-    // Reference order (App::EndErase): texts, latexes, images, strokes.
-    removeDescending(page->texts, texts, gesture_->removedTexts);
-    removeDescending(page->latexes, latexes, gesture_->removedLatexes);
-    removeDescending(page->images, images, gesture_->removedImages);
-    removeDescending(page->strokes, strokes, gesture_->removedStrokes);
+    // One erase drag is one transaction.  An open page gesture belongs to an
+    // older interaction and cannot span pages; settle it first.
+    CancelPageGesture();
 
-    // The erased objects leave the selection as well.
-    ui::PageSelection remaining = SelectionFor(pageIndex);
-    const auto drop = [](std::vector<std::size_t>& selected, const std::vector<std::size_t>& removed) {
-        selected.erase(
-            std::remove_if(selected.begin(), selected.end(), [&](std::size_t index) {
-                return std::find(removed.begin(), removed.end(), index) != removed.end();
-            }),
-            selected.end());
-    };
-    drop(remaining.strokes, strokes);
-    drop(remaining.latexes, latexes);
-    drop(remaining.images, images);
-    drop(remaining.texts, texts);
-    SelectObjects(pageIndex, std::move(remaining));
+    HistoryAction action {};
+    action.type = HistoryActionType::ReplaceObjects;
+    for (auto& [pageIndex, kinds] : pending) {
+        Page* page = PageAt(pageIndex);
+        if (page == nullptr) {
+            continue;
+        }
+        const std::size_t strokeCount = page->strokes.size();
+        const std::size_t imageCount = page->images.size();
+        const std::size_t textCount = page->texts.size();
+        const std::size_t latexCount = page->latexes.size();
 
-    CommitPageGesture();
+        PageObjectSet before {};
+        // Reference order (App::EndErase): texts, latexes, images, strokes.
+        EraseObjectsAt(page->texts, kinds.texts, before.textIndices, before.texts);
+        EraseObjectsAt(page->latexes, kinds.latexes, before.latexIndices, before.latexes);
+        EraseObjectsAt(page->images, kinds.images, before.imageIndices, before.images);
+        EraseObjectsAt(page->strokes, kinds.strokes, before.strokeIndices, before.strokes);
+        if (before.Empty()) {
+            continue;
+        }
+
+        // The erased objects leave the selection and the survivors' indices
+        // shift down with their objects.
+        ui::PageSelection remaining = SelectionFor(pageIndex);
+        const ui::PageSelection beforeSelection = remaining;
+        RemapErasedSelection(remaining.strokes, before.strokeIndices, strokeCount);
+        RemapErasedSelection(remaining.images, before.imageIndices, imageCount);
+        RemapErasedSelection(remaining.texts, before.textIndices, textCount);
+        RemapErasedSelection(remaining.latexes, before.latexIndices, latexCount);
+        if (remaining.strokes != beforeSelection.strokes
+            || remaining.images != beforeSelection.images
+            || remaining.texts != beforeSelection.texts
+            || remaining.latexes != beforeSelection.latexes) {
+            SelectObjects(pageIndex, std::move(remaining));
+        }
+
+        session_->document.TouchPage(pageIndex);
+        action.pageIndices.push_back(pageIndex);
+        action.beforeObjects.push_back(std::move(before));
+        action.afterObjects.emplace_back();
+    }
+    if (action.pageIndices.empty()) {
+        return;
+    }
+    // One record and one notification for the whole drag, even when it
+    // crossed pages.
+    RecordCommit(std::move(action));
 }
 bool QtDocumentController::RecolorSelection(std::uint32_t color) {
     // Reference App::SetColorIndex (ToolbarState.cpp:512-543) recolors selected
