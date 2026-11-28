@@ -161,6 +161,11 @@ private:
     // maximized client area extends past the work area by the frame.
     void UpdateNativeFrameThickness();
     void UpdateChrome();
+    // Viewport-dependent chrome only: the zoom readout and the sidebar's page
+    // indicator.  A pan/zoom tick must never rebuild the title, command
+    // actions, editor style or dialog models (PERF-038); UpdateChrome calls
+    // this so the full refresh still covers the viewport fields.
+    void UpdateViewportChrome();
     // Chrome geometry: the toolbar band and the sidebar host rect (both widgets
     // position themselves; the window only supplies their contract inputs).
     void UpdateChromeGeometry();

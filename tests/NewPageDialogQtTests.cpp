@@ -222,6 +222,41 @@ void EmptySavedPalettesDoNotShiftProfiles() {
     dialog.hide();
 }
 
+// 2c. An unchanged defaults/recent-colours model must not rebuild the swatches:
+// every broad chrome refresh calls setDefaults, and destroying and recreating
+// the buttons there was the hidden dialog's cost (PERF-039).  The swatch widgets
+// still reflect the model right after the call, before any show.
+void UnchangedDefaultsKeepSwatches() {
+    namespace s = cnote::settings;
+    s::Settings settings;
+    settings.palette = { 0xFF000000U, 0xFF2563EBU };
+    cnote::ui::NewPageDialogQt dialog(settings, nullptr);
+
+    const cnote::ui::NewPageDefaults defaults { 612.0f, 792.0f, 0xFF010203U, settings.palette, false };
+    const std::vector<std::uint32_t> recents { 0xFF0A0B0CU, 0xFF0D0E0FU };
+    dialog.setDefaults(defaults, recents);
+    auto* swatch0 = Find<QPushButton>(dialog, "recentColorSwatch0");
+    Find<QPushButton>(dialog, "recentColorSwatch1");
+    int destroyed = 0;
+    QObject::connect(swatch0, &QObject::destroyed, [&destroyed]() { ++destroyed; });
+
+    // What UpdateChrome does on every command (and used to do per viewport tick).
+    dialog.setDefaults(defaults, recents);
+    Check(destroyed == 0, "unchanged defaults and recent colours keep the swatch widgets");
+    Check(dialog.findChild<QPushButton*>(QStringLiteral("recentColorSwatch0")) == swatch0,
+        "the same recent swatch widget is still installed");
+    std::printf("SWATCHES unchanged setDefaults: destroyed=%d\n", destroyed);
+
+    dialog.setDefaults(defaults, { 0xFF111213U });
+    Check(destroyed == 1, "changed recent colours rebuild the swatches");
+    Check(dialog.findChild<QPushButton*>(QStringLiteral("recentColorSwatch0")) != nullptr,
+        "the rebuilt swatch is installed");
+    Check(dialog.findChild<QPushButton*>(QStringLiteral("recentColorSwatch1")) == nullptr,
+        "the rebuilt swatch row matches the new history");
+    Check(dialog.recentColors() == std::vector<std::uint32_t>({ 0xFF111213U }),
+        "the dialog exposes the new recent colours");
+}
+
 // 3. Apply scopes, clamping into the defaults, recent-colour bookkeeping.
 void ApplySemantics() {
     namespace s = cnote::settings;
@@ -482,6 +517,7 @@ int main(int argc, char** argv) {
 
     ControlInventory();
     DraftEdits();
+    UnchangedDefaultsKeepSwatches();
     EmptySavedPalettesDoNotShiftProfiles();
     ApplySemantics();
     ResetAndRefresh();

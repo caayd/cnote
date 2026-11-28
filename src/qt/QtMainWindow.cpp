@@ -350,7 +350,7 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
     precisionTouchpad_->Install(windowHandle());
 #endif
 
-    connect(canvas_, &ui::CanvasWidget::ViewportChanged, this, &QtMainWindow::UpdateChrome);
+    connect(canvas_, &ui::CanvasWidget::ViewportChanged, this, &QtMainWindow::UpdateViewportChrome);
     // Refresh the selection-gated actions (copy/cut) on every selection change,
     // whatever its origin (a canvas gesture, a cut, or a paste that selects what
     // it inserted): the controller owns the selection state.
@@ -2212,7 +2212,6 @@ bool QtMainWindow::eventFilter(QObject* watched, QEvent* event) {
 void QtMainWindow::UpdateChrome() {
     const Document& document = controller_.DocumentRef();
     const std::size_t pages = document.PageCount();
-    const std::size_t current = controller_.CurrentPageIndex();
     const QString fileLabel = document.FilePath().empty()
         ? QStringLiteral("Untitled")
         : QFileInfo(QString::fromStdU16String(document.FilePath().u16string())).fileName();
@@ -2246,9 +2245,7 @@ void QtMainWindow::UpdateChrome() {
             controller_.CanUndo() || editorOwnsKeyboard,
             controller_.CanRedo() || editorOwnsKeyboard);
         toolbar_->SetTitle(fileLabel);
-        toolbar_->SetZoomLabel(QStringLiteral("%1%").arg(canvas_ != nullptr ? qRound(canvas_->Zoom() * 100.0) : 100));
         toolbar_->SetMaximized(IsWindowMaximized());
-        toolbar_->SetPageScale(canvas_ != nullptr ? canvas_->Zoom() : 1.0);
         toolbar_->SetColorIndex(settings_.colorIndex);
         // The popup belongs to the text tool as a whole now: while a text edit
         // is open it shows that editor's format, otherwise the pending style
@@ -2274,11 +2271,14 @@ void QtMainWindow::UpdateChrome() {
     }
     if (sidebar_ != nullptr) {
         sidebar_->SetDocument(&document, controller_.PdfBackground());
-        sidebar_->SetCurrentPage(current);
         if (sidebarAction_ != nullptr) {
             sidebarAction_->setChecked(sidebar_->IsOpen());
         }
     }
+    // The viewport-dependent fields are refreshed through their own entry
+    // point so a pan/zoom tick never reaches the title, actions, editor style
+    // or dialog models above (PERF-038).
+    UpdateViewportChrome();
     if (newPageDialog_ != nullptr) {
         newPageDialog_->setDefaults(controller_.NewPageDefaults(), recentPageColors_);
     }
@@ -2308,6 +2308,21 @@ void QtMainWindow::UpdateChrome() {
     }
     if (toolbar_ != nullptr) {
         toolbar_->SetAutoHideEnabled(settings_.autoHideToolbar);
+    }
+}
+
+void QtMainWindow::UpdateViewportChrome() {
+    // Everything a pan or zoom can change.  The zoom readout and the sidebar's
+    // page indicator follow the visible page; title, command actions, editor
+    // style and the New Page dialog model do not, so they stay on the full
+    // UpdateChrome path (PERF-038).  A field that is not proven viewport-only
+    // belongs in UpdateChrome, never here.
+    if (toolbar_ != nullptr) {
+        toolbar_->SetZoomLabel(QStringLiteral("%1%").arg(canvas_ != nullptr ? qRound(canvas_->Zoom() * 100.0) : 100));
+        toolbar_->SetPageScale(canvas_ != nullptr ? canvas_->Zoom() : 1.0);
+    }
+    if (sidebar_ != nullptr) {
+        sidebar_->SetCurrentPage(controller_.CurrentPageIndex());
     }
 }
 
