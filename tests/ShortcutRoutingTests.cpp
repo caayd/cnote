@@ -1129,9 +1129,9 @@ void SidebarPageKeysActOnTheSelection() {
     Check(controller.DocumentRef().PageCount() == 4U, "Ctrl+X cuts the selected (pasted) pages");
 }
 
-// A quick-size drag reports the same snapped size for several pointer samples;
-// only a real change may rewrite the settings file (PERF-008).
-void UnchangedQuickSizeTicksDoNotWrite() {
+// A quick-size drag applies every pointer sample live; only the release writes
+// the settings file, exactly once (PERF-008).
+void QuickSizeDragWritesOnRelease() {
     Harness harness;
     const std::filesystem::path path = cnote::settings::SettingsStoreQt::ResolveSettingsPath();
 
@@ -1147,15 +1147,62 @@ void UnchangedQuickSizeTicksDoNotWrite() {
         std::fclose(file);
     }
 
-    // The same effective size again: the handler must not touch the file.
+    // A repeated sample and a changed sample are both still inside the drag:
+    // the handler updates the live model but must not touch the file.
     emit harness.toolbar->BrushSizeChanged(cnote::settings::Tool::Draw, 7.5f);
     QApplication::processEvents();
     Check(ReadText(path) == "sentinel\n", "a repeated quick-size tick writes nothing");
-
     emit harness.toolbar->BrushSizeChanged(cnote::settings::Tool::Draw, 9.0f);
     QApplication::processEvents();
+    Check(ReadText(path) == "sentinel\n", "a changed quick-size drag tick writes nothing");
+
+    emit harness.toolbar->BrushSizeCommitted(cnote::settings::Tool::Draw, 9.0f);
+    QApplication::processEvents();
     Check(cnote::settings::SettingsStoreQt(path).Load().drawBrushSize == 9.0f,
-        "a changed quick-size tick still persists immediately");
+        "the quick-size release persists the final size");
+}
+
+// Closing the window while a settings slider is still held writes the live
+// value before the window goes away (PERF-008).
+void WindowCloseFlushesHeldSettingsDrag() {
+    Harness harness;
+    harness.window->SetCloseDecisionProvider([] { return cnote::qt::CloseDecision::Discard; });
+    QAction* settingsAction = nullptr;
+    for (QAction* action : harness.window->findChildren<QAction*>()) {
+        if (action->text() == QStringLiteral("Settings...")) {
+            settingsAction = action;
+            break;
+        }
+    }
+    Check(settingsAction != nullptr, "the Settings command exists for the close test");
+    if (settingsAction == nullptr) {
+        return;
+    }
+    settingsAction->trigger();
+    QApplication::processEvents();
+    auto* dialog = harness.window->findChild<cnote::ui::SettingsDialogQt*>();
+    Check(dialog != nullptr, "the settings dialog opens for the close test");
+    if (dialog == nullptr) {
+        return;
+    }
+    auto* spacing = dialog->findChild<QSlider*>(QStringLiteral("spacingSlider"));
+    Check(spacing != nullptr, "the spacing slider exists for the close test");
+    if (spacing == nullptr) {
+        return;
+    }
+
+    spacing->setSliderDown(true);
+    spacing->setValue(290);
+    Check(dialog->settings().inputSpacing == 2.9f, "the settings drag is live before the window closes");
+
+    harness.window->close();
+    QApplication::processEvents();
+    Check(cnote::settings::SettingsStoreQt(cnote::settings::SettingsStoreQt::ResolveSettingsPath())
+                  .Load()
+                  .inputSpacing
+            == 2.9f,
+        "a window close persists a held settings drag");
+    spacing->setSliderDown(false);
 }
 
 // --- 4b. settings edits only rebuild what they touch -------------------------
@@ -1458,7 +1505,8 @@ int main(int argc, char** argv) {
     SettingsTableShortcutsAreBoundAndFire();
     UndoRedoFireWhenApplicable();
     SettingsEditsKeepUnrelatedActions();
-    UnchangedQuickSizeTicksDoNotWrite();
+    QuickSizeDragWritesOnRelease();
+    WindowCloseFlushesHeldSettingsDrag();
     RemappedBindingIsHonoured();
     DuplicateFileBindingsStayUnambiguous();
 

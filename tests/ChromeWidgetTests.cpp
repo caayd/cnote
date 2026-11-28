@@ -612,15 +612,67 @@ void TestQuickSizeHideClearsDrag() {
     const qt::QuickSizePopupLayout layout = qt::BuildQuickSizePopupLayout(
         toolbar->HostCanvasRect(), anchor, 5);
     const QRectF track = qt::ToolbarBrushTrackRect(layout.sliderRect).translated(-QPointF(popup->geometry().topLeft()));
+    float committedSize = -1.0f;
+    int commits = 0;
+    QObject::connect(toolbar, &cnote::ui::ToolbarWidget::BrushSizeCommitted,
+        [&](cnote::settings::Tool, float size) {
+            committedSize = size;
+            ++commits;
+        });
     SendMouse(*popup, QEvent::MouseButtonPress, track.center(), Qt::LeftButton, Qt::LeftButton);
     Check(toolbar->QuickSizeSliderDragging(), "pressing the slider starts a drag");
+    const float draggedSize = toolbar->QuickSizeValue();
+    Check(commits == 0, "pressing the slider writes nothing");
 
     // Hiding the popup mid-drag must not leave the auto-hide guard (or the
-    // active-thumb paint) latched to the abandoned gesture.
+    // active-thumb paint) latched, and must persist the held live value.
     toolbar->HideQuickSizePopup();
     Check(!toolbar->QuickSizePopupVisible(), "quick-size hides mid-drag");
     Check(!toolbar->QuickSizeSliderDragging(), "hiding quick-size clears the slider drag");
+    Check(commits == 1 && std::abs(committedSize - draggedSize) < 0.001f,
+        "hiding mid-drag commits the held quick-size value once");
     SendMouse(*popup, QEvent::MouseButtonRelease, track.center(), Qt::LeftButton, Qt::NoButton);
+    Check(commits == 1, "a release after the hide does not commit again");
+}
+
+void TestQuickSizeEditCommits() {
+    QWidget host;
+    host.resize(1000, 700);
+    cnote::ui::ToolbarWidget* toolbar = new cnote::ui::ToolbarWidget(&host);
+    toolbar->SetSettings(BuildSettings());
+    toolbar->resize(1000, 34);
+    host.show();
+    QApplication::processEvents();
+
+    const QPointF anchor(400.0, 320.0);
+    toolbar->ShowQuickSizePopup(cnote::settings::Tool::Draw, anchor);
+    QWidget* popup = host.findChild<QWidget*>(QStringLiteral("cnoteQuickSizePopup"));
+    Check(popup != nullptr, "quick-size edit: popup widget exists");
+    if (popup == nullptr) {
+        return;
+    }
+    const qt::QuickSizePopupLayout layout = qt::BuildQuickSizePopupLayout(
+        toolbar->HostCanvasRect(), anchor, 5);
+    const QRectF valueRect = layout.valueRect.translated(-QPointF(popup->geometry().topLeft()));
+    float committedSize = -1.0f;
+    int commits = 0;
+    QObject::connect(toolbar, &cnote::ui::ToolbarWidget::BrushSizeCommitted,
+        [&](cnote::settings::Tool, float size) {
+            committedSize = size;
+            ++commits;
+        });
+
+    SendMouse(*popup, QEvent::MouseButtonPress, valueRect.center(), Qt::LeftButton, Qt::LeftButton);
+    SendMouse(*popup, QEvent::MouseButtonRelease, valueRect.center(), Qt::LeftButton, Qt::NoButton);
+    QKeyEvent digit(QEvent::KeyPress, Qt::Key_7, Qt::NoModifier, QStringLiteral("7"));
+    QApplication::sendEvent(popup, &digit);
+    Check(commits == 0, "typing in the quick-size value editor writes nothing");
+    QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+    QApplication::sendEvent(popup, &commit);
+    Check(commits == 1 && std::abs(committedSize - 7.0f) < 0.001f,
+        "ending the quick-size edit commits the typed size once");
+    toolbar->HideQuickSizePopup();
+    Check(commits == 1, "hiding after a committed edit does not commit again");
 }
 
 void TestInlineEditFocusLoss() {
@@ -1477,6 +1529,7 @@ int main(int argc, char** argv) {
     TestPopupPlacementAndClamping();
     TestOverlayExclusivity();
     TestQuickSizeHideClearsDrag();
+    TestQuickSizeEditCommits();
     TestInlineEditFocusLoss();
     TestSidebarListAndNavigation();
     TestSidebarWheelIsolation();

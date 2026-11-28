@@ -609,16 +609,40 @@ void QtMainWindow::CreateChrome() {
         UpdateChrome();
     });
     connect(toolbar_, &ui::ToolbarWidget::BrushSizeChanged, this, [this](settings::Tool tool, float size) {
-        // The popup snaps every pointer move to a preset/step, so a drag sends
-        // the same effective value repeatedly.  Only a real change rewrites the
-        // settings file and repaints the chrome (PERF-008).
+        // A held drag sends every pointer sample.  Update the live model and
+        // visuals immediately but write nothing; the popup's release (or the
+        // end of its text edit) sends BrushSizeCommitted once (PERF-008).
         float& brushSize = tool == settings::Tool::Erase ? settings_.eraseBrushSize : settings_.drawBrushSize;
         if (brushSize == size) {
             return;
         }
+        if (!quickSizePending_) {
+            quickSizePending_ = true;
+            quickSizePendingTool_ = tool;
+            quickSizeBaseline_ = brushSize;
+        }
         brushSize = size;
         ApplyStrokeStyle();
-        settingsStore_.Save(settings_);
+        UpdateChrome();
+    });
+    connect(toolbar_, &ui::ToolbarWidget::BrushSizeCommitted, this, [this](settings::Tool tool, float size) {
+        if (!quickSizePending_ || tool != quickSizePendingTool_) {
+            return;
+        }
+        const float baseline = quickSizeBaseline_;
+        quickSizePending_ = false;
+        float& brushSize = tool == settings::Tool::Erase ? settings_.eraseBrushSize : settings_.drawBrushSize;
+        brushSize = size;
+        if (settingsStore_.Save(settings_)) {
+            return;
+        }
+        // One write per interaction, so this is the single report.  The file
+        // still holds the previous value; put both the model and the popup
+        // back to it.
+        ReportError(QStringLiteral("Could not save settings: Could not write %1")
+                        .arg(QString::fromStdString(settingsStore_.path().string())));
+        brushSize = baseline;
+        ApplySettingsToShell();
         UpdateChrome();
     });
     // Text-format popup (Ctrl+W): while a text edit is open the commands apply
@@ -1682,6 +1706,15 @@ void QtMainWindow::AddLatexObject() {
 }
 
 void QtMainWindow::closeEvent(QCloseEvent* event) {
+    // A slider dragged with the pointer still down would otherwise lose its
+    // live value on a window close: persist it before the close settles the
+    // document (PERF-008).
+    if (settingsDialog_ != nullptr) {
+        settingsDialog_->flushPendingDrag();
+    }
+    if (toolbar_ != nullptr) {
+        toolbar_->CommitPendingQuickSize();
+    }
     // Settle the live edit/stroke before the close decision and any write: the
     // captured overlay content must reach the model first.
     controller_.FinishInteraction();
