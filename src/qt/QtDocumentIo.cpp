@@ -1,7 +1,11 @@
 #include "qt/QtDocumentIo.h"
 
+#include <algorithm>
 #include <array>
-#include <fstream>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <vector>
 
 #include "PdfBackend.h"
 #include "ProjectFile.h"
@@ -11,33 +15,28 @@ namespace cnote::qt {
 
 namespace {
 
-bool StartsWithPdfMagic(const std::filesystem::path& filePath) {
-    std::ifstream stream(filePath, std::ios::binary);
-    if (!stream) {
-        return false;
-    }
-    std::array<char, 5> magic {};
-    stream.read(magic.data(), static_cast<std::streamsize>(magic.size()));
-    if (stream.gcount() != static_cast<std::streamsize>(magic.size())) {
-        return false;
-    }
-    return magic[0] == '%' && magic[1] == 'P' && magic[2] == 'D' && magic[3] == 'F' && magic[4] == '-';
+bool StartsWithPdfMagic(std::span<const std::uint8_t> bytes) {
+    constexpr std::array<std::uint8_t, 5> kPdfMagic { '%', 'P', 'D', 'F', '-' };
+    return bytes.size() >= kPdfMagic.size()
+        && std::equal(kPdfMagic.begin(), kPdfMagic.end(), bytes.begin());
 }
 
 }  // namespace
 
 std::optional<Document> LoadDocument(
     const std::filesystem::path& filePath, PdfiumBackend& pdfBackend, std::string* error) {
-    std::error_code fileError;
-    if (!std::filesystem::is_regular_file(filePath, fileError)) {
+    std::shared_ptr<std::vector<std::uint8_t>> bytes = ReadDocumentBytes(filePath);
+    if (!bytes) {
         if (error != nullptr) {
             *error = "not a readable file: " + filePath.string();
         }
         return std::nullopt;
     }
 
-    if (StartsWithPdfMagic(filePath)) {
-        if (std::optional<Document> document = LoadDocumentFile(filePath, pdfBackend); document.has_value()) {
+    if (StartsWithPdfMagic(*bytes)) {
+        if (std::optional<Document> document =
+                LoadDocumentFileFromBytes(std::move(bytes), filePath, pdfBackend);
+            document.has_value()) {
             return document;
         }
         if (error != nullptr) {
@@ -46,7 +45,10 @@ std::optional<Document> LoadDocument(
         return std::nullopt;
     }
 
-    std::optional<Document> document = ProjectFile::Load(filePath);
+    std::optional<Document> document = ProjectFile::LoadFromBytes(*bytes, filePath);
+    // A project decode copies everything it keeps; the file buffer is dead here
+    // and must not be held while hydration opens the stored PDF sources.
+    bytes.reset();
     if (!document.has_value()) {
         if (error != nullptr) {
             *error = "cannot decode cnote project: " + filePath.string();
