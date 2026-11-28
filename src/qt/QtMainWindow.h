@@ -256,6 +256,10 @@ private:
 
     settings::SettingsStoreQt settingsStore_;
     settings::Settings settings_ {};
+    // The settings_ last handed to ApplySettingsToShell/RefreshShortcutBindings.
+    // A dialog edit is a delta against this: unrelated fields must not rebuild
+    // shortcut actions or reapply the shell (PERF-043).
+    settings::Settings appliedSettings_ {};
     // The canvas_backdrop last handed to ui::ApplyWindowBackdrop.
     std::optional<settings::CanvasBackdrop> appliedBackdrop_ {};
     settings::Tool activeTool_ = settings::Tool::Draw;

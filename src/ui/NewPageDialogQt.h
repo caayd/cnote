@@ -20,6 +20,8 @@ class QSlider;
 
 namespace cnote::ui {
 
+class ColorPreview;
+
 // Qt port of the legacy Win32 NewPageSettingsWindow (plan step 6.2).
 //
 // Same draft model and policy as src/NewPageSettingsWindow.cpp: width/height,
@@ -108,7 +110,7 @@ private:
     QWidget* defaultSwatchContainer_ = nullptr;
     QWidget* recentSwatchContainer_ = nullptr;
     QLabel* recentColorsEmptyLabel_ = nullptr;
-    QLabel* colorPreview_ = nullptr;
+    ColorPreview* colorPreview_ = nullptr;
     QLineEdit* hexColorEdit_ = nullptr;
     QSlider* hueSlider_ = nullptr;
     QSlider* saturationSlider_ = nullptr;

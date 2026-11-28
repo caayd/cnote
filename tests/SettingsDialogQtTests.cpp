@@ -601,12 +601,22 @@ void FailedPersist(const std::filesystem::path& scratch) {
 
     const float beforeSpacing = settings.inputSpacing;
     auto* spacing = Find<QSlider>(dialog, "spacingSlider");
+    spacing->setSliderDown(true);
     spacing->setValue(300);
     Check(settings.inputSpacing == beforeSpacing, "failed persist leaves the live settings unchanged");
     Check(spacing->value() == static_cast<int>(std::lround(beforeSpacing * 100.0f)),
         "failed persist restores the control to the live value");
     Check(!dialog.lastSaveSucceeded(), "failed persist reports failure");
     Check(saveFailures == 1, "failed persist emits settingsSaveFailed once");
+    spacing->setValue(320);
+    Check(settings.inputSpacing == beforeSpacing, "a second failing tick keeps the live settings unchanged");
+    Check(saveFailures == 1, "one failed mouse drag reports its write failure once, not per tick");
+    spacing->setSliderDown(false);
+    spacing->setValue(310);
+    Check(saveFailures == 2, "a keyboard-style tick after a failed drag reports again");
+    auto* autoHide = Find<QCheckBox>(dialog, "autoHideToolbarCheck");
+    autoHide->setChecked(!autoHide->isChecked());
+    Check(saveFailures == 3, "a separate failed edit reports its own write failure");
     Check(!dialog.lastSaveError().isEmpty(), "failed persist reports a reason");
     Check(ReadFile(dest) == previous, "failed persist leaves the previous file intact");
     Check(store.Load().inputSpacing == beforeSpacing, "failed persist leaves the stored value unchanged");
@@ -616,6 +626,41 @@ void FailedPersist(const std::filesystem::path& scratch) {
 #else
     std::filesystem::permissions(dest.parent_path(), std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, error);
 #endif
+}
+
+// 6b. Ticks that snap or round back to the stored value write nothing.
+void UnchangedTicksDoNotPersist(const std::filesystem::path& scratch) {
+    namespace s = cnote::settings;
+    const std::filesystem::path path = scratch / "noop-ticks-settings.ini";
+    s::Settings settings = MakeSettings({ 0xFF808080U });
+    settings.autoSaveIntervalSeconds = 60U;
+    const s::SettingsStoreQt store(path);
+    cnote::ui::SettingsDialogQt dialog(settings, store, nullptr);
+    Check(store.Save(settings), "baseline save succeeds");
+    const std::string before = ReadFile(path);
+    int changed = 0;
+    QObject::connect(&dialog, &cnote::ui::SettingsDialogQt::settingsChanged, [&] { ++changed; });
+
+    auto* autoSave = Find<QSlider>(dialog, "autoSaveSlider");
+    autoSave->setValue(61);
+    Check(settings.autoSaveIntervalSeconds == 60U, "a no-op auto-save tick keeps the stored interval");
+    Check(autoSave->value() == 60, "a no-op auto-save tick snaps the handle back");
+    Check(ReadFile(path) == before, "a no-op auto-save tick writes nothing");
+    Check(changed == 0, "a no-op auto-save tick does not signal a change");
+
+    auto* hue = Find<QSlider>(dialog, "hueSlider");
+    hue->setValue(120);
+    Check(settings.palette[0] == 0xFF808080U, "a hue tick on a grey keeps the same colour");
+    Check(ReadFile(path) == before, "a hue tick that changes no RGB writes nothing");
+    Check(changed == 0, "a hue tick that changes no RGB does not signal a change");
+    Check(Find<QLabel>(dialog, "hueLabel")->text() == QStringLiteral("Hue: 0 deg"),
+        "the readout still describes the effective colour");
+
+    // The next effective value still persists immediately.
+    autoSave->setValue(90);
+    Check(settings.autoSaveIntervalSeconds == 90U, "a real auto-save tick persists");
+    Check(changed == 1, "a real auto-save tick signals one change");
+    Check(ReadFile(path) != before, "a real auto-save tick rewrites the file");
 }
 
 // 7. Keyboard focus/tab order and deterministic screenshots.
@@ -709,6 +754,7 @@ int main(int argc, char** argv) {
     ShortcutCaptureOperations(scratch);
     RefreshAndOwnership(scratch);
     FailedPersist(scratch);
+    UnchangedTicksDoNotPersist(scratch);
     TabOrderAndScreenshots(scratch);
 
     std::error_code error;

@@ -101,15 +101,22 @@ private:
     void buildViewPage();
     void buildDocumentsPage();
     void buildShortcutsPage();
-    void connectScaledSlider(QSlider* slider, float settings::Settings::*field, float scale);
+    void connectScaledSlider(QSlider* slider, float settings::Settings::*field, float scale, QLabel* label,
+        QString (*formatLabel)(float));
     void connectCheck(QCheckBox* check, bool settings::Settings::*field);
 
     // Stages `candidate`, clamps it, saves it, and only applies it to the live
     // model on success.  Returns whether the settings were applied.
-    bool persist(settings::Settings candidate);
+    // `continuation` marks another tick of the same multi-tick interaction (a
+    // slider drag): a failing write reports once for the interaction instead of
+    // once per tick.  One-shot edits leave it false so they can report again.
+    bool persist(settings::Settings candidate, bool continuation = false);
     void notifyShortcutHint();
 
     void refreshPaletteControls(bool syncSliders);
+    // Updates the HSL/hex controls that describe the selected palette slot;
+    // `syncSliders` also moves the sliders to that slot's colour.
+    void refreshSelectedColorControls(bool syncSliders);
     void refreshSavedPalettes();
     void refreshSavedPaletteButtons();
     void refreshOptionControls();
@@ -120,7 +127,7 @@ private:
     void addPaletteColor();
     void removePaletteColor();
     void applyHexColorEdit();
-    void applyHueSaturationLightness();
+    void applyHueSaturationLightness(bool continuation);
     void saveNamedPalette();
     void applySelectedNamedPalette();
     void deleteSelectedNamedPalette();
@@ -139,6 +146,9 @@ private:
     settings::SettingsStoreQt store_;
     bool lastSaveSucceeded_ = true;
     QString lastSaveError_ {};
+    // Set after a failed write has been reported; the rest of that interaction
+    // is silent (the shell's error dialog is modal and must not stack).
+    bool saveFailureReported_ = false;
     bool refreshing_ = false;
     CaptureState captureState_ {};
 

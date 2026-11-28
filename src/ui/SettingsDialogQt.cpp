@@ -173,6 +173,10 @@ QSlider* MakeSlider(const char* name, int minimum, int maximum, QWidget* parent)
     return slider;
 }
 
+QString FormatSmoothingLabel(float value) {
+    return FormatFloatSliderLabel(value, 100);
+}
+
 }  // namespace
 
 SettingsDialogQt::SettingsDialogQt(
@@ -298,9 +302,9 @@ void SettingsDialogQt::buildPalettePage() {
     connect(removeColorButton_, &QPushButton::clicked, this, [this] { removePaletteColor(); });
     connect(hexColorEdit_, &QLineEdit::editingFinished, this, [this] { applyHexColorEdit(); });
     for (QSlider* slider : { hueSlider_, saturationSlider_, lightnessSlider_ }) {
-        connect(slider, &QSlider::valueChanged, this, [this](int) {
+        connect(slider, &QSlider::valueChanged, this, [this, slider](int) {
             if (!refreshing_) {
-                applyHueSaturationLightness();
+                applyHueSaturationLightness(slider->isSliderDown());
             }
         });
     }
@@ -313,23 +317,37 @@ void SettingsDialogQt::buildPalettePage() {
 }
 
 // Connects a slider whose value is `field * scale` in the settings model.
-void SettingsDialogQt::connectScaledSlider(QSlider* slider, float settings::Settings::*field, float scale) {
-    connect(slider, &QSlider::valueChanged, this, [this, field, scale](int value) {
+// A tick that maps back to the stored value writes nothing (auto-save snapping
+// and stored fractions can both produce a no-op drag tick); a changed tick
+// persists immediately and updates only its own readout.  Only the ticks of a
+// held drag share one failure report; keyboard/wheel steps are discrete edits.
+void SettingsDialogQt::connectScaledSlider(QSlider* slider, float settings::Settings::*field, float scale, QLabel* label,
+    QString (*formatLabel)(float)) {
+    connect(slider, &QSlider::valueChanged, this, [this, slider, field, scale, label, formatLabel](int value) {
         if (refreshing_) return;
+        if (static_cast<float>(value) / scale == settings_.*field) {
+            return;
+        }
         settings::Settings candidate = settings_;
         candidate.*field = static_cast<float>(value) / scale;
-        persist(std::move(candidate));
-        refreshOptionControls();
+        if (!persist(std::move(candidate), /*continuation=*/slider->isSliderDown())) {
+            // The live model kept the previous value; put the tick back.
+            const QSignalBlocker block(slider);
+            slider->setValue(static_cast<int>(std::lround(settings_.*field * scale)));
+        }
+        label->setText(formatLabel(settings_.*field));
     });
 }
 
 void SettingsDialogQt::connectCheck(QCheckBox* check, bool settings::Settings::*field) {
-    connect(check, &QCheckBox::toggled, this, [this, field](bool checked) {
+    connect(check, &QCheckBox::toggled, this, [this, check, field](bool checked) {
         if (refreshing_) return;
         settings::Settings candidate = settings_;
         candidate.*field = checked;
-        persist(std::move(candidate));
-        refreshOptionControls();
+        if (!persist(std::move(candidate))) {
+            const QSignalBlocker block(check);
+            check->setChecked(settings_.*field);
+        }
     });
 }
 
@@ -362,11 +380,11 @@ void SettingsDialogQt::buildDrawingPage() {
     gestures->addRow(scratchToEraseCheck_);
     pageLayout->addStretch(1);
 
-    connectScaledSlider(stabilizationSlider_, &settings::Settings::inputSmoothing, 100.0f);
-    connectScaledSlider(spacingSlider_, &settings::Settings::inputSpacing, 100.0f);
-    connectScaledSlider(strokeSmoothingSlider_, &settings::Settings::strokeSmoothing, 100.0f);
-    connectScaledSlider(dashLengthSlider_, &settings::Settings::dashLength, 10.0f);
-    connectScaledSlider(dashGapSlider_, &settings::Settings::dashGap, 10.0f);
+    connectScaledSlider(stabilizationSlider_, &settings::Settings::inputSmoothing, 100.0f, stabilizationLabel_, FormatSmoothingLabel);
+    connectScaledSlider(spacingSlider_, &settings::Settings::inputSpacing, 100.0f, spacingLabel_, FormatSpacingLabel);
+    connectScaledSlider(strokeSmoothingSlider_, &settings::Settings::strokeSmoothing, 100.0f, strokeSmoothingLabel_, FormatSmoothingLabel);
+    connectScaledSlider(dashLengthSlider_, &settings::Settings::dashLength, 10.0f, dashLengthLabel_, FormatDashLabel);
+    connectScaledSlider(dashGapSlider_, &settings::Settings::dashGap, 10.0f, dashGapLabel_, FormatDashLabel);
     connectCheck(scratchToEraseCheck_, &settings::Settings::scratchToErase);
 }
 
@@ -451,8 +469,15 @@ void SettingsDialogQt::buildViewPage() {
         if (refreshing_) return;
         settings::Settings candidate = settings_;
         candidate.drawCursorKind = index == 1 ? settings::DrawCursorKind::PrecisionCrosshair : settings::DrawCursorKind::Dot;
-        persist(std::move(candidate));
-        refreshOptionControls();
+        if (!persist(std::move(candidate))) {
+            const QSignalBlocker block(drawCursorKindCombo_);
+            drawCursorKindCombo_->setCurrentIndex(
+                settings_.drawCursorKind == settings::DrawCursorKind::PrecisionCrosshair ? 1 : 0);
+        }
+        // Only this combo gates another control.
+        const bool dotCursor = settings_.drawCursorKind == settings::DrawCursorKind::Dot;
+        drawCursorSizeSlider_->setEnabled(dotCursor);
+        drawCursorSizeLabel_->setEnabled(dotCursor);
     });
     connect(canvasBackdropCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (refreshing_ || index < 0) return;
@@ -460,7 +485,7 @@ void SettingsDialogQt::buildViewPage() {
         candidate.canvasBackdrop = static_cast<settings::CanvasBackdrop>(index);
         persist(std::move(candidate));
     });
-    connectScaledSlider(drawCursorSizeSlider_, &settings::Settings::drawCursorSize, 1.0f);
+    connectScaledSlider(drawCursorSizeSlider_, &settings::Settings::drawCursorSize, 1.0f, drawCursorSizeLabel_, FormatPixelLabel);
     connectCheck(autoHideToolbarCheck_, &settings::Settings::autoHideToolbar);
     for (std::size_t index = 0; index < settings::kZoomPresetCount; ++index) {
         connect(zoomPresetEdits_[index], &QLineEdit::editingFinished, this, [this, index] {
@@ -496,14 +521,19 @@ void SettingsDialogQt::buildDocumentsPage() {
 
     connect(defaultPageSizeCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (refreshing_) return;
-        if (index < 0 || static_cast<std::size_t>(index) >= DimensionPresets().size()) {
-            refreshOptionControls();
+        const auto presets = DimensionPresets();
+        if (index < 0 || static_cast<std::size_t>(index) >= presets.size()) {
+            const QSignalBlocker block(defaultPageSizeCombo_);
+            defaultPageSizeCombo_->setCurrentIndex(
+                static_cast<int>(std::min(settings_.defaultPageSizePreset, presets.size() - 1U)));
             return;
         }
         settings::Settings candidate = settings_;
         candidate.defaultPageSizePreset = static_cast<std::size_t>(index);
-        persist(std::move(candidate));
-        refreshOptionControls();
+        if (!persist(std::move(candidate))) {
+            const QSignalBlocker block(defaultPageSizeCombo_);
+            defaultPageSizeCombo_->setCurrentIndex(static_cast<int>(settings_.defaultPageSizePreset));
+        }
     });
     connect(autoSaveSlider_, &QSlider::valueChanged, this, [this](int) {
         if (refreshing_) return;
@@ -584,12 +614,15 @@ void SettingsDialogQt::refreshPaletteControls(bool syncSliders) {
     }
     addColorButton_->setEnabled(settings_.palette.size() < settings::kMaxPaletteColors);
     removeColorButton_->setEnabled(settings_.palette.size() > 1U);
+    refreshSelectedColorControls(syncSliders);
+}
 
+void SettingsDialogQt::refreshSelectedColorControls(bool syncSliders) {
     if (settings_.palette.empty()) {
         hexColorEdit_->clear();
         return;
     }
-
+    const std::size_t selection = std::min(settings_.paletteIndex, settings_.palette.size() - 1U);
     const HslColor hsl = RgbToHsl(settings_.palette[selection]);
     const int hue = static_cast<int>(std::lround(hsl.hue));
     const int saturation = static_cast<int>(std::lround(hsl.saturation * 100.0f));
@@ -728,17 +761,27 @@ void SettingsDialogQt::notifyShortcutHint() {
 
 // --- edits -------------------------------------------------------------------
 
-bool SettingsDialogQt::persist(settings::Settings candidate) {
+bool SettingsDialogQt::persist(settings::Settings candidate, bool continuation) {
+    if (!continuation) {
+        saveFailureReported_ = false;
+    }
     ClampSettings(candidate);
     lastSaveSucceeded_ = store_.Save(candidate);
     if (lastSaveSucceeded_) {
         settings_ = std::move(candidate);
         lastSaveError_.clear();
+        saveFailureReported_ = false;
         emit settingsChanged();
     } else {
         lastSaveError_ = QStringLiteral("Could not write %1")
                              .arg(QString::fromStdString(store_.path().string()));
-        emit settingsSaveFailed(lastSaveError_);
+        // A drag ticks many times; one unreachable file would otherwise stack
+        // one error dialog per tick.  The fallback controls still revert each
+        // tick, so only the first report belongs to the interaction.
+        if (!saveFailureReported_) {
+            emit settingsSaveFailed(lastSaveError_);
+            saveFailureReported_ = true;
+        }
     }
     return lastSaveSucceeded_;
 }
@@ -830,7 +873,7 @@ void SettingsDialogQt::applyHexColorEdit() {
     refreshPaletteControls(true);
 }
 
-void SettingsDialogQt::applyHueSaturationLightness() {
+void SettingsDialogQt::applyHueSaturationLightness(bool continuation) {
     if (settings_.palette.empty() || settings_.paletteIndex >= settings_.palette.size()) {
         return;
     }
@@ -838,10 +881,16 @@ void SettingsDialogQt::applyHueSaturationLightness() {
     const float saturation = static_cast<float>(saturationSlider_->value()) / 100.0f;
     const float lightness = static_cast<float>(lightnessSlider_->value()) / 100.0f;
     const std::uint32_t color = HslToColor(hue, saturation, lightness);
+    if (settings_.palette[settings_.paletteIndex] == color) {
+        // Many slider combinations land on the same RGB (a grey has no hue).
+        // The swatch and labels still come from the effective colour.
+        refreshSelectedColorControls(false);
+        return;
+    }
     settings::Settings candidate = settings_;
     candidate.palette[candidate.paletteIndex] = color;
-    if (!persist(std::move(candidate))) {
-        refreshPaletteControls(true);
+    if (!persist(std::move(candidate), continuation)) {
+        refreshSelectedColorControls(true);
         return;
     }
 
@@ -849,16 +898,7 @@ void SettingsDialogQt::applyHueSaturationLightness() {
         item->setIcon(ColorSwatchIcon(color));
         item->setText(FormatPaletteEntry(settings_.paletteIndex, color));
     }
-    const HslColor hsl = RgbToHsl(color);
-    const int hslHue = static_cast<int>(std::lround(hsl.hue));
-    const int hslSaturation = static_cast<int>(std::lround(hsl.saturation * 100.0f));
-    const int hslLightness = static_cast<int>(std::lround(hsl.lightness * 100.0f));
-    hueLabel_->setText(FormatHueLabel(hslHue));
-    saturationLabel_->setText(FormatPercentLabel(QStringLiteral("Saturation"), hslSaturation));
-    lightnessLabel_->setText(FormatPercentLabel(QStringLiteral("Lightness"), hslLightness));
-    if (!hexColorEdit_->hasFocus()) {
-        hexColorEdit_->setText(FormatHexColor(color));
-    }
+    refreshSelectedColorControls(false);
 }
 
 void SettingsDialogQt::saveNamedPalette() {
@@ -1015,9 +1055,17 @@ void SettingsDialogQt::applyAutoSaveSlider() {
     const int value = autoSaveSlider_->value();
     const unsigned int seconds = static_cast<unsigned int>(
         std::clamp(std::lround(static_cast<float>(value) / 15.0f) * 15, 0L, 300L));
+    if (seconds == settings_.autoSaveIntervalSeconds) {
+        // The slider moved within one snap bucket; nothing effective changed.
+        if (autoSaveSlider_->value() != static_cast<int>(settings_.autoSaveIntervalSeconds)) {
+            const QSignalBlocker block(autoSaveSlider_);
+            autoSaveSlider_->setValue(static_cast<int>(settings_.autoSaveIntervalSeconds));
+        }
+        return;
+    }
     settings::Settings candidate = settings_;
     candidate.autoSaveIntervalSeconds = seconds;
-    persist(std::move(candidate));
+    persist(std::move(candidate), /*continuation=*/autoSaveSlider_->isSliderDown());
     if (autoSaveSlider_->value() != static_cast<int>(settings_.autoSaveIntervalSeconds)) {
         const QSignalBlocker block(autoSaveSlider_);
         autoSaveSlider_->setValue(static_cast<int>(settings_.autoSaveIntervalSeconds));
