@@ -98,7 +98,8 @@ void AdoptParentConsole() {
 // session to the background writer; dirty is cleared (and the timer disarmed)
 // by the completion, only when the write succeeded for the current revision.
 // The initiating view only enqueues, so the timer never serializes a project on
-// the GUI thread.  A failure is reported once per streak through the view.
+// the GUI thread.  A failure is reported once per streak through the owning
+// view, after the manager has held it until no view is interacting.
 void AutoSaveSession(const std::shared_ptr<cnote::ProjectSession>& session, QObject* owner) {
     if (session == nullptr) {
         return;
@@ -108,6 +109,13 @@ void AutoSaveSession(const std::shared_ptr<cnote::ProjectSession>& session, QObj
         return;
     }
     controller->AutoSave();
+}
+
+void ShowAutoSaveFailure(QObject* owner, const std::string& error) {
+    auto* controller = qobject_cast<cnote::qt::QtDocumentController*>(owner);
+    if (controller != nullptr) {
+        controller->ShowAutoSaveFailure(error);
+    }
 }
 
 // macOS delivers file-open requests (Finder double-click, a file dropped on the
@@ -422,6 +430,7 @@ int main(int argc, char** argv) {
     int exitCode = 0;
     {
         manager.SetAutoSaveHandler(&AutoSaveSession);
+        manager.SetAutoSaveFailureHandler(&ShowAutoSaveFailure);
 
         // The self-check runs without an event loop or a shown window, so a
         // modal error dialog would block forever (plan 7.3 requires packaging

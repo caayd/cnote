@@ -493,7 +493,8 @@ Not verified, and not claimed as release-ready:
   window stays responsive while the project is serialized and its destination
   replaced atomically - and closing the last view waits for a write that is
   already in flight. A failed auto-save is reported once per failure streak
-  while retries continue at the interval.
+  while retries continue at the interval; a failure completing mid-interaction
+  is held until the interaction ends (and dropped if a write succeeds first).
 - The product UI is Qt 6 Widgets (Core/Gui/Widgets, dynamically linked). The
   Win32/GDI/GDI+ frontend is deleted; the only remaining raw Win32 code is
   the precision-touchpad adapter, which loads `ninput.dll` dynamically.

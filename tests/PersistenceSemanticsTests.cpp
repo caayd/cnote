@@ -435,6 +435,13 @@ void AutoSaveReportsFailureOncePerStreak() {
         ++reports;
         reportedError = reason.toStdString();
     });
+    // The shell's production dispatcher: the manager owns the streak and the
+    // interaction deferral, the view only shows the report.
+    manager.SetAutoSaveFailureHandler([&](QObject* owner, const std::string& error) {
+        if (auto* view = qobject_cast<cnote::qt::QtDocumentController*>(owner)) {
+            view->ShowAutoSaveFailure(error);
+        }
+    });
 
     controller.AutoSave();
     manager.ProjectSaves().WaitForIdle();

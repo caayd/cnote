@@ -56,6 +56,12 @@ public:
     using AutoSaveHandler = std::function<void(const std::shared_ptr<ProjectSession>&, QObject*)>;
     void SetAutoSaveHandler(AutoSaveHandler handler);
 
+    // Called once per failure streak with the view that should report it.  A
+    // completion that lands while any view of the session is interacting is
+    // held until the interaction ends; a successful write in between drops it.
+    using AutoSaveFailureHandler = std::function<void(QObject* owner, const std::string& error)>;
+    void SetAutoSaveFailureHandler(AutoSaveFailureHandler handler);
+
     // The process's one background project writer.  Every view and the
     // autosave timer submit through it, so writes run in request order and off
     // the GUI thread; the manager drains it before it is destroyed, so a quit
@@ -86,8 +92,11 @@ public:
     void NotifySaveRequested(const std::shared_ptr<ProjectSession>& session);
     // A queued write finished.  dirty itself is the controller's bookkeeping;
     // a failure re-arms the retry at one interval, a success keeps the deadline
-    // of the edits that landed after its snapshot.
+    // of the edits that landed after its snapshot and drops a held failure.
     void NotifySaveFinished(const std::shared_ptr<ProjectSession>& session, bool success);
+    // A background auto-save write failed.  Marks or holds the report (see
+    // SetAutoSaveFailureHandler); never called for a refused request.
+    void NotifyAutoSaveFailed(const std::shared_ptr<ProjectSession>& session, const std::string& error);
 
     // Last-view-close decision: true when the shell should save before closing.
     [[nodiscard]] bool ShouldSaveOnLastViewClose(const std::shared_ptr<ProjectSession>& session) const;
@@ -127,10 +136,17 @@ private:
         std::unique_ptr<QTimer> timer;
         std::optional<std::chrono::steady_clock::time_point> dirtySince;
         unsigned int pendingWrites = 0;
+        // A failure completion that arrived mid-interaction: shown when the
+        // interaction ends, unless a successful write drops it first.
+        std::optional<std::string> pendingFailure;
     };
 
     [[nodiscard]] bool AnyInteractionActive(const std::shared_ptr<ProjectSession>& session) const;
     void OnAutoSaveTimeout(ProjectSession* session);
+    void ReportDeferredFailures();
+    void ScheduleDeferredFailures();
+    void ReportAutoSaveFailure(const std::shared_ptr<ProjectSession>& session, const std::string& error);
+    [[nodiscard]] std::shared_ptr<ProjectSession> SessionFor(ProjectSession* raw) const;
     [[nodiscard]] AutoSaveState& AutoSaveStateFor(const std::shared_ptr<ProjectSession>& session);
     [[nodiscard]] long long IntervalMs() const;
     [[nodiscard]] long long RemainingMs(const AutoSaveState& state) const;
@@ -139,7 +155,11 @@ private:
 
     bool servicesInitialized_ = false;
     AutoSaveHandler autoSaveHandler_;
+    AutoSaveFailureHandler autoSaveFailureHandler_;
     std::unique_ptr<ProjectSaveQueue> projectSaves_;
+    // Single-shot sweep that shows held failure reports once every view of a
+    // session has stopped interacting.
+    std::unique_ptr<QTimer> failureReportTimer_;
     std::vector<Entry> entries_;
     std::map<ProjectSession*, AutoSaveState> autoSave_;
     unsigned int autoSaveIntervalSeconds_ = 60U;

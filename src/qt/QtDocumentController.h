@@ -75,12 +75,15 @@ public:
     // *error set - only when the request is refused up front (PDF destination).
     [[nodiscard]] bool RequestSave(const std::filesystem::path& path, std::string* error,
         SaveCompletion onDone = {});
-    // Auto-save entry: queues a write of the session's current path.  A failed
-    // write is reported through SetAutoSaveErrorHandler once per failure
-    // streak; a refused request (a PDF-backed document saved in place) is not
-    // an error.
+    // Auto-save entry: queues a write of the session's current path.  The
+    // AppManager reports a failed write once per failure streak (and holds it
+    // until no view of the session is interacting); a refused request (a
+    // PDF-backed document saved in place) is not an error.
     void AutoSave();
     void SetAutoSaveErrorHandler(std::function<void(const QString&)> handler);
+    // Called by the shell's auto-save failure dispatcher with an already
+    // deduplicated and interaction-deferred reason.
+    void ShowAutoSaveFailure(const std::string& error);
     // Saves and waits for the write to commit: the last-view close and tests
     // use this where continuing before the destination exists would lose data.
     [[nodiscard]] bool SaveTo(const std::filesystem::path& path, std::string* error);
@@ -350,7 +353,6 @@ private:
     };
 
     void NotifySessionChanged(bool originating);
-    void ReportAutoSaveFailure(const std::shared_ptr<ProjectSession>& session, const std::string& error);
     void RebuildPdfBackground();
     [[nodiscard]] std::uint64_t NextObjectId() const;
     [[nodiscard]] Page* PageAt(std::size_t pageIndex);

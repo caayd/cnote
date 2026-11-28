@@ -77,6 +77,10 @@ void AppManager::SetAutoSaveHandler(AutoSaveHandler handler) {
     autoSaveHandler_ = std::move(handler);
 }
 
+void AppManager::SetAutoSaveFailureHandler(AutoSaveFailureHandler handler) {
+    autoSaveFailureHandler_ = std::move(handler);
+}
+
 ProjectSaveQueue& AppManager::ProjectSaves() {
     if (!projectSaves_) {
         projectSaves_ = std::make_unique<ProjectSaveQueue>();
@@ -149,6 +153,107 @@ QObject* AppManager::AutoSaveOwner(const std::shared_ptr<ProjectSession>& sessio
         }
     }
     return nullptr;
+}
+
+std::shared_ptr<ProjectSession> AppManager::SessionFor(ProjectSession* raw) const {
+    for (const Entry& entry : entries_) {
+        if (entry.session.get() == raw) {
+            return entry.session;
+        }
+    }
+    return {};
+}
+
+void AppManager::NotifyAutoSaveFailed(const std::shared_ptr<ProjectSession>& session, const std::string& error) {
+    if (!session || session->autoSaveFailureReported) {
+        return;
+    }
+    const auto existing = autoSave_.find(session.get());
+    if (existing == autoSave_.end()) {
+        return;
+    }
+    AutoSaveState& state = existing->second;
+    if (state.pendingFailure) {
+        // One report per failure streak: the first failure is enough.
+        return;
+    }
+    state.pendingFailure = error;
+    if (AnyInteractionActive(session)) {
+        // A modal dialog here would take focus and the pointer grab in the
+        // middle of a stroke, drag or edit.  Hold it and re-check shortly.
+        ScheduleDeferredFailures();
+        return;
+    }
+    ReportAutoSaveFailure(session, *state.pendingFailure);
+}
+
+void AppManager::ReportAutoSaveFailure(
+    const std::shared_ptr<ProjectSession>& session, const std::string& error) {
+    const auto existing = autoSave_.find(session.get());
+    if (existing != autoSave_.end()) {
+        existing->second.pendingFailure.reset();
+    }
+    if (!session || session->autoSaveFailureReported || !autoSaveFailureHandler_) {
+        return;
+    }
+    QObject* owner = AutoSaveOwner(session);
+    if (owner == nullptr) {
+        return;
+    }
+    // Mark before showing: the report runs a nested event loop, and another
+    // failure completion must not raise a second dialog.
+    session->autoSaveFailureReported = true;
+    autoSaveFailureHandler_(owner, error);
+}
+
+void AppManager::ScheduleDeferredFailures() {
+    if (!failureReportTimer_) {
+        failureReportTimer_ = std::make_unique<QTimer>(this);
+        failureReportTimer_->setSingleShot(true);
+        QObject::connect(failureReportTimer_.get(), &QTimer::timeout, this, [this]() {
+            ReportDeferredFailures();
+        });
+    }
+    if (!failureReportTimer_->isActive()) {
+        failureReportTimer_->start(kInteractionRecheckMs);
+    }
+}
+
+void AppManager::ReportDeferredFailures() {
+    struct Ready {
+        std::shared_ptr<ProjectSession> session;
+        std::string error;
+    };
+    std::vector<Ready> ready;
+    for (auto& entry : autoSave_) {
+        AutoSaveState& state = entry.second;
+        if (!state.pendingFailure) {
+            continue;
+        }
+        std::shared_ptr<ProjectSession> session = SessionFor(entry.first);
+        if (!session) {
+            state.pendingFailure.reset();
+            continue;
+        }
+        if (AnyInteractionActive(session)) {
+            continue;
+        }
+        ready.push_back({ std::move(session), std::move(*state.pendingFailure) });
+        state.pendingFailure.reset();
+    }
+    // Collect first: a report handler runs a modal loop that can unregister
+    // views or finish writes, invalidating the map iteration above.
+    for (const Ready& item : ready) {
+        ReportAutoSaveFailure(item.session, item.error);
+    }
+    const bool waiting = std::any_of(autoSave_.begin(), autoSave_.end(), [](const auto& entry) {
+        return entry.second.pendingFailure.has_value();
+    });
+    if (waiting) {
+        ScheduleDeferredFailures();
+    } else if (failureReportTimer_) {
+        failureReportTimer_->stop();
+    }
 }
 
 void AppManager::SetAutoSaveInterval(unsigned int seconds) {
@@ -287,6 +392,11 @@ void AppManager::NotifySaveFinished(const std::shared_ptr<ProjectSession>& sessi
         return;
     }
     AutoSaveState& state = existing->second;
+    if (success) {
+        // The file is writable: a failure held for the end of an interaction
+        // must not surface after the write that fixed it.
+        state.pendingFailure.reset();
+    }
     if (state.pendingWrites > 0U) {
         --state.pendingWrites;
     }
@@ -340,13 +450,7 @@ bool AppManager::AnyInteractionActive(const std::shared_ptr<ProjectSession>& ses
 }
 
 void AppManager::OnAutoSaveTimeout(ProjectSession* session) {
-    std::shared_ptr<ProjectSession> shared;
-    for (const Entry& entry : entries_) {
-        if (entry.session.get() == session) {
-            shared = entry.session;
-            break;
-        }
-    }
+    const std::shared_ptr<ProjectSession> shared = SessionFor(session);
     const auto existing = autoSave_.find(session);
     if (!shared || existing == autoSave_.end()) {
         autoSave_.erase(session);

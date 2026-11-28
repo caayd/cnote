@@ -173,6 +173,57 @@ int main(int argc, char** argv) {
     manager.SetAutoSaveInterval(0);
     manager.UnregisterView(&otherView);
 
+    // --- an auto-save failure waits for the interaction to end ---------------
+    // The write completes on the background queue: the user may already be
+    // drawing when its failure arrives.  A modal dialog there would grab focus
+    // and the pointer mid-gesture.
+    {
+        cnote::AppManager deferred;
+        deferred.SetAutoSaveInterval(1);
+        int reports = 0;
+        deferred.SetAutoSaveFailureHandler([&](QObject*, const std::string&) { ++reports; });
+        int requests = 0;
+        deferred.SetAutoSaveHandler(
+            [&](const std::shared_ptr<cnote::ProjectSession>&, QObject*) { ++requests; });
+        auto deferredSession = MakeSession(scratch / "deferred.cnote");
+        deferredSession->dirty = true;
+        StubView deferredView;
+        deferred.RegisterView(&deferredView, &deferredView, deferredSession);
+
+        SpinFor(1400);
+        Check(requests == 1, "the autosave whose write will fail started");
+        // The background write completes after the user has begun a gesture.
+        deferredView.interactionActive = true;
+        deferred.NotifyAutoSaveFailed(deferredSession, "cannot write");
+        SpinFor(400);
+        Check(reports == 0, "an auto-save failure is not reported mid-interaction");
+        deferredView.interactionActive = false;
+        SpinFor(500);  // the 250 ms re-check reports it
+        Check(reports == 1, "the held auto-save failure is reported once the interaction ends");
+        Check(deferredSession->autoSaveFailureReported, "the deferred report marks the failure streak");
+    }
+
+    // --- a later successful write drops the held failure --------------------
+    {
+        cnote::AppManager held;
+        held.SetAutoSaveInterval(1);
+        int reports = 0;
+        held.SetAutoSaveFailureHandler([&](QObject*, const std::string&) { ++reports; });
+        auto heldSession = MakeSession(scratch / "held.cnote");
+        heldSession->dirty = true;
+        StubView heldView;
+        heldView.interactionActive = true;
+        held.RegisterView(&heldView, &heldView, heldSession);
+
+        held.NotifyAutoSaveFailed(heldSession, "cannot write");
+        Check(reports == 0, "a failure completion during an interaction is held");
+        heldSession->dirty = false;
+        held.NotifySaveFinished(heldSession, true);
+        heldView.interactionActive = false;
+        SpinFor(400);
+        Check(reports == 0, "a successful write before the interaction ends drops the held failure");
+    }
+
     // --- owner reassignment on close ----------------------------------------
     manager.UnregisterView(&first);
     Check(manager.AutoSaveOwner(session) == &second, "autosave ownership reassigns when the owner closes");

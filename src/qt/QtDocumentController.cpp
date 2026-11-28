@@ -246,14 +246,14 @@ void QtDocumentController::AutoSave() {
     if (session_ == nullptr || session_->document.FilePath().empty()) {
         return;
     }
-    QPointer<QtDocumentController> view(this);
     const std::shared_ptr<ProjectSession> saved = session_;
     static_cast<void>(RequestSave(session_->document.FilePath(), nullptr,
-        [view, saved](const SaveOutcome& outcome) {
-            if (outcome.success || view.isNull()) {
-                return;
+        [manager = &manager_, saved](const SaveOutcome& outcome) {
+            if (!outcome.success) {
+                // The manager owns the failure streak and defers the report
+                // while any view of the session is interacting.
+                manager->NotifyAutoSaveFailed(saved, outcome.error);
             }
-            view->ReportAutoSaveFailure(saved, outcome.error);
         }));
 }
 
@@ -261,16 +261,10 @@ void QtDocumentController::SetAutoSaveErrorHandler(std::function<void(const QStr
     autoSaveErrorHandler_ = std::move(handler);
 }
 
-void QtDocumentController::ReportAutoSaveFailure(
-    const std::shared_ptr<ProjectSession>& session, const std::string& error) {
-    // One dialog per failure streak: a persistently unwritable file retries at
-    // the interval without raising a modal dialog each time.  A successful
-    // write clears the flag (ApplySaveOutcome).
-    if (session == nullptr || session->autoSaveFailureReported || !autoSaveErrorHandler_) {
-        return;
+void QtDocumentController::ShowAutoSaveFailure(const std::string& error) {
+    if (autoSaveErrorHandler_) {
+        autoSaveErrorHandler_(QString::fromStdString(error));
     }
-    session->autoSaveFailureReported = true;
-    autoSaveErrorHandler_(QString::fromStdString(error));
 }
 
 bool QtDocumentController::SaveTo(const std::filesystem::path& path, std::string* error) {
