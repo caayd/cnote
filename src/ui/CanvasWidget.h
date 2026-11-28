@@ -13,6 +13,7 @@
 #include <QPointF>
 #include <QRectF>
 #include <QRegion>
+#include <QSize>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
@@ -303,6 +304,30 @@ public:
     [[nodiscard]] std::size_t PendingEraseTileBytes() const;
     [[nodiscard]] std::uint64_t PendingEraseRenderCount() const { return erasePatchRenders_; }
     [[nodiscard]] std::uint64_t PendingEraseRenderArea() const { return erasePatchRenderArea_; }
+    // Live-ink diagnostics: how many centerline points the last paint had to
+    // submit for the pending stroke (the incremental batch plus the
+    // provisional tail; the whole smoothed path when the layer does not
+    // apply), and how many bytes the live layer has copied while growing and
+    // how many growths it performed (PERF-024/PERF-025 evidence).
+    [[nodiscard]] std::uint64_t LastLiveStrokePaintPointCount() const {
+        return lastLiveStrokePaintPoints_;
+    }
+    [[nodiscard]] std::uint64_t LiveStrokeLayerCopyBytes() const { return strokeLayerCopyBytes_; }
+    [[nodiscard]] std::uint64_t LiveStrokeLayerGrowthCount() const { return strokeLayerGrowths_; }
+    [[nodiscard]] std::size_t LiveStrokeLayerBytes() const {
+        return static_cast<std::size_t>(strokeLayer_.image.sizeInBytes());
+    }
+    [[nodiscard]] QSize LiveStrokeLayerPixelSize() const { return strokeLayer_.image.size(); }
+    [[nodiscard]] std::uint64_t LiveStrokeLayerBlitBytes() const { return strokeLayerBlitBytes_; }
+    // Ghost diagnostics: vector vs raster paints and the retained ghost raster
+    // bytes (a fade tick must not paint vector geometry; PERF-024).
+    [[nodiscard]] std::uint64_t SnapGhostVectorPaintCount() const { return snapGhostVectorPaints_; }
+    [[nodiscard]] std::uint64_t SnapGhostRasterPaintCount() const { return snapGhostRasterPaints_; }
+    [[nodiscard]] std::size_t SnapGhostRasterBytes() const {
+        return snapGhost_.has_value()
+            ? static_cast<std::size_t>(snapGhost_->raster.image.sizeInBytes())
+            : 0U;
+    }
 
 signals:
     void ViewportChanged();
@@ -439,18 +464,38 @@ private:
         Vec2 consumedLast {};
         Vec2 firstPoint {};
         Vec2 rawLast {};
+        // Dotted ink: the dash pattern (pen-width units, like QPen's) and the
+        // pattern phase at lastEnd in those same units (the provisional tail
+        // continues it with QPen::setDashOffset).
+        float dashLength = 0.0f;
+        float dashGap = 0.0f;
+        float dashPhase = 0.0f;
+        // Incremental dash splitter: dashes are cut along the same flattened
+        // polyline Qt's QDashStroker walks, and each completed dash is stroked
+        // once.  Splitting at append-batch boundaries instead would leave a
+        // round cap on both sides of the seam and visibly darken its
+        // antialiased edges.
+        bool dashStarted = false;
+        bool dashOn = true;
+        double dashRemaining = 0.0;    // device px left in this dash or gap
+        std::vector<Vec2> openDash;    // page units of the unfinished on-dash
+        // Raw points this Sync consumed (diagnostics: steady-state appends
+        // consume a sample or two, not the whole stroke).
+        std::size_t lastSyncRawPoints = 0;
         IncrementalStrokeSmoother smoother;
     };
 
     // Keeps the live-stroke layer in sync with the pending stroke's stabilized
     // path (`path`, liveStroke_) and reports whether it applies (false:
-    // caller falls back to PaintStrokePreview - dotted strokes, replaced
-    // point lists mid-rebuild, allocation failure).
+    // caller falls back to PaintStrokePreview - replaced point lists
+    // mid-rebuild, or allocation failure).
     bool SyncStrokeLayer(const Stroke& stroke, const InkPath& path, const CanvasPageView& view);
     void ResetStrokeLayer();
     // Draws the provisional tail (the smoothed segments that still change as
-    // points arrive) on top of the layer at widget scale.
-    void PaintStrokeTail(QPainter& painter, const Stroke& stroke, const InkPath& path, const CanvasPageView& view);
+    // points arrive) on top of the layer at widget scale.  Returns the number
+    // of centerline points it painted (diagnostics).
+    std::size_t PaintStrokeTail(QPainter& painter, const Stroke& stroke, const InkPath& path,
+        const CanvasPageView& view);
 
     [[nodiscard]] render::PageRenderParams RenderParamsFor(const CanvasPageView& view) const;
     // Finds the cached entry for exactly this scale/DPR, if any.
@@ -762,11 +807,30 @@ private:
         std::size_t pageIndex = 0;
         Stroke stroke;
         std::optional<std::int64_t> releasedAt;
+        // The stroke's dirty bounds, inflated by the pen extent, cached so a
+        // fade tick does not rescan every point (PERF-024).
+        QRectF pageBounds {};
+        bool boundsValid = false;
+        // The fixed geometry rasterized once per view scale/DPR; a fade tick
+        // only blits it at the current opacity.  `rasterFailed` remembers a
+        // refused/failed allocation for that key so it is not retried every
+        // 16 ms frame.
+        render::StrokePreviewRaster raster;
+        bool rasterFailed = false;
+        float rasterKeyScale = 0.0f;
+        float rasterKeyDevicePixelRatio = 0.0f;
+        float rasterKeySmoothing = 0.0f;
+        float rasterKeyDashLength = 0.0f;
+        float rasterKeyDashGap = 0.0f;
     };
     std::optional<SnapGhost> snapGhost_;
     QElapsedTimer snapGhostClock_ {};
     QTimer* snapGhostTimer_ = nullptr;
     [[nodiscard]] float SnapGhostOpacity() const;
+    // Ensures the ghost raster matches this view's scale/DPR.  False means the
+    // bounds are over the raster budget (or allocation failed): the caller
+    // paints the vector instead, as before.
+    bool EnsureSnapGhostRaster(const CanvasPageView& view);
     void RepaintSnapGhost();
     // The pointer lifted (`fade`: the shape was committed) or the stroke was
     // cancelled (the ghost goes at once).  A ghost already fading is left be.
@@ -865,6 +929,16 @@ private:
     // fade patch has rendered, cumulative over the widget's life.
     std::uint64_t erasePatchRenders_ = 0;
     std::uint64_t erasePatchRenderArea_ = 0;
+    // Live-ink work counters (PERF-024/PERF-025): centerline points submitted
+    // by the last pending-stroke paint, and the live layer's growth copies.
+    std::uint64_t lastLiveStrokePaintPoints_ = 0;
+    std::uint64_t strokeLayerCopyBytes_ = 0;
+    std::uint64_t strokeLayerGrowths_ = 0;
+    std::uint64_t strokeLayerBlitBytes_ = 0;
+    // Ghost fade paints that fell back to vector geometry instead of the
+    // retained raster.
+    std::uint64_t snapGhostVectorPaints_ = 0;
+    std::uint64_t snapGhostRasterPaints_ = 0;
 
     static constexpr std::size_t kScalesPerPage = 3;
 };

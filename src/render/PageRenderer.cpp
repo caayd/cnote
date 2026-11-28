@@ -466,6 +466,96 @@ void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRende
     painter.restore();
 }
 
+std::optional<StrokePreviewRaster> RenderStrokePreviewRaster(
+    const Stroke& stroke, const PageRenderParams& params, RasterBudget budget) {
+    if (stroke.points.empty()) {
+        return std::nullopt;
+    }
+    const float deviceScale = std::max(0.01f, params.scale) * std::max(0.01f, params.devicePixelRatio);
+    float minX = stroke.points.front().x;
+    float minY = stroke.points.front().y;
+    float maxX = minX;
+    float maxY = minY;
+    for (const Vec2& point : stroke.points) {
+        if (!std::isfinite(point.x) || !std::isfinite(point.y)) {
+            return std::nullopt;
+        }
+        minX = std::min(minX, point.x);
+        minY = std::min(minY, point.y);
+        maxX = std::max(maxX, point.x);
+        maxY = std::max(maxY, point.y);
+    }
+    // The smoothed centerline stays inside the raw points' convex hull, so the
+    // raw bounds plus the widest pen (pressure ink at 1.6x is still narrower
+    // than style.width) and an antialiasing band cover every painted pixel.
+    // The band is two device pixels, so a zoomed-out view (tiny deviceScale)
+    // still retains its antialiased edge.
+    const float margin = stroke.style.width * 0.5f + 2.0f + (2.0f / deviceScale);
+    const double left = std::floor(static_cast<double>(minX - margin) * deviceScale);
+    const double top = std::floor(static_cast<double>(minY - margin) * deviceScale);
+    const double right = std::ceil(static_cast<double>(maxX + margin) * deviceScale);
+    const double bottom = std::ceil(static_cast<double>(maxY + margin) * deviceScale);
+    if (!std::isfinite(left) || !std::isfinite(top) || !std::isfinite(right) || !std::isfinite(bottom)) {
+        return std::nullopt;
+    }
+    // Compare in doubles first: converting an absurd coordinate range to an
+    // integer would be undefined before the budget could reject it.
+    const double widthPx = right - left;
+    const double heightPx = bottom - top;
+    if (!(widthPx > 0.0) || !(heightPx > 0.0)
+        || widthPx > static_cast<double>(budget.maxDimension)
+        || heightPx > static_cast<double>(budget.maxDimension)
+        || widthPx * heightPx * 4.0 > static_cast<double>(budget.maxSurfaceBytes)) {
+        return std::nullopt;
+    }
+    const int width = static_cast<int>(widthPx);
+    const int height = static_cast<int>(heightPx);
+    StrokePreviewRaster raster;
+    raster.image = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
+    if (raster.image.isNull()) {
+        return std::nullopt;
+    }
+    raster.image.fill(Qt::transparent);
+    QPainter painter(&raster.image);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    PageRenderParams deviceParams = params;
+    deviceParams.scale = deviceScale;
+    deviceParams.devicePixelRatio = 1.0f;
+    if (params.textPixelRatio.has_value()) {
+        deviceParams.textPixelRatio = *params.textPixelRatio * params.devicePixelRatio;
+    }
+    painter.translate(-left, -top);
+    PaintStrokePreview(painter, stroke, deviceParams, 1.0f);
+    painter.end();
+    raster.pageRect = QRectF(
+        static_cast<qreal>(left) / deviceScale,
+        static_cast<qreal>(top) / deviceScale,
+        static_cast<qreal>(width) / deviceScale,
+        static_cast<qreal>(height) / deviceScale);
+    raster.deviceScale = deviceScale;
+    raster.devicePixelRatio = params.devicePixelRatio;
+    return raster;
+}
+
+void PaintStrokePreviewRaster(QPainter& painter, const StrokePreviewRaster& raster,
+    const PageRenderParams& params, float opacity) {
+    if (raster.image.isNull()) {
+        return;
+    }
+    const qreal dpr = params.devicePixelRatio > 0.0f ? params.devicePixelRatio : 1.0;
+    painter.save();
+    painter.setOpacity(std::clamp(opacity, 0.0f, 1.0f));
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    painter.drawImage(
+        QRectF(
+            static_cast<qreal>(raster.pageRect.x() * params.scale),
+            static_cast<qreal>(raster.pageRect.y() * params.scale),
+            static_cast<qreal>(raster.image.width()) / dpr,
+            static_cast<qreal>(raster.image.height()) / dpr),
+        raster.image);
+    painter.restore();
+}
+
 QImage WrapBgraImage(const std::uint8_t* pixels, int width, int height, int stride) {
     if (pixels == nullptr || width <= 0 || height <= 0) {
         return {};
