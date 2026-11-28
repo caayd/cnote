@@ -3692,8 +3692,8 @@ bool CanvasWidget::BeginTransform(const TransformRequest& request) {
     }
     transformSession_ = TransformSession { request.handle, *from, request.pressLogical };
     // Same one-transaction-per-gesture machinery as the selection move: the
-    // controller snapshots the page and CommitTransform records one
-    // ReplacePages action.
+    // controller captures the affected objects and CommitTransform records one
+    // object-delta history action.
     controller_.BeginPageGesture(request.pageIndex);
     BeginGestureOverlay(request.pageIndex, true);
     return true;

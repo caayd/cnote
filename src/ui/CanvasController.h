@@ -160,8 +160,9 @@ public:
     virtual bool RemoveSelection() = 0;
     virtual void SetCurrentPageIndex(std::size_t index) = 0;
 
-    // One transaction per gesture: snapshot on begin, one ReplacePages action on
-    // commit, restore on cancel.
+    // One transaction per gesture: only the affected objects are captured, one
+    // object-delta history action is recorded on commit, and cancel restores
+    // them.
     virtual void BeginPageGesture(std::size_t pageIndex) = 0;
     virtual void CommitPageGesture() = 0;
     virtual void CancelPageGesture() = 0;
@@ -170,7 +171,7 @@ public:
     // Duplicates every selected object on `pageIndex` in place (new ids for
     // texts/LaTeX) and repoints the selection at the clones. Must be called
     // inside an open page gesture so the clone plus the drag that follows it
-    // commits as one ReplacePages action (the Alt-drag move path); false when
+    // commits as one history action (the Alt-drag move path); false when
     // nothing was cloned.
     virtual bool CloneSelection(std::size_t pageIndex) = 0;
     // One affine transform of the whole selection on `pageIndex`, applied on top

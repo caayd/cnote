@@ -1129,6 +1129,195 @@ void MovePagesUndoRedoKeepsOrderAndViewedPage() {
     Check(widths() == moved, "refused moves change nothing");
 }
 
+// Every object gesture must record only its affected objects and reproduce the
+// exact page on undo and redo (page epochs included), with no whole-page
+// snapshot left in history.
+void ObjectGesturesUndoRedoExactly() {
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    cnote::Page& page = controller.Session()->document.CurrentPage();
+    cnote::Stroke stroke;
+    stroke.points = { { 10.0f, 10.0f }, { 60.0f, 40.0f } };
+    page.strokes.push_back(stroke);
+    cnote::PageImage image;
+    image.x = 100.0f;
+    image.y = 100.0f;
+    image.width = 40.0f;
+    image.height = 20.0f;
+    page.images.push_back(image);
+    page.texts.push_back(MakeText(7, u"gesture text"));
+    cnote::PageLatex latex;
+    latex.id = 8;
+    latex.x = 200.0f;
+    latex.y = 200.0f;
+    latex.content = u"x^2 + y^2";
+    page.latexes.push_back(latex);
+
+    const auto runGesture = [&](const std::string& what, auto&& gesture) {
+        const cnote::Page before = controller.Session()->document.CurrentPage();
+        const std::uint64_t epochBefore = controller.Session()->document.PageEpoch(0);
+        gesture();
+        const cnote::Page after = controller.Session()->document.CurrentPage();
+        Check(!cnote::PageEqual(before, after), what + " changes the page");
+        Check(controller.Session()->undoActions.size() == 1U
+                && controller.Session()->undoActions.back().type == cnote::HistoryActionType::ReplaceObjects,
+            what + " records one object delta");
+        const cnote::HistoryAction& action = controller.Session()->undoActions.back();
+        Check(action.pages.empty() && action.replacementPages.empty(),
+            what + " keeps no whole-page snapshot");
+        Check(controller.Session()->document.PageEpoch(0) != epochBefore,
+            what + " bumps the page epoch");
+        Check(controller.Undo(), what + " undoes");
+        Check(cnote::PageEqual(controller.Session()->document.CurrentPage(), before),
+            what + " undo restores the exact page");
+        Check(controller.Redo(), what + " redoes");
+        Check(cnote::PageEqual(controller.Session()->document.CurrentPage(), after),
+            what + " redo restores the exact page");
+        Check(controller.Undo(), what + " returns to the start state");
+    };
+
+    runGesture("move", [&]() {
+        cnote::ui::PageSelection selection;
+        selection.strokes.push_back(0);
+        controller.SelectObjects(0, selection);
+        controller.BeginPageGesture(0);
+        controller.MoveSelectionBy(0, cnote::Vec2 { 5.0f, 4.0f });
+        controller.CommitPageGesture();
+    });
+    runGesture("transform", [&]() {
+        cnote::ui::PageSelection selection;
+        selection.texts.push_back(0);
+        controller.SelectObjects(0, selection);
+        const cnote::text::QtTextBounds bounds =
+            cnote::text::MeasurePageTextBoundsQt(page.texts[0], page.width);
+        cnote::ui::SelectionTransform transform;
+        transform.from = cnote::ui::SelectionBounds { bounds.left, bounds.top, bounds.right, bounds.bottom, true };
+        transform.to = transform.from;
+        transform.to.left += 15.0f;
+        transform.to.right += 15.0f;
+        transform.to.top += 10.0f;
+        transform.to.bottom += 10.0f;
+        controller.BeginPageGesture(0);
+        controller.TransformSelection(0, transform);
+        controller.CommitPageGesture();
+    });
+    runGesture("recolor", [&]() {
+        cnote::ui::PageSelection selection;
+        selection.strokes.push_back(0);
+        selection.texts.push_back(0);
+        selection.latexes.push_back(0);
+        controller.SelectObjects(0, selection);
+        static_cast<void>(controller.RecolorSelection(0xFF00FF00U));
+    });
+    runGesture("erase", [&]() {
+        controller.CommitErase(0, { cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Stroke, 0U },
+                                      cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Text, 0U } });
+    });
+    runGesture("clone", [&]() {
+        cnote::ui::PageSelection selection;
+        selection.strokes.push_back(0);
+        selection.texts.push_back(0);
+        controller.SelectObjects(0, selection);
+        controller.BeginPageGesture(0);
+        Check(controller.CloneSelection(0), "the clone gesture duplicates the selection");
+        controller.CommitPageGesture();
+    });
+}
+
+std::size_t StrokeStorageBytes(const cnote::Stroke& stroke) {
+    return sizeof(cnote::Stroke)
+        + stroke.points.capacity() * sizeof(cnote::Vec2)
+        + stroke.pressures.capacity() * sizeof(float);
+}
+
+std::size_t PageStorageBytes(const cnote::Page& page) {
+    std::size_t bytes = sizeof(cnote::Page);
+    for (const cnote::Stroke& stroke : page.strokes) {
+        bytes += StrokeStorageBytes(stroke);
+    }
+    bytes += page.images.size() * sizeof(cnote::PageImage);
+    for (const cnote::PageText& text : page.texts) {
+        bytes += sizeof(cnote::PageText) + text.content.capacity() * sizeof(char16_t);
+    }
+    for (const cnote::PageLatex& latex : page.latexes) {
+        bytes += sizeof(cnote::PageLatex) + latex.content.capacity() * sizeof(char16_t);
+    }
+    return bytes;
+}
+
+std::size_t ObjectSetStorageBytes(const cnote::PageObjectSet& objects) {
+    std::size_t bytes = (objects.strokeIndices.capacity() + objects.imageIndices.capacity()
+                            + objects.textIndices.capacity() + objects.latexIndices.capacity())
+        * sizeof(std::size_t);
+    for (const cnote::Stroke& stroke : objects.strokes) {
+        bytes += StrokeStorageBytes(stroke);
+    }
+    bytes += objects.images.size() * sizeof(cnote::PageImage);
+    for (const cnote::PageText& text : objects.texts) {
+        bytes += sizeof(cnote::PageText) + text.content.capacity() * sizeof(char16_t);
+    }
+    for (const cnote::PageLatex& latex : objects.latexes) {
+        bytes += sizeof(cnote::PageLatex) + latex.content.capacity() * sizeof(char16_t);
+    }
+    return bytes;
+}
+
+std::size_t RetainedHistoryBytes(const cnote::ProjectSession& session) {
+    std::size_t bytes = 0;
+    for (const cnote::HistoryAction& action : session.undoActions) {
+        bytes += sizeof(cnote::HistoryAction);
+        for (const cnote::Page& page : action.pages) {
+            bytes += PageStorageBytes(page);
+        }
+        for (const cnote::Page& page : action.replacementPages) {
+            bytes += PageStorageBytes(page);
+        }
+        bytes += ObjectSetStorageBytes(action.beforeObjects) + ObjectSetStorageBytes(action.afterObjects);
+    }
+    return bytes;
+}
+
+// One moved object must retain that object per gesture, not the page it lives
+// on: the same repeated move on an ink-heavy page used to keep two full Page
+// snapshots per action, so retained bytes grew with the page.
+void ObjectGestureHistoryDoesNotScaleWithPageSize() {
+    const auto measure = [](std::size_t strokeCount) {
+        cnote::AppManager manager;
+        cnote::qt::QtDocumentController controller(manager);
+        controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+        cnote::Page& page = controller.Session()->document.CurrentPage();
+        for (std::size_t index = 0; index < strokeCount; ++index) {
+            cnote::Stroke stroke;
+            const float offset = static_cast<float>(index) * 4.0f;
+            stroke.points = { { 10.0f + offset, 10.0f }, { 30.0f + offset, 25.0f } };
+            page.strokes.push_back(stroke);
+        }
+        cnote::ui::PageSelection selection;
+        selection.strokes.push_back(0);
+        controller.SelectObjects(0, selection);
+        for (int move = 0; move < 5; ++move) {
+            controller.BeginPageGesture(0);
+            controller.MoveSelectionBy(0, cnote::Vec2 { 2.0f, 1.0f });
+            controller.CommitPageGesture();
+        }
+        for (const cnote::HistoryAction& action : controller.Session()->undoActions) {
+            if (action.type != cnote::HistoryActionType::ReplaceObjects
+                || action.beforeObjects.strokes.size() != 1U
+                || action.afterObjects.strokes.size() != 1U) {
+                return std::size_t { 0 };
+            }
+        }
+        return RetainedHistoryBytes(*controller.Session());
+    };
+
+    const std::size_t small = measure(8);
+    const std::size_t large = measure(400);
+    std::printf("HISTORY-BYTES small-page=%zu large-page=%zu\n", small, large);
+    Check(small > 0U, "repeated one-object moves retain their affected stroke");
+    Check(large == small, "retained history bytes do not grow with the page's object count");
+}
+
 // Version 18 strokes store raw samples, the StrokeSampling they render with
 // and their pen pressures.  A version-17 stroke has no pressures (constant
 // width); a version-16 one stored already-stabilized points, which must read
@@ -1236,6 +1425,8 @@ int main(int argc, char** argv) {
     SetCurrentPageIndexIsSerialized();
     PageClipboardActsOnSeveralPages();
     MovePagesUndoRedoKeepsOrderAndViewedPage();
+    ObjectGesturesUndoRedoExactly();
+    ObjectGestureHistoryDoesNotScaleWithPageSize();
     StrokeFormatRoundTripsAndLegacyReads();
 
     if (gFailures != 0) {

@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 
 #include <QObject>
@@ -92,8 +93,9 @@ public:
     void AddToSelection(std::size_t pageIndex, ui::PageSelection selection) override;
     void SetCurrentPageIndex(std::size_t index) override;
 
-    // One transaction per gesture: the page is snapshotted when the gesture
-    // starts and a single ReplacePages action records before/after on commit.
+    // One transaction per gesture: only the objects the gesture touches are
+    // snapshotted and recorded (a ReplaceObjects history action), so a
+    // one-object move costs that object's state instead of the whole page.
     void BeginPageGesture(std::size_t pageIndex) override;
     void CommitPageGesture() override;
     void CancelPageGesture() override;
@@ -104,8 +106,8 @@ public:
     void MoveSelectionBy(std::size_t pageIndex, Vec2 delta) override;
     // Alt-drag move: duplicates the selected objects on `pageIndex` in place
     // inside the open gesture (new ids for texts/LaTeX), repoints the
-    // selection at the clones and marks the gesture changed so the commit
-    // records the clone even without a drag. False when nothing was selected.
+    // selection at the clones and records the clones as insertions, so the
+    // commit keeps them even without a drag. False when nothing was selected.
     bool CloneSelection(std::size_t pageIndex) override;
     // Whole-selection affine transform for a resize/rotate gesture: restores
     // the gesture snapshot first, so `transform` is absolute, not cumulative.
@@ -275,11 +277,15 @@ private:
         PageLatex latexBefore {};
     };
 
-    // One in-progress page gesture: the page snapshot a commit records as a
-    // ReplacePages action, plus the per-gesture bounds cache for
-    // MoveSelectionBy (each selected object's bounds are measured once and
-    // then translated by the applied delta, so a move event costs O(1) per
-    // object instead of re-measuring strokes/text/LaTeX on every sample).
+    // One in-progress page gesture.  Only the objects the gesture touches are
+    // snapshotted, and CommitPageGesture records just those as one
+    // ReplaceObjects action, so retained history is O(affected objects) rather
+    // than O(page).  The four `before` maps hold the pre-gesture state of
+    // objects mutated in place; `removed` holds objects an eraser deletes (the
+    // pre-removal index is the key) and `inserted` the indices an Alt-drag
+    // clone appends.  The move bounds cache lets MoveSelectionBy measure each
+    // selected object once and translate by the applied delta, so a move
+    // sample costs O(1) per object instead of re-measuring strokes/text/LaTeX.
     struct PageGesture {
         struct MoveBounds {
             bool built = false;
@@ -289,8 +295,18 @@ private:
             std::vector<ui::SelectionBounds> latexes;
         };
         std::size_t pageIndex = 0;
-        Page before {};
-        bool changed = false;
+        std::map<std::size_t, Stroke> beforeStrokes {};
+        std::map<std::size_t, PageImage> beforeImages {};
+        std::map<std::size_t, PageText> beforeTexts {};
+        std::map<std::size_t, PageLatex> beforeLatexes {};
+        std::map<std::size_t, Stroke> removedStrokes {};
+        std::map<std::size_t, PageImage> removedImages {};
+        std::map<std::size_t, PageText> removedTexts {};
+        std::map<std::size_t, PageLatex> removedLatexes {};
+        std::set<std::size_t> insertedStrokes {};
+        std::set<std::size_t> insertedImages {};
+        std::set<std::size_t> insertedTexts {};
+        std::set<std::size_t> insertedLatexes {};
         MoveBounds moveBounds {};
     };
 
@@ -314,9 +330,9 @@ private:
     // it.  `commitOpenEdit` finishes a live edit with the overlay's captured
     // content (a remote commit passes false: its snapshot and object may
     // already be stale, so it must be dropped, never written back).
-    // `restoreGesture` puts an in-progress gesture's page snapshot back (local
-    // abort); a remote commit drops it without restoring, because the snapshot
-    // predates the other view's committed change.
+    // `restoreGesture` puts an in-progress gesture's mutated objects back (local
+    // abort); a remote commit drops it without restoring, because its captured
+    // objects predate the other view's committed change.
     void AbortTransientState(bool commitOpenEdit = true, bool restoreGesture = true);
     // Commits (or, without an edit-content source, cancels) the live edit.
     void FinishOpenEdit();
@@ -325,11 +341,14 @@ private:
     void NoteCommitted();
     // Pushes `action`, drops the redo stack and runs the shared tail.
     void RecordCommit(HistoryAction action);
-    void MarkGestureChanged() {
-        if (gesture_.has_value()) {
-            gesture_->changed = true;
-        }
-    }
+    // Captures the pre-gesture state of every selected object the gesture may
+    // mutate.  Idempotent: an object already captured (or appended by this
+    // gesture's clone) keeps its first snapshot.
+    void CaptureGestureSelection(const Page& page, const ui::PageSelection& selection);
+    // Builds the delta of everything this gesture changed from the current
+    // page, or nullopt when nothing changed (or the page is gone).  Compares
+    // only captured/inserted/removed objects, never the whole page.
+    [[nodiscard]] std::optional<HistoryAction> BuildPageGestureAction() const;
 
     AppManager& manager_;
     std::shared_ptr<ProjectSession> session_;

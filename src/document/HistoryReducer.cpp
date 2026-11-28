@@ -39,7 +39,139 @@ std::vector<std::size_t> PagePositions(const HistoryAction& action) {
     return positions;
 }
 
+bool SortedUniqueIndices(const std::vector<std::size_t>& indices) {
+    return std::is_sorted(indices.begin(), indices.end())
+        && std::adjacent_find(indices.begin(), indices.end()) == indices.end();
+}
+
+// Moves one kind's vector from the `from` side to the `to` side of an object
+// delta. Indices present on one side only are inserted (to) or removed (from);
+// indices on both sides are updated in place through `locate`, which finds the
+// object that `from` identifies (an index for strokes/images, an id for
+// text/LaTeX). `apply == false` only validates; the action's contract requires
+// a failure to leave the page untouched, so every kind is validated before any
+// kind is mutated.
+template <typename T, typename Locate>
+bool ApplyObjectKind(std::vector<T>& objects,
+    const std::vector<std::size_t>& fromIndices,
+    const std::vector<T>& fromObjects,
+    const std::vector<std::size_t>& toIndices,
+    const std::vector<T>& toObjects,
+    Locate&& locate,
+    bool apply) {
+    if (fromIndices.size() != fromObjects.size() || toIndices.size() != toObjects.size()
+        || !SortedUniqueIndices(fromIndices) || !SortedUniqueIndices(toIndices)) {
+        return false;
+    }
+
+    std::vector<std::size_t> removals;
+    std::vector<std::size_t> insertions;
+    std::vector<std::size_t> updateFrom;
+    std::vector<std::size_t> updateTo;
+    std::size_t from = 0;
+    std::size_t to = 0;
+    while (from < fromIndices.size() || to < toIndices.size()) {
+        if (to == toIndices.size()
+            || (from < fromIndices.size() && fromIndices[from] < toIndices[to])) {
+            removals.push_back(fromIndices[from]);
+            ++from;
+        } else if (from == fromIndices.size() || toIndices[to] < fromIndices[from]) {
+            insertions.push_back(toIndices[to]);
+            ++to;
+        } else {
+            updateFrom.push_back(from);
+            updateTo.push_back(to);
+            ++from;
+            ++to;
+        }
+    }
+    // A gesture either updates existing objects, inserts new ones (`after`
+    // only) or removes them (`before` only); the two shapes never mix.
+    if (!updateFrom.empty() && (!removals.empty() || !insertions.empty())) {
+        return false;
+    }
+    if (!removals.empty() && !insertions.empty()) {
+        return false;
+    }
+
+    for (const std::size_t index : removals) {
+        if (index >= objects.size()) {
+            return false;
+        }
+    }
+    std::size_t size = objects.size();
+    for (const std::size_t index : insertions) {
+        if (index > size) {
+            return false;
+        }
+        ++size;
+    }
+    std::vector<std::size_t> updateIndices;
+    updateIndices.reserve(updateFrom.size());
+    for (std::size_t update = 0; update < updateFrom.size(); ++update) {
+        const std::optional<std::size_t> location = locate(
+            fromIndices[updateFrom[update]], fromObjects[updateFrom[update]]);
+        if (!location.has_value() || *location >= objects.size()) {
+            return false;
+        }
+        updateIndices.push_back(*location);
+    }
+    if (!apply) {
+        return true;
+    }
+
+    for (auto index = removals.rbegin(); index != removals.rend(); ++index) {
+        objects.erase(objects.begin() + static_cast<std::ptrdiff_t>(*index));
+    }
+    for (const std::size_t index : insertions) {
+        const auto position = std::lower_bound(toIndices.begin(), toIndices.end(), index);
+        const std::size_t object = static_cast<std::size_t>(position - toIndices.begin());
+        objects.insert(objects.begin() + static_cast<std::ptrdiff_t>(index), toObjects[object]);
+    }
+    for (std::size_t update = 0; update < updateFrom.size(); ++update) {
+        objects[updateIndices[update]] = toObjects[updateTo[update]];
+    }
+    return true;
+}
+
 }  // namespace
+
+bool ApplyPageObjectDelta(Page& page, const PageObjectSet& before, const PageObjectSet& after, bool undo) {
+    const PageObjectSet& from = undo ? after : before;
+    const PageObjectSet& to = undo ? before : after;
+    const auto byIndex = [](std::size_t index, const auto&) {
+        return std::optional<std::size_t>(index);
+    };
+    const auto textById = [&page](std::size_t, const PageText& object) {
+        return FindTextIndexById(page, object.id);
+    };
+    const auto latexById = [&page](std::size_t, const PageLatex& object) {
+        return FindLatexIndexById(page, object.id);
+    };
+
+    const bool fits =
+        ApplyObjectKind(page.strokes, from.strokeIndices, from.strokes,
+            to.strokeIndices, to.strokes, byIndex, false)
+        && ApplyObjectKind(page.images, from.imageIndices, from.images,
+            to.imageIndices, to.images, byIndex, false)
+        && ApplyObjectKind(page.texts, from.textIndices, from.texts,
+            to.textIndices, to.texts, textById, false)
+        && ApplyObjectKind(page.latexes, from.latexIndices, from.latexes,
+            to.latexIndices, to.latexes, latexById, false);
+    if (!fits) {
+        return false;
+    }
+
+    ApplyObjectKind(page.strokes, from.strokeIndices, from.strokes,
+        to.strokeIndices, to.strokes, byIndex, true);
+    ApplyObjectKind(page.images, from.imageIndices, from.images,
+        to.imageIndices, to.images, byIndex, true);
+    ApplyObjectKind(page.texts, from.textIndices, from.texts,
+        to.textIndices, to.texts, textById, true);
+    ApplyObjectKind(page.latexes, from.latexIndices, from.latexes,
+        to.latexIndices, to.latexes, latexById, true);
+    return true;
+}
 
 bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool undo) {
     switch (action.type) {
@@ -165,6 +297,17 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
         for (std::size_t offset = 0; offset < positions.size(); ++offset) {
             document.InsertPage(positions[offset], action.pages[offset]);
         }
+        return true;
+    }
+    case HistoryActionType::ReplaceObjects: {
+        if (action.pageIndex >= document.PageCount()) {
+            return false;
+        }
+        Page& page = document.PageAt(action.pageIndex);
+        if (!ApplyPageObjectDelta(page, action.beforeObjects, action.afterObjects, undo)) {
+            return false;
+        }
+        document.TouchPage(action.pageIndex);
         return true;
     }
     case HistoryActionType::ReplacePages: {
