@@ -268,11 +268,12 @@ PageTextStyle TextStyleFromEditor(const QTextEdit* editor) {
     return style;
 }
 
-// Fields whose consumers read the live settings model themselves, so a dialog
-// edit does not need ApplySettingsToShell: the auto-save timer (when wired),
-// PDF export, the new-page dialog and the recents menu.  Shortcut sequences are
-// handled by RefreshShortcutBindings instead.  Every other field is compared,
-// so a newly added Settings field reapplies the shell by default.
+// Fields whose consumers do not need ApplySettingsToShell: the auto-save
+// interval is pushed to the AppManager (which owns every session's timer) by
+// the settings-changed handler, and PDF export, the new-page dialog and the
+// recents menu read the live model themselves.  Shortcut sequences are handled
+// by RefreshShortcutBindings instead.  Every other field is compared, so a
+// newly added Settings field reapplies the shell by default.
 void NeutralizeShellIrrelevant(settings::Settings& settings) {
     settings.savedPalettes.clear();
     settings.paletteIndex = 0;
@@ -304,6 +305,9 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
     // the document's file name once the session exists.
     setWindowTitle(QStringLiteral("cnote"));
     settings_ = settingsStore_.Load();
+    // Auto-save is app-wide: the manager owns the interval every session
+    // follows.  A window created later loads the same stored value.
+    manager_.SetAutoSaveInterval(settings_.autoSaveIntervalSeconds);
 #if defined(Q_OS_WIN)
     // An alpha backing store, so the canvas can leave its backdrop to the DWM
     // (settings canvas_backdrop).  Qt only honours this before the native
@@ -321,6 +325,9 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
     // (Undo/Redo, a remote commit, session replacement) capture the typed text
     // through it instead of committing an empty value.
     controller_.SetEditContentSource(canvas_);
+    controller_.SetAutoSaveErrorHandler([this](const QString& reason) {
+        ReportError(QStringLiteral("Could not auto-save: %1").arg(reason));
+    });
     contentLayout_->addWidget(canvas_);
     setCentralWidget(content_);
 
@@ -1164,18 +1171,43 @@ void QtMainWindow::ToggleSettingsDialog() {
             if (shortcutsChanged) {
                 RefreshShortcutBindings();
             }
+            // Auto-save is app-wide; the manager re-arms every open session.
+            // NeutralizeShellIrrelevant keeps this field out of the shell diff
+            // above, so push it here.  Comparing against the manager (not the
+            // window's appliedSettings_) keeps the value correct when another
+            // window was the last editor.
+            if (manager_.AutoSaveInterval() != settings_.autoSaveIntervalSeconds) {
+                manager_.SetAutoSaveInterval(settings_.autoSaveIntervalSeconds);
+            }
             UpdateChrome();
-            // The app preset is global across open windows, while each
-            // controller resolves its project's explicit override separately.
+            // The app preset and the auto-save interval are global across open
+            // windows, while each controller resolves its project's explicit
+            // page-size override separately.  Keep the other windows' models in
+            // step so a later unrelated edit there cannot push a stale value
+            // back into the manager or the store.
             for (QWidget* widget : QApplication::topLevelWidgets()) {
                 auto* window = qobject_cast<QtMainWindow*>(widget);
-                if (window != nullptr && window != this
-                    && window->settings_.defaultPageSizePreset != settings_.defaultPageSizePreset) {
+                if (window == nullptr || window == this) {
+                    continue;
+                }
+                bool shellChanged = false;
+                bool dialogChanged = false;
+                if (window->settings_.defaultPageSizePreset != settings_.defaultPageSizePreset) {
                     window->settings_.defaultPageSizePreset = settings_.defaultPageSizePreset;
+                    shellChanged = true;
+                    dialogChanged = true;
+                }
+                if (window->settings_.autoSaveIntervalSeconds != settings_.autoSaveIntervalSeconds) {
+                    window->settings_.autoSaveIntervalSeconds = settings_.autoSaveIntervalSeconds;
+                    dialogChanged = true;
+                }
+                if (shellChanged) {
                     window->ApplySettingsToShell();
-                    if (window->settingsDialog_ != nullptr) {
-                        window->settingsDialog_->refreshFromSettings();
-                    }
+                }
+                if (dialogChanged && window->settingsDialog_ != nullptr) {
+                    window->settingsDialog_->refreshFromSettings();
+                }
+                if (shellChanged) {
                     window->UpdateChrome();
                 }
             }

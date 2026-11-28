@@ -53,11 +53,13 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QEventLoop>
 #include <QMessageBox>
 #include <QAbstractButton>
 #include <QPainter>
 #include <QPdfWriter>
 #include <QPageSize>
+#include <QSlider>
 #include <QString>
 #include <QTimer>
 
@@ -174,8 +176,6 @@ void SuccessfulSaveClearsDirtyAndStopsAutoSave() {
     session->document = MakeProject(u"saved");
     session->document.SetFilePath(target);
     session->dirty = true;
-    session->autoSaveIntervalSeconds = 60U;
-    manager.SetSessionAutoSaveInterval(session, 60U);
     manager.UpdateAutoSaveTimer(session);
     Check(manager.IsAutoSaveTimerActive(session), "a dirty saved session arms the autosave timer");
 
@@ -370,6 +370,143 @@ void DefaultPageSizePrecedence() {
         "a hidden old page-settings draft cannot override a new project's preset");
 }
 
+void AutoSaveIntervalFollowsSettings() {
+    const std::filesystem::path dir = MakeTempDir("autosave-settings");
+    cnote::settings::SettingsStoreQt::OverrideSettingsPath(dir / "settings.ini");
+    cnote::settings::Settings settings;
+    settings.autoSaveIntervalSeconds = 0U;
+    cnote::settings::SettingsStoreQt store;
+    Check(store.Save(settings), "persist Off before opening the windows");
+    // Restore the process-wide override: the close-failure tests below need a
+    // real modal box to answer.
+    const bool headless = cnote::qt::QtMainWindow::HeadlessModals();
+    cnote::qt::QtMainWindow::SetHeadlessModals(true);
+
+    cnote::AppManager manager;
+    cnote::qt::QtMainWindow window(manager);
+    cnote::qt::QtMainWindow other(manager);
+    const std::shared_ptr<cnote::ProjectSession> windowSession = window.Controller().Session();
+    const std::shared_ptr<cnote::ProjectSession> otherSession = other.Controller().Session();
+    Check(windowSession != nullptr && otherSession != nullptr && windowSession != otherSession,
+        "each window has its own session");
+
+    std::string error;
+    Check(window.Controller().SaveTo(dir / "window.cnote", &error), "save the first window's session");
+    Check(other.Controller().SaveTo(dir / "other.cnote", &error), "save the second window's session");
+    window.AddPage();
+    other.AddPage();
+    Check(windowSession->dirty && otherSession->dirty, "both sessions have unsaved edits");
+    Check(!manager.IsAutoSaveTimerActive(windowSession) && !manager.IsAutoSaveTimerActive(otherSession),
+        "the stored Off setting disables auto-save in every open window");
+
+    window.ToggleSettingsDialog();
+    auto* slider = window.findChild<QSlider*>(QStringLiteral("autoSaveSlider"));
+    Check(slider != nullptr, "the settings dialog exposes the auto-save slider");
+    if (slider == nullptr) {
+        cnote::qt::QtMainWindow::SetHeadlessModals(headless);
+        return;
+    }
+    slider->setValue(15);
+    Check(store.Load().autoSaveIntervalSeconds == 15U, "the selected auto-save interval persists");
+    Check(manager.AutoSaveInterval() == 15U, "the selected auto-save interval reaches the manager");
+    Check(manager.IsAutoSaveTimerActive(windowSession) && manager.IsAutoSaveTimerActive(otherSession),
+        "an interval change arms auto-save in every open window");
+    slider->setValue(0);
+    Check(!manager.IsAutoSaveTimerActive(windowSession) && !manager.IsAutoSaveTimerActive(otherSession),
+        "Off reaches every open window again");
+    cnote::qt::QtMainWindow::SetHeadlessModals(headless);
+}
+
+void AutoSaveReportsFailureOncePerStreak() {
+    const std::filesystem::path dir = MakeTempDir("autosave-failure");
+    const std::filesystem::path unwritable = dir / "missing" / "note.cnote";
+
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    const std::shared_ptr<cnote::ProjectSession> session = controller.Session();
+    session->document = MakeProject(u"autosave");
+    session->document.SetFilePath(unwritable);
+    session->dirty = true;
+
+    int reports = 0;
+    std::string reportedError;
+    controller.SetAutoSaveErrorHandler([&](const QString& reason) {
+        ++reports;
+        reportedError = reason.toStdString();
+    });
+    // The shell's production dispatcher: the manager owns the streak and the
+    // interaction deferral, the view only shows the report.
+    manager.SetAutoSaveFailureHandler([&](QObject* owner, const std::string& error) {
+        if (auto* view = qobject_cast<cnote::qt::QtDocumentController*>(owner)) {
+            view->ShowAutoSaveFailure(error);
+        }
+    });
+
+    controller.AutoSave();
+    manager.ProjectSaves().WaitForIdle();
+    Check(reports == 1, "an auto-save failure is reported");
+    Check(!reportedError.empty(), "the auto-save failure carries a reason");
+    Check(session->dirty, "a failed auto-save keeps the session dirty");
+    Check(session->autoSaveFailureReported, "the failure streak is marked");
+
+    controller.AutoSave();
+    manager.ProjectSaves().WaitForIdle();
+    Check(reports == 1, "a repeated failure in the same streak is not reported again");
+
+    // A successful write ends the streak, so the next failure reports again.
+    std::string error;
+    Check(controller.SaveTo(dir / "note.cnote", &error), "a writable destination saves");
+    Check(!session->autoSaveFailureReported, "a successful write clears the failure streak");
+    session->document.SetFilePath(unwritable);
+    session->dirty = true;
+    controller.AutoSave();
+    manager.ProjectSaves().WaitForIdle();
+    Check(reports == 2 && session->dirty, "a failure after a successful write is reported again");
+
+    // A refused auto-save (a PDF-backed document saved in place) is not an
+    // error and must not raise a dialog.
+    session->document.SetFilePath(dir / "scan.pdf");
+    session->document.SetKind(cnote::DocumentKind::PdfContainer);
+    session->dirty = true;
+    controller.AutoSave();
+    manager.ProjectSaves().WaitForIdle();
+    Check(reports == 2, "a refused auto-save is not reported as an error");
+}
+
+// The whole timer-to-disk path: the manager's deadline calls the handler, the
+// handler queues the write, and the successful completion clears dirty.
+void AutoSaveWritesTheDirtyRevision() {
+    const std::filesystem::path dir = MakeTempDir("autosave-writes");
+    const std::filesystem::path target = dir / "auto.cnote";
+    Check(cnote::ProjectFile::Save(MakeProject(u"before"), target), "prepare the autosave target");
+
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    std::string error;
+    Check(controller.OpenFile(target, &error), "open the autosave target");
+    const std::shared_ptr<cnote::ProjectSession> session = controller.Session();
+    manager.SetAutoSaveHandler([&controller](const std::shared_ptr<cnote::ProjectSession>&, QObject*) {
+        controller.AutoSave();
+    });
+    manager.SetAutoSaveInterval(1);
+
+    session->document.CurrentPage().texts.front().content = u"written-by-autosave";
+    ++session->revision;
+    session->dirty = true;
+    manager.UpdateAutoSaveTimer(session);
+    Check(manager.IsAutoSaveTimerActive(session), "a dirty saved session arms auto-save");
+
+    QEventLoop loop;
+    QTimer::singleShot(1800, &loop, &QEventLoop::quit);
+    loop.exec();
+    manager.ProjectSaves().WaitForIdle();
+
+    Check(!session->dirty, "the autosave cleared dirty after writing the current revision");
+    Check(!manager.IsAutoSaveTimerActive(session), "the successful autosave disarmed the timer");
+    Check(ProjectContains(target, u"written-by-autosave"), "the autosave wrote the committed edit");
+}
+
 void FailedSaveKeepsDestinationDirtyAndPath() {
     const std::filesystem::path dir = MakeTempDir("save-readonly-file");
     const std::filesystem::path target = dir / "readonly.cnote";
@@ -386,8 +523,6 @@ void FailedSaveKeepsDestinationDirtyAndPath() {
     session->document = MakeProject(u"replacement");
     session->document.SetFilePath(previous);
     session->dirty = true;
-    session->autoSaveIntervalSeconds = 60U;
-    manager.SetSessionAutoSaveInterval(session, 60U);
     manager.UpdateAutoSaveTimer(session);
     Check(manager.IsAutoSaveTimerActive(session), "the dirty session has an armed autosave timer before the failed save");
 
@@ -560,8 +695,6 @@ void EditDuringSaveKeepsSessionDirty() {
     session->document.SetFilePath(target);
     session->revision = 1U;
     session->dirty = true;
-    session->autoSaveIntervalSeconds = 60U;
-    manager.SetSessionAutoSaveInterval(session, 60U);
     manager.UpdateAutoSaveTimer(session);
 
     Check(controller.RequestSave(target, nullptr), "an asynchronous save request starts");
@@ -1834,6 +1967,9 @@ int main(int argc, char** argv) {
     SaveAfterDestinationDisappears();
     SaveAsToNonAsciiAndLongPaths();
     SuccessfulSaveReplacesTheDestination();
+    AutoSaveReportsFailureOncePerStreak();
+    AutoSaveWritesTheDirtyRevision();
+    AutoSaveIntervalFollowsSettings();
     EditDuringSaveKeepsSessionDirty();
     SaveAsDuringInFlightSaveCommitsBothDestinations();
     FailedAsynchronousSaveKeepsDirtyAndReports();

@@ -74,7 +74,13 @@ std::optional<std::size_t> FindLatexIndexById(const Page& page, std::uint64_t la
 void ApplySaveOutcome(AppManager& manager, const std::shared_ptr<ProjectSession>& session,
     const std::filesystem::path& destination, std::uint64_t revision,
     const ProjectSaveResult& result) {
-    if (!result.success || session == nullptr) {
+    if (session == nullptr) {
+        return;
+    }
+    if (!result.success) {
+        // The file still holds the previous bytes: stay dirty and let the
+        // auto-save timer retry at its interval.
+        manager.NotifySaveFinished(session, false);
         return;
     }
     session->document.SetFilePath(destination);
@@ -82,14 +88,15 @@ void ApplySaveOutcome(AppManager& manager, const std::shared_ptr<ProjectSession>
     // a PDF-backed document turns into a project (an in-place save is safe
     // from here on), and the save/close policy stops routing through Save As.
     session->document.SetKind(DocumentKind::Project);
+    // A successful write ends the auto-save failure streak, even when an edit
+    // landed during it.
+    session->autoSaveFailureReported = false;
     if (session->revision == revision) {
         session->dirty = false;
-        manager.NotifySessionSaved(session);
-    } else {
-        // The file holds the saved revision, not the edit made while it was
-        // being written: stay dirty and keep autosave armed for the new one.
-        manager.UpdateAutoSaveTimer(session);
     }
+    // A write of an older revision leaves dirty set and re-arms the deadline
+    // from the first edit that landed after its snapshot.
+    manager.NotifySaveFinished(session, true);
 
     ProjectChange change;
     change.kind = ProjectChange::Kind::Saved;
@@ -212,6 +219,9 @@ bool QtDocumentController::RequestSave(const std::filesystem::path& path, std::s
     const std::shared_ptr<ProjectSession> saved = session_;
     const std::filesystem::path destination = path;
     QPointer<QtDocumentController> view(this);
+    // The snapshot covers every edit made up to here: the next edit starts a
+    // new maximum dirty age (and a failure re-arms the retry at the interval).
+    manager_.NotifySaveRequested(saved);
     manager_.ProjectSaves().Enqueue(
         { std::move(snapshot), destination },
         [manager = &manager_, saved, destination, revision, view, onDone = std::move(onDone)](
@@ -230,6 +240,31 @@ bool QtDocumentController::RequestSave(const std::filesystem::path& path, std::s
             }
         });
     return true;
+}
+
+void QtDocumentController::AutoSave() {
+    if (session_ == nullptr || session_->document.FilePath().empty()) {
+        return;
+    }
+    const std::shared_ptr<ProjectSession> saved = session_;
+    static_cast<void>(RequestSave(session_->document.FilePath(), nullptr,
+        [manager = &manager_, saved](const SaveOutcome& outcome) {
+            if (!outcome.success) {
+                // The manager owns the failure streak and defers the report
+                // while any view of the session is interacting.
+                manager->NotifyAutoSaveFailed(saved, outcome.error);
+            }
+        }));
+}
+
+void QtDocumentController::SetAutoSaveErrorHandler(std::function<void(const QString&)> handler) {
+    autoSaveErrorHandler_ = std::move(handler);
+}
+
+void QtDocumentController::ShowAutoSaveFailure(const std::string& error) {
+    if (autoSaveErrorHandler_) {
+        autoSaveErrorHandler_(QString::fromStdString(error));
+    }
 }
 
 bool QtDocumentController::SaveTo(const std::filesystem::path& path, std::string* error) {

@@ -75,8 +75,17 @@ public:
     // *error set - only when the request is refused up front (PDF destination).
     [[nodiscard]] bool RequestSave(const std::filesystem::path& path, std::string* error,
         SaveCompletion onDone = {});
+    // Auto-save entry: queues a write of the session's current path.  The
+    // AppManager reports a failed write once per failure streak (and holds it
+    // until no view of the session is interacting); a refused request (a
+    // PDF-backed document saved in place) is not an error.
+    void AutoSave();
+    void SetAutoSaveErrorHandler(std::function<void(const QString&)> handler);
+    // Called by the shell's auto-save failure dispatcher with an already
+    // deduplicated and interaction-deferred reason.
+    void ShowAutoSaveFailure(const std::string& error);
     // Saves and waits for the write to commit: the last-view close and tests
-    // use it where continuing before the destination exists would lose data.
+    // use this where continuing before the destination exists would lose data.
     [[nodiscard]] bool SaveTo(const std::filesystem::path& path, std::string* error);
     [[nodiscard]] bool ExportPdf(const std::filesystem::path& path, bool embedProject, std::string* error);
 
@@ -418,6 +427,7 @@ private:
     };
     mutable std::map<PdfTextCacheKey, std::vector<PdfTextCharBox>> pdfTextCache_;
     std::uint64_t savedChangeCount_ = 0;
+    std::function<void(const QString&)> autoSaveErrorHandler_;
 };
 
 }  // namespace cnote::qt
