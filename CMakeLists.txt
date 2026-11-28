@@ -243,6 +243,7 @@ find_package(Qt6 6.11.2 REQUIRED COMPONENTS Widgets GuiPrivate)
 add_library(cnote_ui
     src/ui/CanvasWidget.cpp
     src/ui/PageObjectBounds.cpp
+    src/ui/SelectionGeometry.cpp
     src/ui/InlineMathTextEdit.cpp
     src/ui/LayoutQt.cpp
     src/ui/ChromeAssetsQt.cpp
@@ -1203,6 +1204,28 @@ set_tests_properties(page_object_bounds_qt PROPERTIES TIMEOUT 120
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 if(WIN32)
     cnote_stage_test_runtime(cnote_page_object_bounds_tests)
+endif()
+
+# --- Selection gesture geometry cache (PERF-018/019/020) ---------------------
+# Damage, handle hover and the overlay paint share one selection-outline
+# measurement; move/transform samples measure at most once and the source
+# text/LaTeX boxes are laid out once per gesture; lasso releases test only
+# objects whose cached bounds meet the polygon.  Asserts counters, exact
+# transform parity, lasso parity with a brute-force scan and overlay pixel
+# parity, and prints the dense-fixture cost per sample.
+add_executable(cnote_selection_gesture_tests tests/SelectionGestureTests.cpp)
+target_compile_definitions(cnote_selection_gesture_tests PRIVATE
+    CNOTE_LATEX_RES_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/third_party/microtex/res")
+target_compile_features(cnote_selection_gesture_tests PRIVATE cxx_std_20)
+target_compile_options(cnote_selection_gesture_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_selection_gesture_tests PRIVATE cnote_ui Qt6::Widgets)
+add_test(NAME selection_gesture_qt COMMAND cnote_selection_gesture_tests)
+set_tests_properties(selection_gesture_qt PROPERTIES TIMEOUT 180
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
+if(WIN32)
+    cnote_stage_test_runtime(cnote_selection_gesture_tests)
 endif()
 
 # --- Stroke render-path cache -------------------------------------------------

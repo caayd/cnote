@@ -98,6 +98,7 @@ public:
     std::vector<ui::ObjectRef> pendingErase;
     std::size_t lastPendingEraseAdded = 0;
     mutable int scratchOutQueries = 0;
+    int lassoPointCount_ = 0;
     StrokeSampling lastSampling {};
     std::optional<float> beginPressure;
     std::vector<std::optional<float>> appendPressures;
@@ -154,6 +155,13 @@ public:
     void ClearSelection() override { ops.push_back("ClearSelection"); }
     void UpdateSelectionOverlay(const QPointF&, const QPointF&, bool lasso, const std::vector<QPointF>& lassoPoints) override {
         ops.push_back("UpdateSelectionOverlay(lasso=" + std::string(lasso ? "1" : "0") + ",points=" + std::to_string(lassoPoints.size()) + ")");
+    }
+    void UpdateSelectionOverlayProgress(const QPointF&, const QPointF&, bool) override {
+        ops.push_back("SelectionOverlayProgress");
+    }
+    void AppendSelectionLassoPoint(const QPointF&) override {
+        ++lassoPointCount_;
+        ops.push_back("AppendSelectionLassoPoint(" + std::to_string(lassoPointCount_) + ")");
     }
     void CancelSelectionOverlay() override { ops.push_back("CancelSelectionOverlay"); }
     void CommitSelection(const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click,
@@ -955,7 +963,7 @@ void TestSelectionLassoAccumulation() {
     router.HandlePointerMove(Move(3.0, 0.0));
     Check(host.HasOp("UpdateSelectionOverlay(lasso=1,points=1)"), "a 3-px move adds no lasso point\n" + host.Dump());
     router.HandlePointerMove(Move(7.0, 0.0));
-    Check(host.HasOp("UpdateSelectionOverlay(lasso=1,points=2)"), "a 7-px move adds a lasso point\n" + host.Dump());
+    Check(host.HasOp("AppendSelectionLassoPoint(1)"), "a 7-px move appends a lasso point\n" + host.Dump());
     router.HandlePointerRelease(Release(7.0, 0.0));
     Check(host.HasOp("CommitSelection(anchor=0.000,0.000,current=7.000,0.000,lasso=1,boxOverride=0,click=1,additive=0)"),
         "the lasso commit reports the effective mode\n" + host.Dump());
@@ -991,7 +999,7 @@ void TestSelectionLassoClickVersusLoop() {
             "a lasso tap inside the click radius is still a click\n" + host.Dump());
         // The 5-px move is under the 6-px sampling spacing, so the release point
         // only reaches the polygon through the final append.
-        Check(host.HasOp("UpdateSelectionOverlay(lasso=1,points=2)"),
+        Check(host.HasOp("AppendSelectionLassoPoint(1)"),
             "the release point joins the lasso polygon\n" + host.Dump());
     }
 }

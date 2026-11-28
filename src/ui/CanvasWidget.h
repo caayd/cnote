@@ -24,6 +24,7 @@
 #include "render/PageRenderer.h"
 #include "settings/SettingsStoreQt.h"
 #include "ui/PageObjectBounds.h"
+#include "ui/SelectionGeometry.h"
 #include "ui/CanvasController.h"
 #include "ui/EraserTrail.h"
 #include "ui/InteractionRouter.h"
@@ -170,6 +171,8 @@ public:
     void DiscardStroke() override;
     void ClearSelection() override;
     void UpdateSelectionOverlay(const QPointF& anchor, const QPointF& current, bool lasso, const std::vector<QPointF>& lassoPoints) override;
+    void UpdateSelectionOverlayProgress(const QPointF& anchor, const QPointF& current, bool lasso) override;
+    void AppendSelectionLassoPoint(const QPointF& point) override;
     void CancelSelectionOverlay() override;
     void CommitSelection(const QPointF& anchor, const QPointF& current, bool lasso, bool boxOverride, bool click,
         bool additive) override;
@@ -256,6 +259,15 @@ public:
     [[nodiscard]] std::size_t ObjectBoundsRecomputeCount() const {
         return objectBoundsCache_.RecomputeCount();
     }
+    // How many times the selected objects' outlines were measured.  Damage,
+    // handle hover and paint share one cache entry, so a static selection is
+    // measured once and a move/transform sample at most once.
+    [[nodiscard]] std::size_t SelectionGeometryRecomputeCount() const {
+        return selectionGeometryCache_.RecomputeCount();
+    }
+    // Exact object tests a lasso release performed; objects whose cached
+    // bounds do not touch the lasso are rejected before this count.
+    [[nodiscard]] std::size_t LassoObjectTestCount() const { return lassoObjectTests_; }
     [[nodiscard]] float ViewportPanX() const { return panX_; }
     [[nodiscard]] float ViewportPanY() const { return panY_; }
     [[nodiscard]] float ZoomReferenceWidth() const { return ZoomReferenceCanvasWidth(); }
@@ -476,6 +488,7 @@ private:
     void EndGestureOverlay();
     // Widget-space dirty rect covering the selection frame plus handles.
     [[nodiscard]] QRect SelectionDirtyRect(std::size_t pageIndex) const;
+    [[nodiscard]] QRect SelectionDirtyRect(const SelectionBounds& bounds, std::size_t pageIndex) const;
     // Byte-bounded nearby-page cache: keeps pages that left the viewport while
     // the aggregate raster bytes stay under kCanvasSurfaceCacheBytes, evicting
     // the pages farthest from the viewport first.
@@ -503,9 +516,9 @@ private:
 
     // Selection / erase rendering helpers.
     [[nodiscard]] std::optional<SelectionBounds> SelectionBoundsForPage(std::size_t pageIndex) const;
-    // Page-space corners (clockwise from the unrotated top-left) of every
-    // selected object on the page; SelectionBoundsForPage is their union.
-    [[nodiscard]] std::vector<std::array<Vec2, 4>> SelectedObjectOutlines(std::size_t pageIndex) const;
+    // Selected-object outlines for `pageIndex`, measured once per page state
+    // and shared with the dirty rect, handle hit test and overlay paint.
+    [[nodiscard]] const SelectionOutlines& SelectionOutlinesForPage(std::size_t pageIndex) const;
     // Selection frame geometry in logical pixels, shared by the overlay painter,
     // the dirty rect and the handle hit test: the frame padded around the
     // bounds, its four corner handle centres (top-left, top-right,
@@ -699,10 +712,20 @@ private:
         QPointF anchor {};
         QPointF current {};
         std::vector<QPointF> lassoPoints;
+        // Incremental widget-space bounds of lassoPoints: a pointer sample
+        // appends one point instead of copying and rescanning the path.
+        QPointF lassoMin {};
+        QPointF lassoMax {};
+        bool lassoBoundsValid = false;
         std::optional<std::size_t> pdfPage {};
         [[nodiscard]] bool Active() const { return mode != Mode::None; }
     };
     SelectionGesture selection_;
+    // Page-space selection bounds at the previous move or transform sample,
+    // so a sample repaints old ∪ new without measuring the old frame again.
+    // Page space (not widget space) so a view change between samples cannot
+    // leave the old rect behind.
+    std::optional<SelectionBounds> gestureSelectionBounds_ {};
     // Pending-erase membership and its fade patch, one entry per page with
     // marked objects.  Index lists are kept sorted per kind for the renderer's
     // binary-search opacity checks; tiles are diffed per changed object.
@@ -802,6 +825,12 @@ private:
     // and the session's transient generation: repeated samples over one page
     // measure nothing.
     mutable PageObjectBoundsCache objectBoundsCache_;
+    // Selected-object outlines shared by damage, handle hover and the overlay
+    // paint, keyed by page epoch / transient generation / selected indices.
+    mutable SelectionGeometryCache selectionGeometryCache_;
+    // Exact object tests the last lasso release performed (diag: the release
+    // rejects objects whose cached bounds miss the polygon).
+    std::size_t lassoObjectTests_ = 0;
     GestureSurface gesture_ {};
     // Widget-space region the transient state has dirtied since the last
     // paint (live stroke growth, marquee drag, pending-erase marks);
