@@ -14,9 +14,11 @@ enum class HistoryActionType {
     AddPages,
     // `pages` removed from the sorted indices `pageIndices` (pre-removal).
     RemovePages,
-    // Only the affected objects of one page change; `beforeObjects`/`afterObjects`
-    // hold them.  Used for object gestures (move, transform, recolor, clone,
-    // erase) so their history cost is O(affected objects), not O(page).
+    // Only the affected objects of the listed pages change; each entry of
+    // `beforeObjects`/`afterObjects` is one page's delta, parallel to
+    // `pageIndices`.  Used for object edits (move, transform, recolor, clone,
+    // erase, cut, paste) so their history cost is O(affected objects), not
+    // O(page).
     ReplaceObjects,
     ReplacePages,
     // Document::ReorderPages with `pageIndices` as the order; undo applies
@@ -57,9 +59,11 @@ struct HistoryAction {
     PageLatex replacementLatex {};
     std::vector<Page> pages {};
     std::vector<Page> replacementPages {};
-    // ReplaceObjects only: the page's affected objects before and after.
-    PageObjectSet beforeObjects {};
-    PageObjectSet afterObjects {};
+    // ReplaceObjects only: one affected-object set per page index, parallel to
+    // `pageIndices`.  A multi-page object edit (delete/cut across a selection)
+    // remains one undo step.
+    std::vector<PageObjectSet> beforeObjects {};
+    std::vector<PageObjectSet> afterObjects {};
     std::vector<std::size_t> pageIndices {};
     std::size_t index = 0;
     std::size_t pageIndex = 0;

@@ -742,9 +742,12 @@ int main(int argc, char** argv) {
         const cnote::HistoryAction& moveAction = session->undoActions.back();
         Check(moveAction.pages.empty() && moveAction.replacementPages.empty(),
               "the move history keeps no whole-page snapshot");
-        Check(moveAction.beforeObjects.strokes.size() == 1U
-                && moveAction.afterObjects.strokes.size() == 1U
-                && moveAction.beforeObjects.strokeIndices == std::vector<std::size_t> { 0U },
+        Check(moveAction.beforeObjects.size() == 1U
+                && moveAction.afterObjects.size() == 1U
+                && moveAction.pageIndices == std::vector<std::size_t> { 0U }
+                && moveAction.beforeObjects.front().strokes.size() == 1U
+                && moveAction.afterObjects.front().strokes.size() == 1U
+                && moveAction.beforeObjects.front().strokeIndices == std::vector<std::size_t> { 0U },
               "the move history retains only the dragged stroke");
     }
     const cnote::Stroke movedStroke = controller.DocumentRef().PageAt(0).strokes[0];

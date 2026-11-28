@@ -8,9 +8,11 @@ namespace cnote {
 // delta) to `page`; `undo` selects the inverse. Does not bump the page epoch,
 // so a cancelled gesture can restore its objects without invalidating renderer
 // caches. Returns false, leaving `page` untouched, when the delta does not fit
-// the page (out-of-range index, stale id, unsorted index lists).
+// the page (out-of-range index, stale id, unsorted index lists). With
+// `apply == false` it only reports whether the delta fits, so a multi-page
+// action can be validated before any page is mutated.
 [[nodiscard]] bool ApplyPageObjectDelta(
-    Page& page, const PageObjectSet& before, const PageObjectSet& after, bool undo);
+    Page& page, const PageObjectSet& before, const PageObjectSet& after, bool undo, bool apply = true);
 
 // Applies the document-mutation half of one undo/redo step in place. `undo`
 // selects the inverse of the recorded action (undo reverses, redo reapplies).

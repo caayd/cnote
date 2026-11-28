@@ -1223,6 +1223,95 @@ void ObjectGesturesUndoRedoExactly() {
         Check(controller.CloneSelection(0), "the clone gesture duplicates the selection");
         controller.CommitPageGesture();
     });
+    runGesture("delete selection", [&]() {
+        cnote::ui::PageSelection selection;
+        selection.strokes.push_back(0);
+        selection.texts.push_back(0);
+        controller.SelectObjects(0, selection);
+        Check(controller.RemoveSelection(), "the delete selection removes objects");
+    });
+    runGesture("paste", [&]() {
+        cnote::SelectionClipboardData payload;
+        cnote::Stroke stroke;
+        stroke.points = { { 300.0f, 300.0f }, { 320.0f, 310.0f } };
+        payload.strokes.push_back(stroke);
+        payload.texts.push_back(MakeText(70, u"pasted text"));
+        cnote::PageLatex latex;
+        latex.id = 80;
+        latex.x = 300.0f;
+        latex.y = 300.0f;
+        latex.content = u"a^2 + b^2";
+        payload.latexes.push_back(latex);
+        cnote::PageImage image;
+        image.x = 300.0f;
+        image.y = 300.0f;
+        image.width = 12.0f;
+        image.height = 8.0f;
+        payload.images.push_back(image);
+        payload.minX = 300.0f;
+        payload.minY = 300.0f;
+        payload.maxX = 320.0f;
+        payload.maxY = 310.0f;
+        Check(controller.PastePayload(0, cnote::Vec2 { 400.0f, 400.0f }, payload),
+            "the paste appends every payload kind");
+    });
+}
+
+// Paste generates new text/LaTeX ids; undo must remove the pasted objects and
+// redo must reinsert them with the same ids, not regenerate them.
+void PasteIdsSurviveUndoRedo() {
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    cnote::SelectionClipboardData payload;
+    cnote::Stroke stroke;
+    stroke.points = { { 10.0f, 10.0f }, { 30.0f, 20.0f } };
+    payload.strokes.push_back(stroke);
+    payload.texts.push_back(MakeText(70, u"pasted text"));
+    cnote::PageLatex latex;
+    latex.id = 80;
+    latex.x = 10.0f;
+    latex.y = 10.0f;
+    latex.content = u"a^2 + b^2";
+    payload.latexes.push_back(latex);
+    cnote::PageImage image;
+    image.x = 10.0f;
+    image.y = 10.0f;
+    image.width = 12.0f;
+    image.height = 8.0f;
+    payload.images.push_back(image);
+    payload.minX = 10.0f;
+    payload.minY = 10.0f;
+    payload.maxX = 30.0f;
+    payload.maxY = 20.0f;
+
+    Check(controller.PastePayload(0, cnote::Vec2 { 200.0f, 200.0f }, payload),
+        "the cross-kind paste succeeds");
+    const cnote::HistoryAction& action = controller.Session()->undoActions.back();
+    Check(action.type == cnote::HistoryActionType::ReplaceObjects
+            && action.pageIndices == std::vector<std::size_t> { 0U }
+            && action.beforeObjects.size() == 1U && action.beforeObjects.front().Empty()
+            && action.afterObjects.size() == 1U
+            && action.afterObjects.front().strokes.size() == 1U
+            && action.afterObjects.front().texts.size() == 1U
+            && action.afterObjects.front().latexes.size() == 1U
+            && action.afterObjects.front().images.size() == 1U,
+        "the paste records one insertion delta for every kind");
+    const cnote::Page pasted = controller.Session()->document.CurrentPage();
+    const std::uint64_t textId = pasted.texts.back().id;
+    const std::uint64_t latexId = pasted.latexes.back().id;
+    Check(textId != 0U && latexId != 0U, "the paste assigned ids to text and LaTeX");
+
+    Check(controller.Undo(), "the paste undoes");
+    const cnote::Page& removed = controller.Session()->document.CurrentPage();
+    Check(removed.strokes.empty() && removed.texts.empty() && removed.latexes.empty()
+            && removed.images.empty(),
+        "undo removes every pasted object");
+    Check(controller.Redo(), "the paste redoes");
+    const cnote::Page& restored = controller.Session()->document.CurrentPage();
+    Check(cnote::PageEqual(restored, pasted), "redo restores the pasted page exactly");
+    Check(restored.texts.back().id == textId && restored.latexes.back().id == latexId,
+        "redo restores the pasted text and LaTeX ids");
 }
 
 std::size_t StrokeStorageBytes(const cnote::Stroke& stroke) {
@@ -1273,7 +1362,12 @@ std::size_t RetainedHistoryBytes(const cnote::ProjectSession& session) {
         for (const cnote::Page& page : action.replacementPages) {
             bytes += PageStorageBytes(page);
         }
-        bytes += ObjectSetStorageBytes(action.beforeObjects) + ObjectSetStorageBytes(action.afterObjects);
+        for (const cnote::PageObjectSet& objects : action.beforeObjects) {
+            bytes += ObjectSetStorageBytes(objects);
+        }
+        for (const cnote::PageObjectSet& objects : action.afterObjects) {
+            bytes += ObjectSetStorageBytes(objects);
+        }
     }
     return bytes;
 }
@@ -1303,8 +1397,10 @@ void ObjectGestureHistoryDoesNotScaleWithPageSize() {
         }
         for (const cnote::HistoryAction& action : controller.Session()->undoActions) {
             if (action.type != cnote::HistoryActionType::ReplaceObjects
-                || action.beforeObjects.strokes.size() != 1U
-                || action.afterObjects.strokes.size() != 1U) {
+                || action.beforeObjects.size() != 1U
+                || action.afterObjects.size() != 1U
+                || action.beforeObjects.front().strokes.size() != 1U
+                || action.afterObjects.front().strokes.size() != 1U) {
                 return std::size_t { 0 };
             }
         }
@@ -1426,6 +1522,7 @@ int main(int argc, char** argv) {
     PageClipboardActsOnSeveralPages();
     MovePagesUndoRedoKeepsOrderAndViewedPage();
     ObjectGesturesUndoRedoExactly();
+    PasteIdsSurviveUndoRedo();
     ObjectGestureHistoryDoesNotScaleWithPageSize();
     StrokeFormatRoundTripsAndLegacyReads();
 

@@ -1128,9 +1128,8 @@ std::optional<HistoryAction> QtDocumentController::BuildPageGestureAction() cons
         return std::nullopt;
     }
     const PageGesture& gesture = *gesture_;
-    HistoryAction action {};
-    action.type = HistoryActionType::ReplaceObjects;
-    action.pageIndex = gesture.pageIndex;
+    PageObjectSet before {};
+    PageObjectSet after {};
 
     // Compare only the objects this gesture captured: an object the gesture
     // never touched (or one it restored to its start state) is not recorded,
@@ -1149,64 +1148,69 @@ std::optional<HistoryAction> QtDocumentController::BuildPageGestureAction() cons
         }
     };
     appendUpdates(gesture.beforeStrokes, page->strokes,
-        action.beforeObjects.strokeIndices, action.beforeObjects.strokes,
-        action.afterObjects.strokeIndices, action.afterObjects.strokes, StrokeEqual);
+        before.strokeIndices, before.strokes,
+        after.strokeIndices, after.strokes, StrokeEqual);
     appendUpdates(gesture.beforeImages, page->images,
-        action.beforeObjects.imageIndices, action.beforeObjects.images,
-        action.afterObjects.imageIndices, action.afterObjects.images, PageImageEqual);
+        before.imageIndices, before.images,
+        after.imageIndices, after.images, PageImageEqual);
     appendUpdates(gesture.beforeTexts, page->texts,
-        action.beforeObjects.textIndices, action.beforeObjects.texts,
-        action.afterObjects.textIndices, action.afterObjects.texts, PageTextEqual);
+        before.textIndices, before.texts,
+        after.textIndices, after.texts, PageTextEqual);
     appendUpdates(gesture.beforeLatexes, page->latexes,
-        action.beforeObjects.latexIndices, action.beforeObjects.latexes,
-        action.afterObjects.latexIndices, action.afterObjects.latexes, PageLatexEqual);
+        before.latexIndices, before.latexes,
+        after.latexIndices, after.latexes, PageLatexEqual);
 
     // Erased objects belong to the before side only; cloned objects to the
     // after side only.  Both maps/sets iterate ascending, so each side's index
     // list stays sorted for the reducer.
     for (const auto& [index, object] : gesture.removedStrokes) {
-        action.beforeObjects.strokeIndices.push_back(index);
-        action.beforeObjects.strokes.push_back(object);
+        before.strokeIndices.push_back(index);
+        before.strokes.push_back(object);
     }
     for (const auto& [index, object] : gesture.removedImages) {
-        action.beforeObjects.imageIndices.push_back(index);
-        action.beforeObjects.images.push_back(object);
+        before.imageIndices.push_back(index);
+        before.images.push_back(object);
     }
     for (const auto& [index, object] : gesture.removedTexts) {
-        action.beforeObjects.textIndices.push_back(index);
-        action.beforeObjects.texts.push_back(object);
+        before.textIndices.push_back(index);
+        before.texts.push_back(object);
     }
     for (const auto& [index, object] : gesture.removedLatexes) {
-        action.beforeObjects.latexIndices.push_back(index);
-        action.beforeObjects.latexes.push_back(object);
+        before.latexIndices.push_back(index);
+        before.latexes.push_back(object);
     }
     for (const std::size_t index : gesture.insertedStrokes) {
         if (index < page->strokes.size()) {
-            action.afterObjects.strokeIndices.push_back(index);
-            action.afterObjects.strokes.push_back(page->strokes[index]);
+            after.strokeIndices.push_back(index);
+            after.strokes.push_back(page->strokes[index]);
         }
     }
     for (const std::size_t index : gesture.insertedImages) {
         if (index < page->images.size()) {
-            action.afterObjects.imageIndices.push_back(index);
-            action.afterObjects.images.push_back(page->images[index]);
+            after.imageIndices.push_back(index);
+            after.images.push_back(page->images[index]);
         }
     }
     for (const std::size_t index : gesture.insertedTexts) {
         if (index < page->texts.size()) {
-            action.afterObjects.textIndices.push_back(index);
-            action.afterObjects.texts.push_back(page->texts[index]);
+            after.textIndices.push_back(index);
+            after.texts.push_back(page->texts[index]);
         }
     }
     for (const std::size_t index : gesture.insertedLatexes) {
         if (index < page->latexes.size()) {
-            action.afterObjects.latexIndices.push_back(index);
-            action.afterObjects.latexes.push_back(page->latexes[index]);
+            after.latexIndices.push_back(index);
+            after.latexes.push_back(page->latexes[index]);
         }
     }
-    if (action.beforeObjects.Empty() && action.afterObjects.Empty()) {
+    if (before.Empty() && after.Empty()) {
         return std::nullopt;
     }
+    HistoryAction action {};
+    action.type = HistoryActionType::ReplaceObjects;
+    action.pageIndices = { gesture.pageIndex };
+    action.beforeObjects.push_back(std::move(before));
+    action.afterObjects.push_back(std::move(after));
     return action;
 }
 
@@ -1245,7 +1249,8 @@ void QtDocumentController::CancelPageGesture() {
     }
     // Restore without TouchPage: the page returns to the state renderer caches
     // already hold, so surfaces and thumbnails need no invalidation.
-    static_cast<void>(ApplyPageObjectDelta(*page, action->beforeObjects, action->afterObjects, true));
+    static_cast<void>(ApplyPageObjectDelta(
+        *page, action->beforeObjects.front(), action->afterObjects.front(), true));
 }
 
 void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
@@ -2200,22 +2205,40 @@ bool QtDocumentController::RemoveSelection() {
         }
     }
     Document& document = session_->document;
-    std::vector<std::size_t> indices;
-    std::vector<Page> before;
-    std::vector<Page> after;
-    bool changed = false;
+    HistoryAction action {};
+    action.type = HistoryActionType::ReplaceObjects;
 
+    // Deleting a selection is a removal delta per page: the removed objects at
+    // their pre-removal indices, which undo reinserts.  A multi-page selection
+    // (not produced by the current single-page selection UI) stays one step.
     for (const auto& [pageIndex, selection] : selection_) {
         if (pageIndex >= document.PageCount() || selection.Empty()) {
             continue;
         }
-        indices.push_back(pageIndex);
-        before.push_back(document.PageAt(pageIndex));
-        document.TouchPage(pageIndex);
         Page& page = document.PageAt(pageIndex);
+        PageObjectSet before {};
+        const auto recordRemoved = [](auto& objects, std::vector<std::size_t> indices,
+                                      auto& removedIndices, auto& removedObjects) {
+            std::sort(indices.begin(), indices.end());
+            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+            for (const std::size_t index : indices) {
+                if (index < objects.size()) {
+                    removedIndices.push_back(index);
+                    removedObjects.push_back(objects[index]);
+                }
+            }
+        };
+        recordRemoved(page.strokes, selection.strokes, before.strokeIndices, before.strokes);
+        recordRemoved(page.texts, selection.texts, before.textIndices, before.texts);
+        recordRemoved(page.latexes, selection.latexes, before.latexIndices, before.latexes);
+        recordRemoved(page.images, selection.images, before.imageIndices, before.images);
+        if (before.Empty()) {
+            continue;
+        }
 
         const auto removeAt = [](auto& objects, std::vector<std::size_t> indices) {
             std::sort(indices.begin(), indices.end(), std::greater<> {});
+            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
             for (const std::size_t index : indices) {
                 if (index < objects.size()) {
                     objects.erase(objects.begin() + static_cast<std::ptrdiff_t>(index));
@@ -2226,18 +2249,15 @@ bool QtDocumentController::RemoveSelection() {
         removeAt(page.texts, selection.texts);
         removeAt(page.latexes, selection.latexes);
         removeAt(page.images, selection.images);
-        after.push_back(page);
-        changed = true;
+        document.TouchPage(pageIndex);
+        action.pageIndices.push_back(pageIndex);
+        action.beforeObjects.push_back(std::move(before));
+        action.afterObjects.emplace_back();
     }
-    if (!changed) {
+    if (action.pageIndices.empty()) {
         return false;
     }
 
-    HistoryAction action {};
-    action.type = HistoryActionType::ReplacePages;
-    action.pageIndices = indices;
-    action.pages = std::move(before);
-    action.replacementPages = std::move(after);
     selection_.clear();
     emit SelectionChanged();
     RecordCommit(std::move(action));
@@ -2255,7 +2275,6 @@ bool QtDocumentController::PastePayload(
     pageIndex = std::min(pageIndex, DocumentRef().PageCount() - 1U);
     Document& document = session_->document;
     Page& page = document.PageAt(pageIndex);
-    const Page before = page;
 
     // Center the payload on the target and keep it inside the page when it fits.
     const float width = data.maxX - data.minX;
@@ -2269,12 +2288,18 @@ bool QtDocumentController::PastePayload(
         deltaY = std::clamp(deltaY, -data.minY, page.height - data.maxY);
     }
 
+    // Paste is an insertion delta: the appended objects at their new indices,
+    // which undo removes.  Keeping them by value also preserves the new
+    // text/LaTeX ids across undo and redo.
+    PageObjectSet after {};
     ui::PageSelection pasted {};
     for (const Stroke& source : data.strokes) {
         Stroke stroke = source;
         ui::TranslateStrokePoints(stroke, Vec2 { deltaX, deltaY });
         pasted.strokes.push_back(page.strokes.size());
+        after.strokeIndices.push_back(page.strokes.size());
         page.strokes.push_back(std::move(stroke));
+        after.strokes.push_back(page.strokes.back());
     }
     for (const PageText& source : data.texts) {
         PageText text = source;
@@ -2282,7 +2307,9 @@ bool QtDocumentController::PastePayload(
         text.x += deltaX;
         text.y += deltaY;
         pasted.texts.push_back(page.texts.size());
+        after.textIndices.push_back(page.texts.size());
         page.texts.push_back(std::move(text));
+        after.texts.push_back(page.texts.back());
     }
     for (const PageLatex& source : data.latexes) {
         PageLatex latex = source;
@@ -2290,23 +2317,27 @@ bool QtDocumentController::PastePayload(
         latex.x += deltaX;
         latex.y += deltaY;
         pasted.latexes.push_back(page.latexes.size());
+        after.latexIndices.push_back(page.latexes.size());
         page.latexes.push_back(std::move(latex));
+        after.latexes.push_back(page.latexes.back());
     }
     for (const PageImage& source : data.images) {
         PageImage image = source;
         image.x += deltaX;
         image.y += deltaY;
         pasted.images.push_back(page.images.size());
+        after.imageIndices.push_back(page.images.size());
         page.images.push_back(std::move(image));
+        after.images.push_back(page.images.back());
     }
 
     document.TouchPage(pageIndex);
 
     HistoryAction action {};
-    action.type = HistoryActionType::ReplacePages;
+    action.type = HistoryActionType::ReplaceObjects;
     action.pageIndices = { pageIndex };
-    action.pages = { before };
-    action.replacementPages = { page };
+    action.beforeObjects.emplace_back();
+    action.afterObjects.push_back(std::move(after));
 
     selection_.clear();
     selection_[pageIndex] = std::move(pasted);

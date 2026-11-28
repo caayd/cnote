@@ -136,7 +136,7 @@ bool ApplyObjectKind(std::vector<T>& objects,
 
 }  // namespace
 
-bool ApplyPageObjectDelta(Page& page, const PageObjectSet& before, const PageObjectSet& after, bool undo) {
+bool ApplyPageObjectDelta(Page& page, const PageObjectSet& before, const PageObjectSet& after, bool undo, bool apply) {
     const PageObjectSet& from = undo ? after : before;
     const PageObjectSet& to = undo ? before : after;
     const auto byIndex = [](std::size_t index, const auto&) {
@@ -158,8 +158,8 @@ bool ApplyPageObjectDelta(Page& page, const PageObjectSet& before, const PageObj
             to.textIndices, to.texts, textById, false)
         && ApplyObjectKind(page.latexes, from.latexIndices, from.latexes,
             to.latexIndices, to.latexes, latexById, false);
-    if (!fits) {
-        return false;
+    if (!fits || !apply) {
+        return fits;
     }
 
     ApplyObjectKind(page.strokes, from.strokeIndices, from.strokes,
@@ -300,14 +300,30 @@ bool ApplyHistoryAction(Document& document, const HistoryAction& action, bool un
         return true;
     }
     case HistoryActionType::ReplaceObjects: {
-        if (action.pageIndex >= document.PageCount()) {
+        if (action.pageIndices.empty()
+            || action.pageIndices.size() != action.beforeObjects.size()
+            || action.pageIndices.size() != action.afterObjects.size()) {
             return false;
         }
-        Page& page = document.PageAt(action.pageIndex);
-        if (!ApplyPageObjectDelta(page, action.beforeObjects, action.afterObjects, undo)) {
-            return false;
+        for (const std::size_t pageIndex : action.pageIndices) {
+            if (pageIndex >= document.PageCount()) {
+                return false;
+            }
         }
-        document.TouchPage(action.pageIndex);
+        // Validate every page before touching any of them, so a stale delta
+        // leaves the whole document unchanged.
+        for (std::size_t index = 0; index < action.pageIndices.size(); ++index) {
+            if (!ApplyPageObjectDelta(document.PageAt(action.pageIndices[index]),
+                    action.beforeObjects[index], action.afterObjects[index], undo, false)) {
+                return false;
+            }
+        }
+        for (std::size_t index = 0; index < action.pageIndices.size(); ++index) {
+            Page& page = document.PageAt(action.pageIndices[index]);
+            static_cast<void>(ApplyPageObjectDelta(
+                page, action.beforeObjects[index], action.afterObjects[index], undo, true));
+            document.TouchPage(action.pageIndices[index]);
+        }
         return true;
     }
     case HistoryActionType::ReplacePages: {
