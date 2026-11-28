@@ -1,6 +1,5 @@
 #include "ProjectFile.h"
 
-#include <QByteArray>
 #include <QFile>
 #include <QSaveFile>
 #include <QString>
@@ -43,6 +42,9 @@ namespace {
 
 constexpr char kCnoteMagic[] = { 'C', 'N', 'O', 'T', 'E', '1', '\0', '\0' };
 constexpr char kLegacyProjectMagic[] = { 'C', 'T', 'R', 'P', 'R', 'J', '1', '\0' };
+// magic + version + payload encoding + uncompressed payload size.
+constexpr std::size_t kProjectHeaderSize =
+    sizeof(kCnoteMagic) + sizeof(std::uint32_t) + sizeof(std::uint32_t) + sizeof(std::uint64_t);
 // 17: strokes store raw pointer samples plus their StrokeSampling; earlier
 // versions stored stabilized points and read back with the identity sampling.
 // 18: strokes end with their pen pressures (count 0 or the point count).
@@ -63,8 +65,18 @@ std::optional<std::vector<std::uint8_t>> ReadAllBytes(const std::filesystem::pat
         return std::nullopt;
     }
 
-    const QByteArray bytes = file.readAll();
-    return std::vector<std::uint8_t>(bytes.begin(), bytes.end());
+    // Read straight into the vector the loader parses: a QByteArray staging
+    // copy would double the file's bytes for the whole load.
+    const qint64 size = file.size();
+    if (size < 0) {
+        return std::nullopt;
+    }
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+    if (size != 0
+        && file.read(reinterpret_cast<char*>(bytes.data()), size) != size) {
+        return std::nullopt;
+    }
+    return bytes;
 }
 
 bool WriteAllBytes(const std::filesystem::path& filePath, const std::vector<std::uint8_t>& bytes) {
@@ -209,7 +221,7 @@ void AppendPath(std::vector<std::uint8_t>& output, const std::filesystem::path& 
     }
 }
 
-void AppendBlob(std::vector<std::uint8_t>& output, const std::vector<std::uint8_t>& value) {
+void AppendBlob(std::vector<std::uint8_t>& output, std::span<const std::uint8_t> value) {
     const auto size = static_cast<std::uint64_t>(value.size());
     AppendValue(output, size);
     if (!value.empty()) {
@@ -712,8 +724,7 @@ std::optional<Document> LoadProjectPayload(
         filePath, std::move(pdfSources), std::move(savedPages), currentPageIndex, pageDefaults, kind);
 }
 
-std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
-    std::vector<std::uint8_t> bytes;
+void SerializeProjectPayload(const Document& document, std::vector<std::uint8_t>& bytes) {
     const std::uint32_t flags = (document.HasPdfData() ? kProjectFlagHasPdf : 0U)
         | (document.NewPageDefaults().sizeOverridden ? 0U : kProjectFlagInheritPageSize);
     const std::uint32_t currentPageIndex = static_cast<std::uint32_t>(document.CurrentPageIndex());
@@ -727,7 +738,9 @@ std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
     for (std::size_t sourceIndex = 0; sourceIndex < document.PdfSourceCount(); ++sourceIndex) {
         const Document::PdfSource& pdfSource = document.PdfSourceAt(sourceIndex);
         AppendPath(bytes, pdfSource.sourcePath);
-        AppendBlob(bytes, pdfSource.pdfData ? *pdfSource.pdfData : std::vector<std::uint8_t> {});
+        AppendBlob(bytes, pdfSource.pdfData
+            ? std::span<const std::uint8_t>(pdfSource.pdfData->data(), pdfSource.pdfData->size())
+            : std::span<const std::uint8_t>());
     }
     AppendValue(bytes, document.NewPageDefaults().width);
     AppendValue(bytes, document.NewPageDefaults().height);
@@ -768,7 +781,6 @@ std::vector<std::uint8_t> SerializeProjectPayload(const Document& document) {
             AppendImage(bytes, image);
         }
     }
-    return bytes;
 }
 
 }  // namespace
@@ -822,25 +834,30 @@ std::optional<Document> ProjectFile::LoadFromBytes(
 }
 
 std::vector<std::uint8_t> ProjectFile::Serialize(const Document& document) {
-    std::vector<std::uint8_t> bytes;
-    std::vector<std::uint8_t> payload = SerializeProjectPayload(document);
-    std::vector<std::uint8_t> storedPayload = payload;
+    // The payload is built in place behind the header, so the raw (the usual
+    // PDF-backed) case writes the file with no copy of payload or frame.  When
+    // compression wins, the same buffer is truncated back to the header and
+    // refilled with the frame; the frame is smaller than the payload, so that
+    // insert reuses the payload's allocation.
+    std::vector<std::uint8_t> bytes(kProjectHeaderSize, 0);
+    SerializeProjectPayload(document, bytes);
+    const std::size_t payloadSize = bytes.size() - kProjectHeaderSize;
     std::uint32_t payloadEncoding = kPayloadEncodingRaw;
-
-    if (const auto compressedPayload = CompressXpressBuffer(payload);
-        compressedPayload.has_value() && compressedPayload->size() < payload.size()) {
-        storedPayload = std::move(*compressedPayload);
+    if (const auto compressedPayload =
+            CompressXpressBuffer(std::span<const std::uint8_t>(bytes).subspan(kProjectHeaderSize));
+        compressedPayload.has_value() && compressedPayload->size() < payloadSize) {
         payloadEncoding = kPayloadEncodingXpressHuff;
+        bytes.resize(kProjectHeaderSize);
+        bytes.insert(bytes.end(), compressedPayload->begin(), compressedPayload->end());
     }
 
-    AppendBytes(bytes, kCnoteMagic, sizeof(kCnoteMagic));
-    AppendValue(bytes, kProjectVersion);
-    AppendValue(bytes, payloadEncoding);
-    AppendValue(bytes, static_cast<std::uint64_t>(payload.size()));
-    if (!storedPayload.empty()) {
-        AppendBytes(bytes, storedPayload.data(), storedPayload.size());
-    }
-
+    std::vector<std::uint8_t> header;
+    header.reserve(kProjectHeaderSize);
+    AppendBytes(header, kCnoteMagic, sizeof(kCnoteMagic));
+    AppendValue(header, kProjectVersion);
+    AppendValue(header, payloadEncoding);
+    AppendValue(header, static_cast<std::uint64_t>(payloadSize));
+    std::copy(header.begin(), header.end(), bytes.begin());
     return bytes;
 }
 

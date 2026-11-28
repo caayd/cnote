@@ -45,6 +45,12 @@ void AppendU32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
     }
 }
 
+void PutU32(std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint32_t value) {
+    for (unsigned byte = 0; byte != 4; ++byte) {
+        bytes[offset + byte] = static_cast<std::uint8_t>(value >> (byte * 8U));
+    }
+}
+
 std::uint8_t HeaderCrc(std::span<const std::uint8_t> header) {
     // Cabinet's buffer wrapper uses the low CRC-32 byte over the header with
     // the CRC byte itself omitted. This is framing, not an XPRESS payload CRC.
@@ -133,8 +139,44 @@ std::optional<std::array<Code, kSymbolCount>> BuildCodes(
     return result;
 }
 
+// Appends one bit stream (the 16-bit slot placeholders plus the raw extra
+// bytes and their patched values) directly to the frame buffer.  Slots hold
+// absolute frame positions, so one writer serves every block: Begin() starts a
+// new stream and Finish() closes it, reusing the slot scratch.
 class BitWriter {
 public:
+    explicit BitWriter(std::vector<std::uint8_t>& output) : output_(output) {}
+
+    void Begin(std::size_t limit) {
+        slots_.clear();
+        nextSlot_ = 0;
+        acc_ = 0;
+        pendingBits_ = 0;
+        cumBits_ = 0;
+        primed_ = false;
+        limit_ = limit;
+    }
+    // Reserves room for `extra` more bytes.  Growth is geometric and clamped
+    // to `limit_` (a chunk body is kept only when smaller than the raw chunk,
+    // so that is the largest useful capacity); past the limit, growth steps in
+    // bounded increments so a raw fallback still never reallocates per byte.
+    void Ensure(std::size_t extra) {
+        const std::size_t needed = output_.size() + extra;
+        if (needed <= output_.capacity()) return;
+        const std::size_t grown = output_.capacity() + output_.capacity() / 2U;
+        if (needed > limit_) {
+            output_.reserve(std::max(needed,
+                output_.capacity() + std::max<std::size_t>(65536U, output_.capacity() / 16U)));
+            return;
+        }
+        output_.reserve(std::max(needed, std::min(limit_, grown)));
+    }
+    void AppendSlot() {
+        Ensure(2);
+        slots_.push_back(output_.size());
+        output_.push_back(0);
+        output_.push_back(0);
+    }
     void Write(std::uint32_t value, unsigned bits) {
         if (!primed_) Prime();
         if (bits == 0) return;
@@ -144,21 +186,16 @@ public:
         while (pendingBits_ >= 16U) {
             const std::uint16_t word = static_cast<std::uint16_t>(acc_ >> 16U);
             acc_ <<= 16U; pendingBits_ -= 16U;
-            if (nextSlot_ == slots_.size()) {
-                slots_.push_back(bytes_.size()); bytes_.push_back(0); bytes_.push_back(0);
-            }
+            if (nextSlot_ == slots_.size()) AppendSlot();
             Patch(slots_[nextSlot_++], word);
         }
     }
     void WriteRawByte(std::uint8_t value) {
         if (!primed_) Prime();
         const std::size_t required = cumBits_ <= 16U ? 2U : 2U + (cumBits_ - 16U + 15U) / 16U;
-        while (slots_.size() < required) {
-            slots_.push_back(bytes_.size());
-            bytes_.push_back(0);
-            bytes_.push_back(0);
-        }
-        bytes_.push_back(value);
+        while (slots_.size() < required) AppendSlot();
+        Ensure(1);
+        output_.push_back(value);
     }
     void WriteRaw16(std::uint32_t value) {
         WriteRawByte(static_cast<std::uint8_t>(value));
@@ -167,38 +204,31 @@ public:
     void WriteRaw32(std::uint32_t value) {
         WriteRaw16(value); WriteRaw16(value >> 16U);
     }
-    [[nodiscard]] std::vector<std::uint8_t> Finish() {
+    void Finish() {
         if (!primed_) Prime();
         if (pendingBits_ != 0) {
-            if (nextSlot_ == slots_.size()) {
-                slots_.push_back(bytes_.size()); bytes_.push_back(0); bytes_.push_back(0);
-            }
+            if (nextSlot_ == slots_.size()) AppendSlot();
             Patch(slots_[nextSlot_++], static_cast<std::uint16_t>(acc_ >> 16U));
         }
         const std::size_t required = cumBits_ <= 16U ? 2U : 2U + (cumBits_ - 16U + 15U) / 16U;
-        while (slots_.size() < required) {
-            slots_.push_back(bytes_.size());
-            bytes_.push_back(0);
-            bytes_.push_back(0);
-        }
-        return std::move(bytes_);
+        while (slots_.size() < required) AppendSlot();
     }
     void Prime() {
         primed_ = true;
-        for (unsigned i = 0; i != 2; ++i) {
-            slots_.push_back(bytes_.size()); bytes_.push_back(0); bytes_.push_back(0);
-        }
+        AppendSlot();
+        AppendSlot();
     }
     void Patch(std::size_t position, std::uint16_t word) {
-        bytes_[position] = static_cast<std::uint8_t>(word);
-        bytes_[position + 1] = static_cast<std::uint8_t>(word >> 8U);
+        output_[position] = static_cast<std::uint8_t>(word);
+        output_[position + 1] = static_cast<std::uint8_t>(word >> 8U);
     }
-    std::vector<std::uint8_t> bytes_;
+    std::vector<std::uint8_t>& output_;
     std::vector<std::size_t> slots_;
     std::uint32_t acc_ = 0;
     unsigned pendingBits_ = 0;
     std::uint32_t cumBits_ = 0;
     std::size_t nextSlot_ = 0;
+    std::size_t limit_ = 0;
     bool primed_ = false;
 };
 struct Token {
@@ -207,16 +237,30 @@ struct Token {
     std::uint32_t offset = 0;
 };
 
-std::optional<std::vector<std::uint8_t>> EncodeLiteralStream(std::span<const std::uint8_t> input) {
-    std::vector<std::uint8_t> result;
+// Appends the encoded blocks of `input` to `output`; the caller frames them.
+// The token and slot scratch is reused across blocks, so encoding never stages
+// a block body in its own buffer.  NotSmaller means the body already cannot
+// beat the raw chunk, so the caller can drop the partial body.
+enum class EncodeStreamStatus { Complete, NotSmaller, Failed };
+
+EncodeStreamStatus EncodeLiteralStream(
+    std::span<const std::uint8_t> input,
+    std::vector<std::uint8_t>& output,
+    BitWriter& writer) {
     constexpr std::size_t kBlockSize = 65536U;
     constexpr std::size_t kHashSize = 65536U;
     constexpr std::size_t kMissing = std::numeric_limits<std::size_t>::max();
+    std::vector<Token> tokens;
+    tokens.reserve(std::min(kBlockSize, input.size()));
+    const std::size_t bodyStart = output.size();
+    // A chunk body is kept only when it is smaller than the raw chunk, so the
+    // raw size is the largest capacity that can still pay off; growth stops
+    // there and the caller drops the partial body when it crosses.
+    const std::size_t bodyLimit = bodyStart + input.size();
     for (std::size_t blockOffset = 0; blockOffset < input.size();) {
         const std::size_t blockSize = std::min(kBlockSize, input.size() - blockOffset);
         const auto block = input.subspan(blockOffset, blockSize);
-        std::vector<Token> tokens;
-        tokens.reserve(blockSize);
+        tokens.clear();
         std::array<std::size_t, kHashSize> last;
         last.fill(kMissing);
         const auto hash = [](std::uint32_t key) {
@@ -270,10 +314,11 @@ std::optional<std::vector<std::uint8_t>> EncodeLiteralStream(std::span<const std
             lengths.fill(0);
             codes = BuildCodes(frequencies, lengths);
         }
-        if (!codes) return std::nullopt;
+        if (!codes) return EncodeStreamStatus::Failed;
+        writer.Begin(bodyLimit);
+        writer.Ensure(kSymbolCount / 2U);
         for (std::size_t symbol = 0; symbol != kSymbolCount; symbol += 2)
-            result.push_back(static_cast<std::uint8_t>(lengths[symbol] | (lengths[symbol + 1] << 4U)));
-        BitWriter writer;
+            output.push_back(static_cast<std::uint8_t>(lengths[symbol] | (lengths[symbol + 1] << 4U)));
         for (const Token& token : tokens) {
             writer.Write((*codes)[token.symbol].bits, (*codes)[token.symbol].length);
             if (token.symbol >= 256U) {
@@ -287,11 +332,11 @@ std::optional<std::vector<std::uint8_t>> EncodeLiteralStream(std::span<const std
                 if (offsetBits != 0) writer.Write(token.offset - (1U << offsetBits), offsetBits);
             }
         }
-        const auto encodedBlock = writer.Finish();
-        result.insert(result.end(), encodedBlock.begin(), encodedBlock.end());
+        writer.Finish();
         blockOffset += blockSize;
+        if (output.size() - bodyStart + 4U >= input.size()) return EncodeStreamStatus::NotSmaller;
     }
-    return result;
+    return EncodeStreamStatus::Complete;
 }
 
 class BitReader {
@@ -355,8 +400,10 @@ private:
 
 struct DecodeNode { int child[2] = {-1, -1}; int symbol = -1; };
 
-std::optional<std::vector<DecodeNode>> BuildTree(std::span<const std::uint8_t> table) {
-    if (table.size() < kTableBytes) return std::nullopt;
+// Rebuilds `tree` from one 256-byte length table, reusing its capacity across
+// blocks.
+bool BuildTree(std::span<const std::uint8_t> table, std::vector<DecodeNode>& tree) {
+    if (table.size() < kTableBytes) return false;
     std::array<std::uint8_t, kSymbolCount> lengths{};
     for (std::size_t i = 0; i != kTableBytes; ++i) {
         lengths[i * 2] = table[i] & 0x0FU;
@@ -372,86 +419,104 @@ std::optional<std::vector<DecodeNode>> BuildTree(std::span<const std::uint8_t> t
         code = (code + count[length - 1]) << 1U;
         next[length] = code;
     }
-    std::vector<DecodeNode> tree(1);
+    tree.clear();
+    tree.push_back({});
     for (std::size_t symbol = 0; symbol != kSymbolCount; ++symbol) {
         const unsigned length = lengths[symbol];
         if (length == 0) continue;
-        if (length > 15U || next[length] >= (1U << length)) return std::nullopt;
+        if (length > 15U || next[length] >= (1U << length)) return false;
         int node = 0;
         const std::uint32_t symbolCode = next[length]++;
         for (unsigned bit = length; bit != 0; --bit) {
             const int branch = static_cast<int>((symbolCode >> (bit - 1U)) & 1U);
-            if (tree[node].symbol >= 0) return std::nullopt;
+            if (tree[node].symbol >= 0) return false;
             if (tree[node].child[branch] < 0) {
                 tree[node].child[branch] = static_cast<int>(tree.size());
                 tree.push_back({});
             }
             node = tree[node].child[branch];
         }
-        if (tree[node].symbol >= 0 || tree[node].child[0] >= 0 || tree[node].child[1] >= 0) return std::nullopt;
+        if (tree[node].symbol >= 0 || tree[node].child[0] >= 0 || tree[node].child[1] >= 0) return false;
         tree[node].symbol = static_cast<int>(symbol);
     }
-    return tree;
+    return true;
 }
-std::optional<std::vector<std::uint8_t>> DecodeStream(
+// Reserves room for `required` decoded bytes, growing geometrically but never
+// past `limit` (the declared payload size).
+void ReserveDecoded(std::vector<std::uint8_t>& output, std::size_t required, std::size_t limit) {
+    if (output.capacity() >= required) return;
+    output.reserve(std::min(limit, std::max(required, output.capacity() * 2U)));
+}
+
+// Decodes `expectedSize` bytes of one chunk body directly into `output`, which
+// may already hold earlier chunks.  The tree scratch is reused across blocks,
+// and output growth is capped at the payload the header declares, so load
+// working memory is the payload plus fixed scratch instead of a staged second
+// copy.
+bool DecodeStream(
     std::span<const std::uint8_t> stream,
-    std::uint64_t expectedSize) {
-    if (expectedSize > std::numeric_limits<std::size_t>::max()) return std::nullopt;
-    std::vector<std::uint8_t> output;
-    if (expectedSize > output.max_size()) return std::nullopt;
+    std::uint64_t expectedSize,
+    std::vector<std::uint8_t>& output,
+    std::vector<DecodeNode>& tree) {
+    if (expectedSize > std::numeric_limits<std::size_t>::max()) return false;
+    const std::size_t expected = static_cast<std::size_t>(expectedSize);
+    if (expected > output.max_size() - output.size()) return false;
+    const std::size_t base = output.size();
+    const std::size_t limit = base + expected;
     std::size_t tableOffset = 0;
-    while (output.size() < expectedSize) {
-        if (stream.size() < tableOffset || stream.size() - tableOffset < kTableBytes) return std::nullopt;
-        const auto tree = BuildTree(stream.subspan(tableOffset, kTableBytes));
-        if (!tree) return std::nullopt;
+    while (output.size() - base < expected) {
+        if (stream.size() < tableOffset || stream.size() - tableOffset < kTableBytes) return false;
+        if (!BuildTree(stream.subspan(tableOffset, kTableBytes), tree)) return false;
         tableOffset += kTableBytes;
         BitReader bits(stream.subspan(tableOffset));
-        if (!bits.Init()) return std::nullopt;
+        if (!bits.Init()) return false;
         std::size_t producedInBlock = 0;
-        while (output.size() < expectedSize && producedInBlock < 65536U) {
+        while (output.size() - base < expected && producedInBlock < 65536U) {
             std::uint32_t value = 0;
             int node = 0;
-            while ((*tree)[node].symbol < 0) {
-                if (!bits.ReadBits(1, value)) return std::nullopt;
-                const int next = (*tree)[node].child[value & 1U];
-                if (next < 0) return std::nullopt;
+            while (tree[node].symbol < 0) {
+                if (!bits.ReadBits(1, value)) return false;
+                const int next = tree[node].child[value & 1U];
+                if (next < 0) return false;
                 node = next;
             }
-            const int symbol = (*tree)[node].symbol;
+            const int symbol = tree[node].symbol;
             if (symbol < 256) {
+                ReserveDecoded(output, output.size() + 1U, limit);
                 output.push_back(static_cast<std::uint8_t>(symbol));
                 ++producedInBlock;
                 continue;
             }
             const unsigned offsetBits = static_cast<unsigned>((symbol - 256) >> 4);
-            if (offsetBits > 15U || !bits.PeekBits(offsetBits, value)) return std::nullopt;
+            if (offsetBits > 15U || !bits.PeekBits(offsetBits, value)) return false;
             const std::size_t offset = (std::size_t{1} << offsetBits) + value;
             unsigned lengthCode = static_cast<unsigned>((symbol - 256) & 15);
             if (lengthCode == 15U) {
                 std::uint8_t extra = 0;
-                if (!bits.ReadByte(extra)) return std::nullopt;
+                if (!bits.ReadByte(extra)) return false;
                 lengthCode = extra + 15U;
                 if (lengthCode == 270U) {
                     std::uint32_t low = 0;
-                    if (!bits.ReadRaw16(low)) return std::nullopt;
+                    if (!bits.ReadRaw16(low)) return false;
                     lengthCode = low;
                     if (lengthCode == 0) {
                         std::uint32_t high = 0;
-                        if (!bits.ReadRaw16(low) || !bits.ReadRaw16(high)) return std::nullopt;
+                        if (!bits.ReadRaw16(low) || !bits.ReadRaw16(high)) return false;
                         lengthCode = (high << 16U) | low;
                     }
                 }
             }
             const std::uint64_t length = static_cast<std::uint64_t>(lengthCode) + 3U;
             if (offset == 0 || offset > output.size()
-                || length > expectedSize - output.size()) return std::nullopt;
-            if (!bits.ReadBits(offsetBits, value)) return std::nullopt;
+                || length > expected - (output.size() - base)) return false;
+            if (!bits.ReadBits(offsetBits, value)) return false;
+            ReserveDecoded(output, output.size() + static_cast<std::size_t>(length), limit);
             for (std::uint64_t i = 0; i != length; ++i) output.push_back(output[output.size() - offset]);
             producedInBlock += static_cast<std::size_t>(length);
         }
         tableOffset += bits.BoundaryPosition();
     }
-    return output;
+    return true;
 }
 
 // Appends one chunk body to `output`; a body whose size equals the expected
@@ -459,17 +524,15 @@ std::optional<std::vector<std::uint8_t>> DecodeStream(
 bool DecodeChunkInto(
     std::span<const std::uint8_t> body,
     std::size_t expectedSize,
-    std::vector<std::uint8_t>& output) {
+    std::vector<std::uint8_t>& output,
+    std::vector<DecodeNode>& tree) {
     if (body.size() == expectedSize) {
+        const std::size_t limit = output.size() + body.size();
+        ReserveDecoded(output, limit, limit);
         output.insert(output.end(), body.begin(), body.end());
         return true;
     }
-    const auto decoded = DecodeStream(body, expectedSize);
-    if (!decoded) {
-        return false;
-    }
-    output.insert(output.end(), decoded->begin(), decoded->end());
-    return true;
+    return DecodeStream(body, expectedSize, output, tree);
 }
 
 }  // namespace
@@ -482,52 +545,11 @@ std::optional<std::vector<std::uint8_t>> CompressXpressBuffer(std::span<const st
         // is stored raw. Above the 64 MiB chunk limit the first chunk carries the
         // full 28-byte header and each later chunk is a uint32 body size + body,
         // matching the Windows Compression API.
-        const auto encodeChunk = [](std::span<const std::uint8_t> chunk) -> std::optional<std::vector<std::uint8_t>> {
-            const auto stream = EncodeLiteralStream(chunk);
-            if (!stream || stream->size() + 4U >= chunk.size()) {
-                return std::vector<std::uint8_t>(chunk.begin(), chunk.end());
-            }
-            return stream;
-        };
-
-        if (input.size() <= kChunkSize) {
-            const auto stream = EncodeLiteralStream(input);
-            const bool useRaw = !stream || stream->size() + 4U >= input.size();
-            const std::size_t bodySize = useRaw ? input.size() : stream->size();
-            std::vector<std::uint8_t> result;
-            result.reserve(kHeaderBytes + bodySize);
-            AppendU32(result, kMagic);
-            result.push_back(static_cast<std::uint8_t>(kHeaderSize));
-            result.push_back(static_cast<std::uint8_t>(kHeaderSize >> 8U));
-            result.push_back(0);
-            result.push_back(kModeXpressHuffman);
-            AppendU32(result, static_cast<std::uint32_t>(input.size()));
-            AppendU32(result, 0);
-            AppendU32(result, static_cast<std::uint32_t>(input.size()));
-            AppendU32(result, 0);
-            AppendU32(result, static_cast<std::uint32_t>(bodySize));
-            if (useRaw) result.insert(result.end(), input.begin(), input.end());
-            else result.insert(result.end(), stream->begin(), stream->end());
-            result[6] = HeaderCrc(result);
-            return result;
-        }
-
-        const auto firstBody = encodeChunk(input.first(kChunkSize));
-        if (!firstBody || firstBody->size() > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
-        std::vector<std::vector<std::uint8_t>> laterBodies;
-        std::size_t offset = kChunkSize;
-        while (offset < input.size()) {
-            const std::size_t chunkLength = std::min<std::size_t>(kChunkSize, input.size() - offset);
-            auto body = encodeChunk(input.subspan(offset, chunkLength));
-            if (!body || body->size() > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
-            laterBodies.push_back(std::move(*body));
-            offset += chunkLength;
-        }
-
-        std::size_t totalSize = kHeaderBytes + firstBody->size();
-        for (const auto& extra : laterBodies) totalSize += extra.size() + 4U;
+        //
+        // The frame is the only buffer: each block and chunk body is encoded
+        // straight into it, and the header's chunk/body sizes are patched once
+        // they are known, so no per-chunk staging vector is allocated.
         std::vector<std::uint8_t> result;
-        result.reserve(totalSize);
         AppendU32(result, kMagic);
         result.push_back(static_cast<std::uint8_t>(kHeaderSize));
         result.push_back(static_cast<std::uint8_t>(kHeaderSize >> 8U));
@@ -535,13 +557,52 @@ std::optional<std::vector<std::uint8_t>> CompressXpressBuffer(std::span<const st
         result.push_back(kModeXpressHuffman);
         AppendU32(result, static_cast<std::uint32_t>(input.size()));
         AppendU32(result, 0);
-        AppendU32(result, kChunkSize);
         AppendU32(result, 0);
-        AppendU32(result, static_cast<std::uint32_t>(firstBody->size()));
-        result.insert(result.end(), firstBody->begin(), firstBody->end());
-        for (const auto& extra : laterBodies) {
-            AppendU32(result, static_cast<std::uint32_t>(extra.size()));
-            result.insert(result.end(), extra.begin(), extra.end());
+        AppendU32(result, 0);
+        AppendU32(result, 0);
+        BitWriter writer(result);
+        // Encodes one chunk body in place; falls back to the raw bytes when the
+        // encoded body would not be smaller.
+        const auto appendChunk = [&result, &writer](std::span<const std::uint8_t> chunk, std::size_t bodyStart) {
+            const EncodeStreamStatus status = EncodeLiteralStream(chunk, result, writer);
+            if (status == EncodeStreamStatus::Complete) return true;
+            result.resize(bodyStart);
+            if (status == EncodeStreamStatus::Failed) return false;
+            if (result.capacity() < bodyStart + chunk.size()) {
+                result.reserve(bodyStart + chunk.size());
+            }
+            result.insert(result.end(), chunk.begin(), chunk.end());
+            return true;
+        };
+
+        if (input.size() <= kChunkSize) {
+            const std::size_t bodyStart = result.size();
+            if (!appendChunk(input, bodyStart)) {
+                // An encoder failure falls back to the raw body, as the
+                // value-returning encoder always has for a single chunk.
+                result.resize(bodyStart);
+                if (result.capacity() < bodyStart + input.size()) {
+                    result.reserve(bodyStart + input.size());
+                }
+                result.insert(result.end(), input.begin(), input.end());
+            }
+            PutU32(result, 16, static_cast<std::uint32_t>(input.size()));
+            PutU32(result, 24, static_cast<std::uint32_t>(result.size() - bodyStart));
+            result[6] = HeaderCrc(result);
+            return result;
+        }
+
+        if (!appendChunk(input.first(kChunkSize), kHeaderBytes)) return std::nullopt;
+        PutU32(result, 16, kChunkSize);
+        PutU32(result, 24, static_cast<std::uint32_t>(result.size() - kHeaderBytes));
+        std::size_t offset = kChunkSize;
+        while (offset < input.size()) {
+            const std::size_t chunkLength = std::min<std::size_t>(kChunkSize, input.size() - offset);
+            const std::size_t sizeSlot = result.size();
+            AppendU32(result, 0);
+            if (!appendChunk(input.subspan(offset, chunkLength), result.size())) return std::nullopt;
+            PutU32(result, sizeSlot, static_cast<std::uint32_t>(result.size() - sizeSlot - 4U));
+            offset += chunkLength;
         }
         result[6] = HeaderCrc(result);
         return result;
@@ -578,6 +639,10 @@ std::optional<std::vector<std::uint8_t>> DecompressXpressBuffer(
     }
     try {
         std::vector<std::uint8_t> output;
+        // One block's tree is the decoder's only scratch, reused across every
+        // block and chunk: the working set is the payload the header declares
+        // plus that fixed table, never a second staged copy.
+        std::vector<DecodeNode> tree;
         // `size` comes from the file header, so never reserve it unconditionally:
         // a forged multi-gigabyte size on a tiny input must fail on bounds, not
         // commit a huge allocation. Cap the hint by what the stored body could
@@ -589,10 +654,10 @@ std::optional<std::vector<std::uint8_t>> DecompressXpressBuffer(
         output.reserve(std::min<std::size_t>(size, reserveHint));
         if (!multiChunk) {
             if (bodySize != available) return std::nullopt;
-            if (!DecodeChunkInto(input.subspan(kHeaderBytes), size, output)) return std::nullopt;
+            if (!DecodeChunkInto(input.subspan(kHeaderBytes), size, output, tree)) return std::nullopt;
             return output;
         }
-        if (!DecodeChunkInto(input.subspan(kHeaderBytes, bodySize), kChunkSize, output)) return std::nullopt;
+        if (!DecodeChunkInto(input.subspan(kHeaderBytes, bodySize), kChunkSize, output, tree)) return std::nullopt;
         std::size_t offset = kHeaderBytes + bodySize;
         std::uint64_t remaining = size - kChunkSize;
         while (remaining > 0) {
@@ -602,7 +667,7 @@ std::optional<std::vector<std::uint8_t>> DecompressXpressBuffer(
             if (nextBodySize > input.size() - offset) return std::nullopt;
             const std::size_t chunkExpected = static_cast<std::size_t>(
                 std::min<std::uint64_t>(remaining, kChunkSize));
-            if (!DecodeChunkInto(input.subspan(offset, nextBodySize), chunkExpected, output)) return std::nullopt;
+            if (!DecodeChunkInto(input.subspan(offset, nextBodySize), chunkExpected, output, tree)) return std::nullopt;
             offset += nextBodySize;
             remaining -= chunkExpected;
         }
