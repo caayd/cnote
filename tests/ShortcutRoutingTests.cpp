@@ -50,9 +50,12 @@
 #include <QAction>
 #include <QApplication>
 #include <QEvent>
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QPointer>
+#include <QSlider>
 #include <QString>
 #include <QTextEdit>
 #include <QWindow>
@@ -68,6 +71,7 @@
 #include "latex/LatexEngine.h"
 #include "ui/CanvasWidget.h"
 #include "ui/InteractionRouter.h"
+#include "ui/SettingsDialogQt.h"
 #include "ui/SidebarWidget.h"
 #include "ui/ToolbarWidget.h"
 
@@ -313,6 +317,20 @@ std::filesystem::path MakeTempDir(const std::string& name) {
     std::filesystem::remove_all(dir, error);
     std::filesystem::create_directories(dir, error);
     return dir;
+}
+
+std::string ReadText(const std::filesystem::path& path) {
+    std::string text;
+    FILE* file = std::fopen(path.string().c_str(), "rb");
+    if (file == nullptr) {
+        return text;
+    }
+    char buffer[256] = {};
+    for (std::size_t read = 0; (read = std::fread(buffer, 1, sizeof(buffer), file)) > 0;) {
+        text.append(buffer, read);
+    }
+    std::fclose(file);
+    return text;
 }
 
 // --- 1. tool keys with the Text tool active and no editor --------------------
@@ -1111,6 +1129,97 @@ void SidebarPageKeysActOnTheSelection() {
     Check(controller.DocumentRef().PageCount() == 4U, "Ctrl+X cuts the selected (pasted) pages");
 }
 
+// A quick-size drag reports the same snapped size for several pointer samples;
+// only a real change may rewrite the settings file (PERF-008).
+void UnchangedQuickSizeTicksDoNotWrite() {
+    Harness harness;
+    const std::filesystem::path path = cnote::settings::SettingsStoreQt::ResolveSettingsPath();
+
+    emit harness.toolbar->BrushSizeChanged(cnote::settings::Tool::Draw, 7.5f);
+    QApplication::processEvents();
+    {
+        FILE* file = std::fopen(path.string().c_str(), "wb");
+        Check(file != nullptr, "the scratch settings file can be replaced");
+        if (file == nullptr) {
+            return;
+        }
+        std::fputs("sentinel\n", file);
+        std::fclose(file);
+    }
+
+    // The same effective size again: the handler must not touch the file.
+    emit harness.toolbar->BrushSizeChanged(cnote::settings::Tool::Draw, 7.5f);
+    QApplication::processEvents();
+    Check(ReadText(path) == "sentinel\n", "a repeated quick-size tick writes nothing");
+
+    emit harness.toolbar->BrushSizeChanged(cnote::settings::Tool::Draw, 9.0f);
+    QApplication::processEvents();
+    Check(cnote::settings::SettingsStoreQt(path).Load().drawBrushSize == 9.0f,
+        "a changed quick-size tick still persists immediately");
+}
+
+// --- 4b. settings edits only rebuild what they touch -------------------------
+
+void SettingsEditsKeepUnrelatedActions() {
+    Harness harness;
+    // Open the modeless settings dialog through the title menu's action, the
+    // same entry point the user has (ToggleSettings has no default chord).
+    QAction* settingsAction = nullptr;
+    for (QAction* action : harness.window->findChildren<QAction*>()) {
+        if (action->text() == QStringLiteral("Settings...")) {
+            settingsAction = action;
+            break;
+        }
+    }
+    Check(settingsAction != nullptr, "the shell still exposes the Settings command");
+    if (settingsAction == nullptr) {
+        return;
+    }
+    settingsAction->trigger();
+    QApplication::processEvents();
+    auto* dialog = harness.window->findChild<cnote::ui::SettingsDialogQt*>();
+    Check(dialog != nullptr, "the Settings command opens the settings dialog");
+    if (dialog == nullptr) {
+        return;
+    }
+
+    std::vector<QPointer<QAction>> actions;
+    for (QAction* action : harness.window->findChildren<QAction*>()) {
+        actions.emplace_back(action);
+    }
+    const auto destroyedActions = [&actions] {
+        return std::count_if(actions.begin(), actions.end(), [](const QPointer<QAction>& action) {
+            return action.isNull();
+        });
+    };
+    Check(destroyedActions() == 0, "the window starts with one live action set");
+
+    // A drawing-slider tick is not a shortcut change: every action object,
+    // including the seven tool actions, must survive it.
+    auto* spacing = dialog->findChild<QSlider*>(QStringLiteral("spacingSlider"));
+    Check(spacing != nullptr, "the settings dialog exposes the spacing slider");
+    if (spacing != nullptr) {
+        spacing->setValue(spacing->value() == spacing->maximum() ? spacing->maximum() - 1 : spacing->value() + 1);
+        QApplication::processEvents();
+        Check(destroyedActions() == 0, "a non-shortcut settings edit keeps the existing shortcut actions");
+    }
+
+    // A captured chord still rebinds: the delete/recreate path must run so no
+    // stale action keeps the old sequence and makes Qt call it ambiguous.
+    dialog->beginShortcutCapture(cnote::settings::ShortcutAction::ToolDraw);
+    QKeyEvent key(QEvent::KeyPress, Qt::Key_K, Qt::NoModifier);
+    QApplication::sendEvent(dialog, &key);
+    QApplication::processEvents();
+    Check(!dialog->capturingShortcut(), "the captured key finishes capture");
+    Check(dialog->settings().shortcuts[static_cast<std::size_t>(cnote::settings::ShortcutAction::ToolDraw)].sequence
+            == QKeySequence(Qt::Key_K),
+        "the captured chord reaches the live settings model");
+    Check(destroyedActions() > 0, "a shortcut edit rebuilds the tool actions");
+    Check(FindActionBySequence(*harness.window, QKeySequence(Qt::Key_K)) != nullptr,
+        "the remapped chord is bound on the rebuilt tool action");
+    dialog->hide();
+}
+
 // --- 5. a remapped binding from the settings store ---------------------------
 
 void RemappedBindingIsHonoured() {
@@ -1348,6 +1457,8 @@ int main(int argc, char** argv) {
     ZoomInKeysAreNotDead();
     SettingsTableShortcutsAreBoundAndFire();
     UndoRedoFireWhenApplicable();
+    SettingsEditsKeepUnrelatedActions();
+    UnchangedQuickSizeTicksDoNotWrite();
     RemappedBindingIsHonoured();
     DuplicateFileBindingsStayUnambiguous();
 

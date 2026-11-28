@@ -9,6 +9,7 @@
 #include <QHideEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPainter>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -37,6 +38,35 @@ QString SwatchStyle(std::uint32_t color, bool selected) {
 }
 
 }  // namespace
+
+// The draft colour swatch.  A plain QLabel repaints through its stylesheet,
+// which unpolishes/repolishes the widget (and re-resolves its style rules) on
+// every HSL tick; this widget keeps the colour and just invalidates its paint.
+class ColorPreview final : public QLabel {
+public:
+    explicit ColorPreview(QWidget* parent)
+        : QLabel(parent) {}
+
+    void SetColor(std::uint32_t color) {
+        if (color_ == color) {
+            return;
+        }
+        color_ = color;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        const QRect outer = rect().adjusted(0, 0, -1, -1);
+        painter.fillRect(outer.adjusted(1, 1, -1, -1), QColor::fromRgb(color_));
+        painter.setPen(QColor(0x2E, 0x3A, 0x4A));
+        painter.drawRect(outer);
+    }
+
+private:
+    std::uint32_t color_ = 0;
+};
 
 NewPageDialogQt::NewPageDialogQt(settings::Settings& settings, QWidget* parent)
     : QDialog(parent),
@@ -82,7 +112,7 @@ void NewPageDialogQt::buildUi() {
     auto* colorRow = new QWidget(defaultsGroup);
     auto* colorLayout = new QHBoxLayout(colorRow);
     colorLayout->setContentsMargins(0, 0, 0, 0);
-    colorPreview_ = new QLabel(colorRow);
+    colorPreview_ = new ColorPreview(colorRow);
     colorPreview_->setObjectName(QStringLiteral("colorPreview"));
     colorPreview_->setFixedSize(48, 24);
     hexColorEdit_ = new QLineEdit(colorRow);
@@ -324,7 +354,7 @@ void NewPageDialogQt::refreshDraftControls() {
         }
     }
 
-    colorPreview_->setStyleSheet(QStringLiteral("background-color: %1; border: 1px solid #2E3A4A;").arg(FormatHexColor(draft_.backgroundColor)));
+    colorPreview_->SetColor(draft_.backgroundColor);
     if (!hexColorEdit_->hasFocus()) {
         hexColorEdit_->setText(FormatHexColor(draft_.backgroundColor));
     }
@@ -494,7 +524,7 @@ void NewPageDialogQt::applyHslSliders() {
     const float lightness = static_cast<float>(lightnessSlider_->value()) / 100.0f;
     draft_.backgroundColor = HslToColor(hue, saturation, lightness);
 
-    colorPreview_->setStyleSheet(QStringLiteral("background-color: %1; border: 1px solid #2E3A4A;").arg(FormatHexColor(draft_.backgroundColor)));
+    colorPreview_->SetColor(draft_.backgroundColor);
     if (!hexColorEdit_->hasFocus()) {
         const QSignalBlocker block(hexColorEdit_);
         hexColorEdit_->setText(FormatHexColor(draft_.backgroundColor));

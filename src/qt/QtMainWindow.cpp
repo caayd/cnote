@@ -267,6 +267,50 @@ PageTextStyle TextStyleFromEditor(const QTextEdit* editor) {
     return style;
 }
 
+// The part of `settings` ApplySettingsToShell reads (directly or through
+// ApplyStrokeStyle, ApplyToolToCanvas and ApplyPendingTextStyle).  A change
+// outside this set is consumed by its own owner - the auto-save timer, PDF
+// export, the new-page dialog - and does not need the shell reapplied.
+bool ShellSettingsEqual(const settings::Settings& a, const settings::Settings& b) {
+    return a.palette == b.palette
+        && a.colorIndex == b.colorIndex
+        && a.defaultPageSizePreset == b.defaultPageSizePreset
+        && a.drawBrushSize == b.drawBrushSize
+        && a.eraseBrushSize == b.eraseBrushSize
+        && a.quickSizeSliderMax == b.quickSizeSliderMax
+        && a.brushSizePresets == b.brushSizePresets
+        && a.textSizePresets == b.textSizePresets
+        && a.textSizePreset == b.textSizePreset
+        && a.textFontFamily == b.textFontFamily
+        && a.textBold == b.textBold
+        && a.textItalic == b.textItalic
+        && a.textUnderline == b.textUnderline
+        && a.textAlignment == b.textAlignment
+        && a.drawCursorKind == b.drawCursorKind
+        && a.drawCursorSize == b.drawCursorSize
+        && a.inputSpacing == b.inputSpacing
+        && a.inputSmoothing == b.inputSmoothing
+        && a.strokeSmoothing == b.strokeSmoothing
+        && a.dashLength == b.dashLength
+        && a.dashGap == b.dashGap
+        && a.autoHideToolbar == b.autoHideToolbar
+        && a.scratchToErase == b.scratchToErase
+        && a.canvasBackdrop == b.canvasBackdrop
+        && a.wheelTools == b.wheelTools
+        && a.zoomPresets == b.zoomPresets;
+}
+
+// ShortcutBinding has no operator==; the sequence is the only field that
+// reaches an action.
+bool ShortcutSequencesEqual(const settings::Settings& a, const settings::Settings& b) {
+    for (std::size_t index = 0; index < a.shortcuts.size(); ++index) {
+        if (a.shortcuts[index].sequence != b.shortcuts[index].sequence) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
@@ -557,11 +601,14 @@ void QtMainWindow::CreateChrome() {
         UpdateChrome();
     });
     connect(toolbar_, &ui::ToolbarWidget::BrushSizeChanged, this, [this](settings::Tool tool, float size) {
-        if (tool == settings::Tool::Erase) {
-            settings_.eraseBrushSize = size;
-        } else {
-            settings_.drawBrushSize = size;
+        // The popup snaps every pointer move to a preset/step, so a drag sends
+        // the same effective value repeatedly.  Only a real change rewrites the
+        // settings file and repaints the chrome (PERF-008).
+        float& brushSize = tool == settings::Tool::Erase ? settings_.eraseBrushSize : settings_.drawBrushSize;
+        if (brushSize == size) {
+            return;
         }
+        brushSize = size;
         ApplyStrokeStyle();
         settingsStore_.Save(settings_);
         UpdateChrome();
@@ -798,6 +845,7 @@ void QtMainWindow::ApplySettingsToShell() {
         canvas_->SetTransparentBackdrop(
             ui::ApplyWindowBackdrop(*this, settings_.canvasBackdrop) != settings::CanvasBackdrop::Solid);
     }
+    appliedSettings_ = settings_;
 }
 
 void QtMainWindow::ApplyStrokeStyle() {
@@ -919,6 +967,7 @@ void QtMainWindow::RefreshShortcutBindings() {
     for (QAction* action : toolShortcutActions_) {
         action->setEnabled(!EditorOwnsKeyboard());
     }
+    appliedSettings_ = settings_;
 }
 
 void QtMainWindow::ResetView() {
@@ -1117,8 +1166,17 @@ void QtMainWindow::ToggleSettingsDialog() {
     if (settingsDialog_ == nullptr) {
         settingsDialog_ = new ui::SettingsDialogQt(settings_, settingsStore_, this);
         connect(settingsDialog_, &ui::SettingsDialogQt::settingsChanged, this, [this]() {
-            ApplySettingsToShell();
-            RefreshShortcutBindings();
+            // One edit used to reapply everything; a slider drag then did it per
+            // tick.  Compare against what the shell last consumed and touch only
+            // the matching state (PERF-043).  Both diffs are read before the
+            // first apply, because each apply updates appliedSettings_.
+            const bool shortcutsChanged = !ShortcutSequencesEqual(settings_, appliedSettings_);
+            if (!ShellSettingsEqual(settings_, appliedSettings_)) {
+                ApplySettingsToShell();
+            }
+            if (shortcutsChanged) {
+                RefreshShortcutBindings();
+            }
             UpdateChrome();
             // The app preset is global across open windows, while each
             // controller resolves its project's explicit override separately.
