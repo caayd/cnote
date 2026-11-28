@@ -135,7 +135,12 @@ std::deque<WidthEntry>& WidthCache() {
     return cache;
 }
 
-constexpr std::size_t kMaxCachedWidths = 128;
+// A dense page resolves one width per text object.  The entries are tiny (a
+// hash and a float plus deque bookkeeping), so the byte budget keeps several
+// thousand: 512 KiB at the conservative 64 bytes charged per entry.
+constexpr std::size_t kWidthEntryBytes = 64;
+constexpr std::size_t kMaxWidthCacheBytes = 512U * 1024U;
+constexpr std::size_t kMaxCachedWidths = kMaxWidthCacheBytes / kWidthEntryBytes;
 
 float MeasureAutoTextWidth(const PageText& text) {
     const std::uint64_t key = TextIdentityHash(text);
@@ -157,7 +162,7 @@ float MeasureAutoTextWidth(const PageText& text) {
     const BuiltDocument built = BuildFormattedDocument(measured, 1.0f);
     const float width = std::max(1.0f, static_cast<float>(built.document->idealWidth()));
     cache.push_back({ key, width });
-    if (cache.size() > kMaxCachedWidths) {
+    while (cache.size() > 1U && cache.size() > kMaxCachedWidths) {
         cache.pop_front();
     }
     return width;
@@ -185,10 +190,16 @@ BuiltDocument BuildDocument(const PageText& text, float layoutScale, float resol
 struct CacheEntry {
     std::uint64_t signature = 0;
     QtTextLayout layout {};
+    std::size_t bytes = 0;
 };
 
-std::deque<CacheEntry>& LayoutCache() {
-    static std::deque<CacheEntry> cache;
+struct LayoutCacheState {
+    std::deque<CacheEntry> entries;
+    std::size_t bytes = 0;
+};
+
+LayoutCacheState& LayoutCache() {
+    static LayoutCacheState cache;
     return cache;
 }
 
@@ -197,7 +208,22 @@ std::uint64_t& LayoutMisses() {
     return misses;
 }
 
-constexpr std::size_t kMaxCachedLayouts = 128;
+// A page may draw every text object in order on each redraw, so the cache has
+// to hold a dense page rather than a fixed number of entries.  The estimate
+// charges the line strings and vectors conservatively; the budget keeps
+// thousands of ordinary text objects while still bounding long documents.
+constexpr std::size_t kMaxLayoutCacheBytes = 8U * 1024U * 1024U;
+constexpr std::size_t kLayoutEntryOverheadBytes = 2048U;
+constexpr std::size_t kLayoutBytesPerUnit = 4U;
+constexpr std::size_t kLayoutBytesPerSpan = 32U;
+constexpr std::size_t kLayoutBytesPerLine = 64U;
+
+std::size_t EstimateLayoutBytes(const PageText& text, const QtTextLayout& layout) {
+    return kLayoutEntryOverheadBytes
+        + text.content.size() * kLayoutBytesPerUnit
+        + text.styleSpans.size() * kLayoutBytesPerSpan
+        + layout.lines.size() * kLayoutBytesPerLine;
+}
 
 // The cached layout for `text`, with its resolved width.  Never copies the
 // line strings; callers that need a copy (the public API) make one.
@@ -206,15 +232,15 @@ const QtTextLayout& CachedLayout(const PageText& text) {
     // while the engine was down (formulas shown as source) is unreachable
     // after a recovery or re-initialization.
     const std::uint64_t key = LayoutSignature(text);
-    std::deque<CacheEntry>& cache = LayoutCache();
-    const auto existing = std::find_if(cache.begin(), cache.end(), [&](const CacheEntry& entry) {
+    LayoutCacheState& cache = LayoutCache();
+    const auto existing = std::find_if(cache.entries.begin(), cache.entries.end(), [&](const CacheEntry& entry) {
         return entry.signature == key;
     });
-    if (existing != cache.end()) {
+    if (existing != cache.entries.end()) {
         CacheEntry entry = std::move(*existing);
-        cache.erase(existing);
-        cache.push_back(std::move(entry));
-        return cache.back().layout;
+        cache.entries.erase(existing);
+        cache.entries.push_back(std::move(entry));
+        return cache.entries.back().layout;
     }
 
     ++LayoutMisses();
@@ -257,11 +283,14 @@ const QtTextLayout& CachedLayout(const PageText& text) {
     // page-unit height is the drawn height at every zoom.
     layout.height = std::max(layout.lineHeight, static_cast<float>(document.size().height()));
 
-    cache.push_back({ key, std::move(layout) });
-    if (cache.size() > kMaxCachedLayouts) {
-        cache.pop_front();
+    const std::size_t bytes = EstimateLayoutBytes(text, layout);
+    cache.entries.push_back({ key, std::move(layout), bytes });
+    cache.bytes += bytes;
+    while (cache.entries.size() > 1U && cache.bytes > kMaxLayoutCacheBytes) {
+        cache.bytes -= cache.entries.front().bytes;
+        cache.entries.pop_front();
     }
-    return cache.back().layout;
+    return cache.entries.back().layout;
 }
 
 // Prepared documents for drawing, keyed by layout identity and the layout
@@ -271,35 +300,60 @@ struct DrawEntry {
     std::uint64_t signature = 0;
     std::uint32_t layoutScaleBits = 0;
     std::unique_ptr<QTextDocument> document;
+    std::size_t bytes = 0;
 };
 
-std::deque<DrawEntry>& DrawCache() {
-    static std::deque<DrawEntry> cache;
+struct DrawCacheState {
+    std::deque<DrawEntry> entries;
+    std::size_t bytes = 0;
+};
+
+DrawCacheState& DrawCache() {
+    static DrawCacheState cache;
     return cache;
 }
 
-constexpr std::size_t kMaxCachedDrawDocuments = 8;
+// Sized for a dense page redrawn in object order: every text box's prepared
+// document has to survive until the next redraw, or the LRU becomes cyclic
+// and each draw both misses and evicts.  The estimate is a fixed per-document
+// cost plus the text and spans; the budget holds a few thousand small boxes
+// or a few hundred long ones.
+constexpr std::size_t kMaxDrawCacheBytes = 8U * 1024U * 1024U;
+constexpr std::size_t kDrawDocumentOverheadBytes = 4096U;
+constexpr std::size_t kDrawBytesPerUnit = 8U;
+constexpr std::size_t kDrawBytesPerSpan = 64U;
+
+std::size_t EstimateDrawDocumentBytes(const PageText& text) {
+    return kDrawDocumentOverheadBytes
+        + text.content.size() * kDrawBytesPerUnit
+        + text.styleSpans.size() * kDrawBytesPerSpan;
+}
 
 QTextDocument& PreparedDrawDocument(const PageText& text, float layoutScale) {
     const std::uint64_t signature = LayoutSignature(text);
     const std::uint32_t layoutScaleBits = std::bit_cast<std::uint32_t>(layoutScale);
-    std::deque<DrawEntry>& cache = DrawCache();
-    const auto existing = std::find_if(cache.begin(), cache.end(), [&](const DrawEntry& entry) {
+    DrawCacheState& cache = DrawCache();
+    const auto existing = std::find_if(cache.entries.begin(), cache.entries.end(), [&](const DrawEntry& entry) {
         return entry.signature == signature && entry.layoutScaleBits == layoutScaleBits;
     });
-    if (existing != cache.end()) {
+    if (existing != cache.entries.end()) {
         DrawEntry entry = std::move(*existing);
-        cache.erase(existing);
-        cache.push_back(std::move(entry));
-        return *cache.back().document;
+        cache.entries.erase(existing);
+        cache.entries.push_back(std::move(entry));
+        return *cache.entries.back().document;
     }
 
     BuiltDocument built = BuildDocument(text, layoutScale, ResolvedTextWidth(text));
-    cache.push_back({ signature, layoutScaleBits, std::move(built.document) });
-    if (cache.size() > kMaxCachedDrawDocuments) {
-        cache.pop_front();
+    const std::size_t bytes = EstimateDrawDocumentBytes(text);
+    cache.entries.push_back({ signature, layoutScaleBits, std::move(built.document), bytes });
+    cache.bytes += bytes;
+    // At least one document stays: a single text object larger than the
+    // budget is the minimum working set for drawing it.
+    while (cache.entries.size() > 1U && cache.bytes > kMaxDrawCacheBytes) {
+        cache.bytes -= cache.entries.front().bytes;
+        cache.entries.pop_front();
     }
-    return *cache.back().document;
+    return *cache.entries.back().document;
 }
 
 }  // namespace

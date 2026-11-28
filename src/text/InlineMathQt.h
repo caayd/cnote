@@ -41,4 +41,8 @@ void RegisterInlineMathHandler(QTextDocument& document);
 // formula baseline on the text baseline.
 void MakeInlineMathFormat(QTextCharFormat& format, std::u16string_view source, float displayScale);
 
+// Diagnostics: number of inline-math placements measured (cache misses).
+// Used by tests to prove a redrawn formula page reuses every placement.
+[[nodiscard]] std::uint64_t InlineMathPlacementMisses();
+
 }  // namespace cnote::text

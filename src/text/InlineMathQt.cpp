@@ -37,26 +37,40 @@ struct MathPlacement {
 
 // Measured placements are reused by the layout's intrinsic-size query, its
 // draw callback and the format that installs the placeholder, so one formula
-// at one layout size parses and measures once per engine lifetime.  Bounded:
-// a text object with many formulas cannot grow this without limit.
+// at one layout size parses and measures once per engine lifetime.  A dense
+// formula page must survive a redraw in object order, so the bound is by
+// bytes (the source plus a conservative share of the parsed render) rather
+// than a small entry count.
 struct PlacementEntry {
     QString source;
     float fontSize = 0.0f;
     float scale = 0.0f;
     MathPlacement placement;
+    std::size_t bytes = 0;
 };
 
-std::deque<PlacementEntry>& PlacementCache() {
-    static std::deque<PlacementEntry> cache;
+struct PlacementCacheState {
+    std::deque<PlacementEntry> entries;
+    std::size_t bytes = 0;
+    std::uint64_t generation = 0;
+};
+
+PlacementCacheState& PlacementCache() {
+    static PlacementCacheState cache;
     return cache;
 }
 
-std::uint64_t& PlacementCacheGeneration() {
-    static std::uint64_t generation = 0;
-    return generation;
+std::uint64_t& PlacementMisses() {
+    static std::uint64_t misses = 0;
+    return misses;
 }
 
-constexpr std::size_t kMaxCachedPlacements = 64;
+constexpr std::size_t kMaxPlacementCacheBytes = 4U * 1024U * 1024U;
+constexpr std::size_t kPlacementEntryOverheadBytes = 2048U;
+
+std::size_t EstimatePlacementBytes(const QString& source) {
+    return kPlacementEntryOverheadBytes + static_cast<std::size_t>(source.size()) * 2U;
+}
 
 // Parsed at the layout size (text size * display scale): MicroTeX reports
 // whole-unit metrics, so this keeps rounding below one layout pixel at
@@ -67,23 +81,26 @@ MathPlacement MeasureInlineMath(const QString& source, float fontSize, float sca
         return placement;
     }
 
-    std::deque<PlacementEntry>& cache = PlacementCache();
+    PlacementCacheState& cache = PlacementCache();
     const std::uint64_t generation = latex::EngineGeneration();
-    if (PlacementCacheGeneration() != generation) {
+    if (cache.generation != generation) {
         // Parsed formulae belong to one engine lifetime.
-        cache.clear();
-        PlacementCacheGeneration() = generation;
+        cache.entries.clear();
+        cache.bytes = 0;
+        cache.generation = generation;
     }
-    const auto existing = std::find_if(cache.begin(), cache.end(), [&](const PlacementEntry& entry) {
-        return entry.fontSize == fontSize && entry.scale == scale && entry.source == source;
-    });
-    if (existing != cache.end()) {
+    const auto existing = std::find_if(cache.entries.begin(), cache.entries.end(),
+        [&](const PlacementEntry& entry) {
+            return entry.fontSize == fontSize && entry.scale == scale && entry.source == source;
+        });
+    if (existing != cache.entries.end()) {
         PlacementEntry entry = std::move(*existing);
-        cache.erase(existing);
-        cache.push_back(std::move(entry));
-        return cache.back().placement;
+        cache.entries.erase(existing);
+        cache.entries.push_back(std::move(entry));
+        return cache.entries.back().placement;
     }
 
+    ++PlacementMisses();
     placement.formula = latex::Parse(InlineSource(source.toStdU16String()), fontSize * scale, false);
     if (placement.formula == nullptr) {
         // Not cached: a missing engine or a failed parse may recover.
@@ -94,9 +111,14 @@ MathPlacement MeasureInlineMath(const QString& source, float fontSize, float sca
     placement.ascent = static_cast<qreal>(metrics.height - metrics.depth);
     placement.depth = static_cast<qreal>(metrics.depth);
 
-    cache.push_back({ source, fontSize, scale, placement });
-    if (cache.size() > kMaxCachedPlacements) {
-        cache.pop_front();
+    const std::size_t bytes = EstimatePlacementBytes(source);
+    cache.entries.push_back({ source, fontSize, scale, placement, bytes });
+    cache.bytes += bytes;
+    // Keep at least the placement just measured; one formula is the minimum
+    // working set.
+    while (cache.entries.size() > 1U && cache.bytes > kMaxPlacementCacheBytes) {
+        cache.bytes -= cache.entries.front().bytes;
+        cache.entries.pop_front();
     }
     return placement;
 }
@@ -199,6 +221,10 @@ void MakeInlineMathFormat(QTextCharFormat& format, std::u16string_view source, f
     }
     format.setFontPointSize(font.pointSizeF());
     format.setProperty(kInlineMathPlaceholderPointSizeProperty, font.pointSizeF());
+}
+
+std::uint64_t InlineMathPlacementMisses() {
+    return PlacementMisses();
 }
 
 }  // namespace cnote::text

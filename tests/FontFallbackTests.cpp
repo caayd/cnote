@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <QFont>
@@ -266,6 +267,38 @@ void CheckBoundsHitBuildsNoDocuments() {
         "fixed-width bounds build one layout document and a hit adds none");
 }
 
+// --- a dense page must fit the measurement caches -------------------------
+// Text is measured and drawn object by object, so a page with more text boxes
+// than the cache holds turns a second pass into a cyclic miss.  200 boxes is
+// a deliberately dense page; both passes must leave every later query cached.
+void CheckDensePageBoundsHitNoDocuments() {
+    std::vector<cnote::PageText> texts;
+    texts.reserve(200);
+    for (int index = 0; index < 200; ++index) {
+        cnote::PageText text = BuildStyledText();
+        text.id = 1000U + static_cast<std::uint64_t>(index);
+        text.x = static_cast<float>(index % 20) * 12.0f;
+        text.y = static_cast<float>(index / 20) * 40.0f;
+        // Mix auto-width (resolved) and fixed-width (never measured) boxes.
+        text.width = index % 2 == 0 ? 0.0f : 260.0f;
+        text.content.push_back(static_cast<char16_t>(0x4E00 + index));
+        texts.push_back(std::move(text));
+    }
+
+    const std::uint64_t documentsBefore = cnote::text::TextDocumentBuilds();
+    for (const cnote::PageText& text : texts) {
+        static_cast<void>(cnote::text::MeasurePageTextBoundsQt(text, 400.0f));
+    }
+    const std::uint64_t documentsAfterCold = cnote::text::TextDocumentBuilds();
+    Check(documentsAfterCold > documentsBefore, "a 200-box page builds layouts on its first pass");
+
+    for (const cnote::PageText& text : texts) {
+        static_cast<void>(cnote::text::MeasurePageTextBoundsQt(text, 400.0f));
+    }
+    Check(cnote::text::TextDocumentBuilds() == documentsAfterCold,
+        "a 200-box page's second bounds pass builds no documents");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -275,6 +308,7 @@ int main(int argc, char** argv) {
     CheckLayoutKeepsEverything();
     CheckWrappingAndDeterminism();
     CheckBoundsHitBuildsNoDocuments();
+    CheckDensePageBoundsHitNoDocuments();
     CheckLayoutCacheTracksEngineGeneration();
 
     if (gFailures != 0) {
