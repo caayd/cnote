@@ -278,6 +278,7 @@ bool AppendBitmapObject(
     double d,
     double e,
     double f,
+    bool opaque,
     std::vector<FPDF_BITMAP>& ownedBitmaps) {
     if (documentHandle == nullptr || pageHandle == nullptr || pixels == nullptr
         || pixelWidth <= 0 || pixelHeight <= 0 || stride <= 0) {
@@ -285,11 +286,13 @@ bool AppendBitmapObject(
     }
 
     // PDFium only reads an external BGRA buffer it is handed for an image
-    // object; the API just lacks a const overload.
+    // object; the API just lacks a const overload. BGRx is the same byte
+    // layout with the alpha byte ignored, and PDFium then skips cloning a
+    // full-image alpha mask for opaque rasters.
     FPDF_BITMAP bitmapHandle = FPDFBitmap_CreateEx(
         pixelWidth,
         pixelHeight,
-        FPDFBitmap_BGRA,
+        opaque ? FPDFBitmap_BGRx : FPDFBitmap_BGRA,
         const_cast<std::uint8_t*>(pixels),
         stride);
     if (bitmapHandle == nullptr) {
@@ -315,25 +318,33 @@ bool AppendBitmapObject(
     return true;
 }
 
-bool AppendFullPageRasterObject(
+// Places a raster over its page rectangle. PDF image space has v = 0 at the
+// image's bottom row, so the matrix' y scale is positive and f is the page
+// height of the rectangle's bottom edge.
+bool AppendRasterObject(
     FPDF_DOCUMENT documentHandle,
     FPDF_PAGE pageHandle,
     const Page& page,
-    const RasterImage& raster,
+    const PlacedRaster& placed,
     std::vector<FPDF_BITMAP>& ownedBitmaps) {
+    const double height = static_cast<double>(placed.bottom) - static_cast<double>(placed.top);
+    if (height <= 0.0) {
+        return true;
+    }
     return AppendBitmapObject(
         documentHandle,
         pageHandle,
-        raster.width,
-        raster.height,
-        raster.stride,
-        raster.pixels.data(),
-        page.width,
+        placed.image.width,
+        placed.image.height,
+        placed.image.stride,
+        placed.image.pixels.data(),
+        static_cast<double>(placed.right) - static_cast<double>(placed.left),
         0.0,
         0.0,
-        page.height,
-        0.0,
-        0.0,
+        height,
+        placed.left,
+        static_cast<double>(page.height) - static_cast<double>(placed.bottom),
+        placed.opaque,
         ownedBitmaps);
 }
 
@@ -374,6 +385,7 @@ bool AppendPageImageObject(
         d,
         e,
         f,
+        false,
         ownedBitmaps);
 }
 
@@ -385,6 +397,40 @@ struct PdfFileWriter {
         auto* fileWriter = reinterpret_cast<PdfFileWriter*>(self);
         const qint64 expected = static_cast<qint64>(size);
         return fileWriter->file->write(static_cast<const char*>(data), expected) == expected ? 1 : 0;
+    }
+};
+
+// Owns one export page and the bitmaps that back the image objects inserted
+// into it, releasing both at the end of the page instead of at the end of the
+// document.
+//
+// Lifetime contract (PDFium 148 sources):
+//   * FPDFImageObj_SetBitmap -> CPDF_ImageObject::SetImage ->
+//     CPDF_Image::SetImage copies the whole bitmap into a document-owned
+//     CPDF_Stream (and clones the alpha mask into its own stream), then drops
+//     its local CFX_DIBitmap reference. The public header does not document
+//     that lifetime, so the buffers are kept until the page's
+//     FPDFPage_GenerateContent, the last call that reads page objects
+//     (CPDF_PageContentGenerator::ProcessImage reads CPDF_Image::GetStream()).
+//   * FPDF_ClosePage drops the last reference to the CPDF_Page view; page
+//     dictionaries and content streams stay in the CPDF_Document, which
+//     FPDF_SaveAsCopy writes through CPDF_Creator. Closing before the save is
+//     therefore safe and frees each page's parsed objects and image caches.
+struct ExportPageScope {
+    FPDF_PAGE page = nullptr;
+    std::vector<FPDF_BITMAP> bitmaps;
+
+    ExportPageScope() = default;
+    ExportPageScope(const ExportPageScope&) = delete;
+    ExportPageScope& operator=(const ExportPageScope&) = delete;
+
+    ~ExportPageScope() {
+        for (FPDF_BITMAP bitmap : bitmaps) {
+            FPDFBitmap_Destroy(bitmap);
+        }
+        if (page != nullptr) {
+            FPDF_ClosePage(page);
+        }
     }
 };
 
@@ -767,18 +813,14 @@ bool PdfiumBackend::ExportPdf(
         return false;
     }
 
-    std::vector<RasterImage> flattenedPages;
-    std::vector<FPDF_BITMAP> ownedBitmaps;
     std::vector<FPDF_DOCUMENT> sourceDocuments(document.PdfSourceCount(), nullptr);
-    std::vector<FPDF_PAGE> createdPages;
-    flattenedPages.reserve(document.PageCount());
-    ownedBitmaps.reserve(document.PageCount());
-    createdPages.reserve(document.PageCount());
 
     bool ok = true;
     for (std::size_t pageIndex = 0; ok && pageIndex < document.PageCount(); ++pageIndex) {
         const Page& sourcePage = document.PageAt(pageIndex);
-        FPDF_PAGE pageHandle = nullptr;
+        // Releases this page's bitmaps and handle at the end of the iteration,
+        // after FPDFPage_GenerateContent.
+        ExportPageScope page;
         bool importedSourcePage = false;
         bool imagesAlreadyFlattened = false;
 
@@ -798,8 +840,8 @@ bool PdfiumBackend::ExportPdf(
                     1,
                     static_cast<int>(pageIndex)) != 0;
                 if (importedSourcePage) {
-                    pageHandle = FPDF_LoadPage(outputDocument, static_cast<int>(pageIndex));
-                    if (pageHandle == nullptr) {
+                    page.page = FPDF_LoadPage(outputDocument, static_cast<int>(pageIndex));
+                    if (page.page == nullptr) {
                         ok = false;
                         break;
                     }
@@ -807,45 +849,45 @@ bool PdfiumBackend::ExportPdf(
             }
         }
 
-        if (pageHandle == nullptr) {
-            pageHandle = FPDFPage_New(
+        if (page.page == nullptr) {
+            page.page = FPDFPage_New(
                 outputDocument,
                 static_cast<int>(pageIndex),
                 sourcePage.width,
                 sourcePage.height);
-            if (pageHandle == nullptr) {
+            if (page.page == nullptr) {
                 ok = false;
                 break;
             }
 
-            bool hasBackgroundRaster = false;
+            std::optional<PlacedRaster> background;
             if (!importedSourcePage && sourcePage.sourcePdfPageIndex >= 0) {
-                flattenedPages.push_back(ComposePageRaster(*this, document, pageIndex, renderScale, strokeSmoothing, dashLength, dashGap, false));
-                hasBackgroundRaster = true;
+                background = ComposePageRaster(*this, document, pageIndex, renderScale, strokeSmoothing, dashLength, dashGap, false);
                 imagesAlreadyFlattened = true;
             } else if (!sourcePage.raster.pixels.empty()
                 && sourcePage.raster.width > 0
                 && sourcePage.raster.height > 0
                 && sourcePage.raster.stride > 0) {
-                flattenedPages.push_back(sourcePage.raster);
-                hasBackgroundRaster = true;
+                background = PlacedRaster {
+                    sourcePage.raster,
+                    0.0f,
+                    0.0f,
+                    sourcePage.width,
+                    sourcePage.height,
+                    IsOpaqueBgra(sourcePage.raster),
+                };
             }
 
-            if (hasBackgroundRaster && !AppendFullPageRasterObject(
-                    outputDocument,
-                    pageHandle,
-                    sourcePage,
-                    flattenedPages.back(),
-                    ownedBitmaps)) {
+            if (background.has_value()
+                && !AppendRasterObject(outputDocument, page.page, sourcePage, *background, page.bitmaps)) {
                 ok = false;
                 break;
             }
         }
-        createdPages.push_back(pageHandle);
 
         if (!imagesAlreadyFlattened) {
             for (const PageImage& image : sourcePage.images) {
-                ok = AppendPageImageObject(outputDocument, pageHandle, sourcePage, image, ownedBitmaps);
+                ok = AppendPageImageObject(outputDocument, page.page, sourcePage, image, page.bitmaps);
                 if (!ok) {
                     break;
                 }
@@ -855,26 +897,26 @@ bool PdfiumBackend::ExportPdf(
             }
         }
 
-        if (const auto textOverlay = ComposeTextOverlayRaster(sourcePage, renderScale); textOverlay.has_value()) {
-            flattenedPages.push_back(std::move(*textOverlay));
-            ok = AppendFullPageRasterObject(
-                outputDocument,
-                pageHandle,
-                sourcePage,
-                flattenedPages.back(),
-                ownedBitmaps);
+        for (const PlacedRaster& textOverlay : ComposeTextOverlayRasters(sourcePage, renderScale)) {
+            ok = AppendRasterObject(outputDocument, page.page, sourcePage, textOverlay, page.bitmaps);
             if (!ok) {
                 break;
             }
+        }
+        if (!ok) {
+            break;
         }
 
         for (const Stroke& stroke : sourcePage.strokes) {
-            ok = AppendVectorStroke(pageHandle, sourcePage, stroke, strokeSmoothing, dashLength, dashGap);
+            ok = AppendVectorStroke(page.page, sourcePage, stroke, strokeSmoothing, dashLength, dashGap);
             if (!ok) {
                 break;
             }
         }
-        ok = FPDFPage_GenerateContent(pageHandle) != 0;
+        if (!ok) {
+            break;
+        }
+        ok = FPDFPage_GenerateContent(page.page) != 0;
     }
 
     if (ok && !embeddedProject.empty()) {
@@ -900,12 +942,6 @@ bool PdfiumBackend::ExportPdf(
         }
     }
 
-    for (FPDF_BITMAP bitmapHandle : ownedBitmaps) {
-        FPDFBitmap_Destroy(bitmapHandle);
-    }
-    for (FPDF_PAGE pageHandle : createdPages) {
-        FPDF_ClosePage(pageHandle);
-    }
     for (FPDF_DOCUMENT sourceDocument : sourceDocuments) {
         if (sourceDocument != nullptr) {
             FPDF_CloseDocument(sourceDocument);

@@ -5,14 +5,20 @@
 // no external fixtures; the selectable-text case embeds a minimal PDF.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <memory>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include <QGuiApplication>
+#include <QImage>
+#include <QPainter>
 
 #include "Document.h"
 #include "PdfBackend.h"
@@ -20,6 +26,8 @@
 #include "ProjectFile.h"
 #include "document/FileIO.h"
 #include "latex/LatexEngine.h"
+#include "render/PageRenderer.h"
+#include "text/TextLayoutQt.h"
 
 namespace {
 
@@ -136,6 +144,268 @@ cnote::Document BuildSyntheticDocument() {
     return document;
 }
 
+cnote::Page BuildOverlayPage(float width) {
+    cnote::Page page;
+    page.width = width;
+    page.height = 200.0f;
+
+    cnote::PageText text {};
+    text.id = 1;
+    text.x = 20.5f;
+    text.y = 40.25f;
+    text.fontSize = 20.0f;
+    text.color = 0xFF000000U;
+    text.rotationDegrees = 17.0f;
+    text.content = u"overlay parity";
+    page.texts.push_back(text);
+
+    cnote::PageLatex latex {};
+    latex.id = 2;
+    latex.x = 30.0f;
+    latex.y = 120.0f;
+    latex.fontSize = 26.0f;
+    latex.color = 0xFF000000U;
+    latex.content = u"x^2 + y";
+    page.latexes.push_back(latex);
+    return page;
+}
+
+cnote::Page BuildOverlappingOverlayPage() {
+    cnote::Page page;
+    page.width = 200.0f;
+    page.height = 200.0f;
+
+    const auto addText = [&page](std::uint64_t id, float x, float y, float fontSize, std::u16string content) {
+        cnote::PageText text {};
+        text.id = id;
+        text.x = x;
+        text.y = y;
+        text.fontSize = fontSize;
+        text.color = 0xFF000000U;
+        text.content = std::move(content);
+        page.texts.push_back(std::move(text));
+    };
+    // Two overlapping boxes: separate images would store their edge alpha twice.
+    addText(1, 30.0f, 30.0f, 20.0f, u"overlap one");
+    addText(2, 40.0f, 42.0f, 20.0f, u"overlap two");
+    // A formula over a text box, plus one far object that must stay its own crop.
+    addText(3, 30.0f, 100.0f, 20.0f, u"formula base");
+    cnote::PageLatex latex {};
+    latex.id = 4;
+    latex.x = 40.0f;
+    latex.y = 108.0f;
+    latex.fontSize = 24.0f;
+    latex.color = 0xFF000000U;
+    latex.content = u"x^2";
+    page.latexes.push_back(latex);
+    addText(5, 150.0f, 170.0f, 16.0f, u"apart");
+    return page;
+}
+
+// Two boxes that do not touch but are close enough that the union rectangle is
+// cheaper than two images (the area-budget merge, not the overlap merge).
+cnote::Page BuildClosePairPage() {
+    cnote::Page page;
+    page.width = 200.0f;
+    page.height = 200.0f;
+    for (const auto& [id, x] : { std::pair<std::uint64_t, float> { 1, 20.0f }, { 2, 38.0f } }) {
+        cnote::PageText text {};
+        text.id = id;
+        text.x = x;
+        text.y = 40.0f;
+        text.fontSize = 20.0f;
+        text.color = 0xFF000000U;
+        text.content = u"a";
+        page.texts.push_back(text);
+    }
+    return page;
+}
+
+cnote::Page BuildOverlapPairPage() {
+    cnote::Page page;
+    page.width = 200.0f;
+    page.height = 200.0f;
+    for (const auto& [id, x, y] : { std::tuple<std::uint64_t, float, float> { 1, 30.0f, 30.0f },
+             { 2, 40.0f, 42.0f } }) {
+        cnote::PageText text {};
+        text.id = id;
+        text.x = x;
+        text.y = y;
+        text.fontSize = 20.0f;
+        text.color = 0xFF000000U;
+        text.content = u"overlapping";
+        page.texts.push_back(text);
+    }
+    return page;
+}
+
+// 200 disjoint small text boxes on A4: the dense-page case for the area-budget
+// merge and the 64-raster backstop.
+cnote::Page BuildDenseOverlayPage() {
+    cnote::Page page;
+    page.width = 595.0f;
+    page.height = 842.0f;
+    std::uint64_t id = 1;
+    for (int row = 0; row < 20; ++row) {
+        for (int column = 0; column < 10; ++column) {
+            cnote::PageText text {};
+            text.id = id++;
+            text.x = 20.0f + static_cast<float>(column) * 56.0f;
+            text.y = 20.0f + static_cast<float>(row) * 40.0f;
+            text.fontSize = 14.0f;
+            text.color = 0xFF111827U;
+            text.content = u"t123";
+            page.texts.push_back(text);
+        }
+    }
+    return page;
+}
+
+// 72 far-apart tiny boxes: no pair passes the area budget, so only the 64-raster
+// backstop can collapse them.
+cnote::Page BuildBackstopOverlayPage() {
+    cnote::Page page;
+    page.width = 595.0f;
+    page.height = 842.0f;
+    std::uint64_t id = 1;
+    for (int row = 0; row < 8; ++row) {
+        for (int column = 0; column < 9; ++column) {
+            cnote::PageText text {};
+            text.id = id++;
+            text.x = 15.0f + static_cast<float>(column) * 64.0f;
+            text.y = 15.0f + static_cast<float>(row) * 100.0f;
+            text.fontSize = 10.0f;
+            text.color = 0xFF111827U;
+            text.content = u"x";
+            page.texts.push_back(text);
+        }
+    }
+    return page;
+}
+
+// The old export path painted the whole overlay into one page-sized image.
+// This reproduces that composition (white or transparent background) as the
+// reference the cropped rasters are compared against.
+QImage PaintOverlayReference(const cnote::Page& page, float scale, bool opaqueBackground) {
+    const int width = std::max(1, static_cast<int>(std::lround(page.width * scale)));
+    const int height = std::max(1, static_cast<int>(std::lround(page.height * scale)));
+    QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
+    image.fill(opaqueBackground ? QColor(Qt::white) : QColor(Qt::transparent));
+
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::TextAntialiasing, true);
+    for (const cnote::PageText& text : page.texts) {
+        cnote::render::PaintPageText(painter, text, page.width, scale, std::nullopt, 1.0f);
+    }
+    for (const cnote::PageLatex& latex : page.latexes) {
+        cnote::render::PaintPageLatex(painter, latex, scale, 1.0f);
+    }
+    painter.end();
+    return image.convertToFormat(QImage::Format_ARGB32);
+}
+
+struct ImageDifference {
+    std::size_t differingPixels = 0;
+    int maxChannelDifference = 0;
+};
+
+// Compares two straight-ARGB images channel by channel, so alpha coverage
+// (placement and clipping) is exact while the premultiply round trip stays
+// within one step.
+ImageDifference CompareArgb(const QImage& expected, const QImage& actual) {
+    ImageDifference difference;
+    if (expected.width() != actual.width() || expected.height() != actual.height()) {
+        difference.maxChannelDifference = 255;
+        return difference;
+    }
+    for (int y = 0; y < expected.height(); ++y) {
+        const auto* expectedRow = reinterpret_cast<const QRgb*>(expected.constScanLine(y));
+        const auto* actualRow = reinterpret_cast<const QRgb*>(actual.constScanLine(y));
+        for (int x = 0; x < expected.width(); ++x) {
+            bool differs = false;
+            const int alphaDifference = std::abs(qAlpha(expectedRow[x]) - qAlpha(actualRow[x]));
+            if (alphaDifference != 0) {
+                difference.maxChannelDifference = 255;
+                differs = true;
+            }
+            for (const int channelDifference : { std::abs(qRed(expectedRow[x]) - qRed(actualRow[x])),
+                     std::abs(qGreen(expectedRow[x]) - qGreen(actualRow[x])),
+                     std::abs(qBlue(expectedRow[x]) - qBlue(actualRow[x])) }) {
+                difference.maxChannelDifference = std::max(difference.maxChannelDifference, channelDifference);
+                if (channelDifference != 0) {
+                    differs = true;
+                }
+            }
+            if (differs) {
+                ++difference.differingPixels;
+            }
+        }
+    }
+    return difference;
+}
+
+// Exports `page` at 4x and checks both layers of parity against a direct Qt
+// composition: the cropped rasters placed on a transparent page must reproduce
+// the old full-page overlay, and the PDFium render of the exported page must
+// reproduce the same overlay painted over white (premultiply round trip only).
+void CheckOverlayExportParity(cnote::PdfiumBackend& backend, const std::filesystem::path& path,
+    const cnote::Page& page, const std::string& label) {
+    constexpr float scale = 4.0f;
+    const auto overlays = cnote::ComposeTextOverlayRasters(page, scale);
+    Check(!overlays.empty(), label + ": overlay rasters compose");
+
+    const int widthPx = static_cast<int>(std::lround(page.width * scale));
+    const int heightPx = static_cast<int>(std::lround(page.height * scale));
+    QImage placed(widthPx, heightPx, QImage::Format_ARGB32);
+    placed.fill(Qt::transparent);
+    {
+        QPainter painter(&placed);
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        for (const cnote::PlacedRaster& overlay : overlays) {
+            const int leftPx = static_cast<int>(std::lround(overlay.left * widthPx / page.width));
+            const int topPx = static_cast<int>(std::lround(overlay.top * heightPx / page.height));
+            const QImage view = cnote::render::WrapBgraImage(
+                overlay.image.pixels.data(),
+                overlay.image.width,
+                overlay.image.height,
+                overlay.image.stride);
+            painter.drawImage(QPoint(leftPx, topPx), view);
+        }
+    }
+    const ImageDifference overlayDifference = CompareArgb(PaintOverlayReference(page, scale, false), placed);
+    Check(overlayDifference.maxChannelDifference <= 1,
+        label + ": cropped overlays reproduce the full-page overlay (max channel difference "
+            + std::to_string(overlayDifference.maxChannelDifference) + ")");
+
+    cnote::Document overlayDocument = cnote::Document::CreateBlank();
+    overlayDocument.CurrentPage() = page;
+    Check(backend.ExportPdf(overlayDocument, path, scale, 0.55f, 3.0f, 2.0f, std::span<const std::uint8_t> {}),
+        label + ": export");
+    auto reopened = cnote::LoadDocumentFile(path, backend);
+    Check(reopened.has_value(), label + ": export reopens");
+    if (!reopened.has_value()) {
+        return;
+    }
+    const auto rendered = backend.RenderPage(reopened->PdfData(), 0U, scale);
+    Check(rendered.has_value(), label + ": export renders");
+    if (!rendered.has_value()) {
+        return;
+    }
+    const QImage expected = PaintOverlayReference(page, scale, true);
+    const QImage actual = cnote::render::WrapBgraImage(
+        rendered->pixels.data(), rendered->width, rendered->height, rendered->stride);
+    const ImageDifference difference = CompareArgb(expected, actual);
+    const std::size_t totalPixels = static_cast<std::size_t>(expected.width())
+        * static_cast<std::size_t>(expected.height());
+    Check(difference.maxChannelDifference <= 1,
+        label + ": exported placement matches direct rendering (max channel difference "
+            + std::to_string(difference.maxChannelDifference) + ")");
+    Check(difference.differingPixels * 50U <= totalPixels,
+        label + ": exported pixels match direct rendering (differing "
+            + std::to_string(difference.differingPixels) + " of " + std::to_string(totalPixels) + ")");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -245,19 +515,114 @@ int main(int argc, char** argv) {
         }
     }
 
-    // --- the text/LaTeX overlay must not be an opaque rectangle -------------
-    const auto overlay = cnote::ComposeTextOverlayRaster(document.PageAt(0), 1.0f);
-    Check(overlay.has_value(), "text/LaTeX overlay composes");
-    if (overlay.has_value()) {
-        std::size_t transparent = 0;
-        for (std::size_t index = 3; index < overlay->pixels.size(); index += 4U) {
-            if (overlay->pixels.data()[index] == 0) {
-                ++transparent;
+    // --- the text/LaTeX overlay is one cropped raster per object -----------
+    {
+        const cnote::Page& overlayPage = document.PageAt(0);
+        const auto overlays = cnote::ComposeTextOverlayRasters(overlayPage, 1.0f);
+        Check(!overlays.empty(), "text/LaTeX overlay rasters compose");
+        std::size_t totalBytes = 0;
+        for (const cnote::PlacedRaster& overlay : overlays) {
+            Check(!overlay.image.pixels.empty(), "text/LaTeX overlay composes");
+            Check(!overlay.opaque, "text/LaTeX overlay keeps its alpha");
+            Check(overlay.image.width < static_cast<int>(overlayPage.width)
+                    && overlay.image.height < static_cast<int>(overlayPage.height),
+                "overlay is cropped to its object, not the page");
+            Check(overlay.left >= 0.0f && overlay.top >= 0.0f
+                    && overlay.right <= overlayPage.width && overlay.bottom <= overlayPage.height,
+                "overlay placement stays inside the page");
+            std::size_t transparent = 0;
+            for (std::size_t index = 3; index < overlay.image.pixels.size(); index += 4U) {
+                if (overlay.image.pixels.data()[index] == 0) {
+                    ++transparent;
+                }
+            }
+            const std::size_t total = overlay.image.pixels.size() / 4U;
+            Check(total > 0 && transparent * 2 > total,
+                "text/LaTeX overlay is mostly transparent (no opaque rectangle)");
+            totalBytes += overlay.image.pixels.size();
+        }
+        const std::size_t fullPageBytes = static_cast<std::size_t>(overlayPage.width)
+            * static_cast<std::size_t>(overlayPage.height) * 4U;
+        Check(totalBytes * 2U < fullPageBytes, "overlay bytes stay proportional to painted area (total "
+                + std::to_string(totalBytes) + " full " + std::to_string(fullPageBytes) + ")");
+    }
+
+    // --- cropped overlays reproduce the old full-page composition -----------
+    CheckOverlayExportParity(backend, dir / "overlay-parity.pdf", BuildOverlayPage(200.0f),
+        "single rotated text and LaTeX");
+
+    // --- overlapping objects share one raster, so their alpha composites once
+    Check(cnote::ComposeTextOverlayRasters(BuildOverlapPairPage(), 4.0f).size() == 1U,
+        "two overlapping text boxes share one raster");
+    CheckOverlayExportParity(backend, dir / "overlay-overlap.pdf", BuildOverlappingOverlayPage(),
+        "overlapping text boxes and formula");
+
+    // --- non-touching neighbours merge when the union is cheap (area budget) -
+    Check(cnote::ComposeTextOverlayRasters(BuildClosePairPage(), 4.0f).size() == 1U,
+        "two close, non-touching text boxes merge into one area-budget raster");
+
+    // --- the 64-raster backstop collapses a page no area merge can compact --
+    Check(cnote::ComposeTextOverlayRasters(BuildBackstopOverlayPage(), 4.0f).size() == 1U,
+        "more than 64 far-apart rasters collapse into one page-bounded raster");
+
+    // --- dense disjoint page: merged/fused output still matches the old path --
+    {
+        const auto denseRasters = cnote::ComposeTextOverlayRasters(BuildDenseOverlayPage(), 4.0f);
+        Check(denseRasters.size() <= 64U,
+            "a 200-box page stays within the 64-raster cap (got "
+                + std::to_string(denseRasters.size()) + ")");
+    }
+    CheckOverlayExportParity(backend, dir / "overlay-dense.pdf", BuildDenseOverlayPage(),
+        "200 disjoint text boxes");
+
+    // --- an opaque stored raster at export resolution is passed through ------
+    {
+        constexpr float scale = 4.0f;
+        cnote::Document rasterDocument = cnote::Document::CreateBlank();
+        cnote::Page& rasterPage = rasterDocument.CurrentPage();
+        rasterPage.width = 200.0f;
+        rasterPage.height = 120.0f;
+        rasterPage.raster.width = 800;
+        rasterPage.raster.height = 480;
+        rasterPage.raster.stride = 800 * 4;
+        rasterPage.raster.scale = scale;
+        std::vector<std::uint8_t> pixels(
+            static_cast<std::size_t>(rasterPage.raster.stride) * static_cast<std::size_t>(rasterPage.raster.height));
+        for (int y = 0; y < rasterPage.raster.height; ++y) {
+            for (int x = 0; x < rasterPage.raster.width; ++x) {
+                std::uint8_t* pixel = pixels.data()
+                    + (static_cast<std::size_t>(y) * static_cast<std::size_t>(rasterPage.raster.stride))
+                    + (static_cast<std::size_t>(x) * 4U);
+                pixel[0] = static_cast<std::uint8_t>(x * 255 / (rasterPage.raster.width - 1));
+                pixel[1] = static_cast<std::uint8_t>(y * 255 / (rasterPage.raster.height - 1));
+                pixel[2] = static_cast<std::uint8_t>(((x / 40) + (y / 40)) % 2 == 0 ? 0x20U : 0xE0U);
+                pixel[3] = 0xFFU;
             }
         }
-        const std::size_t total = overlay->pixels.size() / 4U;
-        Check(total > 0 && transparent * 2 > total,
-            "text/LaTeX overlay is mostly transparent (no opaque rectangle)");
+        rasterPage.raster.pixels = cnote::PixelBuffer(std::move(pixels));
+
+        Check(backend.ExportPdf(rasterDocument, dir / "stored-raster.pdf", scale, 0.55f, 3.0f, 2.0f,
+                std::span<const std::uint8_t> {}),
+            "export an opaque stored raster at the export resolution");
+        auto reopenedRaster = cnote::LoadDocumentFile(dir / "stored-raster.pdf", backend);
+        Check(reopenedRaster.has_value(), "stored-raster export reopens");
+        if (reopenedRaster.has_value()) {
+            const auto rendered = backend.RenderPage(reopenedRaster->PdfData(), 0U, scale);
+            Check(rendered.has_value(), "stored-raster export renders");
+            if (rendered.has_value()) {
+                const QImage expected = cnote::render::WrapBgraImage(
+                    rasterPage.raster.pixels.data(),
+                    rasterPage.raster.width,
+                    rasterPage.raster.height,
+                    rasterPage.raster.stride);
+                const QImage actual = cnote::render::WrapBgraImage(
+                    rendered->pixels.data(), rendered->width, rendered->height, rendered->stride);
+                const ImageDifference difference = CompareArgb(expected, actual);
+                Check(difference.maxChannelDifference <= 1,
+                    "opaque stored raster keeps its pixels (max channel difference "
+                        + std::to_string(difference.maxChannelDifference) + ")");
+            }
+        }
     }
 
     // --- selectable source text survives an attachment-free export ----------

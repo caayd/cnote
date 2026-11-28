@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cstddef>
-#include <optional>
+#include <vector>
 
 #include "Document.h"
 
@@ -16,12 +16,36 @@ class PdfiumBackend;
 // Shared raster allocation helper (defined in PdfBackend.cpp).
 [[nodiscard]] RasterImage CreateBlankRaster(float pageWidth, float pageHeight, float renderScale);
 
-// Renders the text/LaTeX overlay of a page into a transparent raster.
-[[nodiscard]] std::optional<RasterImage> ComposeTextOverlayRaster(const Page& page, float renderScale);
+// True when every pixel's alpha byte is 0xFF, so the raster can be handed to
+// PDFium as an opaque bitmap without an alpha mask.
+[[nodiscard]] bool IsOpaqueBgra(const RasterImage& raster);
+
+// A raster placed on the page. The rectangle is in page units with the page's
+// top-left origin, exactly the space PageText/PageLatex use; the caller maps it
+// to the PDF image matrix (whose y axis points up).
+struct PlacedRaster {
+    RasterImage image {};
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+    // Every pixel is opaque, so the PDF writer may use an opaque bitmap.
+    bool opaque = false;
+};
+
+// Renders a page's text/LaTeX objects into transparent rasters cropped to their
+// painted bounds. Objects are grouped in paint order (all texts, then all
+// LaTeX): overlapping/touching crops always share a raster so their alpha
+// composites once, nearby groups merge while the union rectangle costs at most
+// twice their combined area, and above 64 rasters the remainder collapse into
+// one page-bounded crop. Appending the returned rasters in order preserves the
+// old overlay's layer order without allocating a page-sized image for a small
+// object.
+[[nodiscard]] std::vector<PlacedRaster> ComposeTextOverlayRasters(const Page& page, float renderScale);
 
 // Flattens a page (PDF source raster or stored raster, images, optional
-// strokes) into a raster for pages that have no imported vector source.
-[[nodiscard]] RasterImage ComposePageRaster(
+// strokes) into an opaque raster covering the whole page.
+[[nodiscard]] PlacedRaster ComposePageRaster(
     const PdfiumBackend& backend,
     const Document& document,
     std::size_t pageIndex,
