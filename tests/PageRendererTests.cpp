@@ -27,6 +27,7 @@
 #include "Document.h"
 #include "latex/LatexEngine.h"
 #include "render/PageRenderer.h"
+#include "text/InlineMathQt.h"
 #include "text/TextEditingQt.h"
 #include "text/TextLayoutQt.h"
 #include "Unicode.h"
@@ -215,6 +216,125 @@ int main(int argc, char** argv) {
             && text.content == u"Red\U0001F600Blue\r\nsecond \u03B1 line"
             && text.styleSpans.size() == 1U && text.styleSpans.front().start == 0U && text.styleSpans.front().length == 3U,
         "model geometry and text are unchanged after rendering");
+
+    // --- prepared draw document: a redraw reuses it, pixel for pixel --------
+    {
+        cnote::PageText drawn {};
+        drawn.fontSize = 20.0f;
+        drawn.fontFamily = cnote::TextFontFamily::Sans;
+        drawn.color = 0xFF000000U;
+        drawn.width = 320.0f;
+        drawn.content = u"a $x^2$ b\r\nsecond line \u03B1";
+        const auto drawInto = [&](float scale, float ratio) {
+            QImage image(720, 300, QImage::Format_ARGB32_Premultiplied);
+            image.fill(Qt::transparent);
+            QPainter painter(&image);
+            cnote::text::DrawPageTextQt(painter, drawn, 320.0f, scale, ratio, 10.0f, 10.0f, 1.0f);
+            return image;
+        };
+
+        const std::uint64_t buildsBeforeDraw = cnote::text::TextDocumentBuilds();
+        const QImage coldImage = drawInto(2.0f, 2.0f);
+        const std::uint64_t buildsAfterColdDraw = cnote::text::TextDocumentBuilds();
+        Check(buildsAfterColdDraw > buildsBeforeDraw, "a first draw builds its formatted document");
+
+        const QImage warmImage = drawInto(2.0f, 2.0f);
+        Check(cnote::text::TextDocumentBuilds() == buildsAfterColdDraw,
+            "a redraw at the same scale builds no document (cached prepared layout)");
+        Check(warmImage == coldImage, "a cached draw keeps identical pixels");
+
+        // A transform is a different layout scale: one new document, then that
+        // scale is cached too.
+        const QImage transformed = drawInto(3.0f, 2.0f);
+        const std::uint64_t buildsAfterTransform = cnote::text::TextDocumentBuilds();
+        Check(buildsAfterTransform == buildsAfterColdDraw + 1U,
+            "a draw at a new scale builds exactly one document");
+        const QImage transformedAgain = drawInto(3.0f, 2.0f);
+        Check(cnote::text::TextDocumentBuilds() == buildsAfterTransform && transformedAgain == transformed,
+            "the transformed scale is cached and pixel-identical");
+    }
+
+    // --- dense page: every prepared document survives to the next redraw ---
+    // A page surface redraws text object by object.  If the cache is smaller
+    // than the page, the second pass is a cyclic miss (and evicts what it
+    // just built); 40 ordinary boxes and a deliberately dense 200 must both
+    // be fully reused.
+    {
+        const auto makeBoxes = [](int count) {
+            std::vector<cnote::PageText> boxes;
+            boxes.reserve(static_cast<std::size_t>(count));
+            for (int index = 0; index < count; ++index) {
+                cnote::PageText box {};
+                box.fontSize = 12.0f;
+                box.fontFamily = cnote::TextFontFamily::Sans;
+                box.color = 0xFF000000U;
+                box.width = 160.0f;
+                const std::string label =
+                    "box " + std::to_string(count) + "-" + std::to_string(index);
+                box.content.assign(label.begin(), label.end());
+                boxes.push_back(std::move(box));
+            }
+            return boxes;
+        };
+        const auto drawPass = [](const std::vector<cnote::PageText>& boxes) {
+            QImage image(400, 300, QImage::Format_ARGB32_Premultiplied);
+            image.fill(Qt::transparent);
+            QPainter painter(&image);
+            for (std::size_t index = 0; index < boxes.size(); ++index) {
+                cnote::text::DrawPageTextQt(painter, boxes[index], 200.0f, 1.0f, 1.0f,
+                    static_cast<float>(index % 10) * 18.0f, static_cast<float>(index / 10) * 14.0f, 1.0f);
+            }
+        };
+        for (const int count : { 40, 200 }) {
+            const std::vector<cnote::PageText> boxes = makeBoxes(count);
+            const std::uint64_t buildsBeforeDense = cnote::text::TextDocumentBuilds();
+            drawPass(boxes);
+            const std::uint64_t buildsAfterDense = cnote::text::TextDocumentBuilds();
+            Check(buildsAfterDense - buildsBeforeDense == static_cast<std::uint64_t>(count),
+                "the first draw of a " + std::to_string(count) + "-box page builds one document per box");
+            drawPass(boxes);
+            Check(cnote::text::TextDocumentBuilds() == buildsAfterDense,
+                "the second draw of a " + std::to_string(count)
+                    + "-box page builds no documents (dense page fits the cache)");
+        }
+    }
+
+    // --- dense formula page: placements survive a redraw -------------------
+    {
+        cnote::PageText formulas {};
+        formulas.fontSize = 20.0f;
+        formulas.fontFamily = cnote::TextFontFamily::Sans;
+        formulas.color = 0xFF000000U;
+        formulas.width = 860.0f;
+        for (int index = 0; index < 200; ++index) {
+            const std::string term = "x_" + std::to_string(index) + "^2";
+            formulas.content += u"$";
+            formulas.content.append(term.begin(), term.end());
+            formulas.content += u"$ ";
+        }
+        const auto drawFormulas = [&formulas]() {
+            QImage image(900, 200, QImage::Format_ARGB32_Premultiplied);
+            image.fill(Qt::transparent);
+            QPainter painter(&image);
+            cnote::text::DrawPageTextQt(painter, formulas, 900.0f, 1.0f, 1.0f, 5.0f, 5.0f, 1.0f);
+        };
+
+        const std::uint64_t buildsBeforeFormulas = cnote::text::TextDocumentBuilds();
+        const std::uint64_t placementsBefore = cnote::text::InlineMathPlacementMisses();
+        drawFormulas();
+        const std::uint64_t buildsAfterFormulas = cnote::text::TextDocumentBuilds();
+        const std::uint64_t placementsAfterFirst = cnote::text::InlineMathPlacementMisses();
+        Check(buildsAfterFormulas - buildsBeforeFormulas == 1U,
+            "the 200-formula page builds one formatted document");
+        Check(placementsAfterFirst - placementsBefore == 200U,
+            "the first draw measures every formula placement");
+
+        drawFormulas();
+        Check(cnote::text::TextDocumentBuilds() == buildsAfterFormulas,
+            "a redrawn formula page reuses its prepared document");
+        Check(cnote::text::InlineMathPlacementMisses() == placementsAfterFirst,
+            "a redrawn formula page reuses every placement (dense page fits the cache)");
+    }
 
     // A single-point stroke paints a filled dot whose diameter is the pen
     // width; a regression stroked the dot's outline on top of the fill and

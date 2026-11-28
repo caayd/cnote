@@ -779,7 +779,7 @@ std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& par
             continue;
         }
         const PageText& text = page.texts[index];
-        hash = HashValue(hash, text::TextLayoutSignature(text, page.width));
+        hash = HashValue(hash, text::TextLayoutSignature(text));
         hash = HashFloat(hash, text.x);
         hash = HashFloat(hash, text.y);
         hash = HashFloat(hash, text.width);

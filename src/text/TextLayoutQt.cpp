@@ -50,15 +50,23 @@ struct BuiltDocument {
     TextOffsetMap map;
 };
 
+std::uint64_t& DocumentBuilds() {
+    static std::uint64_t builds = 0;
+    return builds;
+}
+
 // Builds the document exactly like the live editor configures its own at
 // view zoom `layoutScale` (CanvasWidget::ShowTextOverlay): fonts scaled by
 // it, word-or-anywhere wrapping for fixed-width objects, no wrapping for
 // auto-width ones, inline math rendered.  The text width is left unset.
+// The offset map is built once and handed to the formatting pass, which
+// also uses it to place spans and formula placeholders.
 BuiltDocument BuildFormattedDocument(const PageText& text, float layoutScale) {
     BuiltDocument built;
     built.map = BuildTextOffsetMap(text, InlineMathMode::Rendered);
 
     auto document = std::make_unique<QTextDocument>();
+    ++DocumentBuilds();
     document->setDocumentMargin(0.0);
     QTextOption option;
     option.setWrapMode(text.width > 0.0f
@@ -70,34 +78,8 @@ BuiltDocument BuildFormattedDocument(const PageText& text, float layoutScale) {
         built.map.normalized.data(),
         static_cast<qsizetype>(built.map.normalized.size())));
 
-    ApplyPageTextFormatting(*document, text, layoutScale, InlineMathMode::Rendered);
+    ApplyPageTextFormatting(*document, text, built.map, layoutScale);
     built.document = std::move(document);
-    return built;
-}
-
-float ResolvedTextWidth(const PageText& text, float pageWidth) {
-    static_cast<void>(pageWidth);
-    if (text.width > 0.0f) {
-        return std::max(1.0f, text.width);
-    }
-
-    // Measured on the formatted document, so style spans and rendered
-    // formulas count; trailing blanks do not.
-    PageText measured = text;
-    measured.content = TrimTrailingLayoutWhitespace(text.content);
-    const BuiltDocument built = BuildFormattedDocument(measured, 1.0f);
-    return std::max(1.0f, static_cast<float>(built.document->idealWidth()));
-}
-
-BuiltDocument BuildDocument(const PageText& text, float layoutScale) {
-    BuiltDocument built = BuildFormattedDocument(text, layoutScale);
-    QTextDocument& document = *built.document;
-    // Auto-width text never wraps; the width only anchors paragraph alignment.
-    document.setTextWidth(text.width > 0.0f
-        ? static_cast<qreal>(TextWrapWidthPx(text, layoutScale))
-        : static_cast<qreal>(ResolvedTextWidth(text, 0.0f) * layoutScale));
-    // Force the layout so block/line geometry is available to callers.
-    static_cast<void>(document.documentLayout()->documentSize());
     return built;
 }
 
@@ -107,32 +89,13 @@ std::uint64_t HashValue(std::uint64_t hash, std::uint64_t value) {
     return hash;
 }
 
-struct CacheEntry {
-    std::uint64_t signature = 0;
-    QtTextLayout layout {};
-};
-
-std::deque<CacheEntry>& LayoutCache() {
-    static std::deque<CacheEntry> cache;
-    return cache;
-}
-
-std::uint64_t& LayoutMisses() {
-    static std::uint64_t misses = 0;
-    return misses;
-}
-
-constexpr std::size_t kMaxCachedLayouts = 128;
-
-}  // namespace
-
-std::uint64_t TextLayoutSignature(const PageText& text, float pageWidth) {
+// Everything a layout, a resolved auto-width or a drawn document depends on
+// except the stored width (which only selects the wrap mode and width below).
+std::uint64_t TextIdentityHash(const PageText& text) {
     std::uint64_t hash = 14695981039346656037ULL;
     // Inline formulas are laid out into the document, so the layout identity
     // includes the engine lifetime it was produced in.
     hash = HashValue(hash, latex::EngineGeneration());
-    hash = HashValue(hash, std::bit_cast<std::uint32_t>(pageWidth));
-    hash = HashValue(hash, std::bit_cast<std::uint32_t>(text.width));
     hash = HashValue(hash, std::bit_cast<std::uint32_t>(text.fontSize));
     hash = HashValue(hash, text.color);
     hash = HashValue(hash, static_cast<std::uint64_t>(text.alignment));
@@ -156,28 +119,137 @@ std::uint64_t TextLayoutSignature(const PageText& text, float pageWidth) {
     return hash;
 }
 
-QtTextLayout LayoutPageTextQt(const PageText& text, float pageWidth) {
-    // TextLayoutSignature includes the engine generation, so a layout built
-    // while the engine was down (formulas shown as source) is unreachable
-    // after a recovery or re-initialization.
-    const std::uint64_t key = TextLayoutSignature(text, pageWidth);
-    std::deque<CacheEntry>& cache = LayoutCache();
-    const auto existing = std::find_if(cache.begin(), cache.end(), [&](const CacheEntry& entry) {
+std::uint64_t LayoutSignature(const PageText& text) {
+    return HashValue(TextIdentityHash(text), std::bit_cast<std::uint32_t>(text.width));
+}
+
+// Resolved widths in page units for auto-width text, keyed by content and
+// style only: the stored width is zero on every path that measures.
+struct WidthEntry {
+    std::uint64_t signature = 0;
+    float width = 0.0f;
+};
+
+std::deque<WidthEntry>& WidthCache() {
+    static std::deque<WidthEntry> cache;
+    return cache;
+}
+
+// A dense page resolves one width per text object.  The entries are tiny (a
+// hash and a float plus deque bookkeeping), so the byte budget keeps several
+// thousand: 512 KiB at the conservative 64 bytes charged per entry.
+constexpr std::size_t kWidthEntryBytes = 64;
+constexpr std::size_t kMaxWidthCacheBytes = 512U * 1024U;
+constexpr std::size_t kMaxCachedWidths = kMaxWidthCacheBytes / kWidthEntryBytes;
+
+float MeasureAutoTextWidth(const PageText& text) {
+    const std::uint64_t key = TextIdentityHash(text);
+    std::deque<WidthEntry>& cache = WidthCache();
+    const auto existing = std::find_if(cache.begin(), cache.end(), [&](const WidthEntry& entry) {
         return entry.signature == key;
     });
     if (existing != cache.end()) {
-        CacheEntry entry = std::move(*existing);
+        WidthEntry entry = *existing;
         cache.erase(existing);
-        cache.push_back(std::move(entry));
-        return cache.back().layout;
+        cache.push_back(entry);
+        return cache.back().width;
+    }
+
+    // Measured on the formatted document, so style spans and rendered
+    // formulas count; trailing blanks do not.
+    PageText measured = text;
+    measured.content = TrimTrailingLayoutWhitespace(text.content);
+    const BuiltDocument built = BuildFormattedDocument(measured, 1.0f);
+    const float width = std::max(1.0f, static_cast<float>(built.document->idealWidth()));
+    cache.push_back({ key, width });
+    while (cache.size() > 1U && cache.size() > kMaxCachedWidths) {
+        cache.pop_front();
+    }
+    return width;
+}
+
+float ResolvedTextWidth(const PageText& text) {
+    if (text.width > 0.0f) {
+        return std::max(1.0f, text.width);
+    }
+    return MeasureAutoTextWidth(text);
+}
+
+BuiltDocument BuildDocument(const PageText& text, float layoutScale, float resolvedWidth) {
+    BuiltDocument built = BuildFormattedDocument(text, layoutScale);
+    QTextDocument& document = *built.document;
+    // Auto-width text never wraps; the width only anchors paragraph alignment.
+    document.setTextWidth(text.width > 0.0f
+        ? static_cast<qreal>(TextWrapWidthPx(text, layoutScale))
+        : static_cast<qreal>(resolvedWidth * layoutScale));
+    // Force the layout so block/line geometry is available to callers.
+    static_cast<void>(document.documentLayout()->documentSize());
+    return built;
+}
+
+struct CacheEntry {
+    std::uint64_t signature = 0;
+    QtTextLayout layout {};
+    std::size_t bytes = 0;
+};
+
+struct LayoutCacheState {
+    std::deque<CacheEntry> entries;
+    std::size_t bytes = 0;
+};
+
+LayoutCacheState& LayoutCache() {
+    static LayoutCacheState cache;
+    return cache;
+}
+
+std::uint64_t& LayoutMisses() {
+    static std::uint64_t misses = 0;
+    return misses;
+}
+
+// A page may draw every text object in order on each redraw, so the cache has
+// to hold a dense page rather than a fixed number of entries.  The estimate
+// charges the line strings and vectors conservatively; the budget keeps
+// thousands of ordinary text objects while still bounding long documents.
+constexpr std::size_t kMaxLayoutCacheBytes = 8U * 1024U * 1024U;
+constexpr std::size_t kLayoutEntryOverheadBytes = 2048U;
+constexpr std::size_t kLayoutBytesPerUnit = 4U;
+constexpr std::size_t kLayoutBytesPerSpan = 32U;
+constexpr std::size_t kLayoutBytesPerLine = 64U;
+
+std::size_t EstimateLayoutBytes(const PageText& text, const QtTextLayout& layout) {
+    return kLayoutEntryOverheadBytes
+        + text.content.size() * kLayoutBytesPerUnit
+        + text.styleSpans.size() * kLayoutBytesPerSpan
+        + layout.lines.size() * kLayoutBytesPerLine;
+}
+
+// The cached layout for `text`, with its resolved width.  Never copies the
+// line strings; callers that need a copy (the public API) make one.
+const QtTextLayout& CachedLayout(const PageText& text) {
+    // TextIdentityHash includes the engine generation, so a layout built
+    // while the engine was down (formulas shown as source) is unreachable
+    // after a recovery or re-initialization.
+    const std::uint64_t key = LayoutSignature(text);
+    LayoutCacheState& cache = LayoutCache();
+    const auto existing = std::find_if(cache.entries.begin(), cache.entries.end(), [&](const CacheEntry& entry) {
+        return entry.signature == key;
+    });
+    if (existing != cache.entries.end()) {
+        CacheEntry entry = std::move(*existing);
+        cache.entries.erase(existing);
+        cache.entries.push_back(std::move(entry));
+        return cache.entries.back().layout;
     }
 
     ++LayoutMisses();
 
-    BuiltDocument built = BuildDocument(text, 1.0f);
+    QtTextLayout layout;
+    layout.width = ResolvedTextWidth(text);
+    BuiltDocument built = BuildDocument(text, 1.0f, layout.width);
     QTextDocument& document = *built.document;
 
-    QtTextLayout layout;
     for (QTextBlock block = document.begin(); block.isValid(); block = block.next()) {
         const QTextLayout* blockLayout = block.layout();
         if (blockLayout == nullptr) {
@@ -211,19 +283,99 @@ QtTextLayout LayoutPageTextQt(const PageText& text, float pageWidth) {
     // page-unit height is the drawn height at every zoom.
     layout.height = std::max(layout.lineHeight, static_cast<float>(document.size().height()));
 
-    cache.push_back({ key, layout });
-    if (cache.size() > kMaxCachedLayouts) {
-        cache.pop_front();
+    const std::size_t bytes = EstimateLayoutBytes(text, layout);
+    cache.entries.push_back({ key, std::move(layout), bytes });
+    cache.bytes += bytes;
+    while (cache.entries.size() > 1U && cache.bytes > kMaxLayoutCacheBytes) {
+        cache.bytes -= cache.entries.front().bytes;
+        cache.entries.pop_front();
     }
-    return layout;
+    return cache.entries.back().layout;
+}
+
+// Prepared documents for drawing, keyed by layout identity and the layout
+// scale (fonts and wrap width divided by the pixel ratio).  A redraw at the
+// same scale reuses the formatted document instead of rebuilding it.
+struct DrawEntry {
+    std::uint64_t signature = 0;
+    std::uint32_t layoutScaleBits = 0;
+    std::unique_ptr<QTextDocument> document;
+    std::size_t bytes = 0;
+};
+
+struct DrawCacheState {
+    std::deque<DrawEntry> entries;
+    std::size_t bytes = 0;
+};
+
+DrawCacheState& DrawCache() {
+    static DrawCacheState cache;
+    return cache;
+}
+
+// Sized for a dense page redrawn in object order: every text box's prepared
+// document has to survive until the next redraw, or the LRU becomes cyclic
+// and each draw both misses and evicts.  The estimate is a fixed per-document
+// cost plus the text and spans; the budget holds a few thousand small boxes
+// or a few hundred long ones.
+constexpr std::size_t kMaxDrawCacheBytes = 8U * 1024U * 1024U;
+constexpr std::size_t kDrawDocumentOverheadBytes = 4096U;
+constexpr std::size_t kDrawBytesPerUnit = 8U;
+constexpr std::size_t kDrawBytesPerSpan = 64U;
+
+std::size_t EstimateDrawDocumentBytes(const PageText& text) {
+    return kDrawDocumentOverheadBytes
+        + text.content.size() * kDrawBytesPerUnit
+        + text.styleSpans.size() * kDrawBytesPerSpan;
+}
+
+QTextDocument& PreparedDrawDocument(const PageText& text, float layoutScale) {
+    const std::uint64_t signature = LayoutSignature(text);
+    const std::uint32_t layoutScaleBits = std::bit_cast<std::uint32_t>(layoutScale);
+    DrawCacheState& cache = DrawCache();
+    const auto existing = std::find_if(cache.entries.begin(), cache.entries.end(), [&](const DrawEntry& entry) {
+        return entry.signature == signature && entry.layoutScaleBits == layoutScaleBits;
+    });
+    if (existing != cache.entries.end()) {
+        DrawEntry entry = std::move(*existing);
+        cache.entries.erase(existing);
+        cache.entries.push_back(std::move(entry));
+        return *cache.entries.back().document;
+    }
+
+    BuiltDocument built = BuildDocument(text, layoutScale, ResolvedTextWidth(text));
+    const std::size_t bytes = EstimateDrawDocumentBytes(text);
+    cache.entries.push_back({ signature, layoutScaleBits, std::move(built.document), bytes });
+    cache.bytes += bytes;
+    // At least one document stays: a single text object larger than the
+    // budget is the minimum working set for drawing it.
+    while (cache.entries.size() > 1U && cache.bytes > kMaxDrawCacheBytes) {
+        cache.bytes -= cache.entries.front().bytes;
+        cache.entries.pop_front();
+    }
+    return *cache.entries.back().document;
+}
+
+}  // namespace
+
+std::uint64_t TextLayoutSignature(const PageText& text) {
+    return LayoutSignature(text);
+}
+
+QtTextLayout LayoutPageTextQt(const PageText& text, float pageWidth) {
+    // The page width does not affect how text lays out (auto-width text never
+    // wraps); it is accepted for callers that reason in page coordinates.
+    static_cast<void>(pageWidth);
+    return CachedLayout(text);
 }
 
 QtTextBounds MeasurePageTextBoundsQt(const PageText& text, float pageWidth) {
-    const QtTextLayout layout = LayoutPageTextQt(text, pageWidth);
+    static_cast<void>(pageWidth);
+    const QtTextLayout& layout = CachedLayout(text);
     return {
         text.x,
         text.y,
-        text.x + ResolvedTextWidth(text, pageWidth),
+        text.x + layout.width,
         text.y + layout.height,
     };
 }
@@ -233,9 +385,14 @@ int TextWrapWidthPx(const PageText& text, float layoutScale) {
 }
 
 float MeasureUnwrappedTextWidth(const PageText& text) {
+    // Auto-width text measures the same with or without its stored width, and
+    // the bounds query already laid it out: reuse that entry.
+    if (text.width <= 0.0f) {
+        return CachedLayout(text).width;
+    }
     PageText unwrapped = text;
     unwrapped.width = 0.0f;
-    return ResolvedTextWidth(unwrapped, 0.0f);
+    return CachedLayout(unwrapped).width;
 }
 
 float MaxAutoTextWidth(float viewWidthPx, float scale) {
@@ -297,8 +454,7 @@ void DrawPageTextQt(QPainter& painter, const PageText& text, float pageWidth, fl
     }
 
     const float ratio = std::max(0.0001f, pixelRatio);
-    BuiltDocument built = BuildDocument(text, std::max(0.01f, scale / ratio));
-    QTextDocument& document = *built.document;
+    QTextDocument& document = PreparedDrawDocument(text, std::max(0.01f, scale / ratio));
 
     painter.save();
     painter.translate(x, y);
@@ -318,6 +474,10 @@ void DrawPageTextQt(QPainter& painter, const PageText& text, float pageWidth, fl
 
 std::uint64_t TextLayoutCacheMisses() {
     return LayoutMisses();
+}
+
+std::uint64_t TextDocumentBuilds() {
+    return DocumentBuilds();
 }
 
 }  // namespace cnote::text

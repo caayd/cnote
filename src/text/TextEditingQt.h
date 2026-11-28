@@ -63,6 +63,8 @@ enum class InlineMathMode {
     Rendered,
 };
 
+struct TextOffsetMap;
+
 // Applies the model's default style, its page-unit tab stops and every span
 // to the document (sizes and tab stops scaled by displayScale).  In
 // Rendered mode the document must hold BuildTextOffsetMap(text, Rendered)
@@ -70,6 +72,12 @@ enum class InlineMathMode {
 // the run it sits in.
 void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, float displayScale = 1.0f,
     InlineMathMode mathMode = InlineMathMode::Source);
+// Same, with the document's Rendered-mode offset map already built (`map`
+// must be BuildTextOffsetMap(text, Rendered) and the document must already
+// hold map.normalized), so building a document scans the text for formulas
+// only once.
+void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, const TextOffsetMap& map,
+    float displayScale = 1.0f);
 
 // Captures the document's character formats back into spans in model UTF-16
 // offsets (the model being ReadDocumentContent(document).content; `text`

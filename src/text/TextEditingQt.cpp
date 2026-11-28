@@ -214,6 +214,11 @@ PageTextStyle StyleForCharFormat(const QTextCharFormat& format, const PageTextSt
 }
 
 void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, float displayScale, InlineMathMode mathMode) {
+    ApplyPageTextFormatting(document, text, BuildTextOffsetMap(text, mathMode), displayScale);
+}
+
+void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, const TextOffsetMap& map,
+    float displayScale) {
     const PageTextStyle defaultStyle = DefaultStyleFor(text);
     document.setDefaultFont(FontForStyle(defaultStyle, displayScale));
     QTextOption option = document.defaultTextOption();
@@ -239,7 +244,6 @@ void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, floa
     cursor.mergeBlockFormat(lines);
     cursor.setCharFormat(defaultFormat);
 
-    const TextOffsetMap map = BuildTextOffsetMap(text, mathMode);
     for (const PageTextStyleSpan& span : text.styleSpans) {
         const std::uint32_t start = DocumentOffsetForModel(map, span.start);
         const std::uint32_t end = DocumentOffsetForModel(map, span.start + span.length);
