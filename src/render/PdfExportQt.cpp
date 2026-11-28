@@ -99,40 +99,64 @@ struct PageBounds {
     [[nodiscard]] bool empty() const { return right <= left || bottom <= top; }
 };
 
-// Composes one object's painted bounds into a raster cropped to those bounds.
-// The old overlay painted every object at identity on a full-page image;
-// shifting by the integer crop origin keeps each glyph's rasterization
-// bit-identical while the raster only covers the object.
-template <typename Paint>
-std::optional<PlacedRaster> ComposeOverlayRaster(
-    const Page& page, const PageBounds& bounds, float renderScale, Paint&& paint) {
-    if (page.width <= 0.0f || page.height <= 0.0f || renderScale <= 0.0f || bounds.empty()) {
+// Whole-page-unit crop rectangle of one or more painted objects.
+struct OverlayCrop {
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+
+    [[nodiscard]] bool empty() const { return right <= left || bottom <= top; }
+
+    // Overlapping or touching crops share one raster: separate images would
+    // round the overlapping antialiased edges independently, and a dense page
+    // would emit one image object per object.
+    [[nodiscard]] bool touches(const OverlayCrop& other) const {
+        return left <= other.right && other.left <= right && top <= other.bottom && other.top <= bottom;
+    }
+};
+
+// Crop an object's painted bounds to whole-page-unit steps (the padding's own
+// grid), clamped to the page. Besides keeping every painted device pixel
+// inside the crop, that makes the crop origin a whole number of device pixels
+// at integral render scales and at half scales, so PDFium's image sampler
+// stays on the same grid as the old full-page raster instead of picking up a
+// half-pixel phase at zooms below the export resolution.
+std::optional<OverlayCrop> CropForBounds(const Page& page, const PageBounds& bounds) {
+    if (page.width <= 0.0f || page.height <= 0.0f || bounds.empty()) {
         return std::nullopt;
     }
-
-    // Crop to whole-page-unit steps (the padding's own grid). Besides keeping
-    // every painted device pixel inside the crop, that makes the crop origin a
-    // whole number of device pixels at integral render scales and at half
-    // scales, so PDFium's image sampler stays on the same grid as the old
-    // full-page raster instead of picking up a half-pixel phase at zooms below
-    // the export resolution.
     constexpr float kCropGrid = kOverlayPadding;
     const auto alignDown = [](float value) { return std::floor(value / kCropGrid) * kCropGrid; };
     const auto alignUp = [](float value) { return std::ceil(value / kCropGrid) * kCropGrid; };
-    const float leftPage = std::max(0.0f, alignDown(bounds.left - kOverlayPadding));
-    const float topPage = std::max(0.0f, alignDown(bounds.top - kOverlayPadding));
-    const float rightPage = std::min(page.width, alignUp(bounds.right + kOverlayPadding));
-    const float bottomPage = std::min(page.height, alignUp(bounds.bottom + kOverlayPadding));
-    if (rightPage <= leftPage || bottomPage <= topPage) {
+    OverlayCrop crop;
+    crop.left = std::max(0.0f, alignDown(bounds.left - kOverlayPadding));
+    crop.top = std::max(0.0f, alignDown(bounds.top - kOverlayPadding));
+    crop.right = std::min(page.width, alignUp(bounds.right + kOverlayPadding));
+    crop.bottom = std::min(page.height, alignUp(bounds.bottom + kOverlayPadding));
+    if (crop.empty()) {
+        return std::nullopt;
+    }
+    return crop;
+}
+
+// Composes a group of objects, painted in the caller's order, into one raster
+// cropped to `crop`. The old overlay painted every object at identity on a
+// full-page image; shifting by the integer crop origin keeps each glyph's
+// rasterization bit-identical while the raster only covers the group.
+template <typename Paint>
+std::optional<PlacedRaster> ComposeOverlayRaster(
+    const Page& page, const OverlayCrop& crop, float renderScale, Paint&& paint) {
+    if (page.width <= 0.0f || page.height <= 0.0f || renderScale <= 0.0f || crop.empty()) {
         return std::nullopt;
     }
 
     const int pageWidthPx = std::max(1, static_cast<int>(std::lround(page.width * renderScale)));
     const int pageHeightPx = std::max(1, static_cast<int>(std::lround(page.height * renderScale)));
-    const int leftPx = std::clamp(static_cast<int>(std::lround(leftPage * renderScale)), 0, pageWidthPx);
-    const int topPx = std::clamp(static_cast<int>(std::lround(topPage * renderScale)), 0, pageHeightPx);
-    const int rightPx = std::clamp(static_cast<int>(std::lround(rightPage * renderScale)), 0, pageWidthPx);
-    const int bottomPx = std::clamp(static_cast<int>(std::lround(bottomPage * renderScale)), 0, pageHeightPx);
+    const int leftPx = std::clamp(static_cast<int>(std::lround(crop.left * renderScale)), 0, pageWidthPx);
+    const int topPx = std::clamp(static_cast<int>(std::lround(crop.top * renderScale)), 0, pageHeightPx);
+    const int rightPx = std::clamp(static_cast<int>(std::lround(crop.right * renderScale)), 0, pageWidthPx);
+    const int bottomPx = std::clamp(static_cast<int>(std::lround(crop.bottom * renderScale)), 0, pageHeightPx);
     if (rightPx <= leftPx || bottomPx <= topPx) {
         return std::nullopt;
     }
@@ -159,6 +183,29 @@ std::optional<PlacedRaster> ComposeOverlayRaster(
     return placed;
 }
 
+// One paintable text/LaTeX object and the crop it needs.
+struct OverlayItem {
+    OverlayCrop crop;
+    std::size_t objectIndex = 0;
+    bool latex = false;
+};
+
+std::size_t FindGroupRoot(std::vector<std::size_t>& parents, std::size_t index) {
+    while (parents[index] != index) {
+        parents[index] = parents[parents[index]];
+        index = parents[index];
+    }
+    return index;
+}
+
+void JoinGroups(std::vector<std::size_t>& parents, std::size_t first, std::size_t second) {
+    const std::size_t firstRoot = FindGroupRoot(parents, first);
+    const std::size_t secondRoot = FindGroupRoot(parents, second);
+    if (firstRoot != secondRoot) {
+        parents[secondRoot] = firstRoot;
+    }
+}
+
 }  // namespace
 
 bool IsOpaqueBgra(const RasterImage& raster) {
@@ -182,26 +229,24 @@ std::vector<PlacedRaster> ComposeTextOverlayRasters(const Page& page, float rend
     if (page.width <= 0.0f || page.height <= 0.0f || renderScale <= 0.0f) {
         return rasters;
     }
-    rasters.reserve(page.texts.size() + page.latexes.size());
 
-    for (const PageText& text : page.texts) {
+    std::vector<OverlayItem> items;
+    items.reserve(page.texts.size() + page.latexes.size());
+    for (std::size_t index = 0; index < page.texts.size(); ++index) {
+        const PageText& text = page.texts[index];
         if (text.content.empty()) {
             continue;
         }
         const text::QtTextBounds textBounds = text::MeasurePageTextBoundsQt(text, page.width);
         PageBounds bounds;
         bounds.Include(textBounds.left, textBounds.top, textBounds.right, textBounds.bottom, text.rotationDegrees);
-        if (auto placed = ComposeOverlayRaster(page, bounds, renderScale,
-                [&text, &page, renderScale](QPainter& painter) {
-                    render::PaintPageText(painter, text, page.width, renderScale, std::nullopt, 1.0f);
-                });
-            placed.has_value()) {
-            rasters.push_back(std::move(*placed));
+        if (const auto crop = CropForBounds(page, bounds); crop.has_value()) {
+            items.push_back({ *crop, index, false });
         }
     }
-
     if (latex::IsInitialized()) {
-        for (const PageLatex& latexBlock : page.latexes) {
+        for (std::size_t index = 0; index < page.latexes.size(); ++index) {
+            const PageLatex& latexBlock = page.latexes[index];
             if (latexBlock.content.empty()) {
                 continue;
             }
@@ -212,13 +257,64 @@ std::vector<PlacedRaster> ComposeTextOverlayRasters(const Page& page, float rend
             PageBounds bounds;
             bounds.Include(latexBlock.x, latexBlock.y, latexBlock.x + metrics.width,
                 latexBlock.y + metrics.height, latexBlock.rotationDegrees);
-            if (auto placed = ComposeOverlayRaster(page, bounds, renderScale,
-                    [&latexBlock, renderScale](QPainter& painter) {
-                        render::PaintPageLatex(painter, latexBlock, renderScale, 1.0f);
-                    });
-                placed.has_value()) {
-                rasters.push_back(std::move(*placed));
+            if (const auto crop = CropForBounds(page, bounds); crop.has_value()) {
+                items.push_back({ *crop, index, true });
             }
+        }
+    }
+    if (items.empty()) {
+        return rasters;
+    }
+
+    // Connected components of overlapping or touching crops. Objects in one
+    // component keep their paint order and share one image, as they did in the
+    // old single full-page overlay; disjoint groups stay small.
+    std::vector<std::size_t> parents(items.size());
+    for (std::size_t index = 0; index < parents.size(); ++index) {
+        parents[index] = index;
+    }
+    for (std::size_t first = 0; first < items.size(); ++first) {
+        for (std::size_t second = first + 1; second < items.size(); ++second) {
+            if (items[first].crop.touches(items[second].crop)) {
+                JoinGroups(parents, first, second);
+            }
+        }
+    }
+
+    std::vector<std::vector<std::size_t>> groups;
+    std::vector<int> groupForRoot(items.size(), -1);
+    for (std::size_t index = 0; index < items.size(); ++index) {
+        const std::size_t root = FindGroupRoot(parents, index);
+        if (groupForRoot[root] < 0) {
+            groupForRoot[root] = static_cast<int>(groups.size());
+            groups.emplace_back();
+        }
+        groups[static_cast<std::size_t>(groupForRoot[root])].push_back(index);
+    }
+
+    rasters.reserve(groups.size());
+    for (const std::vector<std::size_t>& group : groups) {
+        OverlayCrop crop = items[group.front()].crop;
+        for (const std::size_t itemIndex : group) {
+            const OverlayCrop& itemCrop = items[itemIndex].crop;
+            crop.left = std::min(crop.left, itemCrop.left);
+            crop.top = std::min(crop.top, itemCrop.top);
+            crop.right = std::max(crop.right, itemCrop.right);
+            crop.bottom = std::max(crop.bottom, itemCrop.bottom);
+        }
+        const auto paintGroup = [&](QPainter& painter) {
+            for (const std::size_t itemIndex : group) {
+                const OverlayItem& item = items[itemIndex];
+                if (item.latex) {
+                    render::PaintPageLatex(painter, page.latexes[item.objectIndex], renderScale, 1.0f);
+                } else {
+                    render::PaintPageText(painter, page.texts[item.objectIndex], page.width, renderScale,
+                        std::nullopt, 1.0f);
+                }
+            }
+        };
+        if (auto placed = ComposeOverlayRaster(page, crop, renderScale, paintGroup); placed.has_value()) {
+            rasters.push_back(std::move(*placed));
         }
     }
     return rasters;

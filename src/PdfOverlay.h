@@ -33,10 +33,12 @@ struct PlacedRaster {
     bool opaque = false;
 };
 
-// Renders each text/LaTeX object of a page into its own transparent raster,
-// cropped to that object's painted bounds. Returned in paint order (all texts,
-// then all LaTeX), so appending them in order preserves the old overlay's
-// layer order without allocating a page-sized image for a small object.
+// Renders each connected group of overlapping/touching text/LaTeX objects of a
+// page into its own transparent raster, cropped to that group's painted bounds.
+// Objects are grouped in paint order (all texts, then all LaTeX), so appending
+// the returned rasters in order preserves the old overlay's layer order without
+// allocating a page-sized image for a small object; overlapping objects share a
+// raster and keep one alpha compositing step.
 [[nodiscard]] std::vector<PlacedRaster> ComposeTextOverlayRasters(const Page& page, float renderScale);
 
 // Flattens a page (PDF source raster or stored raster, images, optional
