@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,99 @@ void Check(bool condition, const std::string& message) {
         std::printf("FAIL: %s\n", message.c_str());
     }
 }
+
+// The rescanning implementation the linear scanner replaced, kept verbatim as
+// the oracle for the randomized parity check below.
+namespace reference {
+
+bool IsMathSpace(char16_t character) {
+    switch (character) {
+    case u' ':
+    case u'\t':
+    case u'\n':
+    case u'\r':
+    case u'\f':
+    case u'\v':
+    case u'\u00A0':
+    case u'\u2028':
+    case u'\u2029':
+    case u'\u202F':
+    case u'\u205F':
+    case u'\u3000':
+        return true;
+    default:
+        return character >= u'\u2000' && character <= u'\u200A';
+    }
+}
+
+bool IsLineBreak(char16_t character) {
+    return character == u'\n' || character == u'\r' || character == u'\u2028' || character == u'\u2029';
+}
+
+bool IsAsciiDigit(char16_t character) {
+    return character >= u'0' && character <= u'9';
+}
+
+std::vector<cnote::text::InlineMathRange> FindInlineMath(std::u16string_view content) {
+    std::vector<cnote::text::InlineMathRange> ranges;
+    const std::size_t size = content.size();
+    std::size_t index = 0;
+    while (index < size) {
+        const char16_t character = content[index];
+        if (character == u'\\') {
+            index += 2U;
+            continue;
+        }
+        if (character != u'$') {
+            ++index;
+            continue;
+        }
+        std::size_t runEnd = index + 1U;
+        while (runEnd < size && content[runEnd] == u'$') {
+            ++runEnd;
+        }
+        if (runEnd - index >= 2U) {
+            index = runEnd;
+            continue;
+        }
+        if (index + 1U >= size || IsMathSpace(content[index + 1U])) {
+            ++index;
+            continue;
+        }
+
+        std::size_t closing = size;
+        for (std::size_t probe = index + 1U; probe < size;) {
+            const char16_t candidate = content[probe];
+            if (IsLineBreak(candidate)) {
+                break;
+            }
+            if (candidate == u'\\') {
+                probe += 2U;
+                continue;
+            }
+            if (candidate == u'$') {
+                const bool hasNext = probe + 1U < size;
+                if (hasNext && content[probe + 1U] == u'$') {
+                    break;
+                }
+                if (!IsMathSpace(content[probe - 1U]) && !(hasNext && IsAsciiDigit(content[probe + 1U]))) {
+                    closing = probe;
+                    break;
+                }
+            }
+            ++probe;
+        }
+        if (closing == size) {
+            ++index;
+            continue;
+        }
+        ranges.push_back({ static_cast<std::uint32_t>(index), static_cast<std::uint32_t>(closing + 1U) });
+        index = closing + 1U;
+    }
+    return ranges;
+}
+
+}  // namespace reference
 
 cnote::PageText MakeUnicodeText() {
     cnote::PageText text {};
@@ -266,6 +360,33 @@ int main(int argc, char** argv) {
         const Ranges source = cnote::text::FindInlineMath(u"see $\\frac{a}{b}$");
         Check(source.size() == 1U && source.front().SourceStart() == 5U && source.front().SourceLength() == 11U,
             "the formula source excludes both delimiters");
+
+        // Randomized parity against the rescanning implementation: every
+        // dollar, escape, line break, unicode space and price boundary rule
+        // must produce exactly the same ranges.
+        std::mt19937 random(0x5EED);
+        const char16_t alphabet[] = {
+            u'$', u'$', u'$', u'\\', u'\\', u'a', u'x', u'1', u' ', u' ', u'\t', u'.', u'\n', u'\r',
+            u'\u00A0', u'\u2003', u'\u2028', u'\u2029',
+        };
+        constexpr std::size_t kAlphabetSize = sizeof(alphabet) / sizeof(alphabet[0]);
+        int mismatches = 0;
+        for (int iteration = 0; iteration < 20000; ++iteration) {
+            const std::size_t length = random() % 48U;
+            std::u16string content;
+            content.reserve(length);
+            for (std::size_t index = 0; index < length; ++index) {
+                content.push_back(alphabet[random() % kAlphabetSize]);
+            }
+            if (cnote::text::FindInlineMath(content) != reference::FindInlineMath(content)) {
+                if (mismatches < 5) {
+                    std::printf("FAIL: inline math parity mismatch for \"%s\"\n",
+                        cnote::Utf16ToUtf8(content).c_str());
+                }
+                ++mismatches;
+            }
+        }
+        Check(mismatches == 0, "the linear inline-math scan matches the rescanning oracle");
     }
 
     // --- empty-object deletion ----------------------------------------------

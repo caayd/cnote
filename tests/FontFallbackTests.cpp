@@ -170,7 +170,7 @@ void CheckLayoutKeepsEverything() {
     Check(plainLayout.lineHeight > 0 && LineCount(plainLayout) >= 3U, "an unstyled paragraph set lays out too");
     Check(layout.lineHeight > plainLayout.lineHeight,
         "the 30px style span still reaches the layout (span styling is applied)");
-    Check(cnote::text::TextLayoutSignature(text, 300.0f) != cnote::text::TextLayoutSignature(plain, 300.0f),
+    Check(cnote::text::TextLayoutSignature(text) != cnote::text::TextLayoutSignature(plain),
         "styling is part of the layout identity");
 }
 
@@ -228,6 +228,44 @@ void CheckLayoutCacheTracksEngineGeneration() {
         "Shutdown invalidates layouts built before it");
 }
 
+// --- measurement cache: a bounds hit builds no documents ------------------
+void CheckBoundsHitBuildsNoDocuments() {
+    cnote::PageText autoText = BuildStyledText();
+    autoText.width = 0.0f;  // auto width: the first query must measure the content
+    const std::uint64_t documentsBefore = cnote::text::TextDocumentBuilds();
+    const cnote::text::QtTextBounds first = cnote::text::MeasurePageTextBoundsQt(autoText, 300.0f);
+    Check(cnote::text::TextDocumentBuilds() > documentsBefore,
+        "a first auto-width bounds query builds its measuring documents");
+    const std::uint64_t documentsAfterFirst = cnote::text::TextDocumentBuilds();
+
+    const cnote::text::QtTextBounds second = cnote::text::MeasurePageTextBoundsQt(autoText, 300.0f);
+    Check(cnote::text::TextDocumentBuilds() == documentsAfterFirst,
+        "a cached auto-width bounds query builds no documents");
+    Check(first.left == second.left && first.top == second.top && first.right == second.right
+            && first.bottom == second.bottom,
+        "the cached bounds are identical");
+    Check(cnote::text::LayoutPageTextQt(autoText, 300.0f).width == first.right - first.left,
+        "the cached layout carries the resolved auto width");
+
+    // A different page width is not a different layout: the key must not
+    // include a dimension the layout ignores.
+    const cnote::text::QtTextBounds otherPageWidth = cnote::text::MeasurePageTextBoundsQt(autoText, 123.0f);
+    Check(cnote::text::TextDocumentBuilds() == documentsAfterFirst
+            && otherPageWidth.right == second.right && otherPageWidth.bottom == second.bottom,
+        "the page width is not part of the measurement key");
+
+    // Fixed-width text has no measuring document at all, and a hit adds none.
+    cnote::PageText fixed = BuildStyledText();
+    fixed.width = 280.0f;  // a width no earlier check laid out
+    const std::uint64_t documentsBeforeFixed = cnote::text::TextDocumentBuilds();
+    static_cast<void>(cnote::text::MeasurePageTextBoundsQt(fixed, 300.0f));
+    const std::uint64_t documentsAfterFirstFixed = cnote::text::TextDocumentBuilds();
+    static_cast<void>(cnote::text::MeasurePageTextBoundsQt(fixed, 300.0f));
+    Check(cnote::text::TextDocumentBuilds() == documentsAfterFirstFixed
+            && documentsAfterFirstFixed - documentsBeforeFixed == 1U,
+        "fixed-width bounds build one layout document and a hit adds none");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -236,6 +274,7 @@ int main(int argc, char** argv) {
     CheckFamilyResolution();
     CheckLayoutKeepsEverything();
     CheckWrappingAndDeterminism();
+    CheckBoundsHitBuildsNoDocuments();
     CheckLayoutCacheTracksEngineGeneration();
 
     if (gFailures != 0) {

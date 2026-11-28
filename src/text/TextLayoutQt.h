@@ -18,11 +18,15 @@ struct QtTextLine {
 };
 
 // Heights in page units: `lineHeight` is the tallest line's pitch, `height`
-// the whole laid-out text's.
+// the whole laid-out text's.  `width` is the resolved box width in page units
+// (the stored width for a fixed-width object, the measured content width for
+// an auto-width one), cached with the lines so a bounds query never has to
+// measure again.
 struct QtTextLayout {
     std::vector<QtTextLine> lines;
     float lineHeight = 0.0f;
     float height = 0.0f;
+    float width = 0.0f;
 };
 
 // Lays out a PageText on the fixed 96-DPI reference device: point size is the
@@ -90,7 +94,12 @@ void DrawPageTextQt(QPainter& painter, const PageText& text, float pageWidth, fl
 // Diagnostics: number of layouts actually built (cache misses).
 [[nodiscard]] std::uint64_t TextLayoutCacheMisses();
 
+// Diagnostics: number of QTextDocuments built for layout, width measurement
+// or drawing.  Cache hits add none.
+[[nodiscard]] std::uint64_t TextDocumentBuilds();
+
 // Signature covering everything that affects the layout; used by render caches.
-[[nodiscard]] std::uint64_t TextLayoutSignature(const PageText& text, float pageWidth);
+// The page width is not part of it: it does not affect how text lays out.
+[[nodiscard]] std::uint64_t TextLayoutSignature(const PageText& text);
 
 }  // namespace cnote::text

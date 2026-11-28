@@ -216,6 +216,43 @@ int main(int argc, char** argv) {
             && text.styleSpans.size() == 1U && text.styleSpans.front().start == 0U && text.styleSpans.front().length == 3U,
         "model geometry and text are unchanged after rendering");
 
+    // --- prepared draw document: a redraw reuses it, pixel for pixel --------
+    {
+        cnote::PageText drawn {};
+        drawn.fontSize = 20.0f;
+        drawn.fontFamily = cnote::TextFontFamily::Sans;
+        drawn.color = 0xFF000000U;
+        drawn.width = 320.0f;
+        drawn.content = u"a $x^2$ b\r\nsecond line \u03B1";
+        const auto drawInto = [&](float scale, float ratio) {
+            QImage image(720, 300, QImage::Format_ARGB32_Premultiplied);
+            image.fill(Qt::transparent);
+            QPainter painter(&image);
+            cnote::text::DrawPageTextQt(painter, drawn, 320.0f, scale, ratio, 10.0f, 10.0f, 1.0f);
+            return image;
+        };
+
+        const std::uint64_t buildsBeforeDraw = cnote::text::TextDocumentBuilds();
+        const QImage coldImage = drawInto(2.0f, 2.0f);
+        const std::uint64_t buildsAfterColdDraw = cnote::text::TextDocumentBuilds();
+        Check(buildsAfterColdDraw > buildsBeforeDraw, "a first draw builds its formatted document");
+
+        const QImage warmImage = drawInto(2.0f, 2.0f);
+        Check(cnote::text::TextDocumentBuilds() == buildsAfterColdDraw,
+            "a redraw at the same scale builds no document (cached prepared layout)");
+        Check(warmImage == coldImage, "a cached draw keeps identical pixels");
+
+        // A transform is a different layout scale: one new document, then that
+        // scale is cached too.
+        const QImage transformed = drawInto(3.0f, 2.0f);
+        const std::uint64_t buildsAfterTransform = cnote::text::TextDocumentBuilds();
+        Check(buildsAfterTransform == buildsAfterColdDraw + 1U,
+            "a draw at a new scale builds exactly one document");
+        const QImage transformedAgain = drawInto(3.0f, 2.0f);
+        Check(cnote::text::TextDocumentBuilds() == buildsAfterTransform && transformedAgain == transformed,
+            "the transformed scale is cached and pixel-identical");
+    }
+
     // A single-point stroke paints a filled dot whose diameter is the pen
     // width; a regression stroked the dot's outline on top of the fill and
     // doubled it.  Compare the dot's vertical extent against a two-point
