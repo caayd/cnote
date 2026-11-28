@@ -134,7 +134,7 @@ public:
     // Whole-selection affine transform for a resize/rotate gesture: restores
     // the gesture snapshot first, so `transform` is absolute, not cumulative.
     void TransformSelection(std::size_t pageIndex, const ui::SelectionTransform& transform) override;
-    void CommitErase(std::size_t pageIndex, const std::vector<ui::ObjectRef>& targets) override;
+    void CommitErase(const std::vector<ui::ObjectRef>& targets) override;
     bool RecolorSelection(std::uint32_t color) override;
 
     // Stroke effects the interaction router drives (line/oval modes replace the
@@ -306,8 +306,7 @@ private:
     // snapshotted, and CommitPageGesture records just those as one
     // ReplaceObjects action, so retained history is O(affected objects) rather
     // than O(page).  The four `before` maps hold the pre-gesture state of
-    // objects mutated in place; `removed` holds objects an eraser deletes (the
-    // pre-removal index is the key) and `inserted` the indices an Alt-drag
+    // objects mutated in place and `inserted` holds the indices an Alt-drag
     // clone appends.  The move bounds cache lets MoveSelectionBy measure each
     // selected object once and translate by the applied delta, so a move
     // sample costs O(1) per object instead of re-measuring strokes/text/LaTeX.
@@ -324,10 +323,6 @@ private:
         std::map<std::size_t, PageImage> beforeImages {};
         std::map<std::size_t, PageText> beforeTexts {};
         std::map<std::size_t, PageLatex> beforeLatexes {};
-        std::map<std::size_t, Stroke> removedStrokes {};
-        std::map<std::size_t, PageImage> removedImages {};
-        std::map<std::size_t, PageText> removedTexts {};
-        std::map<std::size_t, PageLatex> removedLatexes {};
         std::set<std::size_t> insertedStrokes {};
         std::set<std::size_t> insertedImages {};
         std::set<std::size_t> insertedTexts {};

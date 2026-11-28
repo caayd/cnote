@@ -189,6 +189,93 @@ std::size_t Document::RemovePage(std::size_t index) {
     return currentPageIndex_;
 }
 
+bool Document::InsertPages(const std::vector<std::size_t>& positions, const std::vector<Page>& pages) {
+    if (positions.empty() || positions.size() != pages.size()
+        || !std::is_sorted(positions.begin(), positions.end())
+        || std::adjacent_find(positions.begin(), positions.end()) != positions.end()) {
+        return false;
+    }
+    // `positions[offset]` counts the pages inserted before it: in final-gap
+    // coordinates the page lands at `positions[offset] - offset`.
+    for (std::size_t offset = 0; offset < positions.size(); ++offset) {
+        if (positions[offset] > pages_.size() + offset) {
+            return false;
+        }
+    }
+
+    // One pass over both lists: survivors keep their epoch, inserted slots get
+    // a fresh one.  The current page is the original page at
+    // `currentPageIndex_`; every insertion pushed before it moves its index.
+    std::vector<Page> merged;
+    std::vector<std::uint64_t> epochs;
+    merged.reserve(pages_.size() + pages.size());
+    epochs.reserve(pages_.size() + pages.size());
+    const bool hadPages = !pages_.empty();
+    std::size_t current = currentPageIndex_;
+    std::size_t original = 0;
+    for (std::size_t offset = 0; offset < positions.size(); ++offset) {
+        const std::size_t gap = positions[offset] - offset;
+        while (original < gap) {
+            merged.push_back(std::move(pages_[original]));
+            epochs.push_back(pageEpochs_[original]);
+            ++original;
+        }
+        merged.push_back(pages[offset]);
+        epochs.push_back(NextPageEpoch());
+        if (hadPages && original <= currentPageIndex_) {
+            ++current;
+        }
+    }
+    while (original < pages_.size()) {
+        merged.push_back(std::move(pages_[original]));
+        epochs.push_back(pageEpochs_[original]);
+        ++original;
+    }
+    pages_ = std::move(merged);
+    pageEpochs_ = std::move(epochs);
+    currentPageIndex_ = hadPages ? current : 0U;
+    return true;
+}
+
+bool Document::RemovePages(const std::vector<std::size_t>& indices) {
+    if (indices.empty() || indices.size() >= pages_.size()
+        || !std::is_sorted(indices.begin(), indices.end())
+        || std::adjacent_find(indices.begin(), indices.end()) != indices.end()
+        || indices.back() >= pages_.size()) {
+        return false;
+    }
+
+    // Compacts pages and epochs in one pass, then applies RemovePage's
+    // current-page bookkeeping in the same descending order (without moving
+    // the vectors again).
+    std::size_t remaining = pages_.size();
+    for (auto index = indices.rbegin(); index != indices.rend(); ++index) {
+        --remaining;
+        if (currentPageIndex_ > *index) {
+            --currentPageIndex_;
+        } else if (currentPageIndex_ >= remaining) {
+            currentPageIndex_ = remaining - 1U;
+        }
+    }
+
+    std::vector<Page> kept;
+    std::vector<std::uint64_t> epochs;
+    kept.reserve(pages_.size() - indices.size());
+    epochs.reserve(pageEpochs_.size() - indices.size());
+    std::size_t removed = 0;
+    for (std::size_t index = 0; index < pages_.size(); ++index) {
+        if (removed < indices.size() && indices[removed] == index) {
+            ++removed;
+            continue;
+        }
+        kept.push_back(std::move(pages_[index]));
+        epochs.push_back(pageEpochs_[index]);
+    }
+    pages_ = std::move(kept);
+    pageEpochs_ = std::move(epochs);
+    return true;
+}
+
 bool Document::ReorderPages(const std::vector<std::size_t>& order) {
     if (order.size() != pages_.size()) {
         return false;

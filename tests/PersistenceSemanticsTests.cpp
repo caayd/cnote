@@ -38,6 +38,7 @@
 // replaced only after a successful write) and are called out in the report.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -67,6 +68,7 @@
 #include "ProjectSaveQueue.h"
 #include "ProjectSession.h"
 #include "Unicode.h"
+#include "document/HistoryReducer.h"
 #include "qt/QtDocumentController.h"
 #include "latex/LatexEngine.h"
 #include "qt/QtMainWindow.h"
@@ -1463,8 +1465,8 @@ void ObjectGesturesUndoRedoExactly() {
         static_cast<void>(controller.RecolorSelection(0xFF00FF00U));
     });
     runGesture("erase", [&]() {
-        controller.CommitErase(0, { cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Stroke, 0U },
-                                      cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Text, 0U } });
+        controller.CommitErase({ cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Stroke, 0U },
+            cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Text, 0U } });
     });
     runGesture("clone", [&]() {
         cnote::ui::PageSelection selection;
@@ -1666,6 +1668,340 @@ void ObjectGestureHistoryDoesNotScaleWithPageSize() {
     Check(large == small, "retained history bytes do not grow with the page's object count");
 }
 
+cnote::Stroke MakeStrokeAt(float x, float y) {
+    cnote::Stroke stroke;
+    stroke.points = { { x, y }, { x + 10.0f, y + 10.0f } };
+    return stroke;
+}
+
+// One erase drag crosses pages: the controller records a single ReplaceObjects
+// action carrying one delta per page, bumps each touched page's epoch once and
+// broadcasts once.  Undo restores both pages exactly.
+void EraseDragIsOneTransactionAcrossPages() {
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    const std::shared_ptr<cnote::ProjectSession> session = controller.Session();
+    Check(controller.InsertPages(1, 1, cnote::ui::NewPageDraft { 200.0f, 300.0f, 0xFFFFFFFFU, {} }) == 1U,
+        "the erase fixture gets a second page");
+
+    cnote::Page& first = session->document.PageAt(0);
+    cnote::Page& second = session->document.PageAt(1);
+    const cnote::Stroke firstStroke0 = MakeStrokeAt(10.0f, 10.0f);
+    const cnote::Stroke firstStroke1 = MakeStrokeAt(20.0f, 20.0f);
+    const cnote::Stroke firstStroke2 = MakeStrokeAt(30.0f, 30.0f);
+    first.strokes = { firstStroke0, firstStroke1, firstStroke2 };
+    first.texts.push_back(MakeText(10, u"keep"));
+    const cnote::Stroke secondStroke0 = MakeStrokeAt(40.0f, 40.0f);
+    const cnote::Stroke secondStroke1 = MakeStrokeAt(50.0f, 50.0f);
+    second.strokes = { secondStroke0, secondStroke1 };
+    cnote::PageLatex latex;
+    latex.id = 40;
+    latex.x = 5.0f;
+    latex.y = 5.0f;
+    latex.content = u"x^2";
+    second.latexes.push_back(latex);
+
+    const cnote::Page firstBefore = first;
+    const cnote::Page secondBefore = second;
+    const std::uint64_t firstEpoch = session->document.PageEpoch(0);
+    const std::uint64_t secondEpoch = session->document.PageEpoch(1);
+    const std::size_t undoBefore = session->undoActions.size();
+    int changes = 0;
+    QObject::connect(&controller, &cnote::qt::QtDocumentController::SessionChanged, &controller,
+        [&changes]() { ++changes; });
+
+    controller.CommitErase({ cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Stroke, 0U },
+        cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Text, 0U },
+        cnote::ui::ObjectRef { 1U, cnote::ui::ObjectKind::Stroke, 1U } });
+
+    Check(changes == 1, "the whole multi-page erase sends exactly one change notification");
+    Check(session->undoActions.size() == undoBefore + 1U, "the whole multi-page erase is one history step");
+    const cnote::HistoryAction& action = session->undoActions.back();
+    Check(action.type == cnote::HistoryActionType::ReplaceObjects
+            && action.pageIndices == std::vector<std::size_t> { 0U, 1U },
+        "the action carries both pages");
+    Check(action.beforeObjects.size() == 2U && action.afterObjects.size() == 2U,
+        "each page has a before/after delta");
+    Check(action.beforeObjects[0].strokes.size() == 1U && action.beforeObjects[0].texts.size() == 1U
+            && action.beforeObjects[0].strokeIndices == std::vector<std::size_t> { 0U }
+            && action.beforeObjects[0].textIndices == std::vector<std::size_t> { 0U },
+        "the first page's delta holds the erased stroke and text");
+    Check(action.beforeObjects[1].strokes.size() == 1U
+            && action.beforeObjects[1].strokeIndices == std::vector<std::size_t> { 1U }
+            && action.beforeObjects[1].latexes.empty(),
+        "the second page's delta holds only the erased stroke");
+    Check(action.afterObjects[0].Empty() && action.afterObjects[1].Empty(),
+        "an erase only removes objects");
+    Check(session->document.PageEpoch(0) != firstEpoch && session->document.PageEpoch(1) != secondEpoch,
+        "both touched pages get one epoch bump");
+    Check(first.strokes.size() == 2U && first.texts.empty()
+            && second.strokes.size() == 1U && second.latexes.size() == 1U,
+        "the erased objects are gone and the rest survive");
+
+    Check(controller.Undo(), "one undo reverts the whole multi-page erase");
+    Check(cnote::PageEqual(first, firstBefore) && cnote::PageEqual(second, secondBefore),
+        "undo restores both pages exactly");
+    Check(controller.Redo(), "the erase redoes");
+    Check(first.strokes.size() == 2U && second.strokes.size() == 1U,
+        "redo removes the same objects again");
+    Check(controller.Undo(), "back to the pre-erase pages");
+}
+
+// Surviving selection indices move down with their objects; erased ones leave
+// the selection.  The bug left them pointing at whatever slid into the hole.
+void SelectionIndicesFollowErasedObjects() {
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    cnote::Page& page = controller.Session()->document.CurrentPage();
+    const cnote::Stroke stroke1 = MakeStrokeAt(1.0f, 1.0f);
+    const cnote::Stroke stroke3 = MakeStrokeAt(3.0f, 3.0f);
+    page.strokes = { MakeStrokeAt(0.0f, 0.0f), stroke1, MakeStrokeAt(2.0f, 2.0f), stroke3,
+        MakeStrokeAt(4.0f, 4.0f) };
+    page.texts = { MakeText(100, u"zero"), MakeText(101, u"one"), MakeText(102, u"two") };
+
+    cnote::ui::PageSelection selection;
+    selection.strokes = { 1U, 3U };
+    selection.texts = { 2U };
+    controller.SelectObjects(0, selection);
+
+    controller.CommitErase({ cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Stroke, 0U },
+        cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Text, 0U } });
+
+    const cnote::ui::PageSelection& after = controller.SelectionFor(0);
+    Check(after.strokes == std::vector<std::size_t> { 0U, 2U },
+        "surviving stroke selection indices shift down by the erased object");
+    Check(after.texts == std::vector<std::size_t> { 1U },
+        "surviving text selection indices shift down by the erased object");
+    Check(page.strokes.size() == 4U && cnote::StrokeEqual(page.strokes[0], stroke1)
+            && cnote::StrokeEqual(page.strokes[2], stroke3),
+        "the remapped stroke indices still name the originally selected objects");
+    Check(page.texts.size() == 2U && page.texts[1].id == 102U,
+        "the remapped text index still names the originally selected object");
+
+    // Erasing a selected object drops it; the other survivor shifts again.
+    controller.CommitErase({ cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Stroke, 0U } });
+    Check(controller.SelectionFor(0).strokes == std::vector<std::size_t> { 1U },
+        "an erased selection member leaves and the survivor follows its object");
+    Check(cnote::StrokeEqual(page.strokes[1], stroke3), "the selected survivor is still the same stroke");
+    Check(controller.SelectionFor(0).texts == std::vector<std::size_t> { 1U },
+        "an untouched kind keeps its remapped selection");
+}
+
+// A rejected history step must not invalidate renderer caches: the page epoch
+// is for committed content only.
+void RejectedHistoryActionsLeavePageEpochs() {
+    cnote::Document document = cnote::Document::CreateBlank();
+    const auto rejected = [&document](const std::string& what, cnote::HistoryAction action) {
+        const std::uint64_t epoch = document.PageEpoch(0);
+        Check(!cnote::ApplyHistoryAction(document, action, false), what + " is rejected");
+        Check(document.PageEpoch(0) == epoch, what + " leaves the page epoch unchanged");
+    };
+
+    cnote::HistoryAction action {};
+    action.type = cnote::HistoryActionType::AddStroke;
+    action.pageIndex = 0;
+    action.index = 3;
+    rejected("an out-of-range stroke insert", action);
+    action.index = 0;
+    action.type = cnote::HistoryActionType::RemoveStroke;
+    rejected("removing a stroke that is not there", action);
+
+    cnote::HistoryAction textAction {};
+    textAction.pageIndex = 0;
+    textAction.type = cnote::HistoryActionType::AddText;
+    textAction.index = 2;
+    textAction.text = MakeText(1, u"x");
+    rejected("an out-of-range text insert", textAction);
+    textAction.index = 0;
+    textAction.type = cnote::HistoryActionType::RemoveText;
+    rejected("removing a text that is not there", textAction);
+    textAction.type = cnote::HistoryActionType::UpdateText;
+    textAction.replacementText = MakeText(2, u"y");
+    rejected("updating a text that is not there", textAction);
+
+    cnote::HistoryAction latexAction {};
+    latexAction.pageIndex = 0;
+    latexAction.type = cnote::HistoryActionType::AddLatex;
+    latexAction.index = 1;
+    latexAction.latex.id = 9;
+    latexAction.latex.content = u"z";
+    rejected("an out-of-range LaTeX insert", latexAction);
+    latexAction.index = 0;
+    latexAction.type = cnote::HistoryActionType::RemoveLatex;
+    rejected("removing a LaTeX object that is not there", latexAction);
+    latexAction.type = cnote::HistoryActionType::UpdateLatex;
+    latexAction.replacementLatex.id = 10;
+    latexAction.replacementLatex.content = u"w";
+    rejected("updating a LaTeX object that is not there", latexAction);
+
+    Check(document.CurrentPage().strokes.empty() && document.CurrentPage().texts.empty()
+            && document.CurrentPage().latexes.empty(),
+        "rejected actions leave the page untouched");
+
+    cnote::HistoryAction valid {};
+    valid.type = cnote::HistoryActionType::AddStroke;
+    valid.pageIndex = 0;
+    valid.index = 0;
+    valid.stroke = MakeStrokeAt(7.0f, 8.0f);
+    const std::uint64_t before = document.PageEpoch(0);
+    Check(cnote::ApplyHistoryAction(document, valid, false), "a valid action applies");
+    Check(document.PageEpoch(0) != before, "a committed action bumps the page epoch");
+    Check(document.CurrentPage().strokes.size() == 1U, "the valid stroke is inserted");
+
+    const std::uint64_t afterValid = document.PageEpoch(0);
+    cnote::HistoryAction staleRemove {};
+    staleRemove.type = cnote::HistoryActionType::RemoveStroke;
+    staleRemove.pageIndex = 0;
+    staleRemove.index = 1;
+    Check(!cnote::ApplyHistoryAction(document, staleRemove, false),
+        "a rejected removal after a commit is refused");
+    Check(document.PageEpoch(0) == afterValid, "the rejected removal keeps the committed epoch");
+}
+
+// Multi-page add/remove actions go through one batched insert/remove.  The
+// page order, the current page (which follows its page across the shift) and
+// one-undo-per-delete must all match the old per-page loop.
+void BatchPageHistoryKeepsOrderAndCurrentPage() {
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    const auto draft = [](float width) {
+        return cnote::ui::NewPageDraft { width, 300.0f, 0xFFFFFFFFU, {} };
+    };
+    controller.InsertPages(1, 1, draft(200.0f));
+    controller.InsertPages(2, 1, draft(300.0f));
+    controller.InsertPages(3, 1, draft(400.0f));
+    const auto widths = [&controller]() {
+        std::vector<float> result;
+        for (std::size_t index = 0; index < controller.DocumentRef().PageCount(); ++index) {
+            result.push_back(controller.DocumentRef().PageAt(index).width);
+        }
+        return result;
+    };
+    const std::vector<float> original = widths();
+    Check(original.size() == 4U, "the batch fixture has four pages");
+    controller.SetCurrentPageIndex(3);
+
+    Check(controller.InsertPages(1, 2, draft(250.0f)) == 1U, "two pages insert as one block");
+    Check(widths() == std::vector<float> { original[0], 250.0f, 250.0f, original[1], original[2], original[3] },
+        "the inserted block lands in order");
+    Check(controller.CurrentPageIndex() == 5U, "the current page moves right past the inserted block");
+
+    Check(controller.Undo(), "the multi-page insert undoes in one step");
+    Check(widths() == original, "undo restores the page order");
+    Check(controller.CurrentPageIndex() == 3U && controller.DocumentRef().CurrentPage().width == original[3],
+        "undo keeps the current page on the same page");
+    Check(controller.Redo(), "the multi-page insert redoes");
+    Check(widths() == std::vector<float> { original[0], 250.0f, 250.0f, original[1], original[2], original[3] }
+            && controller.CurrentPageIndex() == 5U,
+        "redo restores the block and the current page");
+    Check(controller.Undo(), "back to the four-page document");
+
+    // Non-contiguous removal: the batch insert that undoes it must restore the
+    // pages to their recorded positions, not as a contiguous block.
+    Check(controller.RemovePages({ 0U, 2U }), "two non-adjacent pages delete");
+    Check(widths() == std::vector<float> { original[1], original[3] }, "both pages are gone");
+    Check(controller.CurrentPageIndex() == 1U
+            && controller.DocumentRef().CurrentPage().width == original[3],
+        "the current page follows its page across the removal");
+    Check(controller.Undo(), "the multi-page delete undoes in one step");
+    Check(widths() == original, "undo puts both pages back at their old indices");
+    Check(controller.CurrentPageIndex() == 3U
+            && controller.DocumentRef().CurrentPage().width == original[3],
+        "undo leaves the current page on the same page");
+    Check(controller.Redo(), "the delete redoes");
+    Check(widths() == std::vector<float> { original[1], original[3] }
+            && controller.CurrentPageIndex() == 1U,
+        "redo deletes both pages and keeps the current page");
+}
+
+// The old erase erased each target index from the vector front and copied the
+// removed objects twice (into the gesture map, then into the history delta).
+// The compacting commit records the same delta and page with one pass; compare
+// the exact output and measure both on the fixture below.
+void EraseCommitCompactsOnce() {
+    constexpr std::size_t kStrokeCount = 6000U;
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController controller(manager);
+    controller.AttachSession(std::make_shared<cnote::ProjectSession>());
+    cnote::Page& page = controller.Session()->document.CurrentPage();
+    page.strokes.reserve(kStrokeCount);
+    std::vector<cnote::ui::ObjectRef> targets;
+    targets.reserve(kStrokeCount / 2U);
+    for (std::size_t index = 0; index < kStrokeCount; ++index) {
+        page.strokes.push_back(MakeStrokeAt(static_cast<float>(index) * 0.01f, 10.0f));
+        if (index % 2U == 0U) {
+            targets.push_back(cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Stroke, index });
+        }
+    }
+
+    // Reference: the old commit's per-index erase and its two capture copies.
+    std::vector<cnote::Stroke> legacy = page.strokes;
+    std::vector<std::size_t> legacyIndices;
+    for (const cnote::ui::ObjectRef& target : targets) {
+        legacyIndices.push_back(target.objectIndex);
+    }
+    const auto legacyStart = std::chrono::steady_clock::now();
+    std::sort(legacyIndices.begin(), legacyIndices.end());
+    std::map<std::size_t, cnote::Stroke> removed;
+    for (const std::size_t index : legacyIndices) {
+        removed.emplace(index, legacy[index]);
+    }
+    for (auto index = legacyIndices.rbegin(); index != legacyIndices.rend(); ++index) {
+        legacy.erase(legacy.begin() + static_cast<std::ptrdiff_t>(*index));
+    }
+    cnote::PageObjectSet legacyBefore {};
+    for (const auto& [index, object] : removed) {
+        legacyBefore.strokeIndices.push_back(index);
+        legacyBefore.strokes.push_back(object);
+    }
+    const auto legacyEnd = std::chrono::steady_clock::now();
+
+    const cnote::Page before = page;
+    const auto commitStart = std::chrono::steady_clock::now();
+    controller.CommitErase(targets);
+    const auto commitEnd = std::chrono::steady_clock::now();
+
+    const std::shared_ptr<cnote::ProjectSession> session = controller.Session();
+    Check(session->undoActions.size() == 1U, "the dense erase records one history action");
+    const cnote::HistoryAction& action = session->undoActions.back();
+    Check(action.type == cnote::HistoryActionType::ReplaceObjects
+            && action.pageIndices == std::vector<std::size_t> { 0U },
+        "the dense erase is a one-page object delta");
+    const cnote::PageObjectSet& recorded = action.beforeObjects.front();
+    Check(recorded.strokeIndices == legacyBefore.strokeIndices,
+        "the compacting commit records exactly the old pre-removal indices");
+    Check(recorded.strokes.size() == legacyBefore.strokes.size(),
+        "the compacting commit records every erased stroke");
+    bool sameObjects = recorded.strokes.size() == legacyBefore.strokes.size();
+    for (std::size_t index = 0; sameObjects && index < recorded.strokes.size(); ++index) {
+        sameObjects = cnote::StrokeEqual(recorded.strokes[index], legacyBefore.strokes[index]);
+    }
+    Check(sameObjects, "the compacting commit records exactly the old erased strokes");
+    bool samePage = page.strokes.size() == legacy.size();
+    for (std::size_t index = 0; samePage && index < page.strokes.size(); ++index) {
+        samePage = cnote::StrokeEqual(page.strokes[index], legacy[index]);
+    }
+    Check(samePage, "the compacting commit leaves exactly the old surviving strokes in order");
+    Check(page.strokes.size() == kStrokeCount / 2U, "half of the dense page survives");
+
+    const auto micros = [](std::chrono::steady_clock::time_point from,
+                            std::chrono::steady_clock::time_point to) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(to - from).count();
+    };
+    std::printf("ERASE-COMMIT strokes=%zu erased=%zu compact=%lldus per-index=%lldus\n",
+        kStrokeCount, targets.size(), static_cast<long long>(micros(commitStart, commitEnd)),
+        static_cast<long long>(micros(legacyStart, legacyEnd)));
+
+    Check(controller.Undo(), "the dense erase undoes");
+    Check(cnote::PageEqual(page, before), "undo restores the dense page exactly");
+    Check(controller.Redo(), "the dense erase redoes");
+    Check(page.strokes.size() == kStrokeCount / 2U, "redo removes the same objects");
+    Check(controller.Undo(), "back to the dense pre-erase page");
+}
+
 // Version 18 strokes store raw samples, the StrokeSampling they render with
 // and their pen pressures.  A version-17 stroke has no pressures (constant
 // width); a version-16 one stored already-stabilized points, which must read
@@ -1862,6 +2198,11 @@ int main(int argc, char** argv) {
     ObjectGesturesUndoRedoExactly();
     PasteIdsSurviveUndoRedo();
     ObjectGestureHistoryDoesNotScaleWithPageSize();
+    EraseDragIsOneTransactionAcrossPages();
+    SelectionIndicesFollowErasedObjects();
+    RejectedHistoryActionsLeavePageEpochs();
+    BatchPageHistoryKeepsOrderAndCurrentPage();
+    EraseCommitCompactsOnce();
     StrokeFormatRoundTripsAndLegacyReads();
     SerializedProjectBytesAreStable();
 

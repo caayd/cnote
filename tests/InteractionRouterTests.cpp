@@ -730,6 +730,28 @@ void TestErasePendingSingleCommit() {
     Check(empty.CountOp("CommitErase(") == 0 && empty.CountOp("UpdatePendingErase(") == 0, "an erase drag over nothing commits nothing");
 }
 
+void TestEraseDragSpansPagesAsOneCommit() {
+    RecordingHost host;
+    host.hitPage = [](const QPointF& logical) -> std::optional<ui::PageHit> {
+        return ui::PageHit { logical.x() < 100.0 ? 0U : 1U, 1.0f };
+    };
+    ui::InteractionRouter router(host);
+    router.SetTool(ui::Tool::Erase);
+    host.eraseTargets = { ui::ObjectRef { 0U, ui::ObjectKind::Stroke, 2U } };
+    router.HandlePointerPress(Press(50.0, 50.0));
+    Check(host.HasOp("UpdatePendingErase(1)"), "the first page's object is pending\n" + host.Dump());
+
+    host.Reset();
+    host.eraseTargets = { ui::ObjectRef { 1U, ui::ObjectKind::Stroke, 5U } };
+    router.HandlePointerMove(Move(150.0, 50.0));
+    Check(host.HasOp("UpdatePendingErase(2)"), "an object on the next page joins the same pending set\n" + host.Dump());
+
+    host.Reset();
+    router.HandlePointerRelease(Release(150.0, 50.0));
+    Check(host.CountOp("CommitErase(") == 1, "a drag across pages still commits once");
+    Check(host.HasOp("CommitErase(2)"), "the single commit carries both pages' objects\n" + host.Dump());
+}
+
 // Scratch-out: while a freehand zigzag covers objects they are shown as
 // pending erase marks, and lifting erases them in one host call instead of
 // committing the stroke.  Over nothing, in the straight-line mode, with the
@@ -1657,6 +1679,7 @@ int main() {
     TestStrokeDottedModifierWithoutMotion();
     TestStrokeReleaseOutsideCanvas();
     TestErasePendingSingleCommit();
+    TestEraseDragSpansPagesAsOneCommit();
     TestStrokeScratchOut();
     TestSelectionClickVersusMarquee();
     TestSelectionLassoAccumulation();
