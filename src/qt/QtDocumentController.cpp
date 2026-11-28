@@ -1582,12 +1582,45 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         TouchTransient();
     }
 
-    const float fromWidth = transform.from.right - transform.from.left;
-    const float fromHeight = transform.from.bottom - transform.from.top;
-    // Degenerate source extents keep the source scale (the canvas clamps a
-    // resize to 1 page unit, but a selection can legitimately be flat).
-    const float scaleX = fromWidth > 0.0001f ? (transform.to.right - transform.to.left) / fromWidth : 1.0f;
-    const float scaleY = fromHeight > 0.0001f ? (transform.to.bottom - transform.to.top) / fromHeight : 1.0f;
+    // One prepared affine map per sample: the scale ratios and the rotation's
+    // sin/cos used to be recomputed for every point of every selected stroke.
+    const ui::PreparedSelectionTransform map =
+        ui::PrepareSelectionTransform(transform.from, transform.to, transform.rotateDegrees);
+    // The stabilization replays over the mapped raw points, so its spacing
+    // scales with them (exact for uniform scales and rotations; the geometric
+    // mean approximates a non-uniform resize).
+    const float strokeSpacingScale = std::sqrt(std::abs(map.scaleX * map.scaleY));
+    const float textScale = std::max(0.05f,
+        (transform.to.right - transform.to.left) / std::max(1.0f, transform.from.right - transform.from.left));
+
+    // Source bounds of the captured text/LaTeX objects, measured once per
+    // gesture.  The absolute restore puts every object back before it is
+    // measured, so its layout inputs (content, width, font, spans) do not
+    // change between samples; only the transformed result does.  Entries are
+    // per object index and come from the gesture's capture, so a selection
+    // change mid-gesture cannot serve another object's box.
+    const auto sourceTextBounds = [this, page](std::size_t index) -> const text::QtTextBounds& {
+        auto found = gesture_->transformBounds.texts.find(index);
+        if (found == gesture_->transformBounds.texts.end()) {
+            const auto before = gesture_->beforeTexts.find(index);
+            const text::QtTextBounds measured = before != gesture_->beforeTexts.end()
+                ? text::MeasurePageTextBoundsQt(before->second, page->width)
+                : text::MeasurePageTextBoundsQt(page->texts[index], page->width);
+            found = gesture_->transformBounds.texts.emplace(index, measured).first;
+        }
+        return found->second;
+    };
+    const auto sourceLatexBounds = [this, page](std::size_t index) -> const ui::LatexBounds& {
+        auto found = gesture_->transformBounds.latexes.find(index);
+        if (found == gesture_->transformBounds.latexes.end()) {
+            const auto before = gesture_->beforeLatexes.find(index);
+            const ui::LatexBounds measured = before != gesture_->beforeLatexes.end()
+                ? ui::MeasurePageLatexBounds(before->second, page->width)
+                : ui::MeasurePageLatexBounds(page->latexes[index], page->width);
+            found = gesture_->transformBounds.latexes.emplace(index, measured).first;
+        }
+        return found->second;
+    };
 
     for (const std::size_t index : selection.strokes) {
         if (index >= page->strokes.size()) {
@@ -1595,12 +1628,9 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         }
         Stroke& stroke = page->strokes[index];
         for (Vec2& point : stroke.points) {
-            point = ui::MapSelectionTransformPoint(point, transform.from, transform.to, transform.rotateDegrees);
+            point = map.Map(point);
         }
-        // The stabilization replays over the mapped raw points, so its spacing
-        // scales with them (exact for uniform scales and rotations; the
-        // geometric mean approximates a non-uniform resize).
-        stroke.sampling.spacing *= std::sqrt(std::abs(scaleX * scaleY));
+        stroke.sampling.spacing *= strokeSpacingScale;
     }
     for (const std::size_t index : selection.images) {
         if (index >= page->images.size()) {
@@ -1610,10 +1640,9 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         // Scale about the mapped centre: the rotated frame is not axis aligned,
         // so the rotated image keeps its own rotation and accumulates the
         // gesture's.
-        const Vec2 mappedCenter = ui::MapSelectionTransformPoint(
-            ui::ImageCenter(image), transform.from, transform.to, transform.rotateDegrees);
-        image.width *= scaleX;
-        image.height *= scaleY;
+        const Vec2 mappedCenter = map.Map(ui::ImageCenter(image));
+        image.width *= map.scaleX;
+        image.height *= map.scaleY;
         image.x = mappedCenter.x - (image.width * 0.5f);
         image.y = mappedCenter.y - (image.height * 0.5f);
         image.rotationDegrees += transform.rotateDegrees;
@@ -1623,7 +1652,7 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
             continue;
         }
         PageText& text = page->texts[index];
-        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page->width);
+        const text::QtTextBounds bounds = sourceTextBounds(index);
         if (transform.rotateDegrees != 0.0f || transform.scaleTextFont) {
             // Rotation and Shift-resize keep the reference behaviour: the
             // origin follows the mapped top-left and the font scales with the
@@ -1634,20 +1663,16 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
             if (std::abs(text.rotationDegrees) > 0.0001f) {
                 const Vec2 boundsCenter {
                     (bounds.left + bounds.right) * 0.5f, (bounds.top + bounds.bottom) * 0.5f };
-                const Vec2 mappedCenter = ui::MapSelectionTransformPoint(
-                    boundsCenter, transform.from, transform.to, transform.rotateDegrees);
+                const Vec2 mappedCenter = map.Map(boundsCenter);
                 text.x += mappedCenter.x - boundsCenter.x;
                 text.y += mappedCenter.y - boundsCenter.y;
             } else {
-                const Vec2 mapped = ui::MapSelectionTransformPoint(
-                    { bounds.left, bounds.top }, transform.from, transform.to, transform.rotateDegrees);
+                const Vec2 mapped = map.Map({ bounds.left, bounds.top });
                 text.x += mapped.x - bounds.left;
                 text.y += mapped.y - bounds.top;
             }
             text.rotationDegrees += transform.rotateDegrees;
             if (transform.scaleTextFont) {
-                const float textScale = std::max(0.05f,
-                    (transform.to.right - transform.to.left) / std::max(1.0f, transform.from.right - transform.from.left));
                 text.fontSize = std::max(1.0f, text.fontSize * textScale);
                 for (PageTextStyleSpan& span : text.styleSpans) {
                     span.style.fontSize = std::max(1.0f, span.style.fontSize * textScale);
@@ -1664,10 +1689,8 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         // text wraps at (an auto-width text starts wrapping).  The height is
         // never set: it is always the wrapped content's, so a vertical drag
         // only carries the text along with the rest of the selection.
-        const Vec2 mappedTopLeft = ui::MapSelectionTransformPoint(
-            { bounds.left, bounds.top }, transform.from, transform.to, 0.0f);
-        const Vec2 mappedBottomRight = ui::MapSelectionTransformPoint(
-            { bounds.right, bounds.bottom }, transform.from, transform.to, 0.0f);
+        const Vec2 mappedTopLeft = map.Map({ bounds.left, bounds.top });
+        const Vec2 mappedBottomRight = map.Map({ bounds.right, bounds.bottom });
         const bool widthChanged = transform.to.left != transform.from.left
             || transform.to.right != transform.from.right;
         text.x += mappedTopLeft.x - bounds.left;
@@ -1681,24 +1704,22 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
             continue;
         }
         PageLatex& object = page->latexes[index];
-        const ui::LatexBounds bounds = ui::MeasurePageLatexBounds(object, page->width);
+        const ui::LatexBounds bounds = sourceLatexBounds(index);
         // Same centre-anchor rule as text: rotated latex tracks its bounds
         // centre so the accumulated rotation stays meaningful.
         if (std::abs(object.rotationDegrees) > 0.0001f || transform.rotateDegrees != 0.0f) {
             const Vec2 boundsCenter {
                 (bounds.left + bounds.right) * 0.5f, (bounds.top + bounds.bottom) * 0.5f };
-            const Vec2 mappedCenter = ui::MapSelectionTransformPoint(
-                boundsCenter, transform.from, transform.to, transform.rotateDegrees);
+            const Vec2 mappedCenter = map.Map(boundsCenter);
             object.x += mappedCenter.x - boundsCenter.x;
             object.y += mappedCenter.y - boundsCenter.y;
             object.rotationDegrees += transform.rotateDegrees;
         } else {
-            const Vec2 mapped = ui::MapSelectionTransformPoint(
-                { bounds.left, bounds.top }, transform.from, transform.to, transform.rotateDegrees);
+            const Vec2 mapped = map.Map({ bounds.left, bounds.top });
             object.x += mapped.x - bounds.left;
             object.y += mapped.y - bounds.top;
         }
-        object.fontSize *= scaleY;
+        object.fontSize *= map.scaleY;
     }
 }
 

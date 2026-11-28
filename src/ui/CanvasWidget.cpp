@@ -133,24 +133,6 @@ QPolygonF PaddedObjectOutline(const CanvasPageView& view, const std::array<Vec2,
     });
 }
 
-// Axis-aligned page-space union of object outlines; nullopt when empty.
-std::optional<SelectionBounds> OutlinesBounds(const std::vector<std::array<Vec2, 4>>& outlines) {
-    if (outlines.empty()) {
-        return std::nullopt;
-    }
-    const Vec2 first = outlines.front().front();
-    SelectionBounds bounds { first.x, first.y, first.x, first.y, true };
-    for (const std::array<Vec2, 4>& outline : outlines) {
-        for (const Vec2& corner : outline) {
-            bounds.left = std::min(bounds.left, corner.x);
-            bounds.top = std::min(bounds.top, corner.y);
-            bounds.right = std::max(bounds.right, corner.x);
-            bounds.bottom = std::max(bounds.bottom, corner.y);
-        }
-    }
-    return bounds;
-}
-
 QString FromUtf16(const std::u16string& value) {
     return QString::fromUtf16(value.data(), static_cast<qsizetype>(value.size()));
 }
@@ -1354,6 +1336,7 @@ void CanvasWidget::BeginGestureOverlay(std::size_t pageIndex, bool transform) {
 
 void CanvasWidget::EndGestureOverlay() {
     gesture_ = GestureSurface {};
+    gestureSelectionBounds_.reset();
 }
 
 QRect CanvasWidget::SelectionDirtyRect(std::size_t pageIndex) const {
@@ -1361,6 +1344,10 @@ QRect CanvasWidget::SelectionDirtyRect(std::size_t pageIndex) const {
     if (!bounds.has_value()) {
         return rect();
     }
+    return SelectionDirtyRect(*bounds, pageIndex);
+}
+
+QRect CanvasWidget::SelectionDirtyRect(const SelectionBounds& bounds, std::size_t pageIndex) const {
     const CanvasPageView view = CalculatePageView(pageIndex);
     if (!view.valid) {
         return rect();
@@ -1368,7 +1355,7 @@ QRect CanvasWidget::SelectionDirtyRect(std::size_t pageIndex) const {
     // The padded frame's handles reach the rotate handle's top above it, and
     // less on the other sides; one margin covers them plus antialiasing.
     const qreal margin = kSelectionRotateGap + kSelectionHandleSize + 2.0;
-    return SelectionFrameRect(view, *bounds)
+    return SelectionFrameRect(view, bounds)
         .adjusted(-margin, -margin, margin, margin)
         .toAlignedRect()
         .intersected(rect());
@@ -4120,9 +4107,49 @@ void CanvasWidget::UpdateSelectionOverlay(
     }
     selection_.anchor = anchor;
     selection_.current = current;
-    selection_.lassoPoints = lassoPoints;
+    // The complete path is published only when the gesture starts (one point);
+    // later samples append through AppendSelectionLassoPoint, so a drag never
+    // copies its growing path.
+    selection_.lassoPoints.clear();
+    selection_.lassoBoundsValid = false;
+    for (const QPointF& point : lassoPoints) {
+        AppendSelectionLassoPoint(point);
+    }
     const QRect after = OverlayDirtyRect();
     MarkTransientDirty(before.isEmpty() ? after : (after.isEmpty() ? before : before.united(after)));
+}
+
+void CanvasWidget::UpdateSelectionOverlayProgress(const QPointF& anchor, const QPointF& current, bool lasso) {
+    const QRect before = OverlayDirtyRect();
+    if (lasso) {
+        selection_.mode = selection_.pdfPage.has_value()
+            ? SelectionGesture::Mode::PdfText
+            : SelectionGesture::Mode::Lasso;
+    } else {
+        selection_.pdfPage.reset();
+        selection_.mode = SelectionGesture::Mode::Box;
+    }
+    selection_.anchor = anchor;
+    selection_.current = current;
+    const QRect after = OverlayDirtyRect();
+    MarkTransientDirty(before.isEmpty() ? after : (after.isEmpty() ? before : before.united(after)));
+}
+
+void CanvasWidget::AppendSelectionLassoPoint(const QPointF& point) {
+    if (selection_.mode == SelectionGesture::Mode::None) {
+        return;
+    }
+    selection_.lassoPoints.push_back(point);
+    if (!selection_.lassoBoundsValid) {
+        selection_.lassoMin = point;
+        selection_.lassoMax = point;
+        selection_.lassoBoundsValid = true;
+        return;
+    }
+    selection_.lassoMin.setX(std::min(selection_.lassoMin.x(), point.x()));
+    selection_.lassoMin.setY(std::min(selection_.lassoMin.y(), point.y()));
+    selection_.lassoMax.setX(std::max(selection_.lassoMax.x(), point.x()));
+    selection_.lassoMax.setY(std::max(selection_.lassoMax.y(), point.y()));
 }
 
 void CanvasWidget::CancelSelectionOverlay() {
@@ -4220,21 +4247,56 @@ void CanvasWidget::CommitSelection(
     } else if (commitLasso && !boxOverride) {
         std::vector<Vec2> polygon;
         polygon.reserve(gesture.lassoPoints.size());
+        ObjectBounds lassoBounds;
         for (const QPointF& point : gesture.lassoPoints) {
-            polygon.push_back(ScreenToPage(*view, point, false));
+            const Vec2 pagePoint = ScreenToPage(*view, point, false);
+            if (!lassoBounds.valid) {
+                lassoBounds = ObjectBounds { pagePoint.x, pagePoint.y, pagePoint.x, pagePoint.y, true };
+            } else {
+                lassoBounds.left = std::min(lassoBounds.left, pagePoint.x);
+                lassoBounds.top = std::min(lassoBounds.top, pagePoint.y);
+                lassoBounds.right = std::max(lassoBounds.right, pagePoint.x);
+                lassoBounds.bottom = std::max(lassoBounds.bottom, pagePoint.y);
+            }
+            polygon.push_back(pagePoint);
         }
         if (polygon.size() >= 3U) {
+            // The polygon's conservative page-space bounds reject every object
+            // they cannot reach before the exact test measures text/LaTeX or
+            // smooths a stroke.  The canvas keeps concave and self-intersecting
+            // lasso semantics: this only skips objects whose bounds are
+            // disjoint from the polygon's, which no edge or interior point can
+            // touch.
+            const PageObjectBounds& objectBounds =
+                objectBoundsCache_.ForPage(document, view->pageIndex, controller_.TransientGeneration());
+            const auto nearLasso = [&lassoBounds](const ObjectBounds& object) {
+                return object.valid
+                    && object.left <= lassoBounds.right && object.right >= lassoBounds.left
+                    && object.top <= lassoBounds.bottom && object.bottom >= lassoBounds.top;
+            };
             for (std::size_t index = 0; index < page.strokes.size(); ++index) {
+                if (!nearLasso(objectBounds.strokes[index])) {
+                    continue;
+                }
+                ++lassoObjectTests_;
                 if (StrokeIntersectsPolygonSelection(page.strokes[index], polygon, controller_.InputSettings().strokeSmoothing)) {
                     selection.strokes.push_back(index);
                 }
             }
             for (std::size_t index = 0; index < page.images.size(); ++index) {
+                if (!nearLasso(objectBounds.images[index])) {
+                    continue;
+                }
+                ++lassoObjectTests_;
                 if (ImageIntersectsPolygonSelection(page.images[index], polygon)) {
                     selection.images.push_back(index);
                 }
             }
             for (std::size_t index = 0; index < page.texts.size(); ++index) {
+                if (!nearLasso(objectBounds.texts[index])) {
+                    continue;
+                }
+                ++lassoObjectTests_;
                 const PageText& text = page.texts[index];
                 const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page.width);
                 if (RotatedRectIntersectsPolygon(bounds.left, bounds.top, bounds.right, bounds.bottom,
@@ -4243,6 +4305,10 @@ void CanvasWidget::CommitSelection(
                 }
             }
             for (std::size_t index = 0; index < page.latexes.size(); ++index) {
+                if (!nearLasso(objectBounds.latexes[index])) {
+                    continue;
+                }
+                ++lassoObjectTests_;
                 if (LatexIntersectsPolygonSelection(page.latexes[index], page.width, polygon)) {
                     selection.latexes.push_back(index);
                 }
@@ -4301,6 +4367,9 @@ void CanvasWidget::ToggleObjectInSelection(ObjectRef object) {
 void CanvasWidget::BeginMoveSelection(std::size_t pageIndex) {
     controller_.BeginPageGesture(pageIndex);
     BeginGestureOverlay(pageIndex, false);
+    // Measure the starting frame once; later samples repaint from these
+    // page-space bounds and the ones measured after their mutation.
+    gestureSelectionBounds_ = SelectionBoundsForPage(pageIndex);
 }
 
 void CanvasWidget::BeginCloneMoveSelection(std::size_t pageIndex) {
@@ -4309,6 +4378,7 @@ void CanvasWidget::BeginCloneMoveSelection(std::size_t pageIndex) {
     controller_.BeginPageGesture(pageIndex);
     static_cast<void>(controller_.CloneSelection(pageIndex));
     BeginGestureOverlay(pageIndex, false);
+    gestureSelectionBounds_ = SelectionBoundsForPage(pageIndex);
 }
 
 
@@ -4322,11 +4392,20 @@ void CanvasWidget::UpdateMoveSelection(const QPointF& logicalDelta) {
         return;
     }
     // The repaint region is the union of the frame before and after the move.
-    const QRect dirtyBefore = SelectionDirtyRect(*pageIndex);
+    // The before bounds were measured by the previous sample (or the gesture
+    // begin), so a sample measures the selection geometry at most once: after
+    // the mutation, and the overlay paint and hover then reuse that entry.
+    const QRect dirtyBefore = gestureSelectionBounds_.has_value()
+        ? SelectionDirtyRect(*gestureSelectionBounds_, *pageIndex)
+        : rect();
     controller_.MoveSelectionBy(
         *pageIndex,
         Vec2 { static_cast<float>(logicalDelta.x()) / view.scale, static_cast<float>(logicalDelta.y()) / view.scale });
-    MarkTransientDirty(dirtyBefore.united(SelectionDirtyRect(*pageIndex)));
+    gestureSelectionBounds_ = SelectionBoundsForPage(*pageIndex);
+    const QRect dirtyAfter = gestureSelectionBounds_.has_value()
+        ? SelectionDirtyRect(*gestureSelectionBounds_, *pageIndex)
+        : rect();
+    MarkTransientDirty(dirtyBefore.united(dirtyAfter));
 }
 
 void CanvasWidget::CommitMoveSelection() {
@@ -4358,6 +4437,7 @@ bool CanvasWidget::BeginTransform(const TransformRequest& request) {
     // object-delta history action.
     controller_.BeginPageGesture(request.pageIndex);
     BeginGestureOverlay(request.pageIndex, true);
+    gestureSelectionBounds_ = SelectionBoundsForPage(request.pageIndex);
     return true;
 }
 
@@ -4497,10 +4577,18 @@ void CanvasWidget::UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers
     }
 
     // The repaint region is the union of the frame before and after the
-    // transform.
-    const QRect dirtyBefore = SelectionDirtyRect(*pageIndex);
+    // transform.  The before bounds come from the previous sample (or the
+    // gesture begin), so the transform sample measures the selection geometry
+    // at most once; paint and hover reuse that entry.
+    const QRect dirtyBefore = gestureSelectionBounds_.has_value()
+        ? SelectionDirtyRect(*gestureSelectionBounds_, *pageIndex)
+        : rect();
     controller_.TransformSelection(*pageIndex, transform);
-    MarkTransientDirty(dirtyBefore.united(SelectionDirtyRect(*pageIndex)));
+    gestureSelectionBounds_ = SelectionBoundsForPage(*pageIndex);
+    const QRect dirtyAfter = gestureSelectionBounds_.has_value()
+        ? SelectionDirtyRect(*gestureSelectionBounds_, *pageIndex)
+        : rect();
+    MarkTransientDirty(dirtyBefore.united(dirtyAfter));
 }
 
 void CanvasWidget::CommitTransform() {
@@ -5176,22 +5264,12 @@ QRect CanvasWidget::OverlayDirtyRect() const {
         const CanvasPageView view = CalculatePageView(*selection_.pdfPage);
         return view.valid ? view.rect.toAlignedRect().intersected(rect()) : rect();
     }
-    if (selection_.mode == SelectionGesture::Mode::Lasso && !selection_.lassoPoints.empty()) {
-        // QRectF(point, QSizeF(0,0)) is empty, and united() returns the
-        // non-empty operand when either side is empty — so unioning
-        // point-sized rects collapses the bounds to the LAST point instead
-        // of spanning them all.  Track explicit min/max instead.
-        float minX = selection_.lassoPoints.front().x();
-        float minY = selection_.lassoPoints.front().y();
-        float maxX = selection_.lassoPoints.front().x();
-        float maxY = selection_.lassoPoints.front().y();
-        for (const QPointF& point : selection_.lassoPoints) {
-            minX = std::min<float>(minX, point.x());
-            minY = std::min<float>(minY, point.y());
-            maxX = std::max<float>(maxX, point.x());
-            maxY = std::max<float>(maxY, point.y());
-        }
-        return QRectF(minX, minY, maxX - minX, maxY - minY)
+    if (selection_.mode == SelectionGesture::Mode::Lasso && selection_.lassoBoundsValid) {
+        // The bounds are tracked as points are appended (explicit min/max:
+        // QRectF(point, QSizeF(0,0)) is empty and united() would collapse to
+        // the last point).  Reading them is O(1); scanning the whole path on
+        // every sample grew with the drag.
+        return QRectF(selection_.lassoMin, selection_.lassoMax)
             .adjusted(-2.0, -2.0, 2.0, 2.0).toAlignedRect().intersected(rect());
     }
     return QRectF(selection_.anchor, selection_.current).normalized()
@@ -5229,57 +5307,16 @@ void CanvasWidget::PaintTextCreatePreview(QPainter& painter) {
 }
 
 std::optional<SelectionBounds> CanvasWidget::SelectionBoundsForPage(std::size_t pageIndex) const {
-    return OutlinesBounds(SelectedObjectOutlines(pageIndex));
+    return SelectionOutlinesForPage(pageIndex).bounds;
 }
 
-std::vector<std::array<Vec2, 4>> CanvasWidget::SelectedObjectOutlines(std::size_t pageIndex) const {
-    std::vector<std::array<Vec2, 4>> outlines;
-    const Document& document = controller_.DocumentRef();
-    if (pageIndex >= document.PageCount()) {
-        return outlines;
-    }
-    const Page& page = document.PageAt(pageIndex);
-    const PageSelection& selection = controller_.SelectionFor(pageIndex);
-    if (selection.Empty()) {
-        return outlines;
-    }
-
-    for (const std::size_t index : selection.strokes) {
-        if (index >= page.strokes.size()) {
-            continue;
-        }
-        float minX = 0.0f;
-        float minY = 0.0f;
-        float maxX = 0.0f;
-        float maxY = 0.0f;
-        if (StrokeBounds(page.strokes[index], &minX, &minY, &maxX, &maxY)) {
-            outlines.push_back({{ { minX, minY }, { maxX, minY }, { maxX, maxY }, { minX, maxY } }});
-        }
-    }
-    for (const std::size_t index : selection.images) {
-        if (index < page.images.size()) {
-            outlines.push_back(ImageCorners(page.images[index]));
-        }
-    }
-    for (const std::size_t index : selection.texts) {
-        if (index >= page.texts.size()) {
-            continue;
-        }
-        const text::QtTextBounds textBounds = text::MeasurePageTextBoundsQt(page.texts[index], page.width);
-        outlines.push_back(RotatedRectCorners(
-            textBounds.left, textBounds.top, textBounds.right, textBounds.bottom,
-            page.texts[index].rotationDegrees));
-    }
-    for (const std::size_t index : selection.latexes) {
-        if (index >= page.latexes.size()) {
-            continue;
-        }
-        const LatexBounds latexBounds = MeasurePageLatexBounds(page.latexes[index], page.width);
-        outlines.push_back(RotatedRectCorners(
-            latexBounds.left, latexBounds.top, latexBounds.right, latexBounds.bottom,
-            page.latexes[index].rotationDegrees));
-    }
-    return outlines;
+const SelectionOutlines& CanvasWidget::SelectionOutlinesForPage(std::size_t pageIndex) const {
+    // One cache entry serves the dirty rect, the handle hit test and the
+    // overlay paint; it is keyed by page epoch, transient generation and the
+    // selected indices, so an in-place gesture or a selection change cannot
+    // leave a stale frame behind.
+    return selectionGeometryCache_.ForPage(controller_.DocumentRef(), pageIndex,
+        controller_.SelectionFor(pageIndex), controller_.TransientGeneration());
 }
 
 QRectF CanvasWidget::SelectionFrameRect(const CanvasPageView& view, const SelectionBounds& bounds) {
@@ -5329,12 +5366,12 @@ void CanvasWidget::PaintSelectionOverlay(QPainter& painter) {
         if (!view.valid) {
             continue;
         }
-        const std::vector<std::array<Vec2, 4>> outlines = SelectedObjectOutlines(view.pageIndex);
-        const std::optional<SelectionBounds> bounds = OutlinesBounds(outlines);
-        if (!bounds.has_value()) {
+        const SelectionOutlines& selected = SelectionOutlinesForPage(view.pageIndex);
+        const std::vector<std::array<Vec2, 4>>& outlines = selected.outlines;
+        if (!selected.bounds.has_value()) {
             continue;
         }
-        const QRectF frame = SelectionFrameRect(view, *bounds);
+        const QRectF frame = SelectionFrameRect(view, *selected.bounds);
 
         painter.setBrush(Qt::NoBrush);
         if (outlines.size() > 1U) {

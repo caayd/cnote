@@ -19,6 +19,7 @@
 #include "ui/PageDefaultsQt.h"
 #include "ProjectSession.h"
 #include "shell/AppManager.h"
+#include "text/TextLayoutQt.h"
 #include "ui/CanvasController.h"
 #include "ui/InteractionRouter.h"
 
@@ -322,6 +323,9 @@ private:
     // clone appends.  The move bounds cache lets MoveSelectionBy measure each
     // selected object once and translate by the applied delta, so a move
     // sample costs O(1) per object instead of re-measuring strokes/text/LaTeX.
+    // The transform bounds cache does the same for TransformSelection's source
+    // text/LaTeX boxes: the absolute restore makes those inputs constant, so
+    // their layouts are built once per gesture instead of once per sample.
     struct PageGesture {
         struct MoveBounds {
             bool built = false;
@@ -329,6 +333,10 @@ private:
             std::vector<ui::SelectionBounds> images;
             std::vector<ui::SelectionBounds> texts;
             std::vector<ui::SelectionBounds> latexes;
+        };
+        struct TransformBounds {
+            std::map<std::size_t, text::QtTextBounds> texts {};
+            std::map<std::size_t, ui::LatexBounds> latexes {};
         };
         std::size_t pageIndex = 0;
         std::map<std::size_t, Stroke> beforeStrokes {};
@@ -340,6 +348,7 @@ private:
         std::set<std::size_t> insertedTexts {};
         std::set<std::size_t> insertedLatexes {};
         MoveBounds moveBounds {};
+        TransformBounds transformBounds {};
     };
 
     // The stroke being drawn and the page it belongs to, as one value so the

@@ -83,12 +83,38 @@ struct SelectionBounds {
     bool valid = false;
 };
 
+// One selection transform with its affine coefficients and rotation prepared
+// once, so mapping every point of a dense selection does not recompute the
+// `to`/`from` scale ratios or sin/cos per point.  `Map` is exactly the math
+// `MapSelectionTransformPoint` applies (which delegates to it), so gesture
+// output is unchanged.
+struct PreparedSelectionTransform {
+    float fromLeft = 0.0f;
+    float fromTop = 0.0f;
+    float toLeft = 0.0f;
+    float toTop = 0.0f;
+    float scaleX = 1.0f;
+    float scaleY = 1.0f;
+    // Rotation about the `from` centre; identity when `rotated` is false.
+    float centerX = 0.0f;
+    float centerY = 0.0f;
+    float cosine = 1.0f;
+    float sine = 0.0f;
+    bool rotated = false;
+
+    [[nodiscard]] Vec2 Map(Vec2 point) const;
+};
+
 // Maps a page-space point through the selection transform.  New helper for the
 // Qt transform gesture; it has no legacy counterpart (the reference applies its
 // handle transforms per object kind inside App).  Translates `from` to the
 // origin, scales by the `to`/`from` extent ratio, translates back to `to`, then
 // rotates about the `from` centre.
 Vec2 MapSelectionTransformPoint(Vec2 point, const SelectionBounds& from, const SelectionBounds& to, float rotateDegrees);
+
+// Prepared form of MapSelectionTransformPoint for a loop over many points.
+[[nodiscard]] PreparedSelectionTransform PrepareSelectionTransform(
+    const SelectionBounds& from, const SelectionBounds& to, float rotateDegrees);
 
 namespace {
 
@@ -549,25 +575,49 @@ inline Vec2 RotatePointAround(Vec2 point, Vec2 center, float degrees) {
     };
 }
 
-inline Vec2 MapSelectionTransformPoint(Vec2 point, const SelectionBounds& from, const SelectionBounds& to, float rotateDegrees) {
+inline Vec2 PreparedSelectionTransform::Map(Vec2 point) const {
+    const Vec2 mapped {
+        toLeft + ((point.x - fromLeft) * scaleX),
+        toTop + ((point.y - fromTop) * scaleY),
+    };
+    if (!rotated) {
+        return mapped;
+    }
+    // Same formula as RotatePointAround about the `from` centre.
+    const float translatedX = mapped.x - centerX;
+    const float translatedY = mapped.y - centerY;
+    return {
+        centerX + (translatedX * cosine) - (translatedY * sine),
+        centerY + (translatedX * sine) + (translatedY * cosine),
+    };
+}
+
+inline PreparedSelectionTransform PrepareSelectionTransform(
+    const SelectionBounds& from, const SelectionBounds& to, float rotateDegrees) {
+    PreparedSelectionTransform prepared;
+    prepared.fromLeft = from.left;
+    prepared.fromTop = from.top;
+    prepared.toLeft = to.left;
+    prepared.toTop = to.top;
     const float fromWidth = from.right - from.left;
     const float fromHeight = from.bottom - from.top;
     // A degenerate `from` (a selection that collapsed to a point or a line)
     // keeps the source scale instead of dividing by zero.
-    const float scaleX = fromWidth > 0.0001f ? (to.right - to.left) / fromWidth : 1.0f;
-    const float scaleY = fromHeight > 0.0001f ? (to.bottom - to.top) / fromHeight : 1.0f;
-    const Vec2 mapped {
-        to.left + ((point.x - from.left) * scaleX),
-        to.top + ((point.y - from.top) * scaleY),
-    };
-    if (rotateDegrees == 0.0f) {
-        return mapped;
+    prepared.scaleX = fromWidth > 0.0001f ? (to.right - to.left) / fromWidth : 1.0f;
+    prepared.scaleY = fromHeight > 0.0001f ? (to.bottom - to.top) / fromHeight : 1.0f;
+    prepared.centerX = (from.left + from.right) * 0.5f;
+    prepared.centerY = (from.top + from.bottom) * 0.5f;
+    prepared.rotated = rotateDegrees != 0.0f;
+    if (prepared.rotated) {
+        const float radians = rotateDegrees * (kPi / 180.0f);
+        prepared.sine = std::sin(radians);
+        prepared.cosine = std::cos(radians);
     }
-    const Vec2 center {
-        (from.left + from.right) * 0.5f,
-        (from.top + from.bottom) * 0.5f,
-    };
-    return RotatePointAround(mapped, center, rotateDegrees);
+    return prepared;
+}
+
+inline Vec2 MapSelectionTransformPoint(Vec2 point, const SelectionBounds& from, const SelectionBounds& to, float rotateDegrees) {
+    return PrepareSelectionTransform(from, to, rotateDegrees).Map(point);
 }
 
 inline Vec2 ImageCenter(const PageImage& image) {

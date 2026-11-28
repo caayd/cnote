@@ -819,15 +819,22 @@ void InteractionRouter::ExtendSelection(const PointerSample& sample) {
         return;
     }
     state_.select.current = sample.position;
+    bool appended = false;
     if (selectionMode_ == SelectionMode::Lasso) {
         if (state_.select.lassoPoints.empty()
             || SquaredDistance(state_.select.current, state_.select.lassoPoints.back())
                 >= (kLassoPointSpacing * kLassoPointSpacing)) {
             state_.select.lassoPoints.push_back(state_.select.current);
+            appended = true;
         }
     }
-    host_.UpdateSelectionOverlay(state_.select.anchor, state_.select.current,
-        !state_.select.boxOverride && selectionMode_ == SelectionMode::Lasso, state_.select.lassoPoints);
+    // The canvas keeps its own copy of the path; it receives only the new
+    // vertex instead of the whole growing vector.
+    if (appended) {
+        host_.AppendSelectionLassoPoint(state_.select.current);
+    }
+    host_.UpdateSelectionOverlayProgress(state_.select.anchor, state_.select.current,
+        !state_.select.boxOverride && selectionMode_ == SelectionMode::Lasso);
     host_.InvalidateCanvas();
 }
 
@@ -858,8 +865,8 @@ void InteractionRouter::EndSelection() {
         if (!state_.select.lassoPoints.empty()
             && SquaredDistance(state_.select.current, state_.select.lassoPoints.back()) > 1.0f) {
             state_.select.lassoPoints.push_back(state_.select.current);
-            host_.UpdateSelectionOverlay(state_.select.anchor, state_.select.current, true,
-                state_.select.lassoPoints);
+            host_.AppendSelectionLassoPoint(state_.select.current);
+            host_.UpdateSelectionOverlayProgress(state_.select.anchor, state_.select.current, true);
         }
     }
     host_.CommitSelection(state_.select.anchor, state_.select.current, lasso,

@@ -306,7 +306,18 @@ public:
 
     // --- selection --------------------------------------------------------
     virtual void ClearSelection() = 0;
+    // Publishes the live marquee/lasso.  The complete lasso path is passed
+    // only when the gesture starts; later samples report their geometry
+    // through UpdateSelectionOverlayProgress and grow the path through
+    // AppendSelectionLassoPoint, so a drag never republishes (and the host
+    // never recopies) the whole path.
     virtual void UpdateSelectionOverlay(const QPointF& anchor, const QPointF& current, bool lasso, const std::vector<QPointF>& lassoPoints) = 0;
+    // Per-sample marquee progress whose lasso path only grows.  `lasso` is the
+    // gesture's effective mode (the same value the start publish used), so a
+    // mode change mid-drag cannot leave a stale overlay kind behind.
+    virtual void UpdateSelectionOverlayProgress(const QPointF& anchor, const QPointF& current, bool lasso) = 0;
+    // One new lasso vertex (the router's 6-px spacing rule already applied).
+    virtual void AppendSelectionLassoPoint(const QPointF& point) = 0;
     // Drops the live marquee/lasso/pdf-text overlay without committing it.
     virtual void CancelSelectionOverlay() = 0;
     // One call per completed selection gesture (App::EndSelection,
