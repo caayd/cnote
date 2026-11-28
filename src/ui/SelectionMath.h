@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -329,7 +330,8 @@ inline bool ImageHitsSegment(const PageImage& image, Vec2 a, Vec2 b, float radiu
 // first point against the erase segment, then segment-vs-segment for the rest.
 inline bool StrokeHitsSegment(const Stroke& stroke, Vec2 a, Vec2 b, float radius, float fallbackSmoothing) {
     const float radiusSquared = radius * radius;
-    const std::vector<Vec2> points = BuildStrokeRenderPath(stroke, fallbackSmoothing).points;
+    const std::shared_ptr<const InkPath> path = CachedStrokeRenderPath(stroke, fallbackSmoothing, false);
+    const std::vector<Vec2>& points = path->points;
     if (points.empty()) {
         return false;
     }
@@ -449,7 +451,8 @@ inline float SelectionRotateOffsetPageUnits(float pageScale, int dpi) {
 
 inline bool StrokeHitsPoint(const Stroke& stroke, Vec2 point, float radius, float fallbackSmoothing) {
     const float radiusSquared = radius * radius;
-    const std::vector<Vec2> points = BuildStrokeRenderPath(stroke, fallbackSmoothing).points;
+    const std::shared_ptr<const InkPath> path = CachedStrokeRenderPath(stroke, fallbackSmoothing, false);
+    const std::vector<Vec2>& points = path->points;
     if (points.empty()) {
         return false;
     }
@@ -465,7 +468,8 @@ inline bool StrokeHitsPoint(const Stroke& stroke, Vec2 point, float radius, floa
 }
 
 inline bool StrokeIntersectsRectSelection(const Stroke& stroke, Vec2 a, Vec2 b, float fallbackSmoothing) {
-    const std::vector<Vec2> points = BuildStrokeRenderPath(stroke, fallbackSmoothing).points;
+    const std::shared_ptr<const InkPath> path = CachedStrokeRenderPath(stroke, fallbackSmoothing, false);
+    const std::vector<Vec2>& points = path->points;
     if (points.empty()) {
         return false;
     }
@@ -489,7 +493,8 @@ inline bool StrokeIntersectsRectSelection(const Stroke& stroke, Vec2 a, Vec2 b, 
 }
 
 inline bool StrokeIntersectsPolygonSelection(const Stroke& stroke, const std::vector<Vec2>& polygon, float fallbackSmoothing) {
-    const std::vector<Vec2> points = BuildStrokeRenderPath(stroke, fallbackSmoothing).points;
+    const std::shared_ptr<const InkPath> path = CachedStrokeRenderPath(stroke, fallbackSmoothing, false);
+    const std::vector<Vec2>& points = path->points;
     if (points.empty() || polygon.size() < 3U) {
         return false;
     }

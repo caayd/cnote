@@ -1193,6 +1193,28 @@ if(WIN32)
     cnote_stage_test_runtime(cnote_page_object_bounds_tests)
 endif()
 
+# --- Stroke render-path cache -------------------------------------------------
+# PERF-023: every hit test, page render and PDF export stabilized and smoothed
+# the same stroke.  The cache is content-addressed (raw points and pressures,
+# sampling, effective smoothing, pressure-channel request), so in-place gesture
+# edits, undo/redo, clipboard copies and other views cannot serve stale paths.
+# Asserts exact parity with BuildStrokeRenderPath, bounded entries/bytes, and
+# that repeated hit tests/renders recompute nothing; prints dense-page
+# hit-test and paint timings for the committed fixture.
+add_executable(cnote_stroke_path_cache_tests tests/StrokePathCacheTests.cpp)
+target_include_directories(cnote_stroke_path_cache_tests PRIVATE src)
+target_compile_features(cnote_stroke_path_cache_tests PRIVATE cxx_std_20)
+target_compile_options(cnote_stroke_path_cache_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(cnote_stroke_path_cache_tests PRIVATE cnote_services)
+add_test(NAME stroke_path_cache_qt COMMAND cnote_stroke_path_cache_tests)
+set_tests_properties(stroke_path_cache_qt PROPERTIES TIMEOUT 120
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
+if(WIN32)
+    cnote_stage_test_runtime(cnote_stroke_path_cache_tests)
+endif()
+
 # --- Keyboard-shortcut routing ------------------------------------------------
 # One QAction per command; the settings store is the single source of every
 # runtime binding.  This test drives real key events through the real window

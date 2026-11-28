@@ -211,11 +211,11 @@ bool AppendVectorStroke(FPDF_PAGE pageHandle, const Page& page, const Stroke& st
         return true;
     }
 
-    const InkPath ink = BuildStrokeRenderPath(stroke, strokeSmoothing);
+    const std::shared_ptr<const InkPath> ink = CachedStrokeRenderPath(stroke, strokeSmoothing, true);
     if (StrokeHasPressure(stroke)) {
-        return AppendVectorInk(pageHandle, page, stroke, ink);
+        return AppendVectorInk(pageHandle, page, stroke, *ink);
     }
-    const std::vector<Vec2>& smoothedPoints = ink.points;
+    const std::vector<Vec2>& smoothedPoints = ink->points;
     if (smoothedPoints.empty()) {
         return true;
     }
