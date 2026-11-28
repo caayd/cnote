@@ -47,13 +47,18 @@ public:
     // the full-page background at `rasterScale`). Regions only ever come from
     // canvas page surfaces and tiles, so they use the canvas cache.
     [[nodiscard]] std::optional<QImage> PageBackgroundRegion(
-        std::int32_t sourceIndex, std::int32_t pageIndex, float rasterScale, const QRect& pixelRect) override;
+        std::int32_t sourceIndex, std::int32_t pageIndex, float rasterScale, const QRect& pixelRect,
+        QSize fullPagePixelSize = {}) override;
 
     // Drops every cached page, including the negative cache.
     void Invalidate();
 
-    // Diagnostics for the render evidence (both caches).
+    // Diagnostics for the render evidence (both caches).  RenderCount is the
+    // total PDFium render count; FullPageRenderCount counts the full-page
+    // renders that every region patch should be an exact crop of.
     [[nodiscard]] std::size_t RenderCount() const noexcept { return renderCount_; }
+    [[nodiscard]] std::size_t FullPageRenderCount() const noexcept { return fullPageRenderCount_; }
+    [[nodiscard]] std::size_t RegionRenderCount() const noexcept { return regionRenderCount_; }
     [[nodiscard]] std::size_t FailedRenderCount() const noexcept { return failedRenderCount_; }
     [[nodiscard]] std::size_t CachedPageCount() const noexcept {
         return canvas_.entries.size() + thumbnails_.entries.size();
@@ -120,6 +125,8 @@ private:
     const PdfiumBackend& backend_;
     const Document* document_ = nullptr;
     std::size_t renderCount_ = 0;
+    std::size_t fullPageRenderCount_ = 0;
+    std::size_t regionRenderCount_ = 0;
     std::size_t failedRenderCount_ = 0;
     mutable Cache canvas_ {};
     mutable Cache thumbnails_ {};
