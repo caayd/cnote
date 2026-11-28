@@ -158,7 +158,7 @@ bool HullContains(const std::vector<Vec2>& hull, Vec2 point, float margin) {
     return inside || nearest <= margin;
 }
 
-// The same evenly spaced samples as Resample, located through the prefix arc
+// The evenly spaced samples along the path, located through the prefix arc
 // lengths instead of walking the raw points.  Sample k sits at arc length
 // k * length / (kSampleCount - 1), which only grows as the stroke does, so
 // each sample's raw segment cursor moves forward: an append costs the new
