@@ -841,7 +841,8 @@ bool SidebarWidget::RenderThumbnail(std::size_t index, int width, int height) {
 
     bool drewBackground = false;
     if (pdfBackground_ != nullptr && page.sourcePdfSourceIndex >= 0 && page.sourcePdfPageIndex >= 0) {
-        const QImage background = pdfBackground_->PageBackground(page.sourcePdfSourceIndex, page.sourcePdfPageIndex, scale);
+        const QImage background = pdfBackground_->PageBackground(
+            page.sourcePdfSourceIndex, page.sourcePdfPageIndex, scale, render::PdfBackgroundUse::Thumbnail);
         if (!background.isNull()) {
             // The provider renders source orientation; page rotation applies
             // about the thumbnail centre.

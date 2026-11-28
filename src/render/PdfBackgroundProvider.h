@@ -8,6 +8,15 @@
 
 namespace cnote::render {
 
+// Which consumer a background is for. Thumbnails render at a much smaller
+// scale and churn through many pages while scrolling the sidebar; keeping
+// their cached rasters in a separate, smaller budget means that churn cannot
+// evict the full-scale canvas surfaces the user is looking at.
+enum class PdfBackgroundUse : std::uint8_t {
+    Canvas,
+    Thumbnail,
+};
+
 // Supplies PDF page backgrounds lazily for renderers that paint Page::raster.
 // Implementations render on demand and cache by (source, page, raster scale),
 // so a multi-page PDF never materializes every page up front.
@@ -17,7 +26,8 @@ public:
 
     // Returns the background for a PDF source page at the requested raster
     // scale (page units -> raster pixels), or a null image when unavailable.
-    [[nodiscard]] virtual QImage PageBackground(std::int32_t sourceIndex, std::int32_t pageIndex, float rasterScale) = 0;
+    [[nodiscard]] virtual QImage PageBackground(std::int32_t sourceIndex, std::int32_t pageIndex,
+        float rasterScale, PdfBackgroundUse use = PdfBackgroundUse::Canvas) = 0;
 
     // Returns only `pixelRect` of that same background raster (top-down device
     // pixels of the full-page background), or null when the provider has no

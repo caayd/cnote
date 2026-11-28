@@ -70,6 +70,11 @@ public:
     // seen.  Defaults to 0 when unset.
     using TransientGenerationProvider = std::function<std::uint64_t()>;
     void SetTransientGenerationProvider(TransientGenerationProvider provider);
+    // What the last SetDocument bound. SessionChanged is emitted after the
+    // controller dropped the previous session, so a shell listener compares
+    // these before touching a Document or provider that may already be gone.
+    [[nodiscard]] const Document* BoundDocument() const { return document_; }
+    [[nodiscard]] render::PdfBackgroundProvider* BoundBackground() const { return pdfBackground_; }
     // Committed document change: repaint; thumbnails validate lazily against
     // Document::PageEpoch so only pages whose contents changed re-render
     // (the reference dropped the whole cache, which re-rasterized every

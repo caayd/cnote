@@ -30,8 +30,15 @@ inline constexpr std::size_t kSurfaceRenderBytesPerPaint = 24U * 1024U * 1024U;
 // exceeds the budget render visible tiles of this size instead.
 inline constexpr int kPageTileSize = 1024;
 
-// Aggregate byte budget for the lazily rendered PDF page backgrounds.
+// Aggregate byte budget for the lazily rendered PDF page backgrounds painted
+// on the canvas.
 inline constexpr std::size_t kPdfBackgroundCacheBytes = 48U * 1024U * 1024U;
+
+// Sidebar thumbnails render the same sources at a small scale. They get their
+// own small cache so scrolling the sidebar does not evict the canvas surfaces
+// the user is looking at (and a canvas pan does not evict every thumbnail).
+inline constexpr std::size_t kPdfThumbnailCacheBytes = 8U * 1024U * 1024U;
+inline constexpr std::size_t kPdfThumbnailCacheEntries = 16U;
 
 struct RasterBudget {
     int maxDimension = kMaxRasterDimension;

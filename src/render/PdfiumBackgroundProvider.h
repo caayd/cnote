@@ -15,38 +15,56 @@ class PdfiumBackend;
 
 namespace cnote::render {
 
-// PdfiumBackend-backed background provider with a bounded LRU cache keyed by
+// PdfiumBackend-backed background provider with bounded LRU caches keyed by
 // (document, PDF bytes, source index, page index, raster scale, region). Only
 // the pages the controller asks for are rendered, so a 50-page PDF never
 // allocates 50 full pages, and a zoom or DPR change re-renders at the new scale
-// instead of scaling a stale bitmap.  The cache is bounded by entry count and
-// by bytes: page surfaces and tiles above the raster budget ask for bounded
-// regions, and those region rasters count towards the same budget.
+// instead of scaling a stale bitmap.  The canvas cache is bounded by entry count
+// and by bytes: page surfaces and tiles above the raster budget ask for bounded
+// regions, and those region rasters count towards the same budget.  Thumbnails
+// use a second, much smaller cache so sidebar churn cannot evict canvas
+// surfaces (and vice versa).
+//
+// Rendered bytes come from the backend as an owned pixel buffer and become the
+// QImage's storage directly, so a cache miss does not copy the raster a second
+// time.
 //
 // Failed renders are negatively cached too, so a broken page does not retry on
 // every paint. The key pins the document and the exact PDF byte buffer, so a
 // source replaced with different bytes (or a retargeted page) misses instead of
 // serving the failure forever. Invalidate() drops every entry, positive and
-// negative.
+// negative, in both caches.
 class PdfiumBackgroundProvider final : public PdfBackgroundProvider {
 public:
     PdfiumBackgroundProvider(const PdfiumBackend& backend, const Document& document,
-        std::size_t capacity = 8, std::size_t maxBytes = kPdfBackgroundCacheBytes);
+        std::size_t capacity = 8, std::size_t maxBytes = kPdfBackgroundCacheBytes,
+        std::size_t thumbnailCapacity = kPdfThumbnailCacheEntries,
+        std::size_t thumbnailMaxBytes = kPdfThumbnailCacheBytes);
 
-    [[nodiscard]] QImage PageBackground(std::int32_t sourceIndex, std::int32_t pageIndex, float rasterScale) override;
+    [[nodiscard]] QImage PageBackground(std::int32_t sourceIndex, std::int32_t pageIndex,
+        float rasterScale, PdfBackgroundUse use = PdfBackgroundUse::Canvas) override;
     // Bounded region of that same background raster (top-down device pixels of
-    // the full-page background at `rasterScale`).
+    // the full-page background at `rasterScale`). Regions only ever come from
+    // canvas page surfaces and tiles, so they use the canvas cache.
     [[nodiscard]] std::optional<QImage> PageBackgroundRegion(
         std::int32_t sourceIndex, std::int32_t pageIndex, float rasterScale, const QRect& pixelRect) override;
 
     // Drops every cached page, including the negative cache.
     void Invalidate();
 
-    // Diagnostics for the render evidence.
+    // Diagnostics for the render evidence (both caches).
     [[nodiscard]] std::size_t RenderCount() const noexcept { return renderCount_; }
     [[nodiscard]] std::size_t FailedRenderCount() const noexcept { return failedRenderCount_; }
-    [[nodiscard]] std::size_t CachedPageCount() const noexcept { return cache_.size(); }
-    [[nodiscard]] std::size_t CachedBytes() const noexcept { return cachedBytes_; }
+    [[nodiscard]] std::size_t CachedPageCount() const noexcept {
+        return canvas_.entries.size() + thumbnails_.entries.size();
+    }
+    [[nodiscard]] std::size_t CachedBytes() const noexcept {
+        return canvas_.bytes + thumbnails_.bytes;
+    }
+    // Bytes currently held by one consumer's cache; the two are independent.
+    [[nodiscard]] std::size_t CachedBytes(PdfBackgroundUse use) const noexcept {
+        return CacheFor(use).bytes;
+    }
 
 private:
     enum class EntryStatus : std::uint8_t {
@@ -78,21 +96,33 @@ private:
         EntryStatus status = EntryStatus::Ready;
     };
 
+    struct Cache {
+        std::deque<Entry> entries;
+        std::size_t bytes = 0;
+        std::size_t capacity = 1;
+        std::size_t maxBytes = 1;
+    };
+
+    [[nodiscard]] const Cache& CacheFor(PdfBackgroundUse use) const noexcept {
+        return use == PdfBackgroundUse::Thumbnail ? thumbnails_ : canvas_;
+    }
+    [[nodiscard]] Cache& CacheFor(PdfBackgroundUse use) noexcept {
+        return use == PdfBackgroundUse::Thumbnail ? thumbnails_ : canvas_;
+    }
+
     // Finds a cached entry and refreshes its LRU position; returns its status
     // and image through `image`.
-    [[nodiscard]] bool Lookup(const Key& key, QImage* image) const;
+    [[nodiscard]] bool Lookup(Cache& cache, const Key& key, QImage* image) const;
     // Stores (or refreshes) an entry, evicting the oldest while over capacity
     // or over the byte budget (never evicting the entry just stored).
-    void Store(const Key& key, QImage image, EntryStatus status);
+    void Store(Cache& cache, const Key& key, QImage image, EntryStatus status) const;
 
     const PdfiumBackend& backend_;
     const Document* document_ = nullptr;
-    std::size_t capacity_ = 8;
-    std::size_t maxBytes_ = kPdfBackgroundCacheBytes;
     std::size_t renderCount_ = 0;
     std::size_t failedRenderCount_ = 0;
-    std::size_t cachedBytes_ = 0;
-    mutable std::deque<Entry> cache_;
+    mutable Cache canvas_ {};
+    mutable Cache thumbnails_ {};
 };
 
 }  // namespace cnote::render
