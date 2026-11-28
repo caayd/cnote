@@ -4,6 +4,7 @@
 #include <bit>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <vector>
 
 #include <QColor>
@@ -389,15 +390,15 @@ void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRende
         return;
     }
 
-    const InkPath ink = BuildStrokeRenderPath(stroke, params.strokeSmoothing);
-    const std::vector<Vec2>& points = ink.points;
+    const std::shared_ptr<const InkPath> ink = CachedStrokeRenderPath(stroke, params.strokeSmoothing, true);
+    const std::vector<Vec2>& points = ink->points;
     const float scale = params.scale;
     const QColor color = StrokeColor(stroke, opacity);
 
     if (StrokeHasPressure(stroke)) {
         InkOutline outline;
         AppendInkOutline(outline,
-            BuildInkCenterline(ink, scale,
+            BuildInkCenterline(*ink, scale,
                 [&stroke, scale](float pressure) { return StrokeRenderInkDiameter(stroke, scale, pressure); },
                 kInkTolerance),
             kInkTolerance);

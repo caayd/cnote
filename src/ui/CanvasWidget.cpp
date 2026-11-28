@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -3435,7 +3436,8 @@ std::vector<ObjectRef> CanvasWidget::EraseTargetsAt(std::size_t pageIndex, Vec2 
     for (std::size_t index = 0; index < page.strokes.size(); ++index) {
         // The cached stroke bounds hold the raw points' convex hull plus the
         // pen half-width; the smoothed centreline never leaves that hull, so
-        // this rejects distant strokes before BuildStrokeRenderPath.
+        // this rejects distant strokes before their render path is built or
+        // reused from the cache.
         if (!near(bounds.strokes[index])) {
             continue;
         }
@@ -3517,7 +3519,9 @@ std::vector<ObjectRef> CanvasWidget::ScratchOutTargets(std::size_t pageIndex, co
         if (!near(bounds.strokes[index])) {
             continue;
         }
-        if (scratch.CoversPath(BuildStrokeRenderPath(stroke, controller_.InputSettings().strokeSmoothing).points, margin)) {
+        const std::shared_ptr<const InkPath> ink =
+            CachedStrokeRenderPath(stroke, controller_.InputSettings().strokeSmoothing, false);
+        if (scratch.CoversPath(ink->points, margin)) {
             targets.push_back(ObjectRef { pageIndex, ObjectKind::Stroke, index });
         }
     }

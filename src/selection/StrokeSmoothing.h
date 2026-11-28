@@ -1,5 +1,10 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <list>
+#include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include "Document.h"
@@ -83,7 +88,99 @@ private:
 [[nodiscard]] bool StrokeHasPressure(const Stroke& stroke);
 
 // The centerline a stroke renders and hit-tests along: stabilized, then
-// smoothed; pressures are filled in only when StrokeHasPressure.
+// smoothed; pressures are filled in only when StrokeHasPressure.  This is the
+// uncached computation; every consumer goes through CachedStrokeRenderPath.
 [[nodiscard]] InkPath BuildStrokeRenderPath(const Stroke& stroke, float fallbackSmoothing);
+
+// Bounded, content-addressed cache of rendered stroke centerlines (PERF-023).
+//
+// BuildStrokeRenderPath is a pure function of the stroke content and the
+// fallback smoothing: raw points and pressures, StrokeHasPressure's dotted/
+// pressure rule, StrokeSampling after the same clamping IncrementalStroke-
+// Stabilizer::Reset applies, and the smoothed strength.  The cache keys on
+// exactly those inputs, so it needs no epoch or call-site invalidation:
+//  * an in-place move/transform rewrites the points, changing the key;
+//  * undo/redo and clipboard copies present whichever content is current;
+//  * views sharing one session share an entry only when the contents agree.
+// A miss computes with BuildStrokeRenderPath (one code path); a hit returns the
+// stored centerline, so consumers cannot observe a difference.
+class StrokePathCache {
+public:
+    static constexpr std::size_t kDefaultMaxEntries = 512U;
+    static constexpr std::size_t kDefaultMaxBytes = 8U * 1024U * 1024U;
+
+    explicit StrokePathCache(
+        std::size_t maxEntries = kDefaultMaxEntries,
+        std::size_t maxBytes = kDefaultMaxBytes);
+
+    // `withPressure` false skips the pressure channel entirely (geometry-only
+    // consumers); the points are byte-identical to the full path's, which is
+    // all a hit test reads.  Renderers and exporters pass true.
+    [[nodiscard]] std::shared_ptr<const InkPath> Path(
+        const Stroke& stroke, float fallbackSmoothing, bool withPressure);
+
+    // Drops every retained centerline; counters and the peak-byte watermark
+    // stay for diagnostics.
+    void Clear() noexcept;
+
+    // Diagnostics: computations, hits, and current/peak retained centerline
+    // bytes (vector storage plus the InkPath header, not list-node overhead).
+    [[nodiscard]] std::size_t RecomputeCount() const noexcept { return recomputeCount_; }
+    [[nodiscard]] std::size_t HitCount() const noexcept { return hitCount_; }
+    [[nodiscard]] std::size_t EntryCount() const noexcept { return entries_.size(); }
+    [[nodiscard]] std::size_t CachedBytes() const noexcept { return bytes_; }
+    [[nodiscard]] std::size_t PeakCachedBytes() const noexcept { return peakBytes_; }
+
+private:
+    struct Fingerprint {
+        std::uint64_t first = 0;
+        std::uint64_t second = 0;
+        friend bool operator==(const Fingerprint&, const Fingerprint&) = default;
+    };
+    struct Key {
+        Fingerprint points {};
+        Fingerprint pressures {};
+        std::uint64_t pointCount = 0;
+        std::uint64_t pressureCount = 0;
+        std::uint32_t smoothingBits = 0;
+        std::uint32_t streamlineBits = 0;
+        std::uint32_t spacingBits = 0;
+        bool carriesPressure = false;
+        friend bool operator==(const Key&, const Key&) = default;
+    };
+    struct KeyHash {
+        [[nodiscard]] std::size_t operator()(const Key& key) const noexcept;
+    };
+    struct Entry {
+        Key key {};
+        std::shared_ptr<const InkPath> path;
+        std::size_t bytes = 0;
+    };
+
+    [[nodiscard]] static Fingerprint FingerprintPoints(const std::vector<Vec2>& points);
+    [[nodiscard]] static Fingerprint FingerprintPressures(const std::vector<float>& pressures);
+    [[nodiscard]] static Key MakeKey(
+        const Stroke& stroke, float fallbackSmoothing, bool withPressure);
+    [[nodiscard]] static std::size_t PathBytes(const InkPath& path);
+
+    std::size_t maxEntries_ = kDefaultMaxEntries;
+    std::size_t maxBytes_ = kDefaultMaxBytes;
+    // Most-recently-used first; the tail is evicted.
+    std::list<Entry> entries_;
+    std::unordered_map<Key, std::list<Entry>::iterator, KeyHash> index_;
+    std::size_t bytes_ = 0;
+    std::size_t peakBytes_ = 0;
+    std::size_t recomputeCount_ = 0;
+    std::size_t hitCount_ = 0;
+};
+
+// The process-wide cache used by the render and hit-test call sites.  It is
+// thread-local so an off-thread renderer gets its own bounded instance; the
+// key is content, so correctness never depends on which instance serves a call.
+[[nodiscard]] StrokePathCache& SharedStrokePathCache();
+
+// Cached counterpart of BuildStrokeRenderPath.
+[[nodiscard]] std::shared_ptr<const InkPath> CachedStrokeRenderPath(
+    const Stroke& stroke, float fallbackSmoothing, bool withPressure);
 
 }  // namespace cnote
