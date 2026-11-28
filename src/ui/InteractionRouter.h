@@ -465,8 +465,12 @@ private:
         };
         struct StrokeData {
             std::optional<PageHit> page;
-            std::vector<Vec2> points;    // active points (line/oval/snap modes replace them)
-            std::vector<Vec2> freehandPoints;  // raw freehand samples (App.cpp:4497)
+            // Replacement geometry for line/oval/snap modes; empty for plain
+            // freehand, whose authoritative raw samples live in `scratch`.
+            std::vector<Vec2> points;
+            // Raw freehand samples (App.cpp:4497) with incremental scratch-out
+            // recognition state.
+            ScratchOutTracker scratch;
             bool dotted = false;
             bool snapped = false;        // SnapStrokeToShape replaced the points
             // Objects the stroke would scratch out if it ended now; shown as

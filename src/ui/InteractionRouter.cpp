@@ -538,8 +538,8 @@ void InteractionRouter::EndPan() {
 void InteractionRouter::StartStrokeSegment(const PageHit& hit, Vec2 pagePoint, bool dotted) {
     state_.stroke.page = hit;
     state_.stroke.points.clear();
-    state_.stroke.points.push_back(pagePoint);
-    state_.stroke.freehandPoints = state_.stroke.points;
+    state_.stroke.scratch.Reset();
+    state_.stroke.scratch.Append(pagePoint);
     state_.stroke.dotted = dotted;
     state_.kind = InteractionKind::Stroke;
     UpdateCapture();
@@ -600,11 +600,6 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
         ? host_.ScreenToPage(logical, true)
         : host_.ScreenToPageOnPage(state_.stroke.page->pageIndex, logical, true);
     const bool straightLineMode = modifiers_.straightLine;
-
-    if (state_.stroke.freehandPoints.empty()) {
-        state_.stroke.freehandPoints = state_.stroke.points;
-    }
-
     const bool dottedMode = modifiers_.dotted;
     const bool styleChanged = state_.stroke.dotted != dottedMode;
     state_.stroke.dotted = dottedMode;
@@ -615,15 +610,15 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
     // Raw samples are stored as they arrive; the stroke's StrokeSampling
     // replays the stabilization at render time.  A repeated sample adds
     // nothing.
-    const bool pointAppended = state_.stroke.freehandPoints.empty()
-        || !Vec2Equal(state_.stroke.freehandPoints.back(), rawPoint);
+    const bool pointAppended = state_.stroke.scratch.Empty()
+        || !Vec2Equal(state_.stroke.scratch.Points().back(), rawPoint);
     if (pointAppended) {
-        state_.stroke.freehandPoints.push_back(rawPoint);
+        state_.stroke.scratch.Append(rawPoint);
         host_.AppendStrokePoint(rawPoint, dottedMode, samplePressure_);
     }
 
-    if (straightLineMode && !state_.stroke.freehandPoints.empty()) {
-        const Vec2 startPoint = state_.stroke.freehandPoints.front();
+    if (straightLineMode && !state_.stroke.scratch.Empty()) {
+        const Vec2 startPoint = state_.stroke.scratch.Points().front();
         if (modifiers_.oval) {
             state_.stroke.points = BuildOvalStrokePoints(startPoint, rawPoint, modifiers_.snapLine);
         } else {
@@ -640,7 +635,6 @@ bool InteractionRouter::ApplyStrokePoint(const QPointF& logical) {
     if (!pointAppended && !styleChanged) {
         return false;
     }
-    state_.stroke.points = state_.stroke.freehandPoints;
     if (pointAppended) {
         RefreshScratchOutPreview();
     }
@@ -652,7 +646,7 @@ void InteractionRouter::EndStroke() {
     if (state_.kind != InteractionKind::Stroke) {
         return;
     }
-    if (state_.stroke.points.empty()) {
+    if (state_.stroke.points.empty() && state_.stroke.scratch.Empty()) {
         host_.DiscardStroke();
     } else if (!state_.stroke.scratchTargets.empty()) {
         // The marks the user saw before lifting are exactly what goes.
@@ -670,7 +664,7 @@ void InteractionRouter::RefreshScratchOutPreview() {
     // this page's segment is tested.
     std::vector<ObjectRef> targets;
     if (tuning_.scratchToErase && !state_.stroke.snapped && !modifiers_.straightLine && state_.stroke.page.has_value()) {
-        if (const std::optional<ScratchOut> scratch = RecognizeScratchOut(state_.stroke.freehandPoints)) {
+        if (const std::optional<ScratchOut> scratch = state_.stroke.scratch.Recognize()) {
             targets = host_.ScratchOutTargets(state_.stroke.page->pageIndex, *scratch);
         }
     }
@@ -690,7 +684,7 @@ bool InteractionRouter::SnapStrokeToShape() {
 }
 
 bool InteractionRouter::ApplyShapeSnap() {
-    std::optional<RecognizedShape> shape = RecognizeShape(state_.stroke.freehandPoints, modifiers_.snapLine);
+    std::optional<RecognizedShape> shape = RecognizeShape(state_.stroke.scratch.Points(), modifiers_.snapLine);
     if (!shape.has_value()) {
         return false;
     }
