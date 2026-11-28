@@ -44,40 +44,6 @@ float AngleBetween(Vec2 a, Vec2 b) {
     return std::atan2(std::abs(Cross(a, b)), Dot(a, b));
 }
 
-float PathLength(const std::vector<Vec2>& points) {
-    float length = 0.0f;
-    for (std::size_t index = 1; index < points.size(); ++index) {
-        length += Distance(points[index - 1], points[index]);
-    }
-    return length;
-}
-
-// `count` points evenly spaced along the path, first and last kept.
-std::vector<Vec2> Resample(const std::vector<Vec2>& points, float length, std::size_t count) {
-    const float step = length / static_cast<float>(count - 1U);
-    std::vector<Vec2> samples { points.front() };
-    samples.reserve(count);
-    float walked = 0.0f;  // distance since the last sample
-    Vec2 previous = points.front();
-    for (std::size_t index = 1; index < points.size() && samples.size() + 1U < count; ++index) {
-        const Vec2 current = points[index];
-        float segment = Distance(previous, current);
-        while (walked + segment >= step && samples.size() + 1U < count) {
-            const Vec2 sample = Lerp(previous, current, (step - walked) / segment);
-            samples.push_back(sample);
-            segment -= step - walked;
-            previous = sample;
-            walked = 0.0f;
-        }
-        walked += segment;
-        previous = current;
-    }
-    while (samples.size() < count) {
-        samples.push_back(points.back());
-    }
-    return samples;
-}
-
 // The axis the stroke mostly moves along, either way: the principal direction
 // of its step vectors.
 Vec2 DominantAxis(const std::vector<Vec2>& samples) {
@@ -308,12 +274,21 @@ std::optional<ScratchOut> RecognizeScratchOut(const std::vector<Vec2>& points) {
     if (points.size() < 2U) {
         return std::nullopt;
     }
-    const float length = PathLength(points);
+    std::vector<float> arcLengths(points.size(), 0.0f);
+    for (std::size_t index = 1; index < points.size(); ++index) {
+        arcLengths[index] = arcLengths[index - 1U] + Distance(points[index - 1U], points[index]);
+    }
+    const float length = arcLengths.back();
     if (length < kMinStrokeLength) {
         return std::nullopt;
     }
+    // The same resampler as the incremental tracker, so the reference and the
+    // live path can never drift apart; only the caching differs.
+    std::vector<std::size_t> sampleSegments;
+    std::vector<Vec2> samples;
+    ResamplePrefix(points, arcLengths, length, sampleSegments, samples);
     std::vector<float> projections;
-    if (!IsScratchOut(Resample(points, length, kSampleCount), projections)) {
+    if (!IsScratchOut(samples, projections)) {
         return std::nullopt;
     }
     return ScratchOut { ConvexHull(points) };

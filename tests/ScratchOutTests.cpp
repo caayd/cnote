@@ -196,8 +196,8 @@ bool SameScratch(const std::optional<ScratchOut>& a, const std::optional<Scratch
 }
 
 // The canvas recognizes the growing stroke through ScratchOutTracker on every
-// pointer sample; each prefix must decide and measure exactly like the
-// one-shot reference it replaced.
+// pointer sample.  It shares the resampler and pass test with the one-shot
+// reference, so every prefix must also agree on the cached hull.
 void CheckIncrementalParity(const std::string& what, const std::vector<Vec2>& points) {
     cnote::ScratchOutTracker tracker;
     int mismatches = 0;
