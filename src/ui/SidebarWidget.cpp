@@ -216,6 +216,14 @@ SidebarWidget::SidebarWidget(QWidget* parent)
 
 SidebarWidget::~SidebarWidget() = default;
 
+void SidebarWidget::SetTransientGenerationProvider(TransientGenerationProvider provider) {
+    transientGenerationProvider_ = std::move(provider);
+}
+
+std::uint64_t SidebarWidget::TransientGeneration() const {
+    return transientGenerationProvider_ ? transientGenerationProvider_() : 0U;
+}
+
 void SidebarWidget::SetDocument(const Document* document, render::PdfBackgroundProvider* pdfBackground) {
     // A replacement document (or a page insert/remove on the same one) makes
     // the page-jump text and every cached thumbnail meaningless.
@@ -786,14 +794,18 @@ const QImage* SidebarWidget::ThumbnailAt(std::size_t index, int width, int heigh
         return nullptr;
     }
     const std::uint64_t epoch = document_->PageEpoch(index);
-    if (entry.sourceEpoch == epoch) {
+    const std::uint64_t transientGeneration = TransientGeneration();
+    if (entry.sourceEpoch == epoch && entry.sourceTransientGeneration == transientGeneration) {
         entry.lastUse = ++thumbnailUseClock_;
         return &entry.image;
     }
-    // The page epoch moved, but thumbnails depict images and strokes only: a
-    // text/LaTeX-only commit hashes equal and keeps the existing raster.
+    // The page epoch or the session transient revision moved.  Thumbnails
+    // depict images and strokes only, so a text/LaTeX-only commit hashes equal
+    // and keeps the existing raster; a cancelled in-place gesture restores
+    // different content and hashes unequal, discarding a mid-gesture raster.
     if (ThumbnailInputFingerprint(document_->PageAt(index), pdfBackground_) == entry.key.fingerprint) {
         entry.sourceEpoch = epoch;
+        entry.sourceTransientGeneration = transientGeneration;
         entry.lastUse = ++thumbnailUseClock_;
         return &entry.image;
     }
@@ -811,6 +823,7 @@ bool SidebarWidget::RenderThumbnail(std::size_t index, int width, int height) {
     const Document* const renderingDocument = document_;
     const render::PdfBackgroundProvider* const renderingBackground = pdfBackground_;
     const std::uint64_t renderingEpoch = document_->PageEpoch(index);
+    const std::uint64_t renderingTransientGeneration = TransientGeneration();
 
     QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
     if (image.isNull()) {
@@ -867,7 +880,8 @@ bool SidebarWidget::RenderThumbnail(std::size_t index, int width, int height) {
     // the document or committed the page; never cache a mixed render.
     if (document_ != renderingDocument || pdfBackground_ != renderingBackground
         || index >= document_->PageCount()
-        || document_->PageEpoch(index) != renderingEpoch) {
+        || document_->PageEpoch(index) != renderingEpoch
+        || TransientGeneration() != renderingTransientGeneration) {
         return false;
     }
 
@@ -885,6 +899,7 @@ bool SidebarWidget::RenderThumbnail(std::size_t index, int width, int height) {
     entry.image = std::move(image);
     entry.key = key;
     entry.sourceEpoch = document_->PageEpoch(index);
+    entry.sourceTransientGeneration = renderingTransientGeneration;
     entry.lastUse = ++thumbnailUseClock_;
     thumbnailCacheBytes_ += bytes;
     ++thumbnailRenderCount_;
@@ -932,12 +947,15 @@ void SidebarWidget::RenderVisibleThumbnails() {
         // requests the next pass.
         return;
     }
-    std::vector<std::size_t> pending;
-    pending.swap(pendingThumbnailPages_);
     const QRect content = ContentRect();
     const int labelHeight = static_cast<int>(Metrics().labelHeight);
     QRect dirty;
-    for (const std::size_t index : pending) {
+    // One composed page per tick: a PDF page render can take tens of
+    // milliseconds, and returning to the event loop between pages lets paint
+    // and input run.  Stale/off-screen queue entries are dropped for free.
+    while (!pendingThumbnailPages_.empty()) {
+        const std::size_t index = pendingThumbnailPages_.front();
+        pendingThumbnailPages_.erase(pendingThumbnailPages_.begin());
         if (index >= PageCount()) {
             continue;
         }
@@ -952,10 +970,14 @@ void SidebarWidget::RenderVisibleThumbnails() {
         }
         if (RenderThumbnail(index, width, height)) {
             dirty = dirty.isNull() ? *item : dirty.united(*item);
+            break;
         }
     }
     if (!dirty.isNull()) {
         update(dirty);
+    }
+    if (!pendingThumbnailPages_.empty() && !thumbnailTimer_->isActive()) {
+        thumbnailTimer_->start();
     }
 }
 
@@ -969,7 +991,8 @@ bool SidebarWidget::HasThumbnail(std::size_t index) const {
     }
     const Thumbnail& entry = found->second;
     if (!entry.key.IsValid() || entry.key.document != document_
-        || entry.sourceEpoch != document_->PageEpoch(index)) {
+        || entry.sourceEpoch != document_->PageEpoch(index)
+        || entry.sourceTransientGeneration != TransientGeneration()) {
         return false;
     }
     const std::optional<QRect> item = PageItemRect(index);

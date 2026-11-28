@@ -959,6 +959,60 @@ void TestSidebarThumbnailKeyIgnoresText() {
         "a stroke commit re-rasterizes the thumbnail");
 }
 
+void TestSidebarThumbnailDiscardsMidGestureRender() {
+    QWidget host;
+    host.resize(1400, 900);
+    cnote::ui::SidebarWidget sidebar(&host);
+    cnote::Document document = BuildDocument(3);
+    std::uint64_t transient = 0;
+    sidebar.SetTransientGenerationProvider([&transient]() { return transient; });
+    sidebar.SetDocument(&document, nullptr);
+    sidebar.SetHostClientRect(host.rect(), 34);
+    sidebar.SetOpen(true);
+    host.show();
+    QApplication::processEvents();
+    Check(WaitFor([&]() { return sidebar.SlideProgress() >= 0.999; }, 3000), "sidebar opens before the gesture test");
+    static_cast<void>(sidebar.grab());
+    Check(WaitFor([&]() { return sidebar.HasThumbnail(0); }, 3000), "the first thumbnail is ready");
+
+    const QRect item = *sidebar.PageItemRect(0);
+    const auto thumbnailImage = [&]() {
+        const QImage full = sidebar.grab().toImage();
+        return full.copy(QRect(item.left(), item.top(), item.width(),
+            item.height() - static_cast<int>(sidebar.Metrics().labelHeight)));
+    };
+    const QImage reference = thumbnailImage();
+    const cnote::Page before = document.PageAt(0);
+
+    // Drop the cache without changing page 0's layout or content, then mutate
+    // page 0 in place as a move gesture does: no page-epoch bump, only the
+    // session transient revision moves.
+    document.InsertPage(document.PageCount(), cnote::Page {});
+    sidebar.SetDocument(&document, nullptr);
+    for (cnote::Stroke& stroke : document.PageAt(0).strokes) {
+        for (cnote::Vec2& point : stroke.points) {
+            point.x += 40.0f;
+        }
+    }
+    ++transient;
+    static_cast<void>(sidebar.grab());
+    Check(WaitFor([&]() { return sidebar.HasThumbnail(0); }, 3000), "a mid-gesture miss composes");
+    const QImage midGesture = thumbnailImage();
+    Check(midGesture != reference, "the mid-gesture thumbnail depicts the in-place edit");
+
+    // Cancel restores the page without bumping its epoch, exactly like
+    // QtDocumentController::CancelPageGesture; only the transient revision
+    // moves, so the epoch fast path must not serve the mid-gesture raster.
+    document.PageAt(0) = before;
+    ++transient;
+    const std::uint64_t renders = sidebar.ThumbnailRenderCount();
+    static_cast<void>(sidebar.grab());
+    Check(WaitFor([&]() {
+        return sidebar.ThumbnailRenderCount() > renders && sidebar.HasThumbnail(0);
+    }, 3000), "cancelling a gesture recomposes the restored page");
+    Check(thumbnailImage() == reference, "the thumbnail matches the restored page after cancel");
+}
+
 void TestSidebarCommitRepaintsOnlyChangedItems() {
     QWidget host;
     host.resize(1400, 900);
@@ -1376,6 +1430,7 @@ int main(int argc, char** argv) {
     TestSidebarThumbnailCacheInvalidation();
     TestSidebarThumbnailRenderingIsDeferred();
     TestSidebarThumbnailKeyIgnoresText();
+    TestSidebarThumbnailDiscardsMidGestureRender();
     TestSidebarCommitRepaintsOnlyChangedItems();
     TestSidebarThumbnailCacheBudget();
     TestToolbarAutoHide();

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -61,6 +62,14 @@ public:
 
     // --- model ------------------------------------------------------------
     void SetDocument(const Document* document, render::PdfBackgroundProvider* pdfBackground = nullptr);
+    // Session transient revision (ProjectSession::transientGeneration).
+    // In-place gesture edits mutate page objects without bumping the page
+    // epoch, so a thumbnail composed mid-gesture must not be served from the
+    // epoch fast path after a cancel/abort restored the page.  The provider is
+    // queried at lookup/composition time, so any view sharing the session is
+    // seen.  Defaults to 0 when unset.
+    using TransientGenerationProvider = std::function<std::uint64_t()>;
+    void SetTransientGenerationProvider(TransientGenerationProvider provider);
     // Committed document change: repaint; thumbnails validate lazily against
     // Document::PageEpoch so only pages whose contents changed re-render
     // (the reference dropped the whole cache, which re-rasterized every
@@ -189,6 +198,7 @@ private:
     void TrimThumbnailCache();
     void SnapshotPageRevisions();
     void InvalidateThumbnails();
+    [[nodiscard]] std::uint64_t TransientGeneration() const;
     [[nodiscard]] int ItemWidth() const;
     [[nodiscard]] QRect ContentRect() const;
     [[nodiscard]] int ItemTop(std::size_t index) const;
@@ -198,6 +208,7 @@ private:
 
     const Document* document_ = nullptr;
     render::PdfBackgroundProvider* pdfBackground_ = nullptr;
+    TransientGenerationProvider transientGenerationProvider_ {};
     std::size_t currentPage_ = 0;
     std::size_t documentPageCount_ = 0;
 
@@ -260,6 +271,10 @@ private:
         QImage image {};
         ThumbnailKey key {};
         std::uint64_t sourceEpoch = 0;
+        // Generation of in-place gesture edits when the key was last checked.
+        // A change (any view's gesture sample, cancel or abort) forces the
+        // fingerprint path; the epoch alone cannot see those edits.
+        std::uint64_t sourceTransientGeneration = 0;
         std::uint64_t lastUse = 0;
     };
     // Visited pages are evicted least-recently-used once `thumbnailCacheBytes_`
