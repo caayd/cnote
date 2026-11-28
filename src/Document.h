@@ -178,6 +178,18 @@ enum class DocumentKind : std::uint8_t {
 
 [[nodiscard]] bool RasterImageEqual(const RasterImage& a, const RasterImage& b);
 [[nodiscard]] RasterImage CreateSolidRaster(float pageWidth, float pageHeight, float renderScale, std::uint32_t argb);
+// True when `raster` is byte-for-byte the image CreateSolidRaster would build
+// for the same page size, render scale and ARGB colour: matching dimensions,
+// stride and scale, then every pixel scanned in order with an early exit.  It
+// allocates nothing, so callers can decide whether a replacement is needed
+// without building the replacement first.
+[[nodiscard]] bool RasterImageMatchesSolidColor(
+    const RasterImage& raster, float pageWidth, float pageHeight, float renderScale, std::uint32_t argb);
+// Test/diagnostic counter: full solid rasters built by CreateSolidRaster since
+// the last Reset.  Page-default application uses it to prove a no-op apply
+// allocates no raster (PERF-055).
+[[nodiscard]] std::uint64_t SolidRasterBuildCount() noexcept;
+void ResetSolidRasterBuildCount() noexcept;
 [[nodiscard]] bool Vec2Equal(const Vec2& a, const Vec2& b);
 [[nodiscard]] bool StrokeStyleEqual(const StrokeStyle& a, const StrokeStyle& b);
 [[nodiscard]] bool StrokeEqual(const Stroke& a, const Stroke& b);

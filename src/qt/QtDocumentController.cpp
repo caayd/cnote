@@ -2183,7 +2183,6 @@ void QtDocumentController::ApplyNewPageDraft(const ui::NewPageDraft& draft, ui::
     }
 
     std::vector<std::size_t> indices;
-    std::vector<Page> before;
     if (scope == ui::NewPageApplyScope::AllPages) {
         indices.reserve(document.PageCount());
         for (std::size_t page = 0; page < document.PageCount(); ++page) {
@@ -2196,35 +2195,43 @@ void QtDocumentController::ApplyNewPageDraft(const ui::NewPageDraft& draft, ui::
         return;
     }
 
-    bool changed = false;
+    const float width = std::max(ui::kMinPageSize, draft.width);
+    const float height = std::max(ui::kMinPageSize, draft.height);
+    const std::vector<std::uint32_t> profile = ui::ResolvedPaletteProfile(draft.paletteProfile, palette);
+
+    // Only pages that change are snapshotted, so the one ReplacePages action
+    // (and its undo/redo) covers exactly the pages it must restore.  The
+    // predicate shares ApplyConfiguredSettingsToPage's decision and never
+    // builds the replacement raster, so unchanged pages cost one scan.
+    std::vector<std::size_t> changedIndices;
+    std::vector<Page> before;
+    changedIndices.reserve(indices.size());
+    before.reserve(indices.size());
     for (const std::size_t pageIndex : indices) {
         Page& page = document.PageAt(pageIndex);
-        before.push_back(page);
-        const bool pageChanged = ui::ApplyConfiguredSettingsToPage(
-            page,
-            std::max(ui::kMinPageSize, draft.width),
-            std::max(ui::kMinPageSize, draft.height),
-            draft.backgroundColor,
-            ui::ResolvedPaletteProfile(draft.paletteProfile, palette),
-            draft.applyPaletteProfileToExistingStrokes);
-        if (pageChanged) {
-            document.TouchPage(pageIndex);
+        if (!ui::PageSettingsWouldChange(
+                page, width, height, draft.backgroundColor, profile, draft.applyPaletteProfileToExistingStrokes)) {
+            continue;
         }
-        changed = pageChanged || changed;
+        before.push_back(page);
+        ui::ApplyConfiguredSettingsToPage(
+            page, width, height, draft.backgroundColor, profile, draft.applyPaletteProfileToExistingStrokes);
+        document.TouchPage(pageIndex);
+        changedIndices.push_back(pageIndex);
     }
-    if (!changed) {
+    if (changedIndices.empty()) {
         return;
     }
 
     std::vector<Page> after;
-    after.reserve(indices.size());
-    for (const std::size_t pageIndex : indices) {
+    after.reserve(changedIndices.size());
+    for (const std::size_t pageIndex : changedIndices) {
         after.push_back(document.PageAt(pageIndex));
     }
 
     HistoryAction action {};
     action.type = HistoryActionType::ReplacePages;
-    action.pageIndices = indices;
+    action.pageIndices = std::move(changedIndices);
     action.pages = std::move(before);
     action.replacementPages = std::move(after);
     RecordCommit(std::move(action));

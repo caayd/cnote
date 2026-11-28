@@ -22,15 +22,20 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <system_error>
 #include <vector>
 
 #include "Document.h"
+#include "ProjectSession.h"
+#include "qt/QtDocumentController.h"
 #include "settings/SettingsStoreQt.h"
+#include "shell/AppManager.h"
 #include "ui/NewPageDialogQt.h"
 #include "ui/PageDefaultsQt.h"
 #include "ui/SettingsFormatQt.h"
@@ -417,6 +422,86 @@ void PageApplicationPolicy() {
 
     const bool again = cnote::ui::ApplyConfiguredSettingsToPage(page, 612.0f, 792.0f, 0xFF112233U, targetProfile, true);
     Check(!again, "re-applying identical settings reports no change");
+    Check(!cnote::ui::PageSettingsWouldChange(page, 612.0f, 792.0f, 0xFF112233U, targetProfile, true),
+        "PERF-055: the predicate agrees with apply on an unchanged PDF-flattened page");
+
+    // PERF-055: the raster check scans the stored image instead of building a
+    // replacement, and the predicate the controller uses for history must
+    // agree with the apply.
+    const std::uint32_t white = 0xFFFFFFFFU;
+    {
+        cnote::Page solid;
+        solid.width = 595.0f;
+        solid.height = 842.0f;
+        solid.raster = cnote::CreateSolidRaster(solid.width, solid.height, 1.5f, white);
+        const std::uint64_t solidIdentity = solid.raster.pixels.Identity();
+        const std::size_t solidBytes =
+            static_cast<std::size_t>(solid.raster.stride) * static_cast<std::size_t>(solid.raster.height);
+
+        cnote::ResetSolidRasterBuildCount();
+        Check(!cnote::ui::PageSettingsWouldChange(solid, 595.0f, 842.0f, white, {}, false),
+            "PERF-055: a solid page matching the settings needs no change");
+        Check(!cnote::ui::ApplyConfiguredSettingsToPage(solid, 595.0f, 842.0f, white, {}, false),
+            "PERF-055: applying matching settings reports no change");
+        Check(cnote::SolidRasterBuildCount() == 0U, "PERF-055: an unchanged page builds no solid raster");
+        Check(solid.raster.pixels.Identity() == solidIdentity, "PERF-055: an unchanged page keeps its raster");
+        std::printf("PERF-055 matching solid page: %zu bytes retained, 0 built\n", solidBytes);
+
+        std::vector<std::uint8_t> pixels = solid.raster.pixels.bytes();
+        pixels[pixels.size() / 2U] ^= 0x01U;
+        solid.raster.pixels = cnote::PixelBuffer(std::move(pixels));
+        Check(!cnote::RasterImageMatchesSolidColor(solid.raster, 595.0f, 842.0f, 1.5f, white),
+            "PERF-055: one changed pixel is not a solid fill");
+        Check(cnote::ui::PageSettingsWouldChange(solid, 595.0f, 842.0f, white, {}, false),
+            "PERF-055: the predicate sees the changed raster");
+        cnote::ResetSolidRasterBuildCount();
+        Check(cnote::ui::ApplyConfiguredSettingsToPage(solid, 595.0f, 842.0f, white, {}, false),
+            "PERF-055: a changed raster is replaced");
+        Check(cnote::SolidRasterBuildCount() == 1U, "PERF-055: a changed page builds one solid raster");
+        Check(cnote::RasterImageMatchesSolidColor(solid.raster, 595.0f, 842.0f, 1.5f, white),
+            "PERF-055: the replacement is the solid fill");
+
+        cnote::Page wrongScale;
+        wrongScale.width = 595.0f;
+        wrongScale.height = 842.0f;
+        wrongScale.raster = cnote::CreateSolidRaster(595.0f, 842.0f, 1.0f, white);
+        Check(cnote::ui::PageSettingsWouldChange(wrongScale, 595.0f, 842.0f, white, {}, false),
+            "PERF-055: a solid raster at another scale needs replacing");
+        cnote::ResetSolidRasterBuildCount();
+        Check(cnote::ui::ApplyConfiguredSettingsToPage(wrongScale, 595.0f, 842.0f, white, {}, false),
+            "PERF-055: the scale-mismatched page applies");
+        Check(cnote::SolidRasterBuildCount() == 1U, "PERF-055: the mismatched page builds one solid raster");
+        Check(wrongScale.raster.scale == 1.5f, "PERF-055: the replacement uses the page-apply raster scale");
+
+        cnote::Page noRaster;
+        Check(!cnote::RasterImageMatchesSolidColor(noRaster.raster, 595.0f, 842.0f, 1.5f, white),
+            "PERF-055: no raster is not a solid fill");
+        Check(cnote::ui::PageSettingsWouldChange(noRaster, 595.0f, 842.0f, white, {}, false),
+            "PERF-055: a page without a raster changes");
+
+        // A palette-only change keeps the matching raster: the predicate and
+        // apply both report it, but no replacement raster is built.
+        const std::vector<std::uint32_t> oldProfile { 0xFFAA0001U };
+        const std::vector<std::uint32_t> newProfile { 0xFFBB0001U };
+        cnote::Page paletteOnly;
+        paletteOnly.width = 595.0f;
+        paletteOnly.height = 842.0f;
+        paletteOnly.raster = cnote::CreateSolidRaster(595.0f, 842.0f, 1.5f, white);
+        paletteOnly.paletteProfile = oldProfile;
+        paletteOnly.strokes.push_back(MakeStroke(0xFFAA0001U));
+        Check(cnote::ui::PageSettingsWouldChange(paletteOnly, 595.0f, 842.0f, white, newProfile, true),
+            "PERF-055: a changed palette profile needs applying");
+        Check(!cnote::ui::PageSettingsWouldChange(paletteOnly, 595.0f, 842.0f, white, newProfile, false),
+            "PERF-055: the remap flag off leaves the palette alone");
+        cnote::ResetSolidRasterBuildCount();
+        Check(cnote::ui::ApplyConfiguredSettingsToPage(paletteOnly, 595.0f, 842.0f, white, newProfile, true),
+            "PERF-055: a palette-only change applies");
+        Check(cnote::SolidRasterBuildCount() == 0U, "PERF-055: a palette-only change builds no raster");
+        Check(paletteOnly.paletteProfile == newProfile && paletteOnly.strokes[0].style.color == 0xFFBB0001U,
+            "PERF-055: a palette-only change remaps the stored profile and strokes");
+        Check(!cnote::ui::PageSettingsWouldChange(paletteOnly, 595.0f, 842.0f, white, newProfile, true),
+            "PERF-055: the predicate agrees after the palette-only apply");
+    }
 
     cnote::Page untouched;
     untouched.paletteProfile = sourceProfile;
@@ -438,7 +523,233 @@ void PageApplicationPolicy() {
     Check(many.size() <= cnote::ui::kMaxRecentPageColors, "recent colours are capped");
 }
 
-// 6. Tab order, modeless ownership and screenshots.
+cnote::Document::PageDefaults SolidPageDefaults() {
+    cnote::Document::PageDefaults defaults;
+    defaults.width = 595.0f;
+    defaults.height = 842.0f;
+    defaults.backgroundColor = 0xFFFFFFFFU;
+    defaults.sizeOverridden = true;
+    return defaults;
+}
+
+std::vector<cnote::Page> SolidPages(std::size_t count, std::uint32_t color) {
+    std::vector<cnote::Page> pages;
+    pages.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        cnote::Page page;
+        page.width = 595.0f;
+        page.height = 842.0f;
+        page.raster = cnote::CreateSolidRaster(page.width, page.height, 1.5f, color);
+        pages.push_back(std::move(page));
+    }
+    return pages;
+}
+
+std::vector<std::uint64_t> RasterIdentities(const cnote::Document& document) {
+    std::vector<std::uint64_t> identities;
+    identities.reserve(document.PageCount());
+    for (std::size_t index = 0; index < document.PageCount(); ++index) {
+        identities.push_back(document.PageAt(index).raster.pixels.Identity());
+    }
+    return identities;
+}
+
+std::vector<cnote::Page> SnapshotPages(const cnote::Document& document) {
+    std::vector<cnote::Page> pages;
+    pages.reserve(document.PageCount());
+    for (std::size_t index = 0; index < document.PageCount(); ++index) {
+        pages.push_back(document.PageAt(index));
+    }
+    return pages;
+}
+
+bool PagesMatch(const cnote::Document& document, const std::vector<cnote::Page>& expected) {
+    if (document.PageCount() != expected.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        if (!cnote::PageEqual(document.PageAt(index), expected[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 6. PERF-055: Apply to All Pages builds no replacement raster for an
+// unchanged page and records one ReplacePages action covering only the pages
+// that changed.  The 50-page fixture is the one the PR measures.
+void ApplyAllPagesRecordsOnlyChangedPages() {
+    constexpr std::size_t kPageCount = 50;
+    const std::uint32_t white = 0xFFFFFFFFU;
+    const std::uint32_t blue = 0xFF2F6FEDU;
+    const cnote::Document::PageDefaults defaults = SolidPageDefaults();
+
+    cnote::ui::NewPageDraft whiteDraft;
+    whiteDraft.width = 595.0f;
+    whiteDraft.height = 842.0f;
+    whiteDraft.backgroundColor = white;
+    cnote::ui::NewPageDraft blueDraft = whiteDraft;
+    blueDraft.backgroundColor = blue;
+
+    // 1. Every page already matches: no history entry, no raster built, no
+    // commit and every stored raster is kept.
+    {
+        cnote::AppManager manager;
+        cnote::qt::QtDocumentController controller(manager);
+        auto session = std::make_shared<cnote::ProjectSession>();
+        session->document = cnote::Document::CreateEditable({}, SolidPages(kPageCount, white), 0, defaults);
+        controller.AttachSession(session);
+
+        const std::vector<std::uint64_t> identities = RasterIdentities(session->document);
+        const std::size_t undoBefore = session->undoActions.size();
+        const std::uint64_t revisionBefore = session->revision;
+        cnote::ResetSolidRasterBuildCount();
+        const auto started = std::chrono::steady_clock::now();
+        controller.ApplyNewPageDraft(whiteDraft, cnote::ui::NewPageApplyScope::AllPages);
+        const double elapsedMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+
+        Check(session->undoActions.size() == undoBefore, "PERF-055: an unchanged Apply to All records no history");
+        Check(cnote::SolidRasterBuildCount() == 0U, "PERF-055: an unchanged Apply to All builds no solid raster");
+        Check(RasterIdentities(session->document) == identities, "PERF-055: unchanged pages keep their rasters");
+        Check(session->revision == revisionBefore && !controller.Dirty(),
+            "PERF-055: an unchanged Apply to All commits nothing");
+        std::printf("PERF-055 unchanged 50-page Apply to All: %.3f ms, 0 raster bytes built\n", elapsedMs);
+    }
+
+    // 2. Mixed document: matching solid pages, solid pages of the old colour,
+    // and PDF-backed pages (which are flattened even when their pixels match).
+    {
+        std::vector<cnote::Page> pages = SolidPages(kPageCount, white);
+        for (std::size_t index = 25; index < 35; ++index) {
+            pages[index].raster = cnote::CreateSolidRaster(pages[index].width, pages[index].height, 1.5f, blue);
+        }
+        for (std::size_t index = 35; index < kPageCount; ++index) {
+            pages[index].sourcePdfSourceIndex = 0;
+            pages[index].sourcePdfPageIndex = static_cast<std::int32_t>(index - 35U);
+            if (index >= 45) {
+                pages[index].raster = cnote::CreateSolidRaster(pages[index].width, pages[index].height, 1.5f, blue);
+            }
+        }
+        const std::size_t rasterBytes =
+            static_cast<std::size_t>(pages.front().raster.stride) * static_cast<std::size_t>(pages.front().raster.height);
+        const std::vector<cnote::Page> original = pages;
+
+        cnote::AppManager manager;
+        cnote::qt::QtDocumentController controller(manager);
+        auto session = std::make_shared<cnote::ProjectSession>();
+        session->document = cnote::Document::CreateEditable({}, std::move(pages), 0, defaults);
+        controller.AttachSession(session);
+        const std::vector<std::uint64_t> identities = RasterIdentities(session->document);
+
+        const std::uint64_t revisionBefore = session->revision;
+        cnote::ResetSolidRasterBuildCount();
+        const auto started = std::chrono::steady_clock::now();
+        controller.ApplyNewPageDraft(whiteDraft, cnote::ui::NewPageApplyScope::AllPages);
+        const double elapsedMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+
+        std::vector<std::size_t> expectedChanged;
+        for (std::size_t index = 25; index < kPageCount; ++index) {
+            expectedChanged.push_back(index);
+        }
+        Check(cnote::SolidRasterBuildCount() == expectedChanged.size(),
+            "PERF-055: a mixed Apply to All builds one raster per changed page only");
+        Check(session->revision == revisionBefore + 1U, "PERF-055: a mixed Apply to All is one commit");
+        Check(session->undoActions.size() == 1U
+                && session->undoActions.back().type == cnote::HistoryActionType::ReplacePages,
+            "PERF-055: a mixed Apply to All records one ReplacePages action");
+        const cnote::HistoryAction action = session->undoActions.back();
+        Check(action.pageIndices == expectedChanged, "PERF-055: the action names only the changed pages");
+        Check(action.pages.size() == expectedChanged.size()
+                && action.replacementPages.size() == expectedChanged.size(),
+            "PERF-055: before and after snapshots cover only the changed pages");
+        bool snapshotsMatch = action.pages.size() == expectedChanged.size();
+        for (std::size_t index = 0; snapshotsMatch && index < expectedChanged.size(); ++index) {
+            snapshotsMatch = cnote::PageEqual(action.pages[index], original[expectedChanged[index]]);
+        }
+        Check(snapshotsMatch, "PERF-055: the before snapshots are the original changed pages");
+
+        bool changedPagesCorrect = true;
+        for (std::size_t index = 25; index < kPageCount; ++index) {
+            const cnote::Page& page = session->document.PageAt(index);
+            changedPagesCorrect = changedPagesCorrect
+                && page.sourcePdfSourceIndex == -1
+                && page.sourcePdfPageIndex == -1
+                && cnote::RasterImageMatchesSolidColor(page.raster, 595.0f, 842.0f, 1.5f, white);
+        }
+        Check(changedPagesCorrect, "PERF-055: every changed page is the flattened solid fill");
+        const std::vector<std::uint64_t> appliedIdentities = RasterIdentities(session->document);
+        bool unchangedRastersKept = true;
+        for (std::size_t index = 0; index < 25; ++index) {
+            unchangedRastersKept = unchangedRastersKept && appliedIdentities[index] == identities[index];
+        }
+        Check(unchangedRastersKept, "PERF-055: unchanged pages keep their raster buffers");
+        Check(controller.Dirty(), "PERF-055: a mixed Apply to All dirties the session");
+        std::printf("PERF-055 mixed 50-page Apply to All: %.3f ms, %zu bytes built (%zu pages)\n",
+            elapsedMs, expectedChanged.size() * rasterBytes, expectedChanged.size());
+
+        const std::vector<cnote::Page> applied = SnapshotPages(session->document);
+        const std::uint64_t buildsAfterApply = cnote::SolidRasterBuildCount();
+        Check(controller.Undo(), "PERF-055: one undo reverts the whole mixed Apply to All");
+        Check(cnote::SolidRasterBuildCount() == buildsAfterApply, "PERF-055: undo builds no raster");
+        Check(PagesMatch(session->document, original), "PERF-055: undo restores every page exactly");
+        Check(RasterIdentities(session->document) == identities, "PERF-055: undo restores the shared rasters");
+        Check(controller.Redo(), "PERF-055: the mixed Apply to All redoes");
+        Check(cnote::SolidRasterBuildCount() == buildsAfterApply, "PERF-055: redo builds no raster");
+        Check(PagesMatch(session->document, applied), "PERF-055: redo restores every applied page exactly");
+    }
+
+    // 3. Every page changes: the same one-action/undo/redo shape, with one
+    // raster built per page (not one per page plus a comparison raster).
+    {
+        std::vector<cnote::Page> pages = SolidPages(kPageCount, white);
+        const std::size_t rasterBytes =
+            static_cast<std::size_t>(pages.front().raster.stride) * static_cast<std::size_t>(pages.front().raster.height);
+        const std::vector<cnote::Page> original = pages;
+
+        cnote::AppManager manager;
+        cnote::qt::QtDocumentController controller(manager);
+        auto session = std::make_shared<cnote::ProjectSession>();
+        session->document = cnote::Document::CreateEditable({}, std::move(pages), 0, defaults);
+        controller.AttachSession(session);
+        const std::vector<std::uint64_t> identities = RasterIdentities(session->document);
+
+        cnote::ResetSolidRasterBuildCount();
+        const auto started = std::chrono::steady_clock::now();
+        controller.ApplyNewPageDraft(blueDraft, cnote::ui::NewPageApplyScope::AllPages);
+        const double elapsedMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+
+        Check(cnote::SolidRasterBuildCount() == kPageCount,
+            "PERF-055: an all-changed Apply to All builds exactly one raster per page");
+        std::vector<std::size_t> expectedChanged;
+        for (std::size_t index = 0; index < kPageCount; ++index) {
+            expectedChanged.push_back(index);
+        }
+        Check(session->undoActions.size() == 1U
+                && session->undoActions.back().type == cnote::HistoryActionType::ReplacePages
+                && session->undoActions.back().pageIndices == expectedChanged,
+            "PERF-055: an all-changed Apply to All records all pages in one action");
+        bool allChanged = true;
+        for (std::size_t index = 0; index < kPageCount; ++index) {
+            allChanged = allChanged
+                && cnote::RasterImageMatchesSolidColor(session->document.PageAt(index).raster, 595.0f, 842.0f, 1.5f, blue);
+        }
+        Check(allChanged, "PERF-055: every page is the new solid fill");
+        std::printf("PERF-055 all-changed 50-page Apply to All: %.3f ms, %zu bytes built (%zu pages)\n",
+            elapsedMs, kPageCount * rasterBytes, kPageCount);
+
+        const std::vector<cnote::Page> applied = SnapshotPages(session->document);
+        Check(controller.Undo(), "PERF-055: the all-changed Apply to All undoes in one step");
+        Check(PagesMatch(session->document, original), "PERF-055: undo restores every all-changed page exactly");
+        Check(RasterIdentities(session->document) == identities, "PERF-055: undo restores every original raster");
+        Check(controller.Redo(), "PERF-055: the all-changed Apply to All redoes");
+        Check(PagesMatch(session->document, applied), "PERF-055: redo restores every applied page exactly");
+    }
+}
+
+// 7. Tab order, modeless ownership and screenshots.
 void TabOrderAndScreenshots() {
     namespace s = cnote::settings;
     s::Settings settings;
@@ -522,6 +833,7 @@ int main(int argc, char** argv) {
     ApplySemantics();
     ResetAndRefresh();
     PageApplicationPolicy();
+    ApplyAllPagesRecordsOnlyChangedPages();
     TabOrderAndScreenshots();
 
     std::error_code error;
