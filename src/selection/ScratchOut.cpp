@@ -139,23 +139,58 @@ bool InsideOrOnHull(const std::vector<Vec2>& hull, Vec2 point) {
     return true;
 }
 
-float DistanceToSegment(Vec2 point, Vec2 a, Vec2 b) {
+float DistanceSquared(Vec2 a, Vec2 b) {
+    const Vec2 delta = Sub(a, b);
+    return Dot(delta, delta);
+}
+
+float DistanceSquaredToSegment(Vec2 point, Vec2 a, Vec2 b) {
     const Vec2 ab = Sub(b, a);
     const float lengthSquared = Dot(ab, ab);
     const float t = lengthSquared > 0.0f ? std::clamp(Dot(Sub(point, a), ab) / lengthSquared, 0.0f, 1.0f) : 0.0f;
-    return Distance(point, Add(a, Scale(ab, t)));
+    return DistanceSquared(point, Add(a, Scale(ab, t)));
 }
 
-bool HullContains(const std::vector<Vec2>& hull, Vec2 point, float margin) {
+struct HullBounds {
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+};
+
+HullBounds ComputeHullBounds(const std::vector<Vec2>& hull) {
+    HullBounds bounds { hull.front().x, hull.front().y, hull.front().x, hull.front().y };
+    for (const Vec2 point : hull) {
+        bounds.left = std::min(bounds.left, point.x);
+        bounds.top = std::min(bounds.top, point.y);
+        bounds.right = std::max(bounds.right, point.x);
+        bounds.bottom = std::max(bounds.bottom, point.y);
+    }
+    return bounds;
+}
+
+bool HullContains(const std::vector<Vec2>& hull, const HullBounds& bounds, Vec2 point, float margin) {
+    // The hull lies inside its box: a point outside the box grown by the
+    // margin is neither inside nor near it.  A negative margin only accepts
+    // interior points, so there zero reach is the safe box.
+    const float reach = std::max(0.0f, margin);
+    if (point.x < bounds.left - reach || point.x > bounds.right + reach
+        || point.y < bounds.top - reach || point.y > bounds.bottom + reach) {
+        return false;
+    }
+    const float marginSquared = margin * margin;
     bool inside = hull.size() >= 3U;
-    float nearest = Distance(point, hull.front());
     for (std::size_t index = 0; index < hull.size(); ++index) {
         const Vec2 a = hull[index];
         const Vec2 b = hull[(index + 1U) % hull.size()];
         inside = inside && Cross(Sub(b, a), Sub(point, a)) >= 0.0f;
-        nearest = std::min(nearest, DistanceToSegment(point, a, b));
+        // One edge within the margin settles the answer; later edges cannot
+        // take it back.
+        if (margin >= 0.0f && DistanceSquaredToSegment(point, a, b) <= marginSquared) {
+            return true;
+        }
     }
-    return inside || nearest <= margin;
+    return inside;
 }
 
 // The evenly spaced samples along the path, located through the prefix arc
@@ -232,42 +267,99 @@ bool ScratchOut::CoversPath(const std::vector<Vec2>& path, float margin) const {
     if (hull.empty() || path.empty()) {
         return false;
     }
+    const HullBounds hullBounds = ComputeHullBounds(hull);
     if (path.size() == 1U) {
-        return HullContains(hull, path.front(), margin);
+        return HullContains(hull, hullBounds, path.front(), margin);
     }
+    // The threshold needs the whole length up front, so the coverage pass can
+    // stop as soon as later pieces cannot change the result.  Summed in the
+    // same order as before, so the half-covered boundary is unchanged.
+    float total = 0.0f;
+    for (std::size_t index = 1; index < path.size(); ++index) {
+        total += Distance(path[index - 1], path[index]);
+    }
+    if (!(total > 0.0f)) {
+        return HullContains(hull, hullBounds, path.front(), margin);
+    }
+    const float needed = kMinCoverage * total;
+    const float reach = std::max(0.0f, margin);
     // Long segments (a straight line's two points) are split so each piece
     // is weighed where it lies.
     const float piece = std::max(1.0f, margin);
-    float covered = 0.0f, total = 0.0f;
+    float covered = 0.0f;
     for (std::size_t index = 1; index < path.size(); ++index) {
-        const float length = Distance(path[index - 1], path[index]);
+        const Vec2 a = path[index - 1];
+        const Vec2 b = path[index];
+        const float length = Distance(a, b);
+        // A segment whose box cannot reach the hull's box cannot contain a
+        // covered sample; skip its sampling entirely.
+        if (std::max(a.x, b.x) + reach < hullBounds.left
+            || std::min(a.x, b.x) - reach > hullBounds.right
+            || std::max(a.y, b.y) + reach < hullBounds.top
+            || std::min(a.y, b.y) - reach > hullBounds.bottom) {
+            continue;
+        }
         const int pieces = std::max(1, static_cast<int>(std::ceil(length / piece)));
         for (int step = 0; step < pieces; ++step) {
             const float t = (static_cast<float>(step) + 0.5f) / static_cast<float>(pieces);
-            if (HullContains(hull, Lerp(path[index - 1], path[index], t), margin)) {
+            if (HullContains(hull, hullBounds, Lerp(a, b, t), margin)) {
                 covered += length / static_cast<float>(pieces);
             }
         }
-        total += length;
+        // Coverage only grows, so crossing the threshold is final.
+        if (covered >= needed) {
+            return true;
+        }
     }
-    return total > 0.0f ? covered >= kMinCoverage * total : HullContains(hull, path.front(), margin);
+    return covered >= needed;
 }
 
 bool ScratchOut::CoversArea(const std::array<Vec2, 4>& corners, float margin) const {
     if (hull.empty()) {
         return false;
     }
+    const HullBounds hullBounds = ComputeHullBounds(hull);
+    float left = corners.front().x, top = corners.front().y;
+    float right = left, bottom = top;
+    for (const Vec2 corner : corners) {
+        left = std::min(left, corner.x);
+        top = std::min(top, corner.y);
+        right = std::max(right, corner.x);
+        bottom = std::max(bottom, corner.y);
+    }
+    const float reach = std::max(0.0f, margin);
+    // The sampled points all lie inside the corners' box; when that box cannot
+    // reach the hull's, nothing is covered.
+    if (left - reach > hullBounds.right || right + reach < hullBounds.left
+        || top - reach > hullBounds.bottom || bottom + reach < hullBounds.top) {
+        return false;
+    }
+
+    constexpr int kSamples = kAreaGrid * kAreaGrid;
+    const float needed = kMinCoverage * static_cast<float>(kSamples);
     int covered = 0;
+    int remaining = kSamples;
     for (int row = 0; row < kAreaGrid; ++row) {
         const float v = (static_cast<float>(row) + 0.5f) / static_cast<float>(kAreaGrid);
-        const Vec2 left = Lerp(corners[0], corners[3], v);
-        const Vec2 right = Lerp(corners[1], corners[2], v);
+        const Vec2 rowLeft = Lerp(corners[0], corners[3], v);
+        const Vec2 rowRight = Lerp(corners[1], corners[2], v);
         for (int column = 0; column < kAreaGrid; ++column) {
+            --remaining;
             const float u = (static_cast<float>(column) + 0.5f) / static_cast<float>(kAreaGrid);
-            covered += HullContains(hull, Lerp(left, right, u), margin) ? 1 : 0;
+            if (HullContains(hull, hullBounds, Lerp(rowLeft, rowRight, u), margin)) {
+                ++covered;
+                // Covered samples only grow from here.
+                if (static_cast<float>(covered) >= needed) {
+                    return true;
+                }
+            }
+            // Even covering every remaining sample cannot reach the threshold.
+            if (static_cast<float>(covered + remaining) < needed) {
+                return false;
+            }
         }
     }
-    return static_cast<float>(covered) >= kMinCoverage * static_cast<float>(kAreaGrid * kAreaGrid);
+    return static_cast<float>(covered) >= needed;
 }
 
 std::optional<ScratchOut> RecognizeScratchOut(const std::vector<Vec2>& points) {

@@ -88,6 +88,10 @@ public:
     // the returned reference as read-only.
     [[nodiscard]] virtual const Document& DocumentRef() const = 0;
     [[nodiscard]] virtual CanvasInputSettings InputSettings() const = 0;
+    // Session-wide counter bumped by every in-place page gesture mutation.
+    // Document::PageEpoch only changes when the gesture commits, so caches
+    // derived from page geometry must key on both.
+    [[nodiscard]] virtual std::uint64_t TransientGeneration() const = 0;
 
     // Freehand stroke lifecycle. CanvasWidget owns the per-view page scale and
     // segments strokes at page boundaries; it always calls

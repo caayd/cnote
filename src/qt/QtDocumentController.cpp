@@ -1279,6 +1279,9 @@ void QtDocumentController::CancelPageGesture() {
     // already hold, so surfaces and thumbnails need no invalidation.
     static_cast<void>(ApplyPageObjectDelta(
         *page, action->beforeObjects.front(), action->afterObjects.front(), true));
+    // The restore does not bump the page epoch; every view must still drop
+    // bounds measured from the gesture's in-place state.
+    TouchTransient();
 }
 
 void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
@@ -1370,6 +1373,7 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
 
     // Clamps `delta` against the cached bounds and keeps them current by
     // translating with whatever was actually applied.
+    bool mutated = false;
     const auto clampedDelta = [this, page](std::size_t slot, const std::vector<ui::SelectionBounds>& bounds, Vec2 delta) {
         const ui::SelectionBounds& b = bounds[slot];
         if (!b.valid) {
@@ -1398,6 +1402,7 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
         }
         ui::TranslateStrokePoints(page->strokes[index], clamped);
         advance(moveBounds.strokes[slot], clamped);
+        mutated = true;
     }
     for (std::size_t slot = 0; slot < selection.images.size(); ++slot) {
         const std::size_t index = selection.images[slot];
@@ -1411,6 +1416,7 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
         page->images[index].x += clamped.x;
         page->images[index].y += clamped.y;
         advance(moveBounds.images[slot], clamped);
+        mutated = true;
     }
     for (std::size_t slot = 0; slot < selection.texts.size(); ++slot) {
         const std::size_t index = selection.texts[slot];
@@ -1424,6 +1430,7 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
         page->texts[index].x += clamped.x;
         page->texts[index].y += clamped.y;
         advance(moveBounds.texts[slot], clamped);
+        mutated = true;
     }
     for (std::size_t slot = 0; slot < selection.latexes.size(); ++slot) {
         const std::size_t index = selection.latexes[slot];
@@ -1437,6 +1444,10 @@ void QtDocumentController::MoveSelectionBy(std::size_t pageIndex, Vec2 delta) {
         page->latexes[index].x += clamped.x;
         page->latexes[index].y += clamped.y;
         advance(moveBounds.latexes[slot], clamped);
+        mutated = true;
+    }
+    if (mutated) {
+        TouchTransient();
     }
 }
 
@@ -1493,6 +1504,7 @@ bool QtDocumentController::CloneSelection(std::size_t pageIndex) {
     selection_[pageIndex] = std::move(clones);
     // The clones are recorded as insertions, so the commit keeps them even if
     // the pointer never moves afterwards.
+    TouchTransient();
     return true;
 }
 
@@ -1528,6 +1540,9 @@ void QtDocumentController::TransformSelection(std::size_t pageIndex, const ui::S
         if (const auto found = gesture_->beforeLatexes.find(index); found != gesture_->beforeLatexes.end()) {
             page->latexes[index] = found->second;
         }
+    }
+    if (!selection.Empty()) {
+        TouchTransient();
     }
 
     const float fromWidth = transform.from.right - transform.from.left;
