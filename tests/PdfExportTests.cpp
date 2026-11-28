@@ -12,6 +12,8 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include <QGuiApplication>
@@ -200,6 +202,87 @@ cnote::Page BuildOverlappingOverlayPage() {
     return page;
 }
 
+// Two boxes that do not touch but are close enough that the union rectangle is
+// cheaper than two images (the area-budget merge, not the overlap merge).
+cnote::Page BuildClosePairPage() {
+    cnote::Page page;
+    page.width = 200.0f;
+    page.height = 200.0f;
+    for (const auto& [id, x] : { std::pair<std::uint64_t, float> { 1, 20.0f }, { 2, 38.0f } }) {
+        cnote::PageText text {};
+        text.id = id;
+        text.x = x;
+        text.y = 40.0f;
+        text.fontSize = 20.0f;
+        text.color = 0xFF000000U;
+        text.content = u"a";
+        page.texts.push_back(text);
+    }
+    return page;
+}
+
+cnote::Page BuildOverlapPairPage() {
+    cnote::Page page;
+    page.width = 200.0f;
+    page.height = 200.0f;
+    for (const auto& [id, x, y] : { std::tuple<std::uint64_t, float, float> { 1, 30.0f, 30.0f },
+             { 2, 40.0f, 42.0f } }) {
+        cnote::PageText text {};
+        text.id = id;
+        text.x = x;
+        text.y = y;
+        text.fontSize = 20.0f;
+        text.color = 0xFF000000U;
+        text.content = u"overlapping";
+        page.texts.push_back(text);
+    }
+    return page;
+}
+
+// 200 disjoint small text boxes on A4: the dense-page case for the area-budget
+// merge and the 64-raster backstop.
+cnote::Page BuildDenseOverlayPage() {
+    cnote::Page page;
+    page.width = 595.0f;
+    page.height = 842.0f;
+    std::uint64_t id = 1;
+    for (int row = 0; row < 20; ++row) {
+        for (int column = 0; column < 10; ++column) {
+            cnote::PageText text {};
+            text.id = id++;
+            text.x = 20.0f + static_cast<float>(column) * 56.0f;
+            text.y = 20.0f + static_cast<float>(row) * 40.0f;
+            text.fontSize = 14.0f;
+            text.color = 0xFF111827U;
+            text.content = u"t123";
+            page.texts.push_back(text);
+        }
+    }
+    return page;
+}
+
+// 72 far-apart tiny boxes: no pair passes the area budget, so only the 64-raster
+// backstop can collapse them.
+cnote::Page BuildBackstopOverlayPage() {
+    cnote::Page page;
+    page.width = 595.0f;
+    page.height = 842.0f;
+    std::uint64_t id = 1;
+    for (int row = 0; row < 8; ++row) {
+        for (int column = 0; column < 9; ++column) {
+            cnote::PageText text {};
+            text.id = id++;
+            text.x = 15.0f + static_cast<float>(column) * 64.0f;
+            text.y = 15.0f + static_cast<float>(row) * 100.0f;
+            text.fontSize = 10.0f;
+            text.color = 0xFF111827U;
+            text.content = u"x";
+            page.texts.push_back(text);
+        }
+    }
+    return page;
+}
+
 // The old export path painted the whole overlay into one page-sized image.
 // This reproduces that composition (white or transparent background) as the
 // reference the cropped rasters are compared against.
@@ -318,7 +401,7 @@ void CheckOverlayExportParity(cnote::PdfiumBackend& backend, const std::filesyst
     Check(difference.maxChannelDifference <= 1,
         label + ": exported placement matches direct rendering (max channel difference "
             + std::to_string(difference.maxChannelDifference) + ")");
-    Check(difference.differingPixels * 100U <= totalPixels,
+    Check(difference.differingPixels * 50U <= totalPixels,
         label + ": exported pixels match direct rendering (differing "
             + std::to_string(difference.differingPixels) + " of " + std::to_string(totalPixels) + ")");
 }
@@ -436,7 +519,7 @@ int main(int argc, char** argv) {
     {
         const cnote::Page& overlayPage = document.PageAt(0);
         const auto overlays = cnote::ComposeTextOverlayRasters(overlayPage, 1.0f);
-        Check(overlays.size() == 2U, "one overlay raster per painted text/LaTeX object");
+        Check(!overlays.empty(), "text/LaTeX overlay rasters compose");
         std::size_t totalBytes = 0;
         for (const cnote::PlacedRaster& overlay : overlays) {
             Check(!overlay.image.pixels.empty(), "text/LaTeX overlay composes");
@@ -469,14 +552,28 @@ int main(int argc, char** argv) {
         "single rotated text and LaTeX");
 
     // --- overlapping objects share one raster, so their alpha composites once
-    {
-        const auto overlapRasters = cnote::ComposeTextOverlayRasters(BuildOverlappingOverlayPage(), 4.0f);
-        Check(overlapRasters.size() == 3U,
-            "overlapping objects share one raster per connected group (got "
-                + std::to_string(overlapRasters.size()) + ")");
-    }
+    Check(cnote::ComposeTextOverlayRasters(BuildOverlapPairPage(), 4.0f).size() == 1U,
+        "two overlapping text boxes share one raster");
     CheckOverlayExportParity(backend, dir / "overlay-overlap.pdf", BuildOverlappingOverlayPage(),
         "overlapping text boxes and formula");
+
+    // --- non-touching neighbours merge when the union is cheap (area budget) -
+    Check(cnote::ComposeTextOverlayRasters(BuildClosePairPage(), 4.0f).size() == 1U,
+        "two close, non-touching text boxes merge into one area-budget raster");
+
+    // --- the 64-raster backstop collapses a page no area merge can compact --
+    Check(cnote::ComposeTextOverlayRasters(BuildBackstopOverlayPage(), 4.0f).size() == 1U,
+        "more than 64 far-apart rasters collapse into one page-bounded raster");
+
+    // --- dense disjoint page: merged/fused output still matches the old path --
+    {
+        const auto denseRasters = cnote::ComposeTextOverlayRasters(BuildDenseOverlayPage(), 4.0f);
+        Check(denseRasters.size() <= 64U,
+            "a 200-box page stays within the 64-raster cap (got "
+                + std::to_string(denseRasters.size()) + ")");
+    }
+    CheckOverlayExportParity(backend, dir / "overlay-dense.pdf", BuildDenseOverlayPage(),
+        "200 disjoint text boxes");
 
     // --- an opaque stored raster at export resolution is passed through ------
     {

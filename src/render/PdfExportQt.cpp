@@ -8,7 +8,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
+#include <queue>
 #include <vector>
 
 #include <QImage>
@@ -206,6 +208,156 @@ void JoinGroups(std::vector<std::size_t>& parents, std::size_t first, std::size_
     }
 }
 
+// One raster's worth of overlay objects: the crop it paints into and the
+// object indices in paint order.
+struct OverlayGroup {
+    OverlayCrop crop;
+    std::vector<std::size_t> members;
+    bool alive = true;
+    std::uint32_t version = 0;
+};
+
+double CropArea(const OverlayCrop& crop) {
+    return std::max(0.0, static_cast<double>(crop.right) - static_cast<double>(crop.left))
+        * std::max(0.0, static_cast<double>(crop.bottom) - static_cast<double>(crop.top));
+}
+
+OverlayCrop UnionCrop(const OverlayCrop& first, const OverlayCrop& second) {
+    OverlayCrop united;
+    united.left = std::min(first.left, second.left);
+    united.top = std::min(first.top, second.top);
+    united.right = std::max(first.right, second.right);
+    united.bottom = std::max(first.bottom, second.bottom);
+    return united;
+}
+
+// A nearby-group merge proposal. `growth` is the empty area the union adds, so
+// the cheapest proposals are the ones that waste the least raster.
+struct MergeCandidate {
+    double growth = 0.0;
+    double unionArea = 0.0;
+    std::size_t first = 0;
+    std::size_t second = 0;
+    std::uint32_t firstVersion = 0;
+    std::uint32_t secondVersion = 0;
+};
+
+struct MergeCandidateIsCheaper {
+    bool operator()(const MergeCandidate& left, const MergeCandidate& right) const {
+        if (left.growth != right.growth) {
+            return left.growth > right.growth;
+        }
+        if (left.unionArea != right.unionArea) {
+            return left.unionArea > right.unionArea;
+        }
+        if (left.first != right.first) {
+            return left.first > right.first;
+        }
+        return left.second > right.second;
+    }
+};
+
+// At most this many overlay rasters per page; above it everything is merged
+// into one page-bounded crop, which can never exceed the old full-page overlay.
+constexpr std::size_t kMaxOverlayRasters = 64;
+
+// Nearby lines and paragraphs collapse into blocks while far-apart objects keep
+// their small crops. A merge is allowed only while the union rectangle is at
+// most twice the two crops' combined area, so the raster budget stays within
+// twice the painted bounds; merges are taken cheapest-growth first.
+std::vector<OverlayGroup> MergeGroupsByArea(std::vector<OverlayGroup> groups) {
+    std::priority_queue<MergeCandidate, std::vector<MergeCandidate>, MergeCandidateIsCheaper> candidates;
+    const auto propose = [&groups, &candidates](std::size_t first, std::size_t second) {
+        if (first == second || !groups[first].alive || !groups[second].alive) {
+            return;
+        }
+        if (first > second) {
+            std::swap(first, second);
+        }
+        const double combinedArea = CropArea(groups[first].crop) + CropArea(groups[second].crop);
+        const double unionArea = CropArea(UnionCrop(groups[first].crop, groups[second].crop));
+        if (unionArea > combinedArea * 2.0) {
+            return;
+        }
+        candidates.push({ unionArea - combinedArea, unionArea, first, second,
+            groups[first].version, groups[second].version });
+    };
+
+    for (std::size_t first = 0; first < groups.size(); ++first) {
+        for (std::size_t second = first + 1; second < groups.size(); ++second) {
+            propose(first, second);
+        }
+    }
+
+    std::size_t aliveCount = groups.size();
+    while (aliveCount > 1 && !candidates.empty()) {
+        const MergeCandidate candidate = candidates.top();
+        candidates.pop();
+        if (!groups[candidate.first].alive || !groups[candidate.second].alive
+            || groups[candidate.first].version != candidate.firstVersion
+            || groups[candidate.second].version != candidate.secondVersion) {
+            continue;
+        }
+        const double combinedArea = CropArea(groups[candidate.first].crop)
+            + CropArea(groups[candidate.second].crop);
+        const double unionArea = CropArea(UnionCrop(groups[candidate.first].crop, groups[candidate.second].crop));
+        if (unionArea > combinedArea * 2.0) {
+            continue;
+        }
+
+        OverlayGroup& kept = groups[candidate.first];
+        OverlayGroup& removed = groups[candidate.second];
+        kept.crop = UnionCrop(kept.crop, removed.crop);
+        std::vector<std::size_t> mergedMembers;
+        mergedMembers.reserve(kept.members.size() + removed.members.size());
+        std::merge(kept.members.begin(), kept.members.end(), removed.members.begin(), removed.members.end(),
+            std::back_inserter(mergedMembers));
+        kept.members = std::move(mergedMembers);
+        ++kept.version;
+        removed.alive = false;
+        removed.members.clear();
+        --aliveCount;
+
+        for (std::size_t other = 0; other < groups.size(); ++other) {
+            if (other != candidate.first) {
+                propose(candidate.first, other);
+            }
+        }
+    }
+
+    if (aliveCount > kMaxOverlayRasters) {
+        OverlayGroup combined;
+        bool haveCombined = false;
+        for (OverlayGroup& group : groups) {
+            if (!group.alive) {
+                continue;
+            }
+            if (!haveCombined) {
+                combined = std::move(group);
+                haveCombined = true;
+                continue;
+            }
+            combined.crop = UnionCrop(combined.crop, group.crop);
+            std::vector<std::size_t> mergedMembers;
+            mergedMembers.reserve(combined.members.size() + group.members.size());
+            std::merge(combined.members.begin(), combined.members.end(), group.members.begin(), group.members.end(),
+                std::back_inserter(mergedMembers));
+            combined.members = std::move(mergedMembers);
+            group.alive = false;
+            group.members.clear();
+        }
+        if (haveCombined) {
+            groups.clear();
+            groups.push_back(std::move(combined));
+        }
+    }
+
+    groups.erase(std::remove_if(groups.begin(), groups.end(),
+                     [](const OverlayGroup& group) { return !group.alive; }),
+        groups.end());
+    return groups;
+}
+
 }  // namespace
 
 bool IsOpaqueBgra(const RasterImage& raster) {
@@ -281,29 +433,23 @@ std::vector<PlacedRaster> ComposeTextOverlayRasters(const Page& page, float rend
         }
     }
 
-    std::vector<std::vector<std::size_t>> groups;
+    std::vector<OverlayGroup> groups;
     std::vector<int> groupForRoot(items.size(), -1);
     for (std::size_t index = 0; index < items.size(); ++index) {
         const std::size_t root = FindGroupRoot(parents, index);
         if (groupForRoot[root] < 0) {
             groupForRoot[root] = static_cast<int>(groups.size());
-            groups.emplace_back();
+            groups.push_back({ items[index].crop, {}, true, 0 });
         }
-        groups[static_cast<std::size_t>(groupForRoot[root])].push_back(index);
+        groups[static_cast<std::size_t>(groupForRoot[root])].members.push_back(index);
     }
 
+    groups = MergeGroupsByArea(std::move(groups));
+
     rasters.reserve(groups.size());
-    for (const std::vector<std::size_t>& group : groups) {
-        OverlayCrop crop = items[group.front()].crop;
-        for (const std::size_t itemIndex : group) {
-            const OverlayCrop& itemCrop = items[itemIndex].crop;
-            crop.left = std::min(crop.left, itemCrop.left);
-            crop.top = std::min(crop.top, itemCrop.top);
-            crop.right = std::max(crop.right, itemCrop.right);
-            crop.bottom = std::max(crop.bottom, itemCrop.bottom);
-        }
+    for (const OverlayGroup& group : groups) {
         const auto paintGroup = [&](QPainter& painter) {
-            for (const std::size_t itemIndex : group) {
+            for (const std::size_t itemIndex : group.members) {
                 const OverlayItem& item = items[itemIndex];
                 if (item.latex) {
                     render::PaintPageLatex(painter, page.latexes[item.objectIndex], renderScale, 1.0f);
@@ -313,7 +459,7 @@ std::vector<PlacedRaster> ComposeTextOverlayRasters(const Page& page, float rend
                 }
             }
         };
-        if (auto placed = ComposeOverlayRaster(page, crop, renderScale, paintGroup); placed.has_value()) {
+        if (auto placed = ComposeOverlayRaster(page, group.crop, renderScale, paintGroup); placed.has_value()) {
             rasters.push_back(std::move(*placed));
         }
     }
