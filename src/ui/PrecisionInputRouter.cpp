@@ -83,6 +83,7 @@ void PrecisionInputRouter::FinishGesture() {
     phase_ = GesturePhase::Idle;
     source_ = GestureSource::None;
     inertiaActive_ = false;
+    inertiaRoute_ = InertiaRoute::Unknown;
     gestureScale_ = 1.0;
     lastTouchCentroid_ = QPointF();
     touchStartDistance_ = 0.0;
@@ -122,7 +123,7 @@ void PrecisionInputRouter::HandleTouchpadSample(const TouchpadGestureSample& sam
             // Inertia frames keep arriving after the manipulation ended; they
             // pan the canvas exactly like the reference front end.  Without an
             // active manipulation (and without inertia) nothing is applied.
-            if (!sample.inertiaActive || !RoutesToCanvas(sample.screenAnchor)) {
+            if (!sample.inertiaActive || !InertiaRoutesToCanvas(sample.screenAnchor)) {
                 return;
             }
             SetInertiaActive(true);
@@ -287,15 +288,23 @@ bool PrecisionInputRouter::HandleTouchCancel() {
 void PrecisionInputRouter::SetInertiaActive(bool active) {
     inertiaActive_ = active;
     if (!active) {
-        // Inertia ended: Qt's own events are authoritative again, so stale
-        // suppression must not outlive it (also when it coasted past the
-        // manipulation's End).
+        // Inertia ended: the next coast resolves its own route, and Qt's own
+        // events are authoritative again, so stale suppression must not
+        // outlive it (also when it coasted past the manipulation's End).
+        inertiaRoute_ = InertiaRoute::Unknown;
         suppression_ = Suppression {};
     }
 }
 
 bool PrecisionInputRouter::RoutesToCanvas(const QPoint& globalPosition) const {
     return sink_.RoutePrecisionInput(globalPosition) == PrecisionInputRoute::Canvas;
+}
+
+bool PrecisionInputRouter::InertiaRoutesToCanvas(const QPoint& globalPosition) {
+    if (inertiaRoute_ == InertiaRoute::Unknown) {
+        inertiaRoute_ = RoutesToCanvas(globalPosition) ? InertiaRoute::Canvas : InertiaRoute::PassThrough;
+    }
+    return inertiaRoute_ == InertiaRoute::Canvas;
 }
 
 }  // namespace cnote::ui

@@ -309,7 +309,11 @@ QtMainWindow::QtMainWindow(cnote::AppManager& manager, QWidget* parent)
     precisionTouchpad_ = std::make_unique<ui::PrecisionTouchpadQt>(*canvas_);
     precisionFilter_ = std::make_unique<ui::PrecisionInputFilterQt>(precisionTouchpad_->Router());
     canvas_->installEventFilter(precisionFilter_.get());
-    precisionTouchpad_->Install(winId());
+    // Create the native window the adapter binds to, then hand it the real
+    // QWindow: the adapter maps gesture coordinates through it and uses its
+    // HWND only for the Win32 interaction context.
+    winId();
+    precisionTouchpad_->Install(windowHandle());
 #endif
 
     connect(canvas_, &ui::CanvasWidget::ViewportChanged, this, &QtMainWindow::UpdateChrome);
