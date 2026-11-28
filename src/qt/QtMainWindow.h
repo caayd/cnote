@@ -265,6 +265,12 @@ private:
     // A dialog edit is a delta against this: unrelated fields must not rebuild
     // shortcut actions or reapply the shell (PERF-043).
     settings::Settings appliedSettings_ {};
+    // A quick-size drag or text edit has changed the live brush size but not
+    // yet the file.  The release writes once; a failed write restores this
+    // value (PERF-008).
+    bool quickSizePending_ = false;
+    settings::Tool quickSizePendingTool_ = settings::Tool::Draw;
+    float quickSizeBaseline_ = 0.0f;
     // The canvas_backdrop last handed to ui::ApplyWindowBackdrop.
     std::optional<settings::CanvasBackdrop> appliedBackdrop_ {};
     settings::Tool activeTool_ = settings::Tool::Draw;

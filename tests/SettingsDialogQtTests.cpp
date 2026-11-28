@@ -4,7 +4,8 @@
 // edits, key events) and asserts the observable contract: the legacy control
 // inventory, palette add/remove/hex/HSL/named-palette semantics, drawing
 // clamping, zoom/quick-size/brush-preset parsing, shortcut capture and duplicate
-// clearing, immediate apply plus persistence, refresh-on-open, modeless
+// clearing, live apply during a slider drag with one persistent write on
+// release, discrete edits persisting immediately, refresh-on-open, modeless
 // ownership, tab order and deterministic screenshots.
 
 #include <QApplication>
@@ -345,9 +346,27 @@ void DrawingOperations(const std::filesystem::path& scratch) {
     Check(settings.drawCursorSize == 24.0f, "draw cursor size maps directly");
 
     auto* autoSave = Find<QSlider>(dialog, "autoSaveSlider");
+    auto* autoSaveLabel = Find<QLabel>(dialog, "autoSaveLabel");
+    // A held drag keeps the raw handle position and previews the 15 s bucket in
+    // the readout; the interval reaches the model (and the app-wide auto-save
+    // deadline) only on release.
+    autoSave->setSliderDown(true);
     autoSave->setValue(37);
-    Check(settings.autoSaveIntervalSeconds == 30U, "auto save snaps to the nearest 15 seconds");
-    Check(autoSave->value() == 30, "auto save slider shows the snapped value");
+    Check(settings.autoSaveIntervalSeconds == 60U, "an auto-save drag leaves the live interval untouched");
+    Check(autoSave->value() == 37, "the auto-save handle keeps the raw drag position");
+    Check(autoSaveLabel->text() == QStringLiteral("30 sec"), "the readout shows the snapped bucket during the drag");
+    const std::string beforeRelease = ReadFile(path);
+    autoSave->setValue(41);
+    Check(settings.autoSaveIntervalSeconds == 60U, "later auto-save buckets also stay out of the live model");
+    Check(autoSaveLabel->text() == QStringLiteral("45 sec"), "the readout follows the next bucket");
+    Check(ReadFile(path) == beforeRelease, "an auto-save drag writes nothing before release");
+    autoSave->setSliderDown(false);
+    Check(settings.autoSaveIntervalSeconds == 45U, "release applies the dragged bucket to the model");
+    Check(autoSave->value() == 45, "release snaps the auto-save handle to the bucket");
+    Check(s::SettingsStoreQt(path).Load().autoSaveIntervalSeconds == 45U, "release persists the bucket");
+    autoSave->setValue(37);
+    Check(settings.autoSaveIntervalSeconds == 30U, "a discrete auto-save step commits the bucket immediately");
+    Check(autoSave->value() == 30, "a discrete auto-save step shows the snapped value");
     autoSave->setValue(290);
     Check(settings.autoSaveIntervalSeconds == 285U, "auto save snaps near the cap");
     autoSave->setValue(0);
@@ -575,6 +594,104 @@ void RefreshAndOwnership(const std::filesystem::path& scratch) {
     Check(store.Load().inputSpacing == appliedSpacing, "closing keeps the persisted value");
 }
 
+// 5b. A held drag applies live and writes the file exactly once, on release.
+void DragCommitsOnceOnRelease(const std::filesystem::path& scratch) {
+    namespace s = cnote::settings;
+    const std::filesystem::path path = scratch / "drag-settings.ini";
+    s::Settings settings = MakeSettings({ 0xFF000000U });
+    const s::SettingsStoreQt store(path);
+    cnote::ui::SettingsDialogQt dialog(settings, store, nullptr);
+    Check(store.Save(settings), "drag baseline save succeeds");
+    const std::string before = ReadFile(path);
+
+    int changed = 0;
+    QObject::connect(&dialog, &cnote::ui::SettingsDialogQt::settingsChanged, [&] { ++changed; });
+    auto* spacing = Find<QSlider>(dialog, "spacingSlider");
+    auto* label = Find<QLabel>(dialog, "spacingLabel");
+    spacing->setSliderDown(true);
+    for (int tick = 0; tick < 60; ++tick) {
+        const int value = 100 + tick;  // 1.00 .. 1.59 page units
+        spacing->setValue(value);
+        Check(settings.inputSpacing == static_cast<float>(value) / 100.0f, "each drag tick applies live");
+        Check(label->text() == cnote::ui::FormatSpacingLabel(static_cast<float>(value) / 100.0f),
+            "each drag tick updates the readout");
+        Check(ReadFile(path) == before, "no drag tick writes the settings file");
+    }
+    Check(changed == 60, "a 60-tick drag emits one live change per effective tick");
+    spacing->setSliderDown(false);
+    Check(ReadFile(path) != before, "release writes the settings file");
+    Check(store.Load().inputSpacing == 1.59f, "release persists the final live value");
+    Check(changed == 61, "release applies the persisted model once more");
+
+    // Palette HSL drags follow the same live/commit split: the swatch follows
+    // the pointer, and the file changes only on release.
+    auto* lightness = Find<QSlider>(dialog, "lightnessSlider");
+    auto* saturation = Find<QSlider>(dialog, "saturationSlider");
+    lightness->setValue(50);
+    Check(settings.palette[0] == 0xFF808080U, "a discrete HSL step reaches the live palette");
+    const std::string beforeHslDrag = ReadFile(path);
+    saturation->setSliderDown(true);
+    saturation->setValue(100);
+    Check(settings.palette[0] == cnote::ui::HslToColor(0.0f, 1.0f, 0.5f),
+        "an HSL drag applies the live palette colour");
+    Check(ReadFile(path) == beforeHslDrag, "an HSL drag writes nothing before release");
+    auto* paletteList = Find<QListWidget>(dialog, "paletteList");
+    auto* item = paletteList->item(0);
+    Check(item != nullptr && item->text().contains(cnote::ui::FormatHexColor(settings.palette[0])),
+        "the palette entry shows the live drag colour");
+    saturation->setSliderDown(false);
+    Check(ReadFile(path) != beforeHslDrag, "releasing the HSL slider writes the palette");
+    Check(store.Load().palette == settings.palette, "HSL release persists the live colour");
+}
+
+// 5c. Hiding or closing the dialog mid-drag persists the live value.
+void HideOrCloseMidDragPersists(const std::filesystem::path& scratch) {
+    namespace s = cnote::settings;
+    const std::filesystem::path path = scratch / "flush-settings.ini";
+    s::Settings settings = MakeSettings({ 0xFF000000U });
+    const s::SettingsStoreQt store(path);
+    cnote::ui::SettingsDialogQt dialog(settings, store, nullptr);
+    Check(store.Save(settings), "flush baseline save succeeds");
+
+    auto* spacing = Find<QSlider>(dialog, "spacingSlider");
+    dialog.show();
+    QApplication::processEvents();
+    spacing->setSliderDown(true);
+    spacing->setValue(290);
+    Check(settings.inputSpacing == 2.9f, "the dragged value is live before hiding");
+    dialog.hide();
+    Check(settings.inputSpacing == 2.9f, "hiding keeps the dragged value in the live model");
+    Check(store.Load().inputSpacing == 2.9f, "hiding mid-drag persists the dragged value");
+    spacing->setSliderDown(false);
+    Check(store.Load().inputSpacing == 2.9f, "the later release does not write a second value");
+
+    dialog.show();
+    QApplication::processEvents();
+    spacing->setSliderDown(true);
+    spacing->setValue(280);
+    Check(settings.inputSpacing == 2.8f, "the dragged value is live before closing");
+    dialog.close();
+    Check(settings.inputSpacing == 2.8f, "closing keeps the dragged value in the live model");
+    Check(store.Load().inputSpacing == 2.8f, "closing mid-drag persists the dragged value");
+    spacing->setSliderDown(false);
+
+    // The auto-save interval is model-committed on release/flush too, not while
+    // the drag is held.
+    auto* autoSave = Find<QSlider>(dialog, "autoSaveSlider");
+    dialog.show();
+    QApplication::processEvents();
+    const unsigned int committedInterval = settings.autoSaveIntervalSeconds;
+    autoSave->setSliderDown(true);
+    autoSave->setValue(120);
+    Check(settings.autoSaveIntervalSeconds == committedInterval,
+        "an auto-save drag leaves the model untouched before hiding");
+    dialog.hide();
+    Check(settings.autoSaveIntervalSeconds == 120U, "hiding commits the previewed auto-save bucket");
+    Check(store.Load().autoSaveIntervalSeconds == 120U, "hiding mid auto-save drag persists the bucket");
+    autoSave->setSliderDown(false);
+    Check(store.Load().autoSaveIntervalSeconds == 120U, "the later auto-save release writes no second value");
+}
+
 // 6. A failed persist reports failure, keeps the file and leaves live settings unchanged.
 void FailedPersist(const std::filesystem::path& scratch) {
     namespace s = cnote::settings;
@@ -601,19 +718,24 @@ void FailedPersist(const std::filesystem::path& scratch) {
 
     const float beforeSpacing = settings.inputSpacing;
     auto* spacing = Find<QSlider>(dialog, "spacingSlider");
+    auto* spacingLabel = Find<QLabel>(dialog, "spacingLabel");
     spacing->setSliderDown(true);
     spacing->setValue(300);
-    Check(settings.inputSpacing == beforeSpacing, "failed persist leaves the live settings unchanged");
-    Check(spacing->value() == static_cast<int>(std::lround(beforeSpacing * 100.0f)),
-        "failed persist restores the control to the live value");
-    Check(!dialog.lastSaveSucceeded(), "failed persist reports failure");
-    Check(saveFailures == 1, "failed persist emits settingsSaveFailed once");
+    Check(settings.inputSpacing == 3.0f, "a drag tick applies the live value before any write");
+    Check(spacingLabel->text() == cnote::ui::FormatSpacingLabel(3.0f), "the readout follows the live drag value");
+    Check(saveFailures == 0, "no write is attempted during the drag");
     spacing->setValue(320);
-    Check(settings.inputSpacing == beforeSpacing, "a second failing tick keeps the live settings unchanged");
-    Check(saveFailures == 1, "one failed mouse drag reports its write failure once, not per tick");
+    Check(settings.inputSpacing == 3.2f, "later drag ticks keep applying live");
+    Check(ReadFile(dest) == previous, "the drag leaves the file untouched until release");
     spacing->setSliderDown(false);
+    Check(!dialog.lastSaveSucceeded(), "the failed release write reports failure");
+    Check(saveFailures == 1, "a failed release emits settingsSaveFailed once, not per tick");
+    Check(settings.inputSpacing == beforeSpacing, "a failed release restores the last persisted value");
+    Check(spacing->value() == static_cast<int>(std::lround(beforeSpacing * 100.0f)),
+        "a failed release restores the control to the persisted value");
     spacing->setValue(310);
     Check(saveFailures == 2, "a keyboard-style tick after a failed drag reports again");
+    Check(settings.inputSpacing == beforeSpacing, "the failed discrete tick keeps the live settings unchanged");
     auto* autoHide = Find<QCheckBox>(dialog, "autoHideToolbarCheck");
     autoHide->setChecked(!autoHide->isChecked());
     Check(saveFailures == 3, "a separate failed edit reports its own write failure");
@@ -753,6 +875,8 @@ int main(int argc, char** argv) {
     DrawingOperations(scratch);
     ShortcutCaptureOperations(scratch);
     RefreshAndOwnership(scratch);
+    DragCommitsOnceOnRelease(scratch);
+    HideOrCloseMidDragPersists(scratch);
     FailedPersist(scratch);
     UnchangedTicksDoNotPersist(scratch);
     TabOrderAndScreenshots(scratch);

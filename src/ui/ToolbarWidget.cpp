@@ -288,11 +288,23 @@ public:
     [[nodiscard]] bool SliderDragging() const { return dragging_; }
     [[nodiscard]] float BrushSize() const { return brushSize_; }
 
-    // Hiding the popup abandons an in-flight drag or text edit; otherwise a
-    // later reopen would paint the stale active thumb and keep the auto-hide
-    // guard raised through QuickSizeSliderDragging().
-    void ResetInteraction() {
+    // Ends a held drag and asks the owner to write the final value.  The live
+    // value already reached the model tick by tick.
+    void CommitPendingDrag() {
+        if (!dragging_) {
+            return;
+        }
         dragging_ = false;
+        owner_->OnQuickSizeCommitted(tool_, brushSize_);
+        update();
+    }
+
+    // Hiding the popup abandons an in-flight text edit but commits a held drag
+    // (its live value must not be left unpersisted); otherwise a later reopen
+    // would paint the stale active thumb and keep the auto-hide guard raised
+    // through QuickSizeSliderDragging().
+    void ResetInteraction() {
+        CommitPendingDrag();
         editing_ = false;
         editText_.clear();
         update();
@@ -395,9 +407,8 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent* event) override {
         if (dragging_ && event->button() == Qt::LeftButton) {
-            dragging_ = false;
             owner_->OnQuickSizeChanged(tool_, brushSize_);
-            update();
+            CommitPendingDrag();
         }
     }
 
@@ -481,6 +492,7 @@ private:
         if (ok && parsed > 0.0f) {
             brushSize_ = SnapQuickSizeValue(parsed, sliderMax_, presets_);
             owner_->OnQuickSizeChanged(tool_, brushSize_);
+            owner_->OnQuickSizeCommitted(tool_, brushSize_);
         }
         CancelEdit();
     }
@@ -1443,6 +1455,13 @@ void ToolbarWidget::SetSettings(const settings::Settings& settings) {
     if (activeOverlay_ == OverlayId::PaletteWheel && paletteWheel_ != nullptr) {
         paletteWheel_->SetEntries(settings_.palette, PaletteWheelDisplayedTools(), settings_.colorIndex, paletteWheel_->ZoomPresetMode(), settings_.zoomPresets);
     }
+    // An external model change (including a failed quick-size write being
+    // reverted) must also reach an open brush popup, which owns its own copy of
+    // the displayed value.  A live drag is not affected: its shell handler
+    // applies the widget's own value instead of calling SetSettings.
+    if (activeOverlay_ == OverlayId::QuickSize && quickSizePopup_ != nullptr) {
+        UpdateQuickSizePopupState(quickSizePopup_->tool_);
+    }
     if (!settings_.autoHideToolbar) {
         SetRevealTarget(true, /*animate=*/false);
     } else if (!wasAutoHide) {
@@ -2292,6 +2311,15 @@ void ToolbarWidget::PositionOverlays() {
     }
 }
 
+void ToolbarWidget::UpdateQuickSizePopupState(settings::Tool tool) {
+    if (quickSizePopup_ == nullptr) {
+        return;
+    }
+    const float brushSize = tool == settings::Tool::Erase ? settings_.eraseBrushSize : settings_.drawBrushSize;
+    quickSizePopup_->SetState(tool, brushSize, settings_.quickSizeSliderMax, settings_.brushSizePresets,
+        tool == settings::Tool::Erase ? 0xFFFFFFFFU : (settings_.palette.empty() ? 0xFF1F2937U : settings_.palette[settings_.colorIndex % settings_.palette.size()]));
+}
+
 void ToolbarWidget::ShowQuickSizePopup(settings::Tool tool, const QPointF& hostAnchor) {
     EnsureOverlays();
     const QRectF canvas = HostCanvasRect();
@@ -2299,13 +2327,18 @@ void ToolbarWidget::ShowQuickSizePopup(settings::Tool tool, const QPointF& hostA
     const qt::QuickSizePopupLayout layout = qt::BuildQuickSizePopupLayout(
         canvas, hostAnchor, PreviewExtent(tool, brushSize, pageScale_));
     quickSizePopup_->Configure(layout, qt::QuickSizePopupBounds(layout).toAlignedRect());
-    quickSizePopup_->SetState(tool, brushSize, settings_.quickSizeSliderMax, settings_.brushSizePresets,
-        tool == settings::Tool::Erase ? 0xFFFFFFFFU : (settings_.palette.empty() ? 0xFF1F2937U : settings_.palette[settings_.colorIndex % settings_.palette.size()]));
+    UpdateQuickSizePopupState(tool);
     OpenOverlay(OverlayId::QuickSize);
 }
 
 void ToolbarWidget::HideQuickSizePopup() {
     CloseOverlay(OverlayId::QuickSize);
+}
+
+void ToolbarWidget::CommitPendingQuickSize() {
+    if (quickSizePopup_ != nullptr) {
+        quickSizePopup_->CommitPendingDrag();
+    }
 }
 
 bool ToolbarWidget::QuickSizePopupVisible() const {
@@ -2536,6 +2569,10 @@ void ToolbarWidget::OnQuickSizeChanged(settings::Tool tool, float size) {
         settings_.drawBrushSize = size;
     }
     emit BrushSizeChanged(tool, size);
+}
+
+void ToolbarWidget::OnQuickSizeCommitted(settings::Tool tool, float size) {
+    emit BrushSizeCommitted(tool, size);
 }
 
 void ToolbarWidget::OnTextFormatChanged() {

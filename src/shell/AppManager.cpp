@@ -339,6 +339,22 @@ void AppManager::ApplyAutoSaveIntervalTo(const std::shared_ptr<ProjectSession>& 
     StartDeadline(state, RemainingMs(state));
 }
 
+void AppManager::BackdateAutoSaveDirtySinceForTesting(
+    const std::shared_ptr<ProjectSession>& session,
+    std::chrono::steady_clock::duration age) {
+    if (!session) {
+        return;
+    }
+    const auto existing = autoSave_.find(session.get());
+    if (existing == autoSave_.end() || !existing->second.dirtySince) {
+        return;
+    }
+    AutoSaveState& state = existing->second;
+    state.dirtySince = SteadyClock::now() - age;
+    state.timer->stop();
+    StartDeadline(state, RemainingMs(state));
+}
+
 void AppManager::UpdateAutoSaveTimer(const std::shared_ptr<ProjectSession>& session) {
     if (!session) {
         return;

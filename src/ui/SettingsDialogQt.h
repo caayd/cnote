@@ -32,12 +32,17 @@ namespace cnote::ui {
 // KeyBindingQt).
 //
 // The legacy dialog had no OK/Cancel: every edit is applied to the live model
-// and persisted immediately (SaveAppSettings), and closing it changed nothing
-// further.  This dialog keeps that behaviour: `settings` is the application's
-// model.  An edit is staged into a copy, clamped, saved, and only then assigned
-// to `settings`; `settingsChanged()` is emitted after a successful edit.  A
-// failed persist therefore leaves the live model and the controls unchanged and
-// reports the failure through lastSaveSucceeded() and settingsSaveFailed().
+// and closing it changed nothing further.  This dialog keeps that behaviour:
+// `settings` is the application's model.  A discrete edit (keyboard, wheel,
+// checkbox, combo, text field) is staged into a copy, clamped, saved, and only
+// then assigned to `settings`; a failed persist leaves the live model and the
+// controls unchanged.  A slider drag instead applies each tick to `settings`
+// directly and emits settingsChanged() so the shell follows live, then writes
+// the file once on release; the auto-save slider is the exception, previewing
+// its 15 s bucket in the readout only and committing the interval on release
+// so the manager's deadline is never re-derived mid-drag.  A failed release
+// write reverts the live values to the last persisted model.  Failures are
+// reported through lastSaveSucceeded() and settingsSaveFailed().
 class CNOTE_UI_EXPORT SettingsDialogQt : public QDialog {
     Q_OBJECT
 
@@ -82,6 +87,10 @@ public:
     void beginShortcutCapture(settings::ShortcutAction action);
     void clearSelectedShortcut();
 
+    // Writes a drag that is still in progress when the dialog hides or closes
+    // (or its window does), so a live value is never left unpersisted.
+    void flushPendingDrag();
+
 signals:
     void settingsChanged();
     void settingsSaveFailed(const QString& reason);
@@ -106,11 +115,21 @@ private:
     void connectCheck(QCheckBox* check, bool settings::Settings::*field);
 
     // Stages `candidate`, clamps it, saves it, and only applies it to the live
-    // model on success.  Returns whether the settings were applied.
-    // `continuation` marks another tick of the same multi-tick interaction (a
-    // slider drag): a failing write reports once for the interaction instead of
-    // once per tick.  One-shot edits leave it false so they can report again.
-    bool persist(settings::Settings candidate, bool continuation = false);
+    // model on success.  Returns whether the settings were applied.  Reports a
+    // failed write immediately; a drag writes once, so its failure is reported
+    // once.
+    bool persist(settings::Settings candidate);
+
+    // Records the last persisted model before the first live drag tick, then
+    // writes the whole model once when the drag ends.  A failed write reverts
+    // every value the drag changed and reports once.
+    void beginDrag();
+    void commitDrag();
+    // Commits the auto-save slider: the drag's readout was live, but the
+    // interval reaches the model and the manager only here (release, or a
+    // flush on hide/close).
+    void commitAutoSaveDrag();
+    void syncAutoSaveControls();
     void notifyShortcutHint();
 
     void refreshPaletteControls(bool syncSliders);
@@ -127,7 +146,7 @@ private:
     void addPaletteColor();
     void removePaletteColor();
     void applyHexColorEdit();
-    void applyHueSaturationLightness(bool continuation);
+    void applyHueSaturationLightness();
     void saveNamedPalette();
     void applySelectedNamedPalette();
     void deleteSelectedNamedPalette();
@@ -146,9 +165,9 @@ private:
     settings::SettingsStoreQt store_;
     bool lastSaveSucceeded_ = true;
     QString lastSaveError_ {};
-    // Set after a failed write has been reported; the rest of that interaction
-    // is silent (the shell's error dialog is modal and must not stack).
-    bool saveFailureReported_ = false;
+    // The model as it was persisted before the current drag's first live tick.
+    // Present only while a drag has changed something that still needs a write.
+    std::optional<settings::Settings> dragBaseline_;
     bool refreshing_ = false;
     CaptureState captureState_ {};
 

@@ -186,6 +186,8 @@ public:
     [[nodiscard]] QRectF HostCanvasRect() const;
     void ShowQuickSizePopup(settings::Tool tool, const QPointF& hostAnchor);
     void HideQuickSizePopup();
+    // Writes a quick-size drag that is still held when the host window closes.
+    void CommitPendingQuickSize();
     [[nodiscard]] bool QuickSizePopupVisible() const;
     [[nodiscard]] QRect QuickSizePopupBounds() const;
     [[nodiscard]] bool QuickSizeSliderDragging() const;
@@ -258,7 +260,12 @@ signals:
     // The reference palette "..." picker (App::OpenToolbarPaletteSwapMenu).
     void PalettePickerRequested();
     void ZoomTextCommitted(const QString& text);
+    // A live brush-size change while the quick-size popup is dragged or typed
+    // into; the shell applies it to its model and visuals but writes nothing.
     void BrushSizeChanged(settings::Tool tool, float size);
+    // The interaction ended (pointer release, committed text edit, or a hide
+    // that flushes a held drag); the shell writes the one settings file.
+    void BrushSizeCommitted(settings::Tool tool, float size);
     void TextAlignCycleRequested();
     void TextBoldToggleRequested();
     void TextItalicToggleRequested();
@@ -304,7 +311,9 @@ private:
     [[nodiscard]] bool MayShowOverlay(OverlayId id) const;
     void EnsureOverlays();
     void PositionOverlays();
+    void UpdateQuickSizePopupState(settings::Tool tool);
     void OnQuickSizeChanged(settings::Tool tool, float size);
+    void OnQuickSizeCommitted(settings::Tool tool, float size);
     void OnTextFormatChanged();
     void OnPaletteSelection(std::size_t index);
     void OnPaletteToolSelection(settings::Tool tool);

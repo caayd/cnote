@@ -105,6 +105,13 @@ public:
     [[nodiscard]] std::size_t AutoSaveTimerCount() const noexcept { return autoSave_.size(); }
     [[nodiscard]] bool IsAutoSaveTimerActive(const std::shared_ptr<ProjectSession>& session) const;
 
+    // Test-only: moves the session's maximum-age clock back by `age` so a
+    // deadline can be made due without sleeping for the configured interval.
+    // Production code never calls this.
+    void BackdateAutoSaveDirtySinceForTesting(
+        const std::shared_ptr<ProjectSession>& session,
+        std::chrono::steady_clock::duration age);
+
     // Same-file lookup rule: filesystem equivalence for existing paths, then
     // normalized absolute paths; Windows-only case-insensitive fallback, exact
     // spelling on POSIX.

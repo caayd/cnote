@@ -96,6 +96,12 @@ void ClampSettings(settings::Settings& values) {
     values.textSizePreset = std::min(values.textSizePreset, settings::kTextSizePresetCount - 1U);
 }
 
+// Auto-save slider positions snap to 15-second buckets; 0 is Off.
+unsigned int AutoSaveBucket(int sliderValue) {
+    return static_cast<unsigned int>(
+        std::clamp(std::lround(static_cast<float>(sliderValue) / 15.0f) * 15, 0L, 300L));
+}
+
 // Settings pages are a column of titled groups.  Every form label gets the same
 // minimum width so the fields of all groups on a page line up.
 constexpr int kFormLabelWidth = 140;
@@ -302,11 +308,12 @@ void SettingsDialogQt::buildPalettePage() {
     connect(removeColorButton_, &QPushButton::clicked, this, [this] { removePaletteColor(); });
     connect(hexColorEdit_, &QLineEdit::editingFinished, this, [this] { applyHexColorEdit(); });
     for (QSlider* slider : { hueSlider_, saturationSlider_, lightnessSlider_ }) {
-        connect(slider, &QSlider::valueChanged, this, [this, slider](int) {
+        connect(slider, &QSlider::valueChanged, this, [this](int) {
             if (!refreshing_) {
-                applyHueSaturationLightness(slider->isSliderDown());
+                applyHueSaturationLightness();
             }
         });
+        connect(slider, &QSlider::sliderReleased, this, [this] { commitDrag(); });
     }
     connect(savedPaletteNameEdit_, &QLineEdit::textChanged, this, [this](const QString&) { refreshSavedPaletteButtons(); });
     connect(savePaletteButton_, &QPushButton::clicked, this, [this] { saveNamedPalette(); });
@@ -317,26 +324,36 @@ void SettingsDialogQt::buildPalettePage() {
 }
 
 // Connects a slider whose value is `field * scale` in the settings model.
-// A tick that maps back to the stored value writes nothing (auto-save snapping
-// and stored fractions can both produce a no-op drag tick); a changed tick
-// persists immediately and updates only its own readout.  Only the ticks of a
-// held drag share one failure report; keyboard/wheel steps are discrete edits.
+// While the pointer drags the handle every tick updates the live model and the
+// readout, but writes nothing; the file is written once on release (PERF-008).
+// Keyboard/wheel steps and programmatic changes arrive with the handle up and
+// persist immediately.  A tick that maps back to the stored value does nothing,
+// so snapping and stored fractions cannot cause a no-op write.
 void SettingsDialogQt::connectScaledSlider(QSlider* slider, float settings::Settings::*field, float scale, QLabel* label,
     QString (*formatLabel)(float)) {
     connect(slider, &QSlider::valueChanged, this, [this, slider, field, scale, label, formatLabel](int value) {
         if (refreshing_) return;
-        if (static_cast<float>(value) / scale == settings_.*field) {
+        const float target = static_cast<float>(value) / scale;
+        if (target == settings_.*field) {
+            label->setText(formatLabel(settings_.*field));
             return;
         }
-        settings::Settings candidate = settings_;
-        candidate.*field = static_cast<float>(value) / scale;
-        if (!persist(std::move(candidate), /*continuation=*/slider->isSliderDown())) {
-            // The live model kept the previous value; put the tick back.
-            const QSignalBlocker block(slider);
-            slider->setValue(static_cast<int>(std::lround(settings_.*field * scale)));
+        if (slider->isSliderDown()) {
+            beginDrag();
+            settings_.*field = target;
+            emit settingsChanged();
+        } else {
+            settings::Settings candidate = settings_;
+            candidate.*field = target;
+            if (!persist(std::move(candidate))) {
+                // The live model kept the previous value; put the tick back.
+                const QSignalBlocker block(slider);
+                slider->setValue(static_cast<int>(std::lround(settings_.*field * scale)));
+            }
         }
         label->setText(formatLabel(settings_.*field));
     });
+    connect(slider, &QSlider::sliderReleased, this, [this] { commitDrag(); });
 }
 
 void SettingsDialogQt::connectCheck(QCheckBox* check, bool settings::Settings::*field) {
@@ -539,6 +556,10 @@ void SettingsDialogQt::buildDocumentsPage() {
         if (refreshing_) return;
         applyAutoSaveSlider();
     });
+    // The handle shows the raw drag position while held; it snaps to the
+    // committed 15 s bucket (the live readout already showed that value) when
+    // the pointer is released, and only then is the model/file written.
+    connect(autoSaveSlider_, &QSlider::sliderReleased, this, [this] { commitAutoSaveDrag(); });
     connectCheck(embedProjectInPdfCheck_, &settings::Settings::embedProjectInExportedPdfs);
 }
 
@@ -761,29 +782,63 @@ void SettingsDialogQt::notifyShortcutHint() {
 
 // --- edits -------------------------------------------------------------------
 
-bool SettingsDialogQt::persist(settings::Settings candidate, bool continuation) {
-    if (!continuation) {
-        saveFailureReported_ = false;
-    }
+bool SettingsDialogQt::persist(settings::Settings candidate) {
     ClampSettings(candidate);
     lastSaveSucceeded_ = store_.Save(candidate);
     if (lastSaveSucceeded_) {
         settings_ = std::move(candidate);
         lastSaveError_.clear();
-        saveFailureReported_ = false;
         emit settingsChanged();
     } else {
         lastSaveError_ = QStringLiteral("Could not write %1")
                              .arg(QString::fromStdString(store_.path().string()));
-        // A drag ticks many times; one unreachable file would otherwise stack
-        // one error dialog per tick.  The fallback controls still revert each
-        // tick, so only the first report belongs to the interaction.
-        if (!saveFailureReported_) {
-            emit settingsSaveFailed(lastSaveError_);
-            saveFailureReported_ = true;
-        }
+        emit settingsSaveFailed(lastSaveError_);
     }
     return lastSaveSucceeded_;
+}
+
+void SettingsDialogQt::beginDrag() {
+    // The baseline is the model as last persisted; every drag tick after this
+    // mutates settings_ in place so the shell can follow it live.  Only one
+    // pointer drag exists at a time, so one snapshot covers it.
+    if (!dragBaseline_.has_value()) {
+        dragBaseline_ = settings_;
+    }
+}
+
+void SettingsDialogQt::commitDrag() {
+    if (!dragBaseline_.has_value()) {
+        return;
+    }
+    settings::Settings baseline = std::move(*dragBaseline_);
+    dragBaseline_.reset();
+    if (settings_ == baseline) {
+        // The drag returned to the persisted model (or every tick was a no-op
+        // bucket); there is nothing effective to write.
+        return;
+    }
+    settings::Settings candidate = settings_;
+    if (persist(std::move(candidate))) {
+        return;
+    }
+    // A failed write leaves the previous file intact; take the live model and
+    // every control back to it, and let the shell repaint the reverted state.
+    settings_ = std::move(baseline);
+    refreshFromSettings();
+    emit settingsChanged();
+}
+
+void SettingsDialogQt::syncAutoSaveControls() {
+    const QSignalBlocker block(autoSaveSlider_);
+    autoSaveSlider_->setValue(static_cast<int>(settings_.autoSaveIntervalSeconds));
+    autoSaveLabel_->setText(FormatAutoSaveLabel(DecodeAutoSaveInterval(settings_.autoSaveIntervalSeconds)));
+}
+
+void SettingsDialogQt::flushPendingDrag() {
+    commitDrag();
+    if (autoSaveSlider_ != nullptr && autoSaveSlider_->isSliderDown()) {
+        commitAutoSaveDrag();
+    }
 }
 
 std::optional<std::size_t> SettingsDialogQt::selectedSavedPaletteIndex() const {
@@ -873,7 +928,7 @@ void SettingsDialogQt::applyHexColorEdit() {
     refreshPaletteControls(true);
 }
 
-void SettingsDialogQt::applyHueSaturationLightness(bool continuation) {
+void SettingsDialogQt::applyHueSaturationLightness() {
     if (settings_.palette.empty() || settings_.paletteIndex >= settings_.palette.size()) {
         return;
     }
@@ -887,11 +942,18 @@ void SettingsDialogQt::applyHueSaturationLightness(bool continuation) {
         refreshSelectedColorControls(false);
         return;
     }
-    settings::Settings candidate = settings_;
-    candidate.palette[candidate.paletteIndex] = color;
-    if (!persist(std::move(candidate), continuation)) {
-        refreshSelectedColorControls(true);
-        return;
+    const bool dragging = hueSlider_->isSliderDown() || saturationSlider_->isSliderDown()
+        || lightnessSlider_->isSliderDown();
+    if (dragging) {
+        beginDrag();
+        settings_.palette[settings_.paletteIndex] = color;
+    } else {
+        settings::Settings candidate = settings_;
+        candidate.palette[candidate.paletteIndex] = color;
+        if (!persist(std::move(candidate))) {
+            refreshSelectedColorControls(true);
+            return;
+        }
     }
 
     if (QListWidgetItem* item = paletteList_->item(static_cast<int>(settings_.paletteIndex)); item != nullptr) {
@@ -899,6 +961,9 @@ void SettingsDialogQt::applyHueSaturationLightness(bool continuation) {
         item->setText(FormatPaletteEntry(settings_.paletteIndex, color));
     }
     refreshSelectedColorControls(false);
+    if (dragging) {
+        emit settingsChanged();
+    }
 }
 
 void SettingsDialogQt::saveNamedPalette() {
@@ -1052,25 +1117,35 @@ void SettingsDialogQt::applyTextSizePresetEdit(QLineEdit* edit, std::size_t inde
 
 
 void SettingsDialogQt::applyAutoSaveSlider() {
-    const int value = autoSaveSlider_->value();
-    const unsigned int seconds = static_cast<unsigned int>(
-        std::clamp(std::lround(static_cast<float>(value) / 15.0f) * 15, 0L, 300L));
-    if (seconds == settings_.autoSaveIntervalSeconds) {
-        // The slider moved within one snap bucket; nothing effective changed.
-        if (autoSaveSlider_->value() != static_cast<int>(settings_.autoSaveIntervalSeconds)) {
-            const QSignalBlocker block(autoSaveSlider_);
-            autoSaveSlider_->setValue(static_cast<int>(settings_.autoSaveIntervalSeconds));
-        }
+    const unsigned int seconds = AutoSaveBucket(autoSaveSlider_->value());
+    if (autoSaveSlider_->isSliderDown()) {
+        // Live drag: only the readout follows the bucket and the handle keeps
+        // the raw pointer position.  The model (and therefore the app-wide
+        // auto-save deadline) is deliberately untouched: unlike the other
+        // sliders there is no visual to preview, and re-deriving the manager's
+        // maximum dirty age mid-drag could fire a real auto-save for a bucket
+        // the user is only passing through.  sliderReleased() commits.
+        autoSaveLabel_->setText(FormatAutoSaveLabel(DecodeAutoSaveInterval(seconds)));
         return;
     }
-    settings::Settings candidate = settings_;
-    candidate.autoSaveIntervalSeconds = seconds;
-    persist(std::move(candidate), /*continuation=*/autoSaveSlider_->isSliderDown());
-    if (autoSaveSlider_->value() != static_cast<int>(settings_.autoSaveIntervalSeconds)) {
-        const QSignalBlocker block(autoSaveSlider_);
-        autoSaveSlider_->setValue(static_cast<int>(settings_.autoSaveIntervalSeconds));
+    if (seconds != settings_.autoSaveIntervalSeconds) {
+        settings::Settings candidate = settings_;
+        candidate.autoSaveIntervalSeconds = seconds;
+        persist(std::move(candidate));
     }
-    autoSaveLabel_->setText(FormatAutoSaveLabel(DecodeAutoSaveInterval(settings_.autoSaveIntervalSeconds)));
+    // Keyboard/wheel steps are discrete edits: snap the handle to the bucket
+    // immediately (or back to the stored value when nothing changed/failed).
+    syncAutoSaveControls();
+}
+
+void SettingsDialogQt::commitAutoSaveDrag() {
+    const unsigned int seconds = AutoSaveBucket(autoSaveSlider_->value());
+    if (seconds != settings_.autoSaveIntervalSeconds) {
+        settings::Settings candidate = settings_;
+        candidate.autoSaveIntervalSeconds = seconds;
+        persist(std::move(candidate));
+    }
+    syncAutoSaveControls();
 }
 
 // --- shortcuts ---------------------------------------------------------------
@@ -1170,11 +1245,13 @@ void SettingsDialogQt::showEvent(QShowEvent* event) {
 
 void SettingsDialogQt::hideEvent(QHideEvent* event) {
     cancelShortcutCapture();
+    flushPendingDrag();
     QDialog::hideEvent(event);
 }
 
 void SettingsDialogQt::closeEvent(QCloseEvent* event) {
     cancelShortcutCapture();
+    flushPendingDrag();
     QDialog::closeEvent(event);
 }
 

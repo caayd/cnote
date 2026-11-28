@@ -36,6 +36,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -106,6 +107,19 @@ std::string Describe(const cnote::settings::ShortcutAction action) {
     const cnote::settings::ShortcutDefinition* definition = cnote::settings::FindShortcutDefinition(action);
     return definition != nullptr ? std::string(definition->label) : std::string("?");
 }
+
+// A session view with no widgets, registered on the shell's manager so the
+// auto-save deadline can be observed independently of the window's document.
+class AutoSaveStubView : public QObject, public cnote::SessionView {
+public:
+    bool interactionActive = false;
+
+    [[nodiscard]] bool IsInteractionActive() const override { return interactionActive; }
+    void FinishInteraction() override {}
+    void OnSessionChanged(const cnote::ProjectChange&, bool) override {}
+    [[nodiscard]] std::size_t CurrentPageIndex() const override { return 0; }
+    void SetCurrentPageIndex(std::size_t) override {}
+};
 
 // The shell's live state, reached through the same public seam the app uses.
 struct Harness {
@@ -1129,9 +1143,9 @@ void SidebarPageKeysActOnTheSelection() {
     Check(controller.DocumentRef().PageCount() == 4U, "Ctrl+X cuts the selected (pasted) pages");
 }
 
-// A quick-size drag reports the same snapped size for several pointer samples;
-// only a real change may rewrite the settings file (PERF-008).
-void UnchangedQuickSizeTicksDoNotWrite() {
+// A quick-size drag applies every pointer sample live; only the release writes
+// the settings file, exactly once (PERF-008).
+void QuickSizeDragWritesOnRelease() {
     Harness harness;
     const std::filesystem::path path = cnote::settings::SettingsStoreQt::ResolveSettingsPath();
 
@@ -1147,15 +1161,140 @@ void UnchangedQuickSizeTicksDoNotWrite() {
         std::fclose(file);
     }
 
-    // The same effective size again: the handler must not touch the file.
+    // A repeated sample and a changed sample are both still inside the drag:
+    // the handler updates the live model but must not touch the file.
     emit harness.toolbar->BrushSizeChanged(cnote::settings::Tool::Draw, 7.5f);
     QApplication::processEvents();
     Check(ReadText(path) == "sentinel\n", "a repeated quick-size tick writes nothing");
-
     emit harness.toolbar->BrushSizeChanged(cnote::settings::Tool::Draw, 9.0f);
     QApplication::processEvents();
+    Check(ReadText(path) == "sentinel\n", "a changed quick-size drag tick writes nothing");
+
+    emit harness.toolbar->BrushSizeCommitted(cnote::settings::Tool::Draw, 9.0f);
+    QApplication::processEvents();
     Check(cnote::settings::SettingsStoreQt(path).Load().drawBrushSize == 9.0f,
-        "a changed quick-size tick still persists immediately");
+        "the quick-size release persists the final size");
+}
+
+// Closing the window while a settings slider is still held writes the live
+// value before the window goes away (PERF-008).
+void WindowCloseFlushesHeldSettingsDrag() {
+    Harness harness;
+    harness.window->SetCloseDecisionProvider([] { return cnote::qt::CloseDecision::Discard; });
+    QAction* settingsAction = nullptr;
+    for (QAction* action : harness.window->findChildren<QAction*>()) {
+        if (action->text() == QStringLiteral("Settings...")) {
+            settingsAction = action;
+            break;
+        }
+    }
+    Check(settingsAction != nullptr, "the Settings command exists for the close test");
+    if (settingsAction == nullptr) {
+        return;
+    }
+    settingsAction->trigger();
+    QApplication::processEvents();
+    auto* dialog = harness.window->findChild<cnote::ui::SettingsDialogQt*>();
+    Check(dialog != nullptr, "the settings dialog opens for the close test");
+    if (dialog == nullptr) {
+        return;
+    }
+    auto* spacing = dialog->findChild<QSlider*>(QStringLiteral("spacingSlider"));
+    Check(spacing != nullptr, "the spacing slider exists for the close test");
+    if (spacing == nullptr) {
+        return;
+    }
+
+    spacing->setSliderDown(true);
+    spacing->setValue(290);
+    Check(dialog->settings().inputSpacing == 2.9f, "the settings drag is live before the window closes");
+
+    harness.window->close();
+    QApplication::processEvents();
+    Check(cnote::settings::SettingsStoreQt(cnote::settings::SettingsStoreQt::ResolveSettingsPath())
+                  .Load()
+                  .inputSpacing
+            == 2.9f,
+        "a window close persists a held settings drag");
+    spacing->setSliderDown(false);
+}
+
+// A transient auto-save bucket must not re-derive the manager's maximum dirty
+// age mid-drag: an already-overdue session would auto-save (and report) for a
+// value the user is only passing through.  Only the committed release may
+// re-arm the deadline (PERF-008, #61).
+void AutoSaveDragDoesNotReArmTheManager() {
+    Harness harness;
+    // Open the dialog through the title menu, as the user does, and start from
+    // a known 60 s committed interval regardless of earlier scratch settings.
+    QAction* settingsAction = nullptr;
+    for (QAction* action : harness.window->findChildren<QAction*>()) {
+        if (action->text() == QStringLiteral("Settings...")) {
+            settingsAction = action;
+            break;
+        }
+    }
+    Check(settingsAction != nullptr, "the Settings command exists for the auto-save test");
+    if (settingsAction == nullptr) {
+        return;
+    }
+    settingsAction->trigger();
+    QApplication::processEvents();
+    auto* dialog = harness.window->findChild<cnote::ui::SettingsDialogQt*>();
+    Check(dialog != nullptr, "the settings dialog opens for the auto-save test");
+    if (dialog == nullptr) {
+        return;
+    }
+    auto* autoSave = dialog->findChild<QSlider*>(QStringLiteral("autoSaveSlider"));
+    Check(autoSave != nullptr, "the auto-save slider exists for the auto-save test");
+    if (autoSave == nullptr) {
+        return;
+    }
+    autoSave->setValue(60);
+    QApplication::processEvents();
+    Check(dialog->settings().autoSaveIntervalSeconds == 60U, "the auto-save test starts from 60 s");
+
+    // A dirty session whose deadline is already overdue: 20 s of dirty age
+    // against a 60 s committed interval.  A live 15 s bucket would make the
+    // remaining age 0 and fire immediately.
+    auto session = std::make_shared<cnote::ProjectSession>();
+    session->document.SetFilePath(
+        cnote::settings::SettingsStoreQt::ResolveSettingsPath().parent_path() / "autosave-drag-stub.cnote");
+    session->dirty = true;
+    AutoSaveStubView view;
+    harness.manager.RegisterView(&view, &view, session);
+    harness.manager.BackdateAutoSaveDirtySinceForTesting(session, std::chrono::seconds(20));
+    Check(harness.manager.IsAutoSaveTimerActive(session), "the overdue dirty session is armed");
+    int autoSaves = 0;
+    harness.manager.SetAutoSaveHandler(
+        [&](const std::shared_ptr<cnote::ProjectSession>&, QObject*) { ++autoSaves; });
+
+    autoSave->setSliderDown(true);
+    autoSave->setValue(0);
+    QApplication::processEvents();
+    Check(dialog->settings().autoSaveIntervalSeconds == 60U, "Off is only previewed while dragging");
+    Check(harness.manager.AutoSaveInterval() == 60U, "dragging through Off does not push a transient interval");
+    Check(harness.manager.IsAutoSaveTimerActive(session), "dragging through Off does not disarm the deadline");
+    autoSave->setValue(15);
+    QTest::qWait(40);
+    Check(dialog->settings().autoSaveIntervalSeconds == 60U, "the transient bucket stays out of the live model");
+    Check(harness.manager.AutoSaveInterval() == 60U, "the transient bucket never reaches the manager");
+    Check(autoSaves == 0, "a transient 15 s bucket does not auto-save the overdue session");
+
+    autoSave->setSliderDown(false);
+    QTest::qWait(60);
+    Check(harness.manager.AutoSaveInterval() == 15U, "release pushes the committed bucket to the manager");
+    Check(autoSaves == 1, "the committed due bucket auto-saves after release");
+
+    autoSave->setSliderDown(true);
+    autoSave->setValue(45);
+    autoSave->setSliderDown(false);
+    QTest::qWait(60);
+    Check(harness.manager.AutoSaveInterval() == 45U, "a longer release commits 45 s");
+    Check(autoSaves == 1, "a committed bucket later than the dirty age is not due");
+
+    autoSave->setValue(60);
+    harness.manager.UnregisterView(&view);
 }
 
 // --- 4b. settings edits only rebuild what they touch -------------------------
@@ -1458,7 +1597,9 @@ int main(int argc, char** argv) {
     SettingsTableShortcutsAreBoundAndFire();
     UndoRedoFireWhenApplicable();
     SettingsEditsKeepUnrelatedActions();
-    UnchangedQuickSizeTicksDoNotWrite();
+    QuickSizeDragWritesOnRelease();
+    WindowCloseFlushesHeldSettingsDrag();
+    AutoSaveDragDoesNotReArmTheManager();
     RemappedBindingIsHonoured();
     DuplicateFileBindingsStayUnambiguous();
 
