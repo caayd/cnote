@@ -177,6 +177,47 @@ std::vector<Vec2> Loops(Vec2 origin, int loops) {
     return path;
 }
 
+bool SameScratch(const std::optional<ScratchOut>& a, const std::optional<ScratchOut>& b) {
+    if (a.has_value() != b.has_value()) {
+        return false;
+    }
+    if (!a.has_value()) {
+        return true;
+    }
+    if (a->hull.size() != b->hull.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < a->hull.size(); ++index) {
+        if (a->hull[index].x != b->hull[index].x || a->hull[index].y != b->hull[index].y) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The canvas recognizes the growing stroke through ScratchOutTracker on every
+// pointer sample.  It shares the resampler and pass test with the one-shot
+// reference, so every prefix must also agree on the cached hull.
+void CheckIncrementalParity(const std::string& what, const std::vector<Vec2>& points) {
+    cnote::ScratchOutTracker tracker;
+    int mismatches = 0;
+    for (std::size_t count = 1; count <= points.size(); ++count) {
+        tracker.Append(points[count - 1U]);
+        const std::vector<Vec2> prefix(points.begin(), points.begin() + static_cast<long>(count));
+        if (!SameScratch(RecognizeScratchOut(prefix), tracker.Recognize())) {
+            ++mismatches;
+            if (mismatches == 1) {
+                Check(false, what + ": prefix " + std::to_string(count) + " differs from the one-shot recognizer");
+            }
+        }
+    }
+    if (mismatches == 0) {
+        Check(true, what + ": every prefix matches the one-shot recognizer");
+    } else {
+        Check(false, what + ": " + std::to_string(mismatches) + " of " + std::to_string(points.size()) + " prefixes differ");
+    }
+}
+
 // Every seed must give `expected`; reports the first mismatch.
 void CheckEverySeed(const std::string& what, bool expected, const std::vector<Vec2>& ideal, float amplitude) {
     int hits = 0;
@@ -259,6 +300,29 @@ int main() {
             { 160.0f, 140.0f }, 20.0f * kPi / 180.0f);
         Check(!scratch->CoversArea({ { below[0], below[1], below[2], below[3] } }, 1.5f),
             "a rotated box mostly below the scratch is not covered");
+    }
+
+    // --- incremental parity -------------------------------------------------
+    // The live canvas recognizes every prefix through ScratchOutTracker; it
+    // must match the one-shot reference on scratches, handwriting and shapes
+    // alike (including the first sample where nothing is recognized).
+    CheckIncrementalParity("scratch over a word", overWord);
+    CheckIncrementalParity("rounded scratch",
+        Polyline(RoundCorners(HorizontalZigzag(100.0f, 220.0f, 100.0f, 130.0f, 6), 0.08f)));
+    CheckIncrementalParity("vertical scratch", Polyline(VerticalZigzag(100.0f, 190.0f, 100.0f, 130.0f, 10)));
+    CheckIncrementalParity("short scratch", Polyline(HorizontalZigzag(100.0f, 125.0f, 100.0f, 112.0f, 4)));
+    CheckIncrementalParity("angled scratch", Rotated(overWord, { 160.0f, 115.0f }, 35.0f * kPi / 180.0f));
+    CheckIncrementalParity("three passes", Polyline(HorizontalZigzag(100.0f, 220.0f, 100.0f, 130.0f, 3)));
+    CheckIncrementalParity("\"vvvv\"", Polyline(VerticalZigzag(100.0f, 220.0f, 100.0f, 130.0f, 8)));
+    CheckIncrementalParity("cursive \"mmm\"", Polyline(CursiveM({ 100.0f, 100.0f }, 30.0f, 6.0f, 3)));
+    CheckIncrementalParity("loops", Polyline(Loops({ 100.0f, 100.0f }, 5)));
+    CheckIncrementalParity("straight line", Polyline({ { 100.0f, 100.0f }, { 300.0f, 140.0f } }));
+    CheckIncrementalParity("circle", Polyline(ArcPoints({ 200.0f, 200.0f }, 50.0f, 0.0f, 2.0f * kPi)));
+    for (int seed = 1; seed <= 4; ++seed) {
+        CheckIncrementalParity("hand-drawn scratch, seed " + std::to_string(seed),
+            HandDrawn(overWord, 1.5f, static_cast<std::uint32_t>(seed)));
+        CheckIncrementalParity("hand-drawn \"mmm\", seed " + std::to_string(seed),
+            HandDrawn(Polyline(CursiveM({ 100.0f, 100.0f }, 30.0f, 6.0f, 3)), 0.5f, static_cast<std::uint32_t>(seed)));
     }
 
     std::printf("%s\n", g_failures == 0 ? "All scratch-out tests passed." : "Scratch-out tests FAILED.");

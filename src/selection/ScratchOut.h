@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <optional>
 #include <vector>
 
@@ -32,6 +33,41 @@ struct ScratchOut {
     [[nodiscard]] bool CoversArea(const std::array<Vec2, 4>& corners, float margin) const;
 };
 
+// One-shot recognition; the reference definition of the gesture.
 [[nodiscard]] std::optional<ScratchOut> RecognizeScratchOut(const std::vector<Vec2>& points);
+
+// Incremental recognition for the freehand stroke that is being drawn.
+//
+// It owns the authoritative raw samples and their prefix arc lengths, both
+// updated in constant time per append.  Recognition locates the evenly spaced
+// samples by arc length instead of replaying the prefix, so the per-sample
+// cost does not grow with the stroke, and the result is identical to
+// RecognizeScratchOut for the same prefix.
+class ScratchOutTracker {
+public:
+    void Reset();
+    void Append(Vec2 point);
+
+    [[nodiscard]] bool Empty() const { return points_.empty(); }
+    [[nodiscard]] const std::vector<Vec2>& Points() const { return points_; }
+
+    [[nodiscard]] std::optional<ScratchOut> Recognize();
+
+private:
+    std::vector<Vec2> points_;
+    // Arc length from points_.front() to each point; arcLengths_[0] is 0.
+    std::vector<float> arcLengths_;
+    // Reused by every recognition call, which runs once per pointer sample.
+    // `sampleSegments_[k]` is the raw segment holding sample k; sample arc
+    // positions only grow with the stroke, so each cursor moves forward.
+    std::vector<Vec2> samples_;
+    std::vector<std::size_t> sampleSegments_;
+    std::vector<float> projections_;
+    // The last recognized hull and the raw points it covers; a growing
+    // prefix whose new points stay inside it cannot change it.
+    ScratchOut result_;
+    std::size_t hullPointCount_ = 0;
+    std::vector<Vec2> hullWork_;
+};
 
 }  // namespace cnote

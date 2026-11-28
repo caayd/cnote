@@ -44,40 +44,6 @@ float AngleBetween(Vec2 a, Vec2 b) {
     return std::atan2(std::abs(Cross(a, b)), Dot(a, b));
 }
 
-float PathLength(const std::vector<Vec2>& points) {
-    float length = 0.0f;
-    for (std::size_t index = 1; index < points.size(); ++index) {
-        length += Distance(points[index - 1], points[index]);
-    }
-    return length;
-}
-
-// `count` points evenly spaced along the path, first and last kept.
-std::vector<Vec2> Resample(const std::vector<Vec2>& points, float length, std::size_t count) {
-    const float step = length / static_cast<float>(count - 1U);
-    std::vector<Vec2> samples { points.front() };
-    samples.reserve(count);
-    float walked = 0.0f;  // distance since the last sample
-    Vec2 previous = points.front();
-    for (std::size_t index = 1; index < points.size() && samples.size() + 1U < count; ++index) {
-        const Vec2 current = points[index];
-        float segment = Distance(previous, current);
-        while (walked + segment >= step && samples.size() + 1U < count) {
-            const Vec2 sample = Lerp(previous, current, (step - walked) / segment);
-            samples.push_back(sample);
-            segment -= step - walked;
-            previous = sample;
-            walked = 0.0f;
-        }
-        walked += segment;
-        previous = current;
-    }
-    while (samples.size() < count) {
-        samples.push_back(points.back());
-    }
-    return samples;
-}
-
 // The axis the stroke mostly moves along, either way: the principal direction
 // of its step vectors.
 Vec2 DominantAxis(const std::vector<Vec2>& samples) {
@@ -127,9 +93,10 @@ std::vector<std::size_t> PassEnds(const std::vector<float>& t, float hysteresis)
 }
 
 // Andrew's monotone chain; counter-clockwise, no repeated first point.
-std::vector<Vec2> ConvexHull(std::vector<Vec2> points) {
+// `points` is sorted in place; both buffers are reused by incremental callers.
+void ConvexHullInto(std::vector<Vec2>& points, std::vector<Vec2>& hull) {
     std::sort(points.begin(), points.end(), [](Vec2 a, Vec2 b) { return a.x < b.x || (a.x == b.x && a.y < b.y); });
-    std::vector<Vec2> hull(points.size() * 2U);
+    hull.resize(points.size() * 2U);
     std::size_t size = 0;
     for (std::size_t index = 0; index < points.size(); ++index) {
         while (size >= 2U && Cross(Sub(hull[size - 1U], hull[size - 2U]), Sub(points[index], hull[size - 2U])) <= 0.0f) {
@@ -146,7 +113,30 @@ std::vector<Vec2> ConvexHull(std::vector<Vec2> points) {
         hull[size++] = point;
     }
     hull.resize(size > 1U ? size - 1U : size);
+}
+
+std::vector<Vec2> ConvexHull(std::vector<Vec2> points) {
+    std::vector<Vec2> hull;
+    ConvexHullInto(points, hull);
     return hull;
+}
+
+// Whether adding `point` leaves the (already built) hull's vertices alone: it
+// is inside or on the boundary.  A point strictly inside cannot become a
+// vertex, and a point on an edge is dropped as collinear without changing the
+// remaining vertices, so the existing hull stays exactly correct.
+bool InsideOrOnHull(const std::vector<Vec2>& hull, Vec2 point) {
+    if (hull.size() < 3U) {
+        return false;
+    }
+    for (std::size_t index = 0; index < hull.size(); ++index) {
+        const Vec2 a = hull[index];
+        const Vec2 b = hull[(index + 1U) % hull.size()];
+        if (Cross(Sub(b, a), Sub(point, a)) < 0.0f) {
+            return false;
+        }
+    }
+    return true;
 }
 
 float DistanceToSegment(Vec2 point, Vec2 a, Vec2 b) {
@@ -166,6 +156,74 @@ bool HullContains(const std::vector<Vec2>& hull, Vec2 point, float margin) {
         nearest = std::min(nearest, DistanceToSegment(point, a, b));
     }
     return inside || nearest <= margin;
+}
+
+// The evenly spaced samples along the path, located through the prefix arc
+// lengths instead of walking the raw points.  Sample k sits at arc length
+// k * length / (kSampleCount - 1), which only grows as the stroke does, so
+// each sample's raw segment cursor moves forward: an append costs the new
+// point plus the cursors it crossed, never a replay of the prefix.
+void ResamplePrefix(const std::vector<Vec2>& points, const std::vector<float>& arcLengths,
+    float length, std::vector<std::size_t>& sampleSegments, std::vector<Vec2>& samples) {
+    const float step = length / static_cast<float>(kSampleCount - 1U);
+    if (sampleSegments.size() < kSampleCount) {
+        sampleSegments.assign(kSampleCount, 1U);
+    }
+    samples.clear();
+    samples.reserve(kSampleCount);
+    samples.push_back(points.front());
+    for (std::size_t index = 1; index + 1U < kSampleCount; ++index) {
+        const float target = step * static_cast<float>(index);
+        std::size_t segment = sampleSegments[index];
+        // `segment` is the first raw point past `target`; both only grow.
+        while (segment < points.size() && arcLengths[segment] <= target) {
+            ++segment;
+        }
+        sampleSegments[index] = segment;
+        if (segment >= points.size()) {
+            samples.push_back(points.back());
+            continue;
+        }
+        const float segmentLength = arcLengths[segment] - arcLengths[segment - 1U];
+        const float t = segmentLength > 0.0f
+            ? std::clamp((target - arcLengths[segment - 1U]) / segmentLength, 0.0f, 1.0f)
+            : 0.0f;
+        samples.push_back(Lerp(points[segment - 1U], points[segment], t));
+    }
+    while (samples.size() < kSampleCount) {
+        samples.push_back(points.back());
+    }
+}
+
+// The pass test that both the one-shot and incremental recognizers share, so
+// only the resampling differs between them.  `projections` is scratch.
+bool IsScratchOut(const std::vector<Vec2>& samples, std::vector<float>& projections) {
+    const Vec2 axis = DominantAxis(samples);
+    projections.resize(samples.size());
+    float lowest = Dot(samples.front(), axis), highest = lowest;
+    for (std::size_t index = 0; index < samples.size(); ++index) {
+        projections[index] = Dot(samples[index], axis);
+        lowest = std::min(lowest, projections[index]);
+        highest = std::max(highest, projections[index]);
+    }
+    const std::vector<std::size_t> ends = PassEnds(projections, kReversalHysteresis * (highest - lowest));
+    // n passes have n + 1 ends and n - 1 reversals.
+    if (ends.size() < static_cast<std::size_t>(kScratchOutMinReversals) + 2U) {
+        return false;
+    }
+    for (std::size_t pass = 1; pass + 1U < ends.size(); ++pass) {
+        const std::size_t before = ends[pass - 1U], turn = ends[pass], after = ends[pass + 1U];
+        if (AngleBetween(Sub(samples[turn], samples[before]), Sub(samples[after], samples[turn])) < kMinPassTurn) {
+            return false;
+        }
+        const auto window = std::max<std::size_t>(1U,
+            static_cast<std::size_t>(kTurnWindow * static_cast<float>(std::min(turn - before, after - turn))));
+        if (AngleBetween(Sub(samples[turn], samples[turn - window]), Sub(samples[turn + window], samples[turn]))
+            < kMinLocalTurn) {
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace
@@ -216,37 +274,70 @@ std::optional<ScratchOut> RecognizeScratchOut(const std::vector<Vec2>& points) {
     if (points.size() < 2U) {
         return std::nullopt;
     }
-    const float length = PathLength(points);
+    std::vector<float> arcLengths(points.size(), 0.0f);
+    for (std::size_t index = 1; index < points.size(); ++index) {
+        arcLengths[index] = arcLengths[index - 1U] + Distance(points[index - 1U], points[index]);
+    }
+    const float length = arcLengths.back();
     if (length < kMinStrokeLength) {
         return std::nullopt;
     }
-    const std::vector<Vec2> samples = Resample(points, length, kSampleCount);
-    const Vec2 axis = DominantAxis(samples);
-    std::vector<float> t(samples.size());
-    float lowest = Dot(samples.front(), axis), highest = lowest;
-    for (std::size_t index = 0; index < samples.size(); ++index) {
-        t[index] = Dot(samples[index], axis);
-        lowest = std::min(lowest, t[index]);
-        highest = std::max(highest, t[index]);
-    }
-    const std::vector<std::size_t> ends = PassEnds(t, kReversalHysteresis * (highest - lowest));
-    // n passes have n + 1 ends and n - 1 reversals.
-    if (ends.size() < static_cast<std::size_t>(kScratchOutMinReversals) + 2U) {
+    // The same resampler as the incremental tracker, so the reference and the
+    // live path can never drift apart; only the caching differs.
+    std::vector<std::size_t> sampleSegments;
+    std::vector<Vec2> samples;
+    ResamplePrefix(points, arcLengths, length, sampleSegments, samples);
+    std::vector<float> projections;
+    if (!IsScratchOut(samples, projections)) {
         return std::nullopt;
     }
-    for (std::size_t pass = 1; pass + 1U < ends.size(); ++pass) {
-        const std::size_t before = ends[pass - 1U], turn = ends[pass], after = ends[pass + 1U];
-        if (AngleBetween(Sub(samples[turn], samples[before]), Sub(samples[after], samples[turn])) < kMinPassTurn) {
-            return std::nullopt;
-        }
-        const auto window = std::max<std::size_t>(1U,
-            static_cast<std::size_t>(kTurnWindow * static_cast<float>(std::min(turn - before, after - turn))));
-        if (AngleBetween(Sub(samples[turn], samples[turn - window]), Sub(samples[turn + window], samples[turn]))
-            < kMinLocalTurn) {
-            return std::nullopt;
-        }
-    }
     return ScratchOut { ConvexHull(points) };
+}
+
+void ScratchOutTracker::Reset() {
+    points_.clear();
+    arcLengths_.clear();
+    samples_.clear();
+    sampleSegments_.clear();
+    projections_.clear();
+    result_.hull.clear();
+    hullPointCount_ = 0;
+    hullWork_.clear();
+}
+
+void ScratchOutTracker::Append(Vec2 point) {
+    float length = 0.0f;
+    if (!points_.empty()) {
+        length = arcLengths_.back() + Distance(points_.back(), point);
+    }
+    points_.push_back(point);
+    arcLengths_.push_back(length);
+}
+
+std::optional<ScratchOut> ScratchOutTracker::Recognize() {
+    if (points_.size() < 2U) {
+        return std::nullopt;
+    }
+    // The incremental length is the cheap gate: ticks never pay for
+    // resampling or hull work.
+    const float length = arcLengths_.back();
+    if (length < kMinStrokeLength) {
+        return std::nullopt;
+    }
+    ResamplePrefix(points_, arcLengths_, length, sampleSegments_, samples_);
+    if (!IsScratchOut(samples_, projections_)) {
+        return std::nullopt;
+    }
+    bool reuseHull = result_.hull.size() >= 3U && hullPointCount_ <= points_.size();
+    for (std::size_t index = hullPointCount_; reuseHull && index < points_.size(); ++index) {
+        reuseHull = InsideOrOnHull(result_.hull, points_[index]);
+    }
+    if (!reuseHull) {
+        hullWork_.assign(points_.begin(), points_.end());
+        ConvexHullInto(hullWork_, result_.hull);
+    }
+    hullPointCount_ = points_.size();
+    return result_;
 }
 
 }  // namespace cnote
