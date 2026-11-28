@@ -12,6 +12,7 @@
 #include <QCursor>
 #include <QPointF>
 #include <QRectF>
+#include <QRegion>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
@@ -183,7 +184,8 @@ public:
     void UpdateTransform(const QPointF& logical, Qt::KeyboardModifiers modifiers) override;
     void CommitTransform() override;
     void CancelTransform() override;
-    void UpdatePendingErase(const std::vector<ObjectRef>& pending) override;
+    void UpdatePendingErase(const std::vector<ObjectRef>& added,
+        const std::vector<ObjectRef>& removed) override;
     void CommitErase(const std::vector<ObjectRef>& pending) override;
     void CommitScratchOut(const std::vector<ObjectRef>& targets) override;
     void BeginTextEdit(std::size_t pageIndex, std::size_t textIndex) override;
@@ -280,6 +282,15 @@ public:
     [[nodiscard]] std::uint64_t LatexPreviewParseCount() const { return latexPreviewParses_; }
     [[nodiscard]] std::uint64_t OverlayPlacementCount() const { return overlayPlacements_; }
     [[nodiscard]] std::uint64_t LatexPopupRefreshCount() const { return latexPopupRefreshes_; }
+    // Erase-preview diagnostics: the marked object count, the retained fade
+    // patch (tile count and bytes), and how many tiles / device pixels the
+    // patch has rendered (a diff-based update renders only the changed
+    // objects' regions, not the growing union; PERF-016/PERF-017).
+    [[nodiscard]] std::size_t PendingEraseObjectCount() const;
+    [[nodiscard]] std::size_t PendingEraseTileCount() const;
+    [[nodiscard]] std::size_t PendingEraseTileBytes() const;
+    [[nodiscard]] std::uint64_t PendingEraseRenderCount() const { return erasePatchRenders_; }
+    [[nodiscard]] std::uint64_t PendingEraseRenderArea() const { return erasePatchRenderArea_; }
 
 signals:
     void ViewportChanged();
@@ -511,25 +522,71 @@ private:
     // The text-tool drag's box: its logical rect, and the dashed outline.
     [[nodiscard]] QRectF TextCreatePreviewRect() const;
     void PaintTextCreatePreview(QPainter& painter);
-    // Per-kind pending-erase index sets for one page; the renderer fades them
-    // (App.cpp:5572-5628 pendingErase*Indices_).
+    // Per-kind pending-erase index sets for one page, sorted per kind so the
+    // renderer fades objects by binary search (App.cpp:5572-5628
+    // pendingErase*Indices_).
     [[nodiscard]] render::PendingEraseIndices PendingEraseFor(std::size_t pageIndex) const;
-    // Page-space bounds of one pending-erase candidate (stroke bounds include
-    // the pen half-width), or nullopt when the ref is out of range.
-    [[nodiscard]] std::optional<QRectF> PendingEraseObjectBounds(const Page& page, const ObjectRef& object) const;
-    // Page-space union of a page's marked-object bounds: the region that must
-    // be re-rendered for the faded overlay.
-    [[nodiscard]] QRectF PendingErasePageRegion(std::size_t pageIndex) const;
+    // One rendered fade-patch tile: the page's pixels (marked objects at
+    // kPendingEraseObjectOpacity) for one page-device-pixel rect, rendered at
+    // a RegionAlignment-aligned origin so it composites exactly like the
+    // full-page raster it overlays.
+    struct PendingEraseTile {
+        QRect deviceRect;
+        QImage image;
+    };
+    // One page's pending-erase membership and fade patch.  `indices` is the
+    // marked set; the key fields (page epoch, transient generation, scale,
+    // DPR) decide when every tile is stale; `dirty` holds the device rects
+    // whose pixels changed since the last paint and must be re-rendered.
+    // `failed` records that a tile exceeded the raster budget, so the page
+    // paints vector-live until the key changes instead of retrying per frame.
+    struct PendingErasePage {
+        render::PendingEraseIndices indices;
+        std::uint64_t epoch = 0;
+        std::uint64_t transientGeneration = 0;
+        float scale = 0.0f;
+        float devicePixelRatio = 0.0f;
+        bool keyValid = false;
+        bool failed = false;
+        std::vector<PendingEraseTile> tiles;
+        QRegion dirty;
+    };
+    // Page-space bounds of one pending-erase candidate from the shared object
+    // bounds cache (stroke bounds include the pen half-width plus the preview's
+    // 2-unit ink margin), or nullopt when the ref is out of range.
+    [[nodiscard]] std::optional<QRectF> PendingEraseObjectBounds(
+        std::size_t pageIndex, const ObjectRef& object) const;
+    // Page-device-pixel rect covering `pageBounds` for this view, origin
+    // snapped down to render::RegionAlignment and clipped to the page raster.
+    [[nodiscard]] QRect PendingEraseDeviceRect(
+        const CanvasPageView& view, const Page& page, const QRectF& pageBounds) const;
+    // Widget-space rect of one page-device-pixel rect (the same 1:1 mapping
+    // the tile blit uses).
+    [[nodiscard]] QRect PendingEraseWidgetRect(const CanvasPageView& view, const QRect& device) const;
+    // Drops the page's tiles when its key changed and queues the marked
+    // objects' rects so the patch rebuilds at the new scale/content.
+    void SyncPendingEraseKey(std::size_t pageIndex, PendingErasePage& state, const CanvasPageView& view);
+    // Queues every marked object's device rect for a tile render.
+    void QueueAllPendingEraseTiles(std::size_t pageIndex, PendingErasePage& state, const CanvasPageView& view);
+    // Removes tiles overlapping `device` and queues their rects for a re-render
+    // at the new membership (their content included the changed object).
+    void InvalidatePendingEraseTiles(PendingErasePage& state, const QRect& device);
+    // Renders queued tiles and draws the page's fade patch over the blitted
+    // raster.  False means no reusable raster/patch applies in this paint.
+    bool PaintPendingErase(QPainter& painter, const CanvasPageView& view, const Page& page,
+        const QRect& clip);
+    // Releases every fade-patch tile and the membership they cover.
+    void ReleasePendingErase();
 
     // Widget-space dirty rect covering a page-unit region of `pageIndex`.
     [[nodiscard]] QRect PageRegionDirtyRect(std::size_t pageIndex, const QRectF& pageRect) const;
-    // Widget-space dirty rect covering every pending-erase object's bounds.
-    [[nodiscard]] QRect PendingEraseDirtyRect() const;
     // Widget-space dirty rect covering the live marquee/lasso overlay.
     [[nodiscard]] QRect OverlayDirtyRect() const;
     // Records a transient repaint region and queues it; InvalidateCanvas then
-    // repaints the accumulated region instead of the whole widget.
+    // repaints the accumulated region instead of the whole widget.  The region
+    // form keeps widely separated marks sparse (PERF-017).
     void MarkTransientDirty(const QRect& logical);
+    void MarkTransientDirty(const QRegion& logical);
 
     void BeginZoomSession(const QPointF& anchor);
     void EndZoomSession();
@@ -646,7 +703,10 @@ private:
         [[nodiscard]] bool Active() const { return mode != Mode::None; }
     };
     SelectionGesture selection_;
-    std::vector<ObjectRef> pendingErase_;
+    // Pending-erase membership and its fade patch, one entry per page with
+    // marked objects.  Index lists are kept sorted per kind for the renderer's
+    // binary-search opacity checks; tiles are diffed per changed object.
+    std::unordered_map<std::size_t, PendingErasePage> pendingErase_;
     // The erase drag's fading trail (widget logical coordinates), animated by
     // eraserTrailTimer_ until it has decayed; eraserTrailRect_ is the region
     // last painted with it, repainted on the next frame to clear old pixels.
@@ -745,8 +805,10 @@ private:
     GestureSurface gesture_ {};
     // Widget-space region the transient state has dirtied since the last
     // paint (live stroke growth, marquee drag, pending-erase marks);
-    // InvalidateCanvas repaints it instead of the whole widget.
-    QRect transientDirty_ {};
+    // InvalidateCanvas repaints it instead of the whole widget.  A QRegion
+    // keeps disjoint marks sparse instead of collapsing them to one bounding
+    // rect (PERF-017).
+    QRegion transientDirty_ {};
     LiveStrokeLayer strokeLayer_ {};
     // The pending stroke's raw samples run through its StrokeSampling as they
     // arrive: point-for-point what BuildStabilizedPath yields at commit, so
@@ -765,13 +827,15 @@ private:
     std::uint64_t latexPreviewParses_ = 0;
     std::uint64_t overlayPlacements_ = 0;
     std::uint64_t latexPopupRefreshes_ = 0;
-    // Pending-erase fade patch: re-rendered region of the page under the
-    // erase cursor, keyed by the page's signature (which includes the pending
-    // index lists) so drag samples blit instead of re-painting the page live.
-    std::size_t erasePatchPage_ = std::numeric_limits<std::size_t>::max();
-    std::uint64_t erasePatchSignature_ = 0;
-    QRectF erasePatchRegion_;
-    QImage erasePatch_;
+    // Document identity of the transient caches above: AttachSession swaps the
+    // ProjectSession's document under the same controller, so NotifyDocumentChanged
+    // compares this pointer and releases pending/gesture rasters that describe
+    // the old session (PERF-036).
+    const Document* sessionDocument_ = nullptr;
+    // Erase-preview work counters (PERF-016): tiles and device-pixel area the
+    // fade patch has rendered, cumulative over the widget's life.
+    std::uint64_t erasePatchRenders_ = 0;
+    std::uint64_t erasePatchRenderArea_ = 0;
 
     static constexpr std::size_t kScalesPerPage = 3;
 };

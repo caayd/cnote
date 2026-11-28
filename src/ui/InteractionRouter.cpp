@@ -460,13 +460,13 @@ void InteractionRouter::CancelInteraction() {
     switch (state_.kind) {
     case InteractionKind::Stroke:
         if (!state_.stroke.scratchTargets.empty()) {
-            host_.UpdatePendingErase({});
+            SetScratchTargets({});
         }
         host_.DiscardStroke();
         break;
     case InteractionKind::Erase:
         if (!state_.erase.pending.empty()) {
-            host_.UpdatePendingErase({});
+            host_.UpdatePendingErase({}, state_.erase.pending);
         }
         break;
     case InteractionKind::Select:
@@ -671,9 +671,32 @@ void InteractionRouter::RefreshScratchOutPreview() {
     if (targets == state_.stroke.scratchTargets) {
         return;
     }
-    state_.stroke.scratchTargets = std::move(targets);
-    host_.UpdatePendingErase(state_.stroke.scratchTargets);
+    SetScratchTargets(std::move(targets));
     host_.InvalidateCanvas();
+}
+
+void InteractionRouter::SetScratchTargets(std::vector<ObjectRef> targets) {
+    // Build membership sets so a refresh publishes only the changed marks:
+    // the canvas re-renders just those objects' regions (PERF-016).
+    const std::unordered_set<ObjectRef, ObjectRefHash> previous(
+        state_.stroke.scratchTargets.begin(), state_.stroke.scratchTargets.end());
+    const std::unordered_set<ObjectRef, ObjectRefHash> next(targets.begin(), targets.end());
+    std::vector<ObjectRef> added;
+    for (const ObjectRef& target : targets) {
+        if (previous.find(target) == previous.end()) {
+            added.push_back(target);
+        }
+    }
+    std::vector<ObjectRef> removed;
+    for (const ObjectRef& old : state_.stroke.scratchTargets) {
+        if (next.find(old) == next.end()) {
+            removed.push_back(old);
+        }
+    }
+    state_.stroke.scratchTargets = std::move(targets);
+    if (!added.empty() || !removed.empty()) {
+        host_.UpdatePendingErase(added, removed);
+    }
 }
 
 bool InteractionRouter::SnapStrokeToShape() {
@@ -710,6 +733,7 @@ void InteractionRouter::BeginErase(const QPointF& logical) {
         host_.ClearSelection();
     }
     state_.erase.pending.clear();
+    state_.erase.pendingSet.clear();
     state_.erase.lastPageIndex.reset();
     state_.kind = InteractionKind::Erase;
     UpdateCapture();
@@ -734,17 +758,17 @@ void InteractionRouter::ExtendErase(const QPointF& logical) {
         ? state_.erase.lastPagePoint
         : center;
 
-    bool changed = false;
+    std::vector<ObjectRef> added;
     for (const ObjectRef& target : host_.EraseTargetsAt(hit->pageIndex, start, center)) {
-        if (std::find(state_.erase.pending.begin(), state_.erase.pending.end(), target) == state_.erase.pending.end()) {
+        if (state_.erase.pendingSet.insert(target).second) {
             state_.erase.pending.push_back(target);
-            changed = true;
+            added.push_back(target);
         }
     }
     state_.erase.lastPageIndex = hit->pageIndex;
     state_.erase.lastPagePoint = center;
-    if (changed) {
-        host_.UpdatePendingErase(state_.erase.pending);
+    if (!added.empty()) {
+        host_.UpdatePendingErase(added, {});
         host_.InvalidateCanvas();
     }
 }
@@ -757,7 +781,7 @@ void InteractionRouter::EndErase(bool commit) {
     if (commit && !state_.erase.pending.empty()) {
         host_.CommitErase(state_.erase.pending);
     } else if (!state_.erase.pending.empty()) {
-        host_.UpdatePendingErase({});
+        host_.UpdatePendingErase({}, state_.erase.pending);
     }
     ResetInteraction();
     host_.InvalidateCanvas();

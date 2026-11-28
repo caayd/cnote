@@ -476,9 +476,10 @@ void PaintPage(QPainter& painter, const Page& page, const QPointF& pageOrigin, c
     PaintPageBackground(painter, page, params);
 
     // Pending-erase objects paint faded (App.cpp:9519-9568); everything else
-    // keeps full opacity.
+    // keeps full opacity.  The index lists are sorted, so membership is a
+    // binary search like the exclusion lists.
     const auto pendingOpacity = [](const std::vector<std::size_t>& pending, std::size_t index) {
-        return std::find(pending.begin(), pending.end(), index) != pending.end()
+        return std::binary_search(pending.begin(), pending.end(), index)
             ? kPendingEraseObjectOpacity
             : 1.0f;
     };

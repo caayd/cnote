@@ -181,6 +181,11 @@ CanvasWidget::CanvasWidget(CanvasController& controller, QWidget* parent)
 
     router_ = std::make_unique<InteractionRouter>(*this, InteractionTuning {});
 
+    // Bind the transient caches to the controller's current document now; a
+    // later AttachSession replaces it and NotifyDocumentChanged releases the
+    // old session's pending/gesture rasters (PERF-036).
+    sessionDocument_ = &controller_.DocumentRef();
+
     zoomSettleTimer_ = new QTimer(this);
     zoomSettleTimer_->setSingleShot(true);
     zoomSettleTimer_->setInterval(kZoomSessionDelayMs);
@@ -1450,6 +1455,20 @@ void CanvasWidget::NotifyDocumentChanged() {
     // each commit, which delayed the first frame of the next stroke by ~10
     // refresh intervals (measured on dense-1000x100 at a 0.8 s cadence).
     // Inserted, removed or resized pages move the layout under the viewport.
+    const Document* document = &controller_.DocumentRef();
+    if (document != sessionDocument_) {
+        // A different session (AttachSession swaps the document under the same
+        // controller): pending-erase refs, fade tiles and gesture rasters all
+        // describe the old document, so abandon them instead of carrying the
+        // buffers into the new one (PERF-036).
+        sessionDocument_ = document;
+        router_->CancelInteraction();
+        ReleasePendingErase();
+        gesture_ = GestureSurface {};
+        ResetStrokeLayer();
+        transformSession_.reset();
+        transientDirty_ = QRegion();
+    }
     SyncFocusedPage();
     update();
 }
@@ -1523,6 +1542,10 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
 
     const Document& document = controller_.DocumentRef();
     const QRectF clip = QRectF(event->rect());
+    // Sparse transient damage: test pages against the actual paint region, not
+    // its bounding rect, so a mark on page 1 and another on page 5 do not
+    // compose the pages between them (PERF-017).
+    const QRegion paintRegion = event->region();
     const std::vector<CanvasPageView> views = CalculatePageViews();
     // Caches are keyed to pages the user can see, not to this paint's clip: a
     // clipped repaint (live stroke segment, partial update) must never evict the
@@ -1557,6 +1580,9 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
             continue;
         }
         if (!view.rect.intersects(clip)) {
+            continue;
+        }
+        if (!paintRegion.intersects(view.rect.toAlignedRect())) {
             continue;
         }
         // A move/transform gesture mutates its selected objects in place
@@ -1615,6 +1641,9 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
             continue;
         }
         if (!view.rect.intersects(clip)) {
+            continue;
+        }
+        if (!paintRegion.intersects(view.rect.toAlignedRect())) {
             continue;
         }
 
@@ -1723,42 +1752,17 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                 render::PaintPage(painter, page, view.rect.topLeft(), params);
             }
         } else if (pageHasPendingErase) {
+            // The committed raster is still valid during an erase drag (marks
+            // only fade; nothing is deleted yet).  Blit it and overlay the
+            // per-object fade tiles the membership diff queued, instead of
+            // re-painting the whole page or the growing mark union.
             bool erasePatchReady = false;
             if (entry != nullptr && BlitSurface(painter, view, *entry, event->rect())) {
-                // Overlay the faded objects: one re-rendered patch keyed on the
-                // page signature (which covers the pending index lists), reused
-                // for every sample where the pending set is unchanged.
-                render::PageRenderParams params = RenderParamsFor(view);
-                params.pendingErase = pendingErase;
-                const std::uint64_t signature = render::PageSurfaceSignature(page, params);
-                if (erasePatch_.isNull() || erasePatchSignature_ != signature
-                    || erasePatchPage_ != view.pageIndex) {
-                    // RenderPageSurfaceRegion clamps to the page internally but
-                    // does not report the clamped rect, so clip here first or the
-                    // patch would land offset from its true position.
-                    erasePatchRegion_ = PendingErasePageRegion(view.pageIndex)
-                        .intersected(QRectF(0.0, 0.0, page.width, page.height));
-                    erasePatch_ = render::RenderPageSurfaceRegion(page, params, erasePatchRegion_);
-                    if (!erasePatch_.isNull()) {
-                        erasePatch_.setDevicePixelRatio(cachedDevicePixelRatio_);
-                    }
-                    erasePatchSignature_ = signature;
-                    erasePatchPage_ = view.pageIndex;
-                    ++surfaceRenders_;
-                }
-                erasePatchReady = !erasePatch_.isNull() && !erasePatchRegion_.isEmpty();
-                if (erasePatchReady) {
-                    // The patch is rendered at scale * DPR in device pixels, so it
-                    // blits 1:1 at its region's top-left (same as gesture_.patch).
-                    painter.drawImage(
-                        QPointF(view.rect.left() + erasePatchRegion_.x() * view.scale,
-                            view.rect.top() + erasePatchRegion_.y() * view.scale),
-                        erasePatch_);
-                }
+                erasePatchReady = PaintPendingErase(painter, view, page, event->rect());
             }
             if (!erasePatchReady) {
-                // No reusable raster, or the marked region's patch is above the
-                // raster budget: repaint the page vector-live with the fade.
+                // No reusable raster, or the fade tiles exceeded the raster
+                // budget: repaint the page vector-live with the fade.
                 render::PageRenderParams params = RenderParamsFor(view);
                 params.pendingErase = pendingErase;
                 render::PaintPage(painter, page, view.rect.topLeft(), params);
@@ -2039,7 +2043,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     peakPaintSurfaceBytes_ = std::max(peakPaintSurfaceBytes_, lastPaintSurfaceBytes_);
     // The accumulated transient region was just consumed by this paint; the
     // next gesture samples start a fresh region.
-    transientDirty_ = QRect();
+    transientDirty_ = QRegion();
     TrimSurfaceCache(visiblePages);
     for (const QRect& deferred : deferredSurfaceRects) {
         // Spread zoom-settle (and above-budget tile) replacements across
@@ -3837,7 +3841,7 @@ void CanvasWidget::InvalidateCanvas() {
     // The transient state only ever dirties the regions it reported through
     // MarkTransientDirty; repaint that accumulated region instead of the
     // whole widget.
-    update(transientDirty_.isEmpty() ? rect() : transientDirty_);
+    update(transientDirty_.isEmpty() ? QRegion(rect()) : transientDirty_);
 }
 
 void CanvasWidget::SetPointerCapture(bool captured) {
@@ -4520,19 +4524,157 @@ void CanvasWidget::CancelTransform() {
     update();
 }
 
-void CanvasWidget::UpdatePendingErase(const std::vector<ObjectRef>& pending) {
-    // Fade-in and fade-out each repaint only the objects' own bounds.
-    const QRect dirty = PendingEraseDirtyRect();
-    pendingErase_ = pending;
-    const QRect after = PendingEraseDirtyRect();
-    // QRect::united treats an empty rect as a point at the origin, so merge
-    // explicitly to avoid dirtying the top-left corner spuriously.
-    const QRect combined = dirty.isEmpty() ? after : (after.isEmpty() ? dirty : dirty.united(after));
-    MarkTransientDirty(combined);
+namespace {
+
+std::vector<std::size_t>* PendingEraseList(render::PendingEraseIndices& indices, ObjectKind kind) {
+    switch (kind) {
+    case ObjectKind::Stroke:
+        return &indices.strokes;
+    case ObjectKind::Image:
+        return &indices.images;
+    case ObjectKind::Text:
+        return &indices.texts;
+    case ObjectKind::Latex:
+        return &indices.latexes;
+    }
+    return nullptr;
+}
+
+// Inserts into the sorted per-kind index list the renderer binary-searches.
+bool AddPendingEraseIndex(render::PendingEraseIndices& indices, ObjectKind kind, std::size_t index) {
+    std::vector<std::size_t>* list = PendingEraseList(indices, kind);
+    if (list == nullptr) {
+        return false;
+    }
+    const auto at = std::lower_bound(list->begin(), list->end(), index);
+    if (at != list->end() && *at == index) {
+        return false;
+    }
+    list->insert(at, index);
+    return true;
+}
+
+bool RemovePendingEraseIndex(render::PendingEraseIndices& indices, ObjectKind kind, std::size_t index) {
+    std::vector<std::size_t>* list = PendingEraseList(indices, kind);
+    if (list == nullptr) {
+        return false;
+    }
+    const auto at = std::lower_bound(list->begin(), list->end(), index);
+    if (at == list->end() || *at != index) {
+        return false;
+    }
+    list->erase(at);
+    return true;
+}
+
+std::size_t PendingEraseIndexCount(const render::PendingEraseIndices& indices) {
+    return indices.images.size() + indices.texts.size() + indices.latexes.size()
+        + indices.strokes.size();
+}
+
+}  // namespace
+
+void CanvasWidget::UpdatePendingErase(const std::vector<ObjectRef>& added,
+    const std::vector<ObjectRef>& removed) {
+    const Document& document = controller_.DocumentRef();
+    QRegion dirty;
+    // Additions first: each marked object's own bounds (and any patch tile it
+    // overlaps) are the only pixels that change, so a sample costs work
+    // proportional to the objects it newly hit, not the drag's accumulated
+    // union (PERF-015/PERF-016).
+    for (const ObjectRef& object : added) {
+        if (object.pageIndex >= document.PageCount()) {
+            continue;
+        }
+        PendingErasePage& state = pendingErase_[object.pageIndex];
+        if (!AddPendingEraseIndex(state.indices, object.kind, object.objectIndex)) {
+            continue;
+        }
+        const CanvasPageView view = CalculatePageView(object.pageIndex);
+        if (!view.valid) {
+            continue;
+        }
+        SyncPendingEraseKey(object.pageIndex, state, view);
+        const std::optional<QRectF> bounds = PendingEraseObjectBounds(object.pageIndex, object);
+        if (!bounds.has_value()) {
+            continue;
+        }
+        const QRect device = PendingEraseDeviceRect(view, document.PageAt(object.pageIndex), *bounds);
+        if (device.isEmpty()) {
+            continue;
+        }
+        dirty += PendingEraseWidgetRect(view, device);
+        if (state.failed) {
+            continue;
+        }
+        InvalidatePendingEraseTiles(state, device);
+        state.dirty += device;
+    }
+    for (const ObjectRef& object : removed) {
+        if (object.pageIndex >= document.PageCount()) {
+            continue;
+        }
+        const auto found = pendingErase_.find(object.pageIndex);
+        if (found == pendingErase_.end()) {
+            continue;
+        }
+        PendingErasePage& state = found->second;
+        if (!RemovePendingEraseIndex(state.indices, object.kind, object.objectIndex)) {
+            continue;
+        }
+        const CanvasPageView view = CalculatePageView(object.pageIndex);
+        if (!view.valid) {
+            continue;
+        }
+        const std::optional<QRectF> bounds = PendingEraseObjectBounds(object.pageIndex, object);
+        if (!bounds.has_value()) {
+            continue;
+        }
+        const QRect device = PendingEraseDeviceRect(view, document.PageAt(object.pageIndex), *bounds);
+        if (device.isEmpty()) {
+            continue;
+        }
+        // The removed object returns to full opacity: the committed raster
+        // underneath already has it, so only tiles overlapping its bounds need
+        // re-rendering (their pixels included the faded object).
+        dirty += PendingEraseWidgetRect(view, device);
+        if (!state.failed) {
+            InvalidatePendingEraseTiles(state, device);
+        }
+    }
+    for (auto page = pendingErase_.begin(); page != pendingErase_.end();) {
+        if (page->second.indices.Empty()) {
+            page = pendingErase_.erase(page);
+        } else {
+            ++page;
+        }
+    }
+    MarkTransientDirty(dirty);
 }
 
 void CanvasWidget::CommitErase(const std::vector<ObjectRef>& pending) {
-    const QRect dirty = PendingEraseDirtyRect();
+    // The marked objects vanish with the commit, so repaint exactly their
+    // bounds; the fade patch describes the previous page content and must not
+    // outlive the gesture (PERF-036).
+    QRegion dirty;
+    const Document& document = controller_.DocumentRef();
+    for (const ObjectRef& object : pending) {
+        if (object.pageIndex >= document.PageCount()) {
+            continue;
+        }
+        const CanvasPageView view = CalculatePageView(object.pageIndex);
+        if (!view.valid) {
+            continue;
+        }
+        const std::optional<QRectF> bounds = PendingEraseObjectBounds(object.pageIndex, object);
+        if (!bounds.has_value()) {
+            continue;
+        }
+        const QRect device = PendingEraseDeviceRect(view, document.PageAt(object.pageIndex), *bounds);
+        if (!device.isEmpty()) {
+            dirty += PendingEraseWidgetRect(view, device);
+        }
+    }
     // The controller records the whole drag, including pages other than the
     // one under the pointer, as one history action; this view only has to drop
     // the surfaces of the pages it touched.
@@ -4549,8 +4691,12 @@ void CanvasWidget::CommitErase(const std::vector<ObjectRef>& pending) {
     for (const std::size_t pageIndex : pages) {
         surfaces_.erase(pageIndex);
     }
-    pendingErase_.clear();
-    update(dirty.isEmpty() ? rect() : dirty);
+    ReleasePendingErase();
+    if (dirty.isEmpty()) {
+        update();
+    } else {
+        MarkTransientDirty(dirty);
+    }
 }
 
 void CanvasWidget::CommitScratchOut(const std::vector<ObjectRef>& targets) {
@@ -4731,117 +4877,293 @@ void CanvasWidget::MarkTransientDirty(const QRect& logical) {
     if (logical.isEmpty()) {
         return;
     }
-    transientDirty_ = transientDirty_.isEmpty() ? logical : transientDirty_.united(logical);
-    lastTransientRepaintArea_ = static_cast<std::uint64_t>(logical.width())
-        * static_cast<std::uint64_t>(logical.height());
-    update(logical);
+    MarkTransientDirty(QRegion(logical));
 }
 
-QRect CanvasWidget::PendingEraseDirtyRect() const {
-    // Union of every marked object's bounds; marking/unmarking only ever
-    // changes pixels inside them.
-    QRect dirty;
-    const Document& document = controller_.DocumentRef();
-    for (const ObjectRef& object : pendingErase_) {
-        if (object.pageIndex >= document.PageCount()) {
-            continue;
-        }
-        if (const std::optional<QRectF> bounds = PendingEraseObjectBounds(
-                document.PageAt(object.pageIndex), object);
-            bounds.has_value()) {
-            const QRect rect = PageRegionDirtyRect(object.pageIndex, *bounds);
-            dirty = dirty.isEmpty() ? rect : dirty.united(rect);
-        }
+void CanvasWidget::MarkTransientDirty(const QRegion& logical) {
+    // Clip to the widget so accumulated regions stay bounded, and keep the
+    // disjoint rects instead of collapsing them to their bounding rect.
+    const QRegion clipped = logical.intersected(QRegion(rect()));
+    if (clipped.isEmpty()) {
+        return;
     }
-    return dirty;
+    transientDirty_ = transientDirty_.isEmpty() ? clipped : transientDirty_.united(clipped);
+    std::uint64_t area = 0;
+    for (const QRect& part : clipped) {
+        area += static_cast<std::uint64_t>(part.width()) * static_cast<std::uint64_t>(part.height());
+    }
+    lastTransientRepaintArea_ = area;
+    update(clipped);
 }
 
 std::optional<QRectF> CanvasWidget::PendingEraseObjectBounds(
-    const Page& page, const ObjectRef& object) const {
-    switch (object.kind) {
-    case ObjectKind::Stroke: {
-        if (object.objectIndex >= page.strokes.size()) {
-            return std::nullopt;
-        }
-        float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
-        if (!StrokeBounds(page.strokes[object.objectIndex], &minX, &minY, &maxX, &maxY)) {
-            return std::nullopt;
-        }
-        const float margin = page.strokes[object.objectIndex].style.width * 0.5f + 2.0f;
-        return QRectF(
-            static_cast<qreal>(minX - margin), static_cast<qreal>(minY - margin),
-            static_cast<qreal>((maxX - minX) + margin * 2.0f),
-            static_cast<qreal>((maxY - minY) + margin * 2.0f));
-    }
-    case ObjectKind::Image: {
-        if (object.objectIndex >= page.images.size()) {
-            return std::nullopt;
-        }
-        const PageImage& image = page.images[object.objectIndex];
-        float minX = page.width, minY = page.height, maxX = 0.0f, maxY = 0.0f;
-        for (const Vec2& corner : ImageCorners(image)) {
-            minX = std::min(minX, corner.x);
-            minY = std::min(minY, corner.y);
-            maxX = std::max(maxX, corner.x);
-            maxY = std::max(maxY, corner.y);
-        }
-        return QRectF(minX, minY, maxX - minX, maxY - minY);
-    }
-    case ObjectKind::Text: {
-        if (object.objectIndex >= page.texts.size()) {
-            return std::nullopt;
-        }
-        const PageText& text = page.texts[object.objectIndex];
-        const text::QtTextBounds bounds = text::MeasurePageTextBoundsQt(text, page.width);
-        float minX = page.width, minY = page.height, maxX = 0.0f, maxY = 0.0f;
-        for (const Vec2& corner : RotatedRectCorners(
-                bounds.left, bounds.top, bounds.right, bounds.bottom, text.rotationDegrees)) {
-            minX = std::min(minX, corner.x);
-            minY = std::min(minY, corner.y);
-            maxX = std::max(maxX, corner.x);
-            maxY = std::max(maxY, corner.y);
-        }
-        return QRectF(minX, minY, maxX - minX, maxY - minY);
-    }
-    case ObjectKind::Latex: {
-        if (object.objectIndex >= page.latexes.size()) {
-            return std::nullopt;
-        }
-        const PageLatex& latex = page.latexes[object.objectIndex];
-        const LatexBounds bounds = MeasurePageLatexBounds(latex, page.width);
-        float minX = page.width, minY = page.height, maxX = 0.0f, maxY = 0.0f;
-        for (const Vec2& corner : RotatedRectCorners(
-                bounds.left, bounds.top, bounds.right, bounds.bottom, latex.rotationDegrees)) {
-            minX = std::min(minX, corner.x);
-            minY = std::min(minY, corner.y);
-            maxX = std::max(maxX, corner.x);
-            maxY = std::max(maxY, corner.y);
-        }
-        return QRectF(minX, minY, maxX - minX, maxY - minY);
-    }
-    }
-    return std::nullopt;
-}
-
-QRectF CanvasWidget::PendingErasePageRegion(std::size_t pageIndex) const {
-    // Page-space union of the marked objects' bounds: the re-rendered patch
-    // covering their faded state.
-    QRectF region;
+    std::size_t pageIndex, const ObjectRef& object) const {
     const Document& document = controller_.DocumentRef();
     if (pageIndex >= document.PageCount()) {
-        return region;
+        return std::nullopt;
+    }
+    // Shared with the eraser's hit rejection: keyed on the page epoch plus the
+    // session's transient generation, so a drag sample measures nothing
+    // (PERF-006's cache, reused here instead of re-measuring per sample).
+    const PageObjectBounds& bounds =
+        objectBoundsCache_.ForPage(document, pageIndex, controller_.TransientGeneration());
+    const std::vector<ObjectBounds>* list = nullptr;
+    switch (object.kind) {
+    case ObjectKind::Stroke:
+        list = &bounds.strokes;
+        break;
+    case ObjectKind::Image:
+        list = &bounds.images;
+        break;
+    case ObjectKind::Text:
+        list = &bounds.texts;
+        break;
+    case ObjectKind::Latex:
+        list = &bounds.latexes;
+        break;
+    }
+    if (list == nullptr || object.objectIndex >= list->size()) {
+        return std::nullopt;
+    }
+    const ObjectBounds& objectBounds = (*list)[object.objectIndex];
+    if (!objectBounds.valid) {
+        return std::nullopt;
+    }
+    // Cached stroke bounds already include the pen half-width; the erase
+    // preview's damage/patch keep the 2-page-unit ink margin the previous
+    // preview used so antialiased caps cannot fall outside a tile.
+    const float margin = object.kind == ObjectKind::Stroke ? 2.0f : 0.0f;
+    return QRectF(
+        static_cast<qreal>(objectBounds.left - margin),
+        static_cast<qreal>(objectBounds.top - margin),
+        static_cast<qreal>((objectBounds.right - objectBounds.left) + margin * 2.0f),
+        static_cast<qreal>((objectBounds.bottom - objectBounds.top) + margin * 2.0f));
+}
+
+QRect CanvasWidget::PendingEraseDeviceRect(
+    const CanvasPageView& view, const Page& page, const QRectF& pageBounds) const {
+    const render::PageRenderParams params = RenderParamsFor(view);
+    const double deviceScale = std::max(0.01f, params.scale * params.devicePixelRatio);
+    const QSize pageSize = render::PageSurfacePixelSize(page, params);
+    const auto clampToInt = [](double value) {
+        return static_cast<int>(std::clamp(value, -1.0e7, 1.0e7));
+    };
+    const int alignment = std::max(1, render::RegionAlignment(params));
+    const auto alignDown = [alignment](int value) {
+        return static_cast<int>(std::floor(static_cast<double>(value) / alignment) * alignment);
+    };
+    const int left = alignDown(clampToInt(std::floor(pageBounds.left() * deviceScale)));
+    const int top = alignDown(clampToInt(std::floor(pageBounds.top() * deviceScale)));
+    const int right = clampToInt(std::ceil(pageBounds.right() * deviceScale));
+    const int bottom = clampToInt(std::ceil(pageBounds.bottom() * deviceScale));
+    if (right <= left || bottom <= top) {
+        return {};
+    }
+    // The aligned origin is what makes the tile's glyph subpixel phase (and
+    // therefore every pixel) match the full-page raster this overlays; see
+    // RenderPageSurfaceRegionPixels and RegionAlignment.
+    return QRect(left, top, right - left, bottom - top)
+        .intersected(QRect(QPoint(0, 0), pageSize));
+}
+
+QRect CanvasWidget::PendingEraseWidgetRect(const CanvasPageView& view, const QRect& device) const {
+    const qreal dpr = cachedDevicePixelRatio_ > 0.0 ? cachedDevicePixelRatio_ : 1.0;
+    return QRectF(
+        view.rect.left() + static_cast<qreal>(device.x()) / dpr,
+        view.rect.top() + static_cast<qreal>(device.y()) / dpr,
+        static_cast<qreal>(device.width()) / dpr,
+        static_cast<qreal>(device.height()) / dpr)
+        .toAlignedRect()
+        .intersected(rect());
+}
+
+void CanvasWidget::SyncPendingEraseKey(
+    std::size_t pageIndex, PendingErasePage& state, const CanvasPageView& view) {
+    const Document& document = controller_.DocumentRef();
+    if (pageIndex >= document.PageCount() || !view.valid) {
+        state.tiles.clear();
+        state.dirty = QRegion();
+        state.failed = false;
+        state.keyValid = false;
+        return;
+    }
+    const render::PageRenderParams params = RenderParamsFor(view);
+    const bool sameKey = state.keyValid
+        && state.epoch == document.PageEpoch(pageIndex)
+        && state.transientGeneration == controller_.TransientGeneration()
+        && std::abs(state.scale - view.scale) <= 1.0e-4f
+        && std::abs(state.devicePixelRatio - params.devicePixelRatio) <= 1.0e-4f;
+    if (sameKey) {
+        if (!state.failed && state.tiles.empty() && state.dirty.isEmpty() && !state.indices.Empty()) {
+            // The marks were recorded while the page had no usable view; build
+            // their tiles now that the page is being painted.
+            QueueAllPendingEraseTiles(pageIndex, state, view);
+        }
+        return;
+    }
+    // A committed edit (page epoch), an in-place gesture in any view
+    // (transient generation), or a scale/DPR change invalidates every tile:
+    // the raster and its translation no longer describe this page.
+    state.epoch = document.PageEpoch(pageIndex);
+    state.transientGeneration = controller_.TransientGeneration();
+    state.scale = view.scale;
+    state.devicePixelRatio = params.devicePixelRatio;
+    state.keyValid = true;
+    state.failed = false;
+    state.tiles.clear();
+    state.dirty = QRegion();
+    QueueAllPendingEraseTiles(pageIndex, state, view);
+}
+
+void CanvasWidget::QueueAllPendingEraseTiles(
+    std::size_t pageIndex, PendingErasePage& state, const CanvasPageView& view) {
+    const Document& document = controller_.DocumentRef();
+    if (pageIndex >= document.PageCount()) {
+        return;
     }
     const Page& page = document.PageAt(pageIndex);
-    for (const ObjectRef& object : pendingErase_) {
-        if (object.pageIndex != pageIndex) {
-            continue;
+    const auto queue = [&](ObjectKind kind, const std::vector<std::size_t>& list) {
+        for (const std::size_t index : list) {
+            const std::optional<QRectF> bounds =
+                PendingEraseObjectBounds(pageIndex, ObjectRef { pageIndex, kind, index });
+            if (!bounds.has_value()) {
+                continue;
+            }
+            const QRect device = PendingEraseDeviceRect(view, page, *bounds);
+            if (!device.isEmpty()) {
+                state.dirty += device;
+            }
         }
-        if (const std::optional<QRectF> bounds = PendingEraseObjectBounds(page, object);
-            bounds.has_value()) {
-            region = region.isEmpty() ? *bounds : region.united(*bounds);
+    };
+    queue(ObjectKind::Stroke, state.indices.strokes);
+    queue(ObjectKind::Image, state.indices.images);
+    queue(ObjectKind::Text, state.indices.texts);
+    queue(ObjectKind::Latex, state.indices.latexes);
+}
+
+void CanvasWidget::InvalidatePendingEraseTiles(PendingErasePage& state, const QRect& device) {
+    for (auto tile = state.tiles.begin(); tile != state.tiles.end();) {
+        if (tile->deviceRect.intersects(device)) {
+            state.dirty += tile->deviceRect;
+            tile = state.tiles.erase(tile);
+        } else {
+            ++tile;
         }
     }
-    return region;
+}
+
+bool CanvasWidget::PaintPendingErase(
+    QPainter& painter, const CanvasPageView& view, const Page& page, const QRect& clip) {
+    const auto found = pendingErase_.find(view.pageIndex);
+    if (found == pendingErase_.end() || found->second.indices.Empty()) {
+        return false;
+    }
+    PendingErasePage& state = found->second;
+    SyncPendingEraseKey(view.pageIndex, state, view);
+    if (state.failed) {
+        return false;
+    }
+    render::PageRenderParams params = RenderParamsFor(view);
+    params.pendingErase = state.indices;
+    if (!state.dirty.isEmpty()) {
+        // A fresh region every paint: a failed render below drops the tiles so
+        // the caller's vector-live path stays correct.
+        const QRegion dirty = state.dirty;
+        state.dirty = QRegion();
+        std::size_t bytes = 0;
+        for (const PendingEraseTile& tile : state.tiles) {
+            bytes += tile.image.sizeInBytes();
+        }
+        // Coalescing dirty rects can split them at another tile's edge, whose
+        // origin need not be RegionAlignment-aligned; snap every render origin
+        // down so its glyph phase still matches the full-page raster.
+        const QSize pageSize = render::PageSurfacePixelSize(page, params);
+        const int alignment = std::max(1, render::RegionAlignment(params));
+        const auto aligned = [alignment, pageSize](const QRect& rect) {
+            const int left = static_cast<int>(std::floor(static_cast<double>(rect.left()) / alignment)) * alignment;
+            const int top = static_cast<int>(std::floor(static_cast<double>(rect.top()) / alignment)) * alignment;
+            return QRect(left, top, rect.right() + 1 - left, rect.bottom() + 1 - top)
+                .intersected(QRect(QPoint(0, 0), pageSize));
+        };
+        for (const QRect& dirtyRect : dirty) {
+            const QRect device = aligned(dirtyRect);
+            if (device.isEmpty()) {
+                continue;
+            }
+            const QImage image = render::RenderPageSurfaceRegionPixels(page, params, device);
+            ++erasePatchRenders_;
+            if (image.isNull()) {
+                // Over the raster budget (or allocation failure): paint the
+                // page live until the key changes instead of retrying a tile
+                // that cannot exist.
+                state.failed = true;
+                state.tiles.clear();
+                return false;
+            }
+            erasePatchRenderArea_ += static_cast<std::uint64_t>(image.width())
+                * static_cast<std::uint64_t>(image.height());
+            bytes += image.sizeInBytes();
+            if (bytes > render::kSurfaceRenderBytesPerPaint) {
+                state.failed = true;
+                state.tiles.clear();
+                return false;
+            }
+            state.tiles.push_back(PendingEraseTile { QRect(device.topLeft(), image.size()), image });
+        }
+    }
+    if (state.tiles.empty()) {
+        return false;
+    }
+    const qreal dpr = cachedDevicePixelRatio_ > 0.0 ? cachedDevicePixelRatio_ : 1.0;
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    for (const PendingEraseTile& tile : state.tiles) {
+        const QRect widget = PendingEraseWidgetRect(view, tile.deviceRect);
+        if (!widget.intersects(clip)) {
+            continue;
+        }
+        // Raw device pixels blitted 1:1 at the tile's aligned origin (same rule
+        // as the page-surface tiles).  Tiles may overlap when marked objects
+        // do; every tile renders the current membership at an aligned origin,
+        // so overlapping pixels agree and draw order cannot matter.
+        painter.drawImage(
+            QRectF(
+                view.rect.left() + static_cast<qreal>(tile.deviceRect.x()) / dpr,
+                view.rect.top() + static_cast<qreal>(tile.deviceRect.y()) / dpr,
+                static_cast<qreal>(tile.image.width()) / dpr,
+                static_cast<qreal>(tile.image.height()) / dpr),
+            tile.image);
+    }
+    return true;
+}
+
+void CanvasWidget::ReleasePendingErase() {
+    pendingErase_.clear();
+}
+
+std::size_t CanvasWidget::PendingEraseObjectCount() const {
+    std::size_t count = 0;
+    for (const auto& page : pendingErase_) {
+        count += PendingEraseIndexCount(page.second.indices);
+    }
+    return count;
+}
+
+std::size_t CanvasWidget::PendingEraseTileCount() const {
+    std::size_t count = 0;
+    for (const auto& page : pendingErase_) {
+        count += page.second.tiles.size();
+    }
+    return count;
+}
+
+std::size_t CanvasWidget::PendingEraseTileBytes() const {
+    std::size_t bytes = 0;
+    for (const auto& page : pendingErase_) {
+        for (const PendingEraseTile& tile : page.second.tiles) {
+            bytes += tile.image.sizeInBytes();
+        }
+    }
+    return bytes;
 }
 
 QRect CanvasWidget::OverlayDirtyRect() const {
@@ -5124,29 +5446,11 @@ void CanvasWidget::PaintSelectionOverlay(QPainter& painter) {
 }
 
 render::PendingEraseIndices CanvasWidget::PendingEraseFor(std::size_t pageIndex) const {
-    // The router's ObjectRef list becomes the per-kind index sets the renderer
-    // fades (App.cpp:5572-5628 pendingErase*Indices_).
-    render::PendingEraseIndices indices;
-    for (const ObjectRef& object : pendingErase_) {
-        if (object.pageIndex != pageIndex) {
-            continue;
-        }
-        switch (object.kind) {
-        case ObjectKind::Stroke:
-            indices.strokes.push_back(object.objectIndex);
-            break;
-        case ObjectKind::Image:
-            indices.images.push_back(object.objectIndex);
-            break;
-        case ObjectKind::Text:
-            indices.texts.push_back(object.objectIndex);
-            break;
-        case ObjectKind::Latex:
-            indices.latexes.push_back(object.objectIndex);
-            break;
-        }
-    }
-    return indices;
+    // The per-page membership is already the renderer's per-kind index sets,
+    // kept sorted so the fade check is a binary search (App.cpp:5572-5628
+    // pendingErase*Indices_).
+    const auto page = pendingErase_.find(pageIndex);
+    return page == pendingErase_.end() ? render::PendingEraseIndices {} : page->second.indices;
 }
 
 }  // namespace cnote::ui

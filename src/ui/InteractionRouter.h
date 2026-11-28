@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -114,6 +116,19 @@ struct ObjectRef {
 
     friend bool operator==(const ObjectRef& a, const ObjectRef& b) {
         return a.pageIndex == b.pageIndex && a.kind == b.kind && a.objectIndex == b.objectIndex;
+    }
+};
+
+// ObjectRef identity for the eraser's membership set: a pointer sample tests
+// hits against already-marked objects in constant time instead of scanning the
+// growing pending list (PERF-015).
+struct ObjectRefHash {
+    [[nodiscard]] std::size_t operator()(const ObjectRef& ref) const noexcept {
+        constexpr std::size_t kMix = 0x9e3779b97f4a7c15ULL;
+        std::size_t hash = std::hash<std::size_t> {}(ref.pageIndex);
+        hash ^= std::hash<int> {}(static_cast<int>(ref.kind)) + kMix + (hash << 6U) + (hash >> 2U);
+        hash ^= std::hash<std::size_t> {}(ref.objectIndex) + kMix + (hash << 6U) + (hash >> 2U);
+        return hash;
     }
 };
 
@@ -327,7 +342,12 @@ public:
     // --- erase ------------------------------------------------------------
     // Pending marks are shown at kPendingEraseOpacity; the whole drag becomes
     // one CommitErase call, i.e. one transaction (App::EndErase, App.cpp:5639).
-    virtual void UpdatePendingErase(const std::vector<ObjectRef>& pending) = 0;
+    // Only the diff is published: `added`/`removed` hold the objects whose
+    // membership changed since the previous call, so a sample that hits
+    // nothing new does no host work and the canvas re-renders only their
+    // regions (PERF-015/PERF-016).
+    virtual void UpdatePendingErase(const std::vector<ObjectRef>& added,
+        const std::vector<ObjectRef>& removed) = 0;
     virtual void CommitErase(const std::vector<ObjectRef>& pending) = 0;
 
     // --- scratch-out ------------------------------------------------------
@@ -437,6 +457,10 @@ private:
     // when it stops being one).  EndStroke erases the marked objects instead
     // of committing the stroke.
     void RefreshScratchOutPreview();
+    // Publishes the scratch-out target membership change (added/removed) and
+    // takes ownership of `targets`.  Called for every preview refresh and when
+    // the marks clear, so the canvas never rescans a whole target list.
+    void SetScratchTargets(std::vector<ObjectRef> targets);
     // Recognizes the live stroke's freehand points under the current Shift
     // state and replaces the stroke with the shape; false when none fits.
     bool ApplyShapeSnap();
@@ -479,6 +503,10 @@ private:
         };
         struct EraseData {
             std::vector<ObjectRef> pending;
+            // Membership mirror of `pending` for the eraser's per-sample hit
+            // rejection: inserting a hit is O(1), not a scan of the drag's
+            // accumulated marks (PERF-015).
+            std::unordered_set<ObjectRef, ObjectRefHash> pendingSet;
             // App.cpp:5713-5799 EraseAt's lastErasePageIndex_/lastErasePagePoint_:
             // the segment start for the next sample, reset when the cursor
             // leaves the page.
