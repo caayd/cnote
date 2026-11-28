@@ -29,9 +29,11 @@ struct PdfPixelRect {
 
 // PDFium wrapper. PDFium parses from the caller's byte buffer for as long as a
 // document is open, so every operation goes through one process-wide handle
-// cache keyed by the exact PdfSource byte buffer (shared ownership, not an
-// address): a buffer replaced by a different allocation, or dropped entirely,
-// invalidates its handle instead of being reused.
+// cache keyed by the exact PdfSource byte buffer. The cache holds a strong
+// reference to those bytes, so the buffer always outlives its handle: an entry
+// is only closed after no Document references the buffer any more, and the
+// buffer is released after the close. A source replaced by a different
+// allocation is a different buffer, so a handle can never be reused for it.
 //
 // PDFium is not thread-safe: every method here must run on the GUI thread, the
 // only thread that ever calls PDFium (the background save worker serializes the
@@ -79,6 +81,16 @@ public:
     // was initialized. Diagnostics only; the handle cache should keep it flat
     // while one source is used repeatedly.
     [[nodiscard]] std::size_t DocumentLoadCount() const;
+    // Number of cached document handles closed since PDFium was initialized.
+    [[nodiscard]] std::size_t DocumentCloseCount() const;
+    // Open (or failed-open) document handles currently cached.
+    [[nodiscard]] std::size_t CachedDocumentCount() const;
+    // Closes cached handles whose PdfSource bytes are no longer referenced by
+    // any Document (only the cache still holds them), releasing the bytes after
+    // the close. The cache also does this on every acquire and at shutdown;
+    // owners call it when they release a session so a closed document's parse
+    // memory does not linger. Requires an initialized PDFium (any live backend).
+    static void ReleaseUnreferencedDocuments();
     [[nodiscard]] bool ExportPdf(
         const Document& document,
         const std::filesystem::path& filePath,

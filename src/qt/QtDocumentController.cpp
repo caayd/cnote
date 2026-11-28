@@ -118,6 +118,13 @@ QtDocumentController::QtDocumentController(AppManager& manager, QObject* parent)
 
 QtDocumentController::~QtDocumentController() {
     manager_.UnregisterView(this);
+    // Drop the provider (it references this session's document) before
+    // releasing the session, then sweep: if this view was the last owner, the
+    // cached PDF handles are now collectable and are closed before their
+    // source bytes are freed.
+    pdfBackground_.reset();
+    session_.reset();
+    PdfiumBackend::ReleaseUnreferencedDocuments();
 }
 
 // --- session ---------------------------------------------------------------
@@ -126,6 +133,10 @@ void QtDocumentController::AttachSession(std::shared_ptr<ProjectSession> session
     AbortTransientState();
     manager_.UnregisterView(this);
     session_ = std::move(session);
+    // A replaced session may have just released the previous document's PDF
+    // sources. Close their cached handles now (before the bytes go away) rather
+    // than waiting for the next PDF operation.
+    PdfiumBackend::ReleaseUnreferencedDocuments();
     if (session_ != nullptr) {
         manager_.RegisterView(this, this, session_);
     }

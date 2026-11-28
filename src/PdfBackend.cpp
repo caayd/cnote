@@ -456,14 +456,15 @@ struct ExportPageScope {
 
 namespace {
 
-// One open PDFium document per PDF source byte buffer, for as long as that
-// buffer is alive. PDFium keeps parsing from the caller's memory, so an entry
-// pins nothing itself: it holds a weak reference to the PdfSource buffer and
-// closes the handle as soon as the buffer is gone. Reacquiring by a different
-// shared_ptr to the same buffer (the controller and Document share one) is the
-// common case and must reuse the handle; a source replaced with a new
-// allocation is a different address, so it cannot collide with a dead entry
-// whose address the allocator reused.
+// One open PDFium document per PDF source byte buffer. PDFium keeps parsing
+// from the caller's memory, so the entry holds a strong reference to those
+// bytes: the buffer is guaranteed to outlive the handle, and it is only
+// released after the handle has been closed. An entry is dropped as soon as
+// the cache is its only owner (every Acquire, the explicit release hook, and
+// shutdown check that), so a closed document's parsed memory does not linger.
+// Reacquiring by a different shared_ptr to the same buffer (the controller and
+// Document share one) reuses the handle; the stored address is the live
+// vector's, and a strong reference means the allocator cannot reuse it.
 //
 // All calls are GUI-thread-only, like PDFium itself, and completion/modal
 // nested event loops still run on that thread. The cache is an LRU of a few
@@ -478,7 +479,7 @@ public:
         if (!pdfBytes) {
             return nullptr;
         }
-        PurgeExpiredAddresses();
+        SweepUnreferenced();
         const std::vector<std::uint8_t>* address = pdfBytes.get();
         for (auto entry = entries_.begin(); entry != entries_.end(); ++entry) {
             if (entry->address != address) {
@@ -496,11 +497,12 @@ public:
         ++loadCount_;
         FPDF_DOCUMENT handle = FPDF_LoadMemDocument64(pdfBytes->data(), pdfBytes->size(), nullptr);
         entries_.push_back(CachedDocument {
-            std::weak_ptr<const std::vector<std::uint8_t>>(pdfBytes),
+            std::shared_ptr<const std::vector<std::uint8_t>>(pdfBytes),
             address,
             handle,
         });
         while (entries_.size() > kMaxCachedDocuments) {
+            // Close before the entry's reference to the bytes is released.
             Close(entries_.front());
             entries_.pop_front();
         }
@@ -508,11 +510,14 @@ public:
     }
 
     [[nodiscard]] std::size_t LoadCount() const noexcept { return loadCount_; }
+    [[nodiscard]] std::size_t CloseCount() const noexcept { return closeCount_; }
+    [[nodiscard]] std::size_t EntryCount() const noexcept { return entries_.size(); }
 
     void Start() {
         // The library was initialized for the first time; nothing can be open.
         entries_.clear();
         loadCount_ = 0;
+        closeCount_ = 0;
     }
 
     // Closes every open document. Must run before FPDF_DestroyLibrary.
@@ -523,9 +528,17 @@ public:
         entries_.clear();
     }
 
+    // Drops every entry whose bytes no Document references any more. Callers
+    // must have released their own references first.
+    void ReleaseUnreferenced() {
+        SweepUnreferenced();
+    }
+
 private:
     struct CachedDocument {
-        std::weak_ptr<const std::vector<std::uint8_t>> bytes;
+        // Strong: the buffer outlives the handle. Only the cache holding it is
+        // what makes the entry collectable.
+        std::shared_ptr<const std::vector<std::uint8_t>> bytes;
         const std::vector<std::uint8_t>* address = nullptr;
         // Null records a failed open, so a broken source is not reparsed per
         // render or pointer probe. It expires with the buffer like a success.
@@ -537,19 +550,19 @@ private:
         return id;
     }
 
-    static void Close(CachedDocument& entry) {
+    void Close(CachedDocument& entry) {
         if (entry.handle != nullptr) {
             FPDF_CloseDocument(entry.handle);
             entry.handle = nullptr;
+            ++closeCount_;
         }
     }
 
-    // Drops entries whose byte buffer is gone. A new std::vector allocated at a
-    // dead entry's address must never match it, so expiry is decided by the
-    // weak reference and the address only breaks ties between live buffers.
-    void PurgeExpiredAddresses() {
+    // Closes and removes entries only the cache still references, then lets the
+    // entry's shared_ptr release the bytes. Close always runs first.
+    void SweepUnreferenced() {
         for (auto entry = entries_.begin(); entry != entries_.end();) {
-            if (entry->bytes.expired()) {
+            if (entry->bytes.use_count() == 1) {
                 Close(*entry);
                 entry = entries_.erase(entry);
             } else {
@@ -560,6 +573,7 @@ private:
 
     std::list<CachedDocument> entries_;
     std::size_t loadCount_ = 0;
+    std::size_t closeCount_ = 0;
 };
 
 PdfDocumentCache& PdfDocuments() {
@@ -872,6 +886,18 @@ std::optional<std::vector<PdfTextCharBox>> PdfiumBackend::ExtractTextCharBoxes(
 
 std::size_t PdfiumBackend::DocumentLoadCount() const {
     return PdfDocuments().LoadCount();
+}
+
+std::size_t PdfiumBackend::DocumentCloseCount() const {
+    return PdfDocuments().CloseCount();
+}
+
+std::size_t PdfiumBackend::CachedDocumentCount() const {
+    return PdfDocuments().EntryCount();
+}
+
+void PdfiumBackend::ReleaseUnreferencedDocuments() {
+    PdfDocuments().ReleaseUnreferenced();
 }
 
 bool PdfiumBackend::ExportPdf(

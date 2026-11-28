@@ -342,6 +342,89 @@ int main(int argc, char** argv) {
             "Invalidate drops positive and negative entries");
     }
 
+    // --- the cached handle owns the source bytes until it closes ------------
+    // PDFium parses from the caller's buffer, so the cache must keep the bytes
+    // alive until after FPDF_CloseDocument. Dropping the document and releasing
+    // it closes the handle first and only then frees the buffer.
+    {
+        // Settle entries left behind by earlier blocks so the counters below
+        // measure this block only.
+        cnote::PdfiumBackend::ReleaseUnreferencedDocuments();
+        auto ownedBytes = std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(1));
+        std::weak_ptr<std::vector<std::uint8_t>> ownedBytesAlive = ownedBytes;
+        const std::size_t loadsBefore = backend.DocumentLoadCount();
+        const std::size_t closesBefore = backend.DocumentCloseCount();
+        const std::size_t cachedBefore = backend.CachedDocumentCount();
+        {
+            auto ownedDocument = backend.OpenFromMemory(
+                std::filesystem::path("owned.pdf"), ownedBytes);
+            Check(ownedDocument.has_value(), "a PDF whose bytes the test owns opens");
+            Check(backend.DocumentLoadCount() == loadsBefore + 1U,
+                "opening that PDF loads its document once");
+            Check(backend.CachedDocumentCount() == cachedBefore + 1U,
+                "the open handle is cached");
+            if (ownedDocument.has_value()) {
+                cnote::render::PdfiumBackgroundProvider ownedProvider(backend, *ownedDocument, 8);
+                Check(!ownedProvider.PageBackground(0, 0, 1.0f).isNull(),
+                    "the cached handle renders the page");
+                Check(backend.DocumentLoadCount() == loadsBefore + 1U,
+                    "rendering through the cache does not reload");
+            }
+            ownedBytes.reset();
+            ownedDocument.reset();
+        }
+        Check(!ownedBytesAlive.expired(),
+            "the cache keeps the source bytes alive while its handle is open");
+        Check(backend.DocumentCloseCount() == closesBefore,
+            "the handle is still open before the release hook");
+        Check(backend.CachedDocumentCount() == cachedBefore + 1U,
+            "the unreleased handle is still cached");
+        cnote::PdfiumBackend::ReleaseUnreferencedDocuments();
+        Check(backend.DocumentCloseCount() == closesBefore + 1U,
+            "the release hook closes the unreferenced handle");
+        Check(ownedBytesAlive.expired(),
+            "the source bytes are freed only after the handle closed");
+        Check(backend.CachedDocumentCount() == cachedBefore,
+            "the release hook drops the cached entry");
+    }
+
+    // Replacing a document's source drops the old handle on the next acquire,
+    // closing it before the old bytes are released.
+    {
+        auto replacedBytes = std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(1));
+        std::weak_ptr<std::vector<std::uint8_t>> replacedBytesAlive = replacedBytes;
+        cnote::Page replacedPage;
+        replacedPage.width = 612.0f;
+        replacedPage.height = 792.0f;
+        replacedPage.sourcePdfSourceIndex = 0;
+        replacedPage.sourcePdfPageIndex = 0;
+        cnote::Document replacedDocument = cnote::Document::CreateProjectDocument(
+            std::filesystem::path("replaced.cnote"),
+            { { std::filesystem::path("replaced.pdf"), replacedBytes } },
+            { replacedPage },
+            0,
+            {});
+        Check(backend.RenderPage(replacedDocument.PdfData(), 0U, 1.0f).has_value(),
+            "the replaced document's source renders");
+        const std::size_t closesBefore = backend.DocumentCloseCount();
+        replacedDocument.ReplaceWithProject(
+            std::filesystem::path("replaced.cnote"),
+            { { std::filesystem::path("replacement.pdf"),
+                std::make_shared<std::vector<std::uint8_t>>(BuildMultiPagePdf(1)) } },
+            { replacedDocument.PageAt(0) },
+            0,
+            {});
+        replacedBytes.reset();
+        Check(!replacedBytesAlive.expired(),
+            "the replaced source is still pinned by its cached handle");
+        Check(backend.RenderPage(replacedDocument.PdfData(), 0U, 1.0f).has_value(),
+            "the replacement source renders");
+        Check(replacedBytesAlive.expired(),
+            "the next acquire closed the replaced handle before freeing its bytes");
+        Check(backend.DocumentCloseCount() > closesBefore,
+            "the replaced document's handle was closed");
+    }
+
     // --- hydration never leaves a page claiming a source it cannot show -----
     {
         const cnote::RasterImage storedRaster =
