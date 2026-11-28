@@ -267,48 +267,30 @@ PageTextStyle TextStyleFromEditor(const QTextEdit* editor) {
     return style;
 }
 
-// The part of `settings` ApplySettingsToShell reads (directly or through
-// ApplyStrokeStyle, ApplyToolToCanvas and ApplyPendingTextStyle).  A change
-// outside this set is consumed by its own owner - the auto-save timer, PDF
-// export, the new-page dialog - and does not need the shell reapplied.
-bool ShellSettingsEqual(const settings::Settings& a, const settings::Settings& b) {
-    return a.palette == b.palette
-        && a.colorIndex == b.colorIndex
-        && a.defaultPageSizePreset == b.defaultPageSizePreset
-        && a.drawBrushSize == b.drawBrushSize
-        && a.eraseBrushSize == b.eraseBrushSize
-        && a.quickSizeSliderMax == b.quickSizeSliderMax
-        && a.brushSizePresets == b.brushSizePresets
-        && a.textSizePresets == b.textSizePresets
-        && a.textSizePreset == b.textSizePreset
-        && a.textFontFamily == b.textFontFamily
-        && a.textBold == b.textBold
-        && a.textItalic == b.textItalic
-        && a.textUnderline == b.textUnderline
-        && a.textAlignment == b.textAlignment
-        && a.drawCursorKind == b.drawCursorKind
-        && a.drawCursorSize == b.drawCursorSize
-        && a.inputSpacing == b.inputSpacing
-        && a.inputSmoothing == b.inputSmoothing
-        && a.strokeSmoothing == b.strokeSmoothing
-        && a.dashLength == b.dashLength
-        && a.dashGap == b.dashGap
-        && a.autoHideToolbar == b.autoHideToolbar
-        && a.scratchToErase == b.scratchToErase
-        && a.canvasBackdrop == b.canvasBackdrop
-        && a.wheelTools == b.wheelTools
-        && a.zoomPresets == b.zoomPresets;
+// Fields whose consumers read the live settings model themselves, so a dialog
+// edit does not need ApplySettingsToShell: the auto-save timer (when wired),
+// PDF export, the new-page dialog and the recents menu.  Shortcut sequences are
+// handled by RefreshShortcutBindings instead.  Every other field is compared,
+// so a newly added Settings field reapplies the shell by default.
+void NeutralizeShellIrrelevant(settings::Settings& settings) {
+    settings.savedPalettes.clear();
+    settings.paletteIndex = 0;
+    settings.defaultPageColor = 0;
+    settings.recentDocumentPaths.clear();
+    settings.autoSaveIntervalSeconds = 0;
+    settings.embedProjectInExportedPdfs = false;
+    settings.shortcuts = {};
 }
 
-// ShortcutBinding has no operator==; the sequence is the only field that
-// reaches an action.
-bool ShortcutSequencesEqual(const settings::Settings& a, const settings::Settings& b) {
-    for (std::size_t index = 0; index < a.shortcuts.size(); ++index) {
-        if (a.shortcuts[index].sequence != b.shortcuts[index].sequence) {
-            return false;
-        }
+bool ShellSettingsEqual(const settings::Settings& a, const settings::Settings& b) {
+    if (a == b) {
+        return true;
     }
-    return true;
+    settings::Settings left = a;
+    settings::Settings right = b;
+    NeutralizeShellIrrelevant(left);
+    NeutralizeShellIrrelevant(right);
+    return left == right;
 }
 
 }  // namespace
@@ -1170,7 +1152,7 @@ void QtMainWindow::ToggleSettingsDialog() {
             // tick.  Compare against what the shell last consumed and touch only
             // the matching state (PERF-043).  Both diffs are read before the
             // first apply, because each apply updates appliedSettings_.
-            const bool shortcutsChanged = !ShortcutSequencesEqual(settings_, appliedSettings_);
+            const bool shortcutsChanged = settings_.shortcuts != appliedSettings_.shortcuts;
             if (!ShellSettingsEqual(settings_, appliedSettings_)) {
                 ApplySettingsToShell();
             }

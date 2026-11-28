@@ -127,7 +127,7 @@ private:
     void addPaletteColor();
     void removePaletteColor();
     void applyHexColorEdit();
-    void applyHueSaturationLightness();
+    void applyHueSaturationLightness(bool continuation);
     void saveNamedPalette();
     void applySelectedNamedPalette();
     void deleteSelectedNamedPalette();

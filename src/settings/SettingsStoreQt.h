@@ -66,11 +66,15 @@ enum class CanvasBackdrop {
 struct NamedPalette {
     std::u16string name {};
     std::vector<std::uint32_t> colors {};
+
+    bool operator==(const NamedPalette&) const = default;
 };
 
 struct ShortcutBinding {
     ShortcutAction action = ShortcutAction::ToolDraw;
     QKeySequence sequence {};
+
+    bool operator==(const ShortcutBinding&) const = default;
 };
 
 std::vector<std::uint32_t> DefaultPalette();
@@ -129,6 +133,8 @@ struct Settings {
     std::array<float, kZoomPresetCount> zoomPresets {};
     std::vector<Tool> wheelTools {};
     std::array<ShortcutBinding, kShortcutActionCount> shortcuts = DefaultShortcutBindings();
+
+    bool operator==(const Settings&) const = default;
 };
 
 // Portable settings storage for the Qt frontend (plan steps 6.4/6.5).

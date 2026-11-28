@@ -302,9 +302,9 @@ void SettingsDialogQt::buildPalettePage() {
     connect(removeColorButton_, &QPushButton::clicked, this, [this] { removePaletteColor(); });
     connect(hexColorEdit_, &QLineEdit::editingFinished, this, [this] { applyHexColorEdit(); });
     for (QSlider* slider : { hueSlider_, saturationSlider_, lightnessSlider_ }) {
-        connect(slider, &QSlider::valueChanged, this, [this](int) {
+        connect(slider, &QSlider::valueChanged, this, [this, slider](int) {
             if (!refreshing_) {
-                applyHueSaturationLightness();
+                applyHueSaturationLightness(slider->isSliderDown());
             }
         });
     }
@@ -319,7 +319,8 @@ void SettingsDialogQt::buildPalettePage() {
 // Connects a slider whose value is `field * scale` in the settings model.
 // A tick that maps back to the stored value writes nothing (auto-save snapping
 // and stored fractions can both produce a no-op drag tick); a changed tick
-// persists immediately and updates only its own readout.
+// persists immediately and updates only its own readout.  Only the ticks of a
+// held drag share one failure report; keyboard/wheel steps are discrete edits.
 void SettingsDialogQt::connectScaledSlider(QSlider* slider, float settings::Settings::*field, float scale, QLabel* label,
     QString (*formatLabel)(float)) {
     connect(slider, &QSlider::valueChanged, this, [this, slider, field, scale, label, formatLabel](int value) {
@@ -329,15 +330,13 @@ void SettingsDialogQt::connectScaledSlider(QSlider* slider, float settings::Sett
         }
         settings::Settings candidate = settings_;
         candidate.*field = static_cast<float>(value) / scale;
-        if (!persist(std::move(candidate), /*continuation=*/true)) {
+        if (!persist(std::move(candidate), /*continuation=*/slider->isSliderDown())) {
             // The live model kept the previous value; put the tick back.
             const QSignalBlocker block(slider);
             slider->setValue(static_cast<int>(std::lround(settings_.*field * scale)));
         }
         label->setText(formatLabel(settings_.*field));
     });
-    // A new drag/click is a new interaction for save-failure reporting.
-    connect(slider, &QSlider::sliderPressed, this, [this] { saveFailureReported_ = false; });
 }
 
 void SettingsDialogQt::connectCheck(QCheckBox* check, bool settings::Settings::*field) {
@@ -540,7 +539,6 @@ void SettingsDialogQt::buildDocumentsPage() {
         if (refreshing_) return;
         applyAutoSaveSlider();
     });
-    connect(autoSaveSlider_, &QSlider::sliderPressed, this, [this] { saveFailureReported_ = false; });
     connectCheck(embedProjectInPdfCheck_, &settings::Settings::embedProjectInExportedPdfs);
 }
 
@@ -875,7 +873,7 @@ void SettingsDialogQt::applyHexColorEdit() {
     refreshPaletteControls(true);
 }
 
-void SettingsDialogQt::applyHueSaturationLightness() {
+void SettingsDialogQt::applyHueSaturationLightness(bool continuation) {
     if (settings_.palette.empty() || settings_.paletteIndex >= settings_.palette.size()) {
         return;
     }
@@ -891,7 +889,7 @@ void SettingsDialogQt::applyHueSaturationLightness() {
     }
     settings::Settings candidate = settings_;
     candidate.palette[candidate.paletteIndex] = color;
-    if (!persist(std::move(candidate), /*continuation=*/true)) {
+    if (!persist(std::move(candidate), continuation)) {
         refreshSelectedColorControls(true);
         return;
     }
@@ -1067,7 +1065,7 @@ void SettingsDialogQt::applyAutoSaveSlider() {
     }
     settings::Settings candidate = settings_;
     candidate.autoSaveIntervalSeconds = seconds;
-    persist(std::move(candidate), /*continuation=*/true);
+    persist(std::move(candidate), /*continuation=*/autoSaveSlider_->isSliderDown());
     if (autoSaveSlider_->value() != static_cast<int>(settings_.autoSaveIntervalSeconds)) {
         const QSignalBlocker block(autoSaveSlider_);
         autoSaveSlider_->setValue(static_cast<int>(settings_.autoSaveIntervalSeconds));

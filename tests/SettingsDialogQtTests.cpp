@@ -601,6 +601,7 @@ void FailedPersist(const std::filesystem::path& scratch) {
 
     const float beforeSpacing = settings.inputSpacing;
     auto* spacing = Find<QSlider>(dialog, "spacingSlider");
+    spacing->setSliderDown(true);
     spacing->setValue(300);
     Check(settings.inputSpacing == beforeSpacing, "failed persist leaves the live settings unchanged");
     Check(spacing->value() == static_cast<int>(std::lround(beforeSpacing * 100.0f)),
@@ -609,10 +610,13 @@ void FailedPersist(const std::filesystem::path& scratch) {
     Check(saveFailures == 1, "failed persist emits settingsSaveFailed once");
     spacing->setValue(320);
     Check(settings.inputSpacing == beforeSpacing, "a second failing tick keeps the live settings unchanged");
-    Check(saveFailures == 1, "one failed drag reports its write failure once, not per tick");
+    Check(saveFailures == 1, "one failed mouse drag reports its write failure once, not per tick");
+    spacing->setSliderDown(false);
+    spacing->setValue(310);
+    Check(saveFailures == 2, "a keyboard-style tick after a failed drag reports again");
     auto* autoHide = Find<QCheckBox>(dialog, "autoHideToolbarCheck");
     autoHide->setChecked(!autoHide->isChecked());
-    Check(saveFailures == 2, "a separate failed edit reports its own write failure");
+    Check(saveFailures == 3, "a separate failed edit reports its own write failure");
     Check(!dialog.lastSaveError().isEmpty(), "failed persist reports a reason");
     Check(ReadFile(dest) == previous, "failed persist leaves the previous file intact");
     Check(store.Load().inputSpacing == beforeSpacing, "failed persist leaves the stored value unchanged");
