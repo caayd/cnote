@@ -144,6 +144,31 @@ void PaintImage(QPainter& painter, const PageImage& image, const PageRenderParam
 // painter units exactly like PaintPage.
 void PaintStrokePreview(QPainter& painter, const Stroke& stroke, const PageRenderParams& params, float opacity);
 
+// One stroke rasterized once at a fixed scale/DPR and later composited at
+// changing opacity (the snap ghost fades a fixed stroke over 250 ms).  The
+// image holds untagged device pixels; `pageRect` is the page-unit rect it
+// covers, snapped to the device-pixel grid, so the caller blits it 1:1.
+struct StrokePreviewRaster {
+    QImage image;
+    QRectF pageRect {};
+    float deviceScale = 0.0f;         // device pixels per page unit
+    float devicePixelRatio = 0.0f;    // DPR the raster was rendered at
+};
+
+// Renders `stroke` once at params.scale * params.devicePixelRatio device
+// pixels, at full opacity, with the same path/pen/dash rules as
+// PaintStrokePreview.  Returns nullopt when the stroke has no points or the
+// bounds do not fit `budget` (the caller falls back to painting the vector).
+[[nodiscard]] std::optional<StrokePreviewRaster> RenderStrokePreviewRaster(
+    const Stroke& stroke, const PageRenderParams& params, RasterBudget budget = RasterBudget {});
+
+// Composites a StrokePreviewRaster at `opacity`; `params.scale` maps page units
+// to painter units and `params.devicePixelRatio` must be the one the raster was
+// rendered at (the caller rebuilds it when the view changes).  Identical to
+// PaintStrokePreview(stroke, params, opacity) within 8-bit rounding.
+void PaintStrokePreviewRaster(QPainter& painter, const StrokePreviewRaster& raster,
+    const PageRenderParams& params, float opacity);
+
 // Draws one text/LaTeX block in page units (rotation and opacity applied),
 // same transform rules as the committed render; `pixelRatio` is
 // PageRenderParams::textPixelRatio (nullopt lays out in page units).

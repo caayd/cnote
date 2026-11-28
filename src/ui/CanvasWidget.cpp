@@ -969,7 +969,12 @@ void CanvasWidget::ResetStrokeLayer() {
 
 bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const InkPath& path, const CanvasPageView& view) {
     const float devicePixelRatio = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
-    const float smoothing = StrokeRenderSmoothing(stroke, controller_.InputSettings().strokeSmoothing);
+    const CanvasInputSettings input = controller_.InputSettings();
+    const float smoothing = StrokeRenderSmoothing(stroke, input.strokeSmoothing);
+    // QPen's custom dash pattern is in pen-width units; a segment batch
+    // continues the pattern by setting that phase as the pen's dash offset.
+    const float dashLength = std::max(0.5f, input.dashLength);
+    const float dashGap = std::max(0.5f, input.dashGap);
     const std::vector<Vec2>& points = path.points;
     const std::size_t count = points.size();
     // Pressure ink composites filled outlines instead of pen segments.
@@ -990,16 +995,15 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const InkPath& path, co
         && layer.style.dotted == stroke.style.dotted
         && std::abs(layer.style.width - stroke.style.width) < 0.0001f
         && std::abs(layer.smoothing - smoothing) < 0.0001f
+        && std::abs(layer.dashLength - dashLength) < 0.0001f
+        && std::abs(layer.dashGap - dashGap) < 0.0001f
         && layer.pressure == pressure
         && count >= layer.consumedRaw
         && Vec2Equal(points.front(), layer.firstPoint)
         && Vec2Equal(points[layer.consumedRaw - 1U], layer.consumedLast);
     if (!appendContinues) {
-        // Dotted strokes keep the whole-stroke preview: the dash pattern phase
-        // is path-global, so compositing per segment would restart the pattern
-        // at every seam.
         layer = LiveStrokeLayer {};
-        if (count == 0U || stroke.style.dotted) {
+        if (count == 0U) {
             return false;
         }
         layer.valid = true;
@@ -1008,6 +1012,8 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const InkPath& path, co
         layer.devicePixelRatio = devicePixelRatio;
         layer.style = stroke.style;
         layer.smoothing = smoothing;
+        layer.dashLength = dashLength;
+        layer.dashGap = dashGap;
         layer.pressure = pressure;
         layer.smoother.Reset(smoothing);
         layer.smoothed.push_back(points.front());
@@ -1020,9 +1026,8 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const InkPath& path, co
         layer.consumedLast = points.front();
         Vec2 ignored;
         static_cast<void>(layer.smoother.Feed(points.front(), pressureAt(0), &ignored, nullptr));
-    } else if (stroke.style.dotted) {
-        return false;
     }
+    const std::size_t consumedBefore = layer.consumedRaw;
 
     const float deviceScale = layer.scale * layer.devicePixelRatio;
     const float penWidth = render::StrokeRenderPenWidth(stroke, layer.scale) * layer.devicePixelRatio;
@@ -1035,7 +1040,7 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const InkPath& path, co
     // Ensures the image covers `rect` (page units, snapped to device pixels).
     // Snapping keeps the paint-time blit at integer device coordinates, so it
     // is a 1:1 copy like the page surface rather than a resample.
-    const auto ensureCover = [&layer, deviceScale](const QRectF& needed) {
+    const auto ensureCover = [this, &layer, deviceScale](const QRectF& needed) {
         if (!layer.image.isNull() && layer.pageRect.contains(needed)) {
             return;
         }
@@ -1051,17 +1056,41 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const InkPath& path, co
                 ? needed
                 : layer.pageRect.united(needed))
             .adjusted(-slack, -slack, slack, slack);
-        const int left = static_cast<int>(std::floor(grown.left() * deviceScale));
-        const int top = static_cast<int>(std::floor(grown.top() * deviceScale));
-        const int right = static_cast<int>(std::ceil(grown.right() * deviceScale));
-        const int bottom = static_cast<int>(std::ceil(grown.bottom() * deviceScale));
-        QImage image(std::max(1, right - left), std::max(1, bottom - top),
-            QImage::Format_ARGB32_Premultiplied);
+        if (!std::isfinite(grown.left()) || !std::isfinite(grown.top())
+            || !std::isfinite(grown.right()) || !std::isfinite(grown.bottom())) {
+            layer = LiveStrokeLayer {};
+            return;
+        }
+        const double leftPx = std::floor(static_cast<double>(grown.left()) * deviceScale);
+        const double topPx = std::floor(static_cast<double>(grown.top()) * deviceScale);
+        const double rightPx = std::ceil(static_cast<double>(grown.right()) * deviceScale);
+        const double bottomPx = std::ceil(static_cast<double>(grown.bottom()) * deviceScale);
+        const double width = rightPx - leftPx;
+        const double height = bottomPx - topPx;
+        const render::RasterBudget budget;
+        // A stroke larger than one raster (very high zoom/DPR) must not ask
+        // QImage for an unbounded surface (PERF-007); the caller then paints
+        // the whole preview instead.
+        if (!(width > 0.0) || !(height > 0.0)
+            || width > budget.maxDimension || height > budget.maxDimension
+            || width * height * 4.0 > static_cast<double>(budget.maxSurfaceBytes)) {
+            layer = LiveStrokeLayer {};
+            return;
+        }
+        const int left = static_cast<int>(leftPx);
+        const int top = static_cast<int>(topPx);
+        const int right = static_cast<int>(rightPx);
+        const int bottom = static_cast<int>(bottomPx);
+        QImage image(right - left, bottom - top, QImage::Format_ARGB32_Premultiplied);
         if (image.isNull()) {
             return;
         }
         image.fill(Qt::transparent);
         if (!layer.image.isNull()) {
+            // PERF-025 evidence: every reallocation copies the accumulated
+            // surface.  The 96 px slack amortizes this over ~96 px of travel.
+            ++strokeLayerGrowths_;
+            strokeLayerCopyBytes_ += static_cast<std::uint64_t>(layer.image.sizeInBytes());
             QPainter copy(&image);
             const int offsetX = static_cast<int>(std::lround(layer.pageRect.x() * deviceScale)) - left;
             const int offsetY = static_cast<int>(std::lround(layer.pageRect.y() * deviceScale)) - top;
@@ -1134,9 +1163,107 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const InkPath& path, co
             for (std::size_t i = 0; i < pendingControls.size(); ++i) {
                 path.quadTo(toDevice(pendingControls[i]), toDevice(pendingEnds[i]));
             }
-            ink.setPen(QPen(color, static_cast<qreal>(penWidth), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             ink.setBrush(Qt::NoBrush);
-            ink.drawPath(path);
+            if (layer.style.dotted) {
+                // Cut the pattern along the same flattened polyline Qt's
+                // QDashStroker walks, but draw each completed dash once even
+                // when it spans several append batches.  Splitting a dash at a
+                // batch boundary (a fresh subpath) would cap both halves and
+                // darken the seam's antialiased edges (PERF-024).
+                const QList<QPolygonF> flattened = path.toSubpathPolygons();
+                const float dashLength = std::max(0.5f, layer.dashLength);
+                const float dashGap = std::max(0.5f, layer.dashGap);
+                const double penWidthDevice = static_cast<double>(penWidth);
+                const auto pageFromDevice = [&layer, deviceScale](const QPointF& point) {
+                    return Vec2 {
+                        static_cast<float>(point.x() / deviceScale + layer.pageRect.x()),
+                        static_cast<float>(point.y() / deviceScale + layer.pageRect.y()),
+                    };
+                };
+                const auto flushOpenDash = [&layer, &ink, &toDevice, &color, penWidth]() {
+                    if (layer.openDash.empty()) {
+                        return;
+                    }
+                    ink.setBrush(Qt::NoBrush);
+                    ink.setPen(QPen(color, static_cast<qreal>(penWidth), Qt::SolidLine,
+                        Qt::RoundCap, Qt::RoundJoin));
+                    if (layer.openDash.size() == 1U) {
+                        // A zero-length on-dash is a round dot.
+                        ink.setPen(Qt::NoPen);
+                        ink.setBrush(color);
+                        const qreal radius = static_cast<qreal>(penWidth) * 0.5;
+                        ink.drawEllipse(toDevice(layer.openDash.front()), radius, radius);
+                    } else {
+                        QPainterPath dash;
+                        dash.moveTo(toDevice(layer.openDash.front()));
+                        for (std::size_t index = 1; index < layer.openDash.size(); ++index) {
+                            dash.lineTo(toDevice(layer.openDash[index]));
+                        }
+                        ink.drawPath(dash);
+                    }
+                    layer.openDash.clear();
+                };
+                if (!layer.dashStarted) {
+                    layer.dashStarted = true;
+                    layer.dashOn = true;
+                    layer.dashRemaining = static_cast<double>(dashLength) * penWidthDevice;
+                }
+                double batchLength = 0.0;
+                for (const QPolygonF& polyline : flattened) {
+                    for (int index = 1; index < polyline.size(); ++index) {
+                        const QPointF from = polyline[index - 1];
+                        const QPointF to = polyline[index];
+                        const double dx = to.x() - from.x();
+                        const double dy = to.y() - from.y();
+                        const double length = std::hypot(dx, dy);
+                        if (!(length > 0.0)) {
+                            continue;
+                        }
+                        batchLength += length;
+                        double position = 0.0;
+                        while (position < length) {
+                            if (layer.dashRemaining <= 0.0) {
+                                if (layer.dashOn) {
+                                    flushOpenDash();
+                                }
+                                layer.dashOn = !layer.dashOn;
+                                layer.dashRemaining = static_cast<double>(
+                                    layer.dashOn ? dashLength : dashGap) * penWidthDevice;
+                            }
+                            const double step = std::min(length - position, layer.dashRemaining);
+                            const double t0 = position / length;
+                            const double t1 = (position + step) / length;
+                            const auto at = [&from, dx, dy](double t) {
+                                return QPointF(from.x() + dx * t, from.y() + dy * t);
+                            };
+                            if (layer.dashOn) {
+                                if (layer.openDash.empty()) {
+                                    layer.openDash.push_back(pageFromDevice(at(t0)));
+                                }
+                                layer.openDash.push_back(pageFromDevice(at(t1)));
+                            }
+                            position += step;
+                            layer.dashRemaining -= step;
+                            if (layer.dashRemaining <= 0.0) {
+                                if (layer.dashOn) {
+                                    flushOpenDash();
+                                }
+                                layer.dashOn = !layer.dashOn;
+                                layer.dashRemaining = static_cast<double>(
+                                    layer.dashOn ? dashLength : dashGap) * penWidthDevice;
+                            }
+                        }
+                    }
+                }
+                // Qt measures dashes along its flattened polyline; advance the
+                // tail's pattern phase by that same length in pen-width units.
+                if (penWidth > 0.0f) {
+                    layer.dashPhase += static_cast<float>(batchLength / penWidthDevice);
+                }
+            } else {
+                ink.setPen(QPen(color, static_cast<qreal>(penWidth), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                ink.drawPath(path);
+            }
         }
         ink.end();
         pendingControls.clear();
@@ -1186,11 +1313,12 @@ bool CanvasWidget::SyncStrokeLayer(const Stroke& stroke, const InkPath& path, co
         layer.consumedLast = raw;
         ++layer.consumedRaw;
     }
+    layer.lastSyncRawPoints = layer.consumedRaw - consumedBefore;
     flush();
     return true;
 }
 
-void CanvasWidget::PaintStrokeTail(QPainter& painter, const Stroke& stroke, const InkPath& path,
+std::size_t CanvasWidget::PaintStrokeTail(QPainter& painter, const Stroke& stroke, const InkPath& path,
     const CanvasPageView& view) {
     const LiveStrokeLayer& layer = strokeLayer_;
     const float scale = view.scale;
@@ -1235,7 +1363,7 @@ void CanvasWidget::PaintStrokeTail(QPainter& painter, const Stroke& stroke, cons
         AppendInkOutline(outline, centerline, kInkTolerance);
         painter.setPen(Qt::NoPen);
         painter.fillPath(render::InkOutlinePath(outline), color);
-        return;
+        return k <= 1U ? 1U : 3U;
     }
 
     painter.setBrush(Qt::NoBrush);
@@ -1248,16 +1376,56 @@ void CanvasWidget::PaintStrokeTail(QPainter& painter, const Stroke& stroke, cons
             QPointF(static_cast<qreal>(layer.smoothed.front().x * scale),
                 static_cast<qreal>(layer.smoothed.front().y * scale)),
             radius, radius);
-        return;
+        return 1U;
     }
 
-    painter.setPen(QPen(color, static_cast<qreal>(penWidth), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    if (layer.style.dotted && !layer.openDash.empty()) {
+        // The layer withholds an on-dash until it is complete (so it is drawn
+        // once, with no seam at an append boundary).  Paint the consumed part
+        // of that dash provisionally; the dashed tail below continues it.
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(color, static_cast<qreal>(penWidth), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        if (layer.openDash.size() == 1U) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(color);
+            const qreal radius = static_cast<qreal>(penWidth) * 0.5;
+            painter.drawEllipse(
+                QPointF(static_cast<qreal>(layer.openDash.front().x * scale),
+                    static_cast<qreal>(layer.openDash.front().y * scale)),
+                radius, radius);
+        } else {
+            QPainterPath openDash;
+            openDash.moveTo(
+                QPointF(static_cast<qreal>(layer.openDash.front().x * scale),
+                    static_cast<qreal>(layer.openDash.front().y * scale)));
+            for (std::size_t index = 1; index < layer.openDash.size(); ++index) {
+                openDash.lineTo(
+                    QPointF(static_cast<qreal>(layer.openDash[index].x * scale),
+                        static_cast<qreal>(layer.openDash[index].y * scale)));
+            }
+            painter.drawPath(openDash);
+        }
+    }
+
+    QPen pen(color, static_cast<qreal>(penWidth), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    if (layer.style.dotted) {
+        // The tail continues the layer's dash phase; its geometry starts where
+        // the composited prefix ended.
+        pen.setStyle(Qt::CustomDashLine);
+        pen.setDashPattern({
+            static_cast<qreal>(std::max(0.5f, layer.dashLength)),
+            static_cast<qreal>(std::max(0.5f, layer.dashGap)),
+        });
+        pen.setCapStyle(Qt::RoundCap);
+        pen.setDashOffset(static_cast<qreal>(layer.dashPhase));
+    }
+    painter.setPen(pen);
     const QPointF from(static_cast<qreal>(layer.lastEnd.x * scale),
         static_cast<qreal>(layer.lastEnd.y * scale));
     const QPointF to(static_cast<qreal>(end.x * scale), static_cast<qreal>(end.y * scale));
     if (k == 2U) {
         painter.drawLine(from, to);
-        return;
+        return 2U + layer.openDash.size();
     }
     QPainterPath line;
     line.moveTo(from);
@@ -1270,6 +1438,7 @@ void CanvasWidget::PaintStrokeTail(QPainter& painter, const Stroke& stroke, cons
     }
     line.lineTo(to);
     painter.drawPath(line);
+    return (hasTail ? 3U : 2U) + layer.openDash.size();
 }
 
 void CanvasWidget::BeginGestureOverlay(std::size_t pageIndex, bool transform) {
@@ -1521,6 +1690,7 @@ std::size_t CanvasWidget::CachedTileCount() const {
 
 void CanvasWidget::paintEvent(QPaintEvent* event) {
     lastPaintSurfaceBytes_ = 0;
+    lastLiveStrokePaintPoints_ = 0;
     const float devicePixelRatio = static_cast<float>(devicePixelRatioF());
     if (cachedDevicePixelRatio_ != devicePixelRatio) {
         // Display/DPR change: raster caches are keyed by their effective scale.
@@ -1977,11 +2147,22 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
             }
         }
 
-        // A snapped stroke's freehand original, faded under the shape.
+        // A snapped stroke's freehand original, faded under the shape.  The
+        // fixed geometry is rasterized once per view scale/DPR; fade ticks
+        // only blit it at the current opacity (PERF-024).
         if (snapGhost_.has_value() && snapGhost_->pageIndex == view.pageIndex) {
             painter.save();
             painter.translate(view.rect.topLeft());
-            render::PaintStrokePreview(painter, snapGhost_->stroke, RenderParamsFor(view), SnapGhostOpacity());
+            const render::PageRenderParams ghostParams = RenderParamsFor(view);
+            if (EnsureSnapGhostRaster(view)) {
+                render::PaintStrokePreviewRaster(painter, snapGhost_->raster, ghostParams, SnapGhostOpacity());
+                ++snapGhostRasterPaints_;
+            } else {
+                // Over the raster budget (or allocation failure): the vector
+                // is the previous, always-correct fallback.
+                render::PaintStrokePreview(painter, snapGhost_->stroke, ghostParams, SnapGhostOpacity());
+                ++snapGhostVectorPaints_;
+            }
             painter.restore();
         }
 
@@ -2005,9 +2186,13 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                             static_cast<qreal>(strokeLayer_.image.width() / dpr),
                             static_cast<qreal>(strokeLayer_.image.height() / dpr)),
                         strokeLayer_.image);
-                    PaintStrokeTail(painter, *pending, liveStroke_, view);
+                    strokeLayerBlitBytes_ += static_cast<std::uint64_t>(strokeLayer_.image.sizeInBytes());
+                    const std::size_t tailPoints = PaintStrokeTail(painter, *pending, liveStroke_, view);
+                    lastLiveStrokePaintPoints_ = static_cast<std::uint64_t>(
+                        strokeLayer_.lastSyncRawPoints + tailPoints);
                 } else {
                     render::PaintStrokePreview(painter, *pending, RenderParamsFor(view), 1.0f);
+                    lastLiveStrokePaintPoints_ = static_cast<std::uint64_t>(liveStroke_.points.size());
                 }
                 painter.restore();
             }
@@ -3055,7 +3240,9 @@ void CanvasWidget::SnapHeldStroke() {
     if (pending == nullptr) {
         return;
     }
-    SnapGhost ghost { controller_.PendingStrokePage(), *pending, std::nullopt };
+    SnapGhost ghost;
+    ghost.pageIndex = controller_.PendingStrokePage();
+    ghost.stroke = *pending;
     if (!router_->SnapStrokeToShape()) {
         return;
     }
@@ -3081,14 +3268,61 @@ void CanvasWidget::RepaintSnapGhost() {
     if (!snapGhost_.has_value()) {
         return;
     }
-    float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
-    if (!StrokeBounds(snapGhost_->stroke, &minX, &minY, &maxX, &maxY)) {
-        return;
+    SnapGhost& ghost = *snapGhost_;
+    if (!ghost.boundsValid) {
+        // One scan per ghost, not one per 16 ms fade tick (PERF-024).
+        float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
+        if (!StrokeBounds(ghost.stroke, &minX, &minY, &maxX, &maxY)) {
+            return;
+        }
+        const float margin = ghost.stroke.style.width + kStrokeDirtyMarginPixels;
+        ghost.pageBounds = QRectF(
+            static_cast<qreal>(minX - margin), static_cast<qreal>(minY - margin),
+            static_cast<qreal>((maxX - minX) + margin * 2.0f),
+            static_cast<qreal>((maxY - minY) + margin * 2.0f));
+        ghost.boundsValid = true;
     }
-    const float margin = snapGhost_->stroke.style.width + kStrokeDirtyMarginPixels;
-    update(PageRegionDirtyRect(snapGhost_->pageIndex, QRectF(
-        static_cast<qreal>(minX - margin), static_cast<qreal>(minY - margin),
-        static_cast<qreal>((maxX - minX) + margin * 2.0f), static_cast<qreal>((maxY - minY) + margin * 2.0f))));
+    update(PageRegionDirtyRect(ghost.pageIndex, ghost.pageBounds));
+}
+
+bool CanvasWidget::EnsureSnapGhostRaster(const CanvasPageView& view) {
+    if (!snapGhost_.has_value()) {
+        return false;
+    }
+    SnapGhost& ghost = *snapGhost_;
+    const render::PageRenderParams params = RenderParamsFor(view);
+    const float scale = view.scale;
+    const float devicePixelRatio = params.devicePixelRatio;
+    const bool sameKey = std::abs(ghost.rasterKeyScale - scale) < 0.0001f
+        && std::abs(ghost.rasterKeyDevicePixelRatio - devicePixelRatio) < 0.0001f
+        && std::abs(ghost.rasterKeySmoothing - params.strokeSmoothing) < 0.0001f
+        && std::abs(ghost.rasterKeyDashLength - params.dashLength) < 0.0001f
+        && std::abs(ghost.rasterKeyDashGap - params.dashGap) < 0.0001f;
+    if (sameKey) {
+        if (!ghost.raster.image.isNull()) {
+            return true;
+        }
+        if (ghost.rasterFailed) {
+            return false;
+        }
+    }
+    ghost.rasterKeyScale = scale;
+    ghost.rasterKeyDevicePixelRatio = devicePixelRatio;
+    ghost.rasterKeySmoothing = params.strokeSmoothing;
+    ghost.rasterKeyDashLength = params.dashLength;
+    ghost.rasterKeyDashGap = params.dashGap;
+    const std::optional<render::StrokePreviewRaster> raster =
+        render::RenderStrokePreviewRaster(ghost.stroke, params);
+    if (!raster.has_value()) {
+        // Over the raster budget (PERF-007) or allocation failure: remember it
+        // for this key so the fade does not retry every frame.
+        ghost.raster = {};
+        ghost.rasterFailed = true;
+        return false;
+    }
+    ghost.raster = *raster;
+    ghost.rasterFailed = false;
+    return true;
 }
 
 void CanvasWidget::EndSnapGhost(bool fade) {
@@ -4703,7 +4937,11 @@ void CanvasWidget::CommitScratchOut(const std::vector<ObjectRef>& targets) {
     // The scratch's ink fades out over what it erased rather than vanishing.
     if (const Stroke* pending = controller_.PendingStroke(); pending != nullptr) {
         RepaintSnapGhost();
-        snapGhost_ = SnapGhost { controller_.PendingStrokePage(), *pending, snapGhostClock_.elapsed() };
+        SnapGhost ghost;
+        ghost.pageIndex = controller_.PendingStrokePage();
+        ghost.stroke = *pending;
+        ghost.releasedAt = snapGhostClock_.elapsed();
+        snapGhost_ = std::move(ghost);
         snapGhostTimer_->start();
         RepaintSnapGhost();
     }

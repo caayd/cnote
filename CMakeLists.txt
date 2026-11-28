@@ -1150,6 +1150,23 @@ if(WIN32)
     cnote_stage_test_runtime(cnote_canvas_geometry_tests)
 endif()
 
+# --- Live ink (PERF-024/PERF-025) --------------------------------------------
+# Dotted live preview must use the incremental ink layer (bounded per-sample
+# work, dash phase carried across append batches), and the snap ghost's fade
+# must blit a retained raster instead of repainting the stroke every 16 ms.
+# Runs at DPR 1.0 and 1.75 like the canvas geometry test.
+add_executable(cnote_live_ink_tests tests/LiveInkTests.cpp)
+target_link_libraries(cnote_live_ink_tests PRIVATE cnote_ui)
+add_test(NAME live_ink_dpr1_qt COMMAND cnote_live_ink_tests)
+set_tests_properties(live_ink_dpr1_qt PROPERTIES TIMEOUT 180
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins};QT_SCALE_FACTOR=1.0")
+add_test(NAME live_ink_dpr175_qt COMMAND cnote_live_ink_tests)
+set_tests_properties(live_ink_dpr175_qt PROPERTIES TIMEOUT 180
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins};QT_SCALE_FACTOR=1.75")
+if(WIN32)
+    cnote_stage_test_runtime(cnote_live_ink_tests)
+endif()
+
 # --- Page-surface epoch regression (stroke lag on multi-page documents) ------
 # Keys page rasters on the per-page content epoch instead of the session
 # revision: a stroke commit used to invalidate every visible page's surface
