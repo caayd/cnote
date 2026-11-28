@@ -2,7 +2,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <QImage>
@@ -59,6 +62,14 @@ public:
 
     // --- model ------------------------------------------------------------
     void SetDocument(const Document* document, render::PdfBackgroundProvider* pdfBackground = nullptr);
+    // Session transient revision (ProjectSession::transientGeneration).
+    // In-place gesture edits mutate page objects without bumping the page
+    // epoch, so a thumbnail composed mid-gesture must not be served from the
+    // epoch fast path after a cancel/abort restored the page.  The provider is
+    // queried at lookup/composition time, so any view sharing the session is
+    // seen.  Defaults to 0 when unset.
+    using TransientGenerationProvider = std::function<std::uint64_t()>;
+    void SetTransientGenerationProvider(TransientGenerationProvider provider);
     // Committed document change: repaint; thumbnails validate lazily against
     // Document::PageEpoch so only pages whose contents changed re-render
     // (the reference dropped the whole cache, which re-rasterized every
@@ -113,6 +124,13 @@ public:
     [[nodiscard]] bool HasThumbnail(std::size_t index) const;
     [[nodiscard]] std::size_t RenderedThumbnailCount() const;
     [[nodiscard]] std::size_t VisibleThumbnailCount() const;
+    // Bytes held by the thumbnail cache and how many thumbnail rasters it has
+    // composed since construction.  Thumbnails are composed outside paint, so
+    // the counter lets tests prove animation frames and text-only commits do
+    // no raster work.
+    [[nodiscard]] std::size_t ThumbnailCacheBytes() const { return thumbnailCacheBytes_; }
+    [[nodiscard]] std::uint64_t ThumbnailRenderCount() const { return thumbnailRenderCount_; }
+    static constexpr std::size_t kThumbnailCacheBudgetBytes = 4U * 1024U * 1024U;
     [[nodiscard]] bool PageJumpEditing() const { return pageJump_.active; }
     [[nodiscard]] QString PageIndicatorLabel() const;
     // Shift-click selects the range from the anchor (the last plain-clicked
@@ -174,7 +192,13 @@ private:
     void StartScrollAnimation(int target);
     void EnsureCurrentPageVisible();
     const QImage* ThumbnailAt(std::size_t index, int width, int height);
+    bool RenderThumbnail(std::size_t index, int width, int height);
+    void RequestThumbnailRenders();
+    void RenderVisibleThumbnails();
+    void TrimThumbnailCache();
+    void SnapshotPageRevisions();
     void InvalidateThumbnails();
+    [[nodiscard]] std::uint64_t TransientGeneration() const;
     [[nodiscard]] int ItemWidth() const;
     [[nodiscard]] QRect ContentRect() const;
     [[nodiscard]] int ItemTop(std::size_t index) const;
@@ -184,6 +208,7 @@ private:
 
     const Document* document_ = nullptr;
     render::PdfBackgroundProvider* pdfBackground_ = nullptr;
+    TransientGenerationProvider transientGenerationProvider_ {};
     std::size_t currentPage_ = 0;
     std::size_t documentPageCount_ = 0;
 
@@ -225,26 +250,51 @@ private:
     // Scrolls the list while a drag hovers near the content band's edges.
     QTimer* dragScrollTimer_ = nullptr;
 
-    // Everything a cached thumbnail depends on.  `document` is the identity,
-    // `pageEpoch` the content revision, and the pixel size the raster the
-    // entry was composed for; one predicate decides validity for both the
-    // paint path and HasThumbnail.
+    // Everything a cached thumbnail depends on.  `document` and the pixel size
+    // pick the raster; `fingerprint` covers the page content the thumbnail
+    // actually paints (background, raster, images, strokes, rotation) and
+    // deliberately ignores text/LaTeX, which thumbnails do not depict.
+    // `sourceEpoch` is the page epoch `fingerprint` was last checked against:
+    // an unchanged epoch is a fast hit, and a changed one recomputes the
+    // fingerprint once, then keeps the image when only text moved.
     struct ThumbnailKey {
         const Document* document = nullptr;
-        std::uint64_t pageEpoch = 0;
+        std::uint64_t fingerprint = 0;
         int width = 0;
         int height = 0;
 
         [[nodiscard]] bool IsValid() const noexcept {
             return document != nullptr && width > 0 && height > 0;
         }
-        friend bool operator==(const ThumbnailKey&, const ThumbnailKey&) = default;
     };
     struct Thumbnail {
         QImage image {};
         ThumbnailKey key {};
+        std::uint64_t sourceEpoch = 0;
+        // Generation of in-place gesture edits when the key was last checked.
+        // A change (any view's gesture sample, cancel or abort) forces the
+        // fingerprint path; the epoch alone cannot see those edits.
+        std::uint64_t sourceTransientGeneration = 0;
+        std::uint64_t lastUse = 0;
     };
-    std::vector<Thumbnail> thumbnails_ {};
+    // Visited pages are evicted least-recently-used once `thumbnailCacheBytes_`
+    // exceeds the budget; only visible pages are ever composed, so a long list
+    // no longer retains a raster per page ever scrolled past.
+    std::unordered_map<std::size_t, Thumbnail> thumbnails_ {};
+    std::size_t thumbnailCacheBytes_ = 0;
+    std::uint64_t thumbnailUseClock_ = 0;
+    std::uint64_t thumbnailRenderCount_ = 0;
+    QTimer* thumbnailTimer_ = nullptr;
+    // Visible pages whose thumbnail was missing at paint time; the zero-timer
+    // composes these outside paint.  Paint appends, the timer consumes, so
+    // repeated slide/paint frames coalesce into one pass over unique pages.
+    std::vector<std::size_t> pendingThumbnailPages_ {};
+
+    // Page revisions at the last SetDocument/NotifyDocumentChanged, used to
+    // dirty only the item rects a commit changed.  Sizes detect layout shifts
+    // (rotate/resize/reorder) that move the pages below.
+    std::vector<std::uint64_t> knownPageEpochs_ {};
+    std::vector<std::pair<float, float>> knownPageSizes_ {};
 };
 
 }  // namespace cnote::ui

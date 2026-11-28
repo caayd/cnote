@@ -396,8 +396,18 @@ void Document::ReplaceWithProject(
     newPageDefaults_ = pageDefaults;
 }
 
+namespace {
+// Monotonic buffer identities: never reused, so a cached key can pin which
+// bytes a thumbnail drew even after the buffer is freed.
+std::uint64_t NextPixelBufferIdentity() noexcept {
+    static std::uint64_t next = 1;
+    return next++;
+}
+}  // namespace
+
 PixelBuffer::PixelBuffer(std::vector<std::uint8_t> bytes)
-    : bytes_(bytes.empty() ? nullptr : std::make_shared<const std::vector<std::uint8_t>>(std::move(bytes))) {}
+    : bytes_(bytes.empty() ? nullptr : std::make_shared<const std::vector<std::uint8_t>>(std::move(bytes)))
+    , identity_(bytes_ != nullptr ? NextPixelBufferIdentity() : 0U) {}
 
 const std::vector<std::uint8_t>& PixelBuffer::bytes() const noexcept {
     static const std::vector<std::uint8_t> kEmpty;

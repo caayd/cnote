@@ -17,6 +17,7 @@
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QTextBlock>
@@ -685,6 +686,17 @@ void QtMainWindow::CreateChrome() {
     connect(toolbar_, &ui::ToolbarWidget::PaletteOverlayToggled, this, [this](bool) { UpdateChrome(); });
 
     sidebar_ = new ui::SidebarWidget(this);
+    {
+        // Thumbnails cache committed page content.  In-place gestures mutate
+        // it without a page epoch bump and are tracked by the shared session's
+        // transient generation instead; ask the controller every time so a
+        // gesture started in another view is visible too.  QPointer keeps the
+        // lookup safe during window teardown.
+        const QPointer<QtDocumentController> controller(&controller_);
+        sidebar_->SetTransientGenerationProvider([controller]() {
+            return controller != nullptr ? controller->TransientGeneration() : 0U;
+        });
+    }
     sidebar_->SetDocument(&controller_.DocumentRef(), controller_.PdfBackground());
     connect(sidebar_, &ui::SidebarWidget::PageActivated, this, [this](std::size_t pageIndex) {
         FocusPage(pageIndex);
