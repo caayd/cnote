@@ -201,6 +201,17 @@ add_test(NAME pdf_background_qt COMMAND cnote_pdf_background_tests)
 set_tests_properties(pdf_background_qt PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
 
+# File-open path: one read and one PDFium open per open, embedded container
+# buffers released before hydration (PERF-056).
+add_executable(cnote_load_path_tests
+    tests/LoadPathTests.cpp
+    src/qt/QtDocumentIo.cpp
+)
+target_link_libraries(cnote_load_path_tests PRIVATE cnote_services)
+add_test(NAME load_path_qt COMMAND cnote_load_path_tests)
+set_tests_properties(load_path_qt PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_cnote_plugins}")
+
 # PDF text selection end-to-end: real canvas + controller over a generated
 # PDF, drag-highlight, commit and copy.
 add_executable(cnote_pdf_text_tests
@@ -1100,6 +1111,7 @@ if(WIN32)
         cnote_pdf_export_tests
         cnote_text_editing_tests
         cnote_pdf_background_tests
+        cnote_load_path_tests
         cnote_session_manager_tests
         cnote_pdf_text_tests
         cnote_settings_tests

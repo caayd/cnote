@@ -1,6 +1,5 @@
 #include "ProjectFile.h"
 
-#include <QFile>
 #include <QSaveFile>
 #include <QString>
 
@@ -10,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <span>
@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "Unicode.h"
+#include "document/FileIO.h"
 #include "document/XpressCodec.h"
 
 namespace cnote {
@@ -58,26 +59,6 @@ constexpr std::uint8_t kTextStyleFlagItalic = 1U << 1U;
 constexpr std::uint8_t kTextStyleFlagUnderline = 1U << 2U;
 constexpr std::uint32_t kPayloadEncodingRaw = 0U;
 constexpr std::uint32_t kPayloadEncodingXpressHuff = 1U;
-
-std::optional<std::vector<std::uint8_t>> ReadAllBytes(const std::filesystem::path& filePath) {
-    QFile file(QString::fromUtf8(PathToUtf8(filePath).c_str()));
-    if (!file.open(QIODevice::ReadOnly)) {
-        return std::nullopt;
-    }
-
-    // Read straight into the vector the loader parses: a QByteArray staging
-    // copy would double the file's bytes for the whole load.
-    const qint64 size = file.size();
-    if (size < 0) {
-        return std::nullopt;
-    }
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if (size != 0
-        && file.read(reinterpret_cast<char*>(bytes.data()), size) != size) {
-        return std::nullopt;
-    }
-    return bytes;
-}
 
 bool WriteAllBytes(const std::filesystem::path& filePath, const std::vector<std::uint8_t>& bytes) {
     QSaveFile file(QString::fromUtf8(PathToUtf8(filePath).c_str()));
@@ -786,8 +767,8 @@ void SerializeProjectPayload(const Document& document, std::vector<std::uint8_t>
 }  // namespace
 
 std::optional<Document> ProjectFile::Load(const std::filesystem::path& filePath) {
-    const auto bytes = ReadAllBytes(filePath);
-    if (!bytes.has_value()) {
+    const std::shared_ptr<std::vector<std::uint8_t>> bytes = ReadDocumentBytes(filePath);
+    if (!bytes) {
         return std::nullopt;
     }
 
