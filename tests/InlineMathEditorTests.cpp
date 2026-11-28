@@ -182,6 +182,110 @@ int main(int argc, char** argv) {
     }
     Check(std::abs(formulaSize - 30.0) < 0.01, "the rendered formula follows the new text size");
 
+    // --- caret moves and keystrokes do local work only -----------------------
+    {
+        editor.LoadPageText(MakeText(u"intro $a+b$ middle $c$ end"), 1.0f);
+        QApplication::processEvents();
+        Check(RenderedCount(editor) == 2U, "both formulas render away from the caret");
+        const std::uint64_t reads = editor.FullDocumentReadCount();
+        const std::uint64_t captures = editor.FullFormattingCaptureCount();
+        const std::uint64_t scans = editor.FullFormulaScanCount();
+
+        Press(editor, Qt::Key_Home);
+        for (int step = 0; step < 6; ++step) {
+            Press(editor, Qt::Key_Right);
+        }
+        Check(RenderedCount(editor) == 1U, "the caret entering a formula expands only that formula");
+        Check(editor.FullDocumentReadCount() == reads, "caret moves do not read the whole document");
+        Check(editor.FullFormattingCaptureCount() == captures, "caret moves do not capture all formatting");
+        Check(editor.FullFormulaScanCount() == scans, "caret moves do not rescan every formula");
+
+        // Leave the formula, then type: the edit is spliced and re-scanned
+        // for its line only, never by a whole-document pass.
+        Press(editor, Qt::Key_End);
+        Type(editor, QStringLiteral(" word"));
+        const std::u16string typedContent = u"intro $a+b$ middle $c$ end word";
+        Check(Content(editor) == typedContent,
+            "typing past a formula keeps its source, got " + Quote(Content(editor)));
+        Check(editor.FullDocumentReadCount() == reads, "typing does not read the whole document");
+        Check(editor.FullFormattingCaptureCount() == captures, "typing does not capture all formatting");
+        Check(editor.FullFormulaScanCount() == scans, "typing does not rescan every formula");
+
+        // Copy maps only the selection through the cached map.
+        editor.selectAll();
+        editor.copy();
+        QApplication::processEvents();
+        Check(QApplication::clipboard()->text().toStdU16String() == typedContent,
+            "copy after typing exports the source, got " + Quote(QApplication::clipboard()->text().toStdU16String()));
+        Check(editor.FullDocumentReadCount() == reads, "copy does not read the whole document");
+
+        // The incrementally maintained span list is exactly what a full
+        // capture over the same document produces.
+        const auto spansMatch = [](const std::vector<cnote::PageTextStyleSpan>& a,
+                                    const std::vector<cnote::PageTextStyleSpan>& b) {
+            if (a.size() != b.size()) {
+                return false;
+            }
+            for (std::size_t index = 0; index < a.size(); ++index) {
+                if (a[index].start != b[index].start || a[index].length != b[index].length
+                    || !cnote::PageTextStyleEqual(a[index].style, b[index].style)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        const cnote::PageText incremental = editor.CapturePageText();
+        Check(cnote::text::ReadDocumentContent(*editor.document()).content == incremental.content,
+            "the cached content matches a full read after typing");
+        Check(spansMatch(incremental.styleSpans,
+                  cnote::text::CapturePageTextFormatting(*editor.document(), incremental, 1.0f)),
+            "the cached spans match a full capture after typing");
+
+        // A style edit must produce the same spans through the cached path.
+        editor.selectAll();
+        const cnote::PageTextStyle restyle { 30.0f, 0xFF000000U, cnote::TextFontFamily::Sans, true, false, false };
+        editor.textCursor().mergeCharFormat(cnote::text::CharFormatForStyle(restyle));
+        QApplication::processEvents();
+        const cnote::PageText restyled = editor.CapturePageText();
+        Check(spansMatch(restyled.styleSpans,
+                  cnote::text::CapturePageTextFormatting(*editor.document(), restyled, 1.0f)),
+            "the cached spans match a full capture after a style edit");
+
+        // Multiline edits through a styled run: typing inside it, splitting
+        // the line and joining it back must stay byte-identical to a full
+        // capture (the incremental span splice is the risky part).
+        editor.LoadPageText(MakeText(u"alpha beta\ngamma delta"), 1.0f);
+        QApplication::processEvents();
+        {
+            QTextCursor cursor = editor.textCursor();
+            cursor.setPosition(6);
+            cursor.setPosition(10, QTextCursor::KeepAnchor);
+            cursor.mergeCharFormat(cnote::text::CharFormatForStyle(
+                cnote::PageTextStyle { 30.0f, 0xFF000000U, cnote::TextFontFamily::Sans, true, false, false }));
+        }
+        QApplication::processEvents();
+        const auto checkParity = [&](const char* what) {
+            const cnote::PageText cached = editor.CapturePageText();
+            Check(cnote::text::ReadDocumentContent(*editor.document()).content == cached.content,
+                std::string("content matches a full read after ") + what);
+            Check(spansMatch(cached.styleSpans,
+                      cnote::text::CapturePageTextFormatting(*editor.document(), cached, 1.0f)),
+                std::string("cached spans match a full capture after ") + what);
+        };
+        checkParity("styling a word");
+        {
+            QTextCursor cursor = editor.textCursor();
+            cursor.setPosition(8);
+            editor.setTextCursor(cursor);
+        }
+        Type(editor, QStringLiteral("X"));
+        checkParity("typing inside a styled word");
+        Press(editor, Qt::Key_Return);
+        checkParity("splitting a styled line");
+        Press(editor, Qt::Key_Backspace);
+        checkParity("joining the split line");
+    }
+
     // --- the editor shows exactly what the commit renders ---------------------
     // Formula widths must count for line breaking, rules must antialias the
     // same way, and glyphs must rasterize at the device size wherever the DPR

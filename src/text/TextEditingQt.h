@@ -19,6 +19,8 @@ class QTextDocument;
 
 namespace cnote::text {
 
+struct TextOffsetMap;
+
 // The stored font size is pixel-like at the 96-DPI reference scale; Qt wants
 // points.  Page zoom and DPR are applied by the callers, never baked into the
 // model.  Exported so callers that reason in the popup's point units (the
@@ -76,6 +78,16 @@ void ApplyPageTextFormatting(QTextDocument& document, const PageText& text, floa
 // supplies the default style).  displayScale must match the scale the
 // document was formatted with.
 [[nodiscard]] std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& document, const PageText& text, float displayScale = 1.0f);
+// The same capture for a caller that already holds the document's offset map:
+// no second ReadDocumentContent pass.  `map` must belong to `document`.
+[[nodiscard]] std::vector<PageTextStyleSpan> CapturePageTextFormatting(const QTextDocument& document, const PageText& text,
+    const TextOffsetMap& map, float displayScale = 1.0f);
+// Captures only the fragments inside the document-offset range [documentStart,
+// documentEnd).  Spans come back in absolute model offsets.  Used to update a
+// cached span list after a local edit without re-walking the whole document;
+// the result must match CapturePageTextFormatting over the same document.
+[[nodiscard]] std::vector<PageTextStyleSpan> CapturePageTextFormattingRange(const QTextDocument& document, const PageText& text,
+    const TextOffsetMap& map, std::uint32_t documentStart, std::uint32_t documentEnd, float displayScale = 1.0f);
 
 // --- offset mapping ---------------------------------------------------------
 
@@ -109,6 +121,13 @@ struct DocumentContent {
     TextOffsetMap map;
 };
 [[nodiscard]] DocumentContent ReadDocumentContent(const QTextDocument& document);
+
+// The model text a document-offset range holds: formula placeholders expand
+// back to their `$...$` source and separators convert like
+// ReadDocumentContent.  Reads only the fragments that overlap the range, so
+// an incremental editor can consume one edit without a whole-document pass.
+[[nodiscard]] std::u16string ReadDocumentTextRange(const QTextDocument& document,
+    std::uint32_t documentStart, std::uint32_t documentEnd);
 
 // --- commit normalization ---------------------------------------------------
 

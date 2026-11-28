@@ -273,6 +273,13 @@ public:
     // transient-state path (diagnostics for the dirty-rect work: full-widget
     // repaints report the window area).
     [[nodiscard]] std::uint64_t LastTransientRepaintArea() const { return lastTransientRepaintArea_; }
+    // Overlay work diagnostics: how many times the live LaTeX source was
+    // parsed (source/style changes, not paints) and how many times overlay
+    // mask/geometry placement ran (geometry changes and content edits, not
+    // paints).
+    [[nodiscard]] std::uint64_t LatexPreviewParseCount() const { return latexPreviewParses_; }
+    [[nodiscard]] std::uint64_t OverlayPlacementCount() const { return overlayPlacements_; }
+    [[nodiscard]] std::uint64_t LatexPopupRefreshCount() const { return latexPopupRefreshes_; }
 
 signals:
     void ViewportChanged();
@@ -551,7 +558,15 @@ private:
     // when a typed text starts wrapping).
     void RevealEditedText(const PageText& text);
     void ShowLatexOverlay(const PageLatex& object);
+    // Re-parses the live LaTeX source, updates its metrics and repositions
+    // the source box.  Called on source/style changes, never from paint.
+    void RefreshLatexPreview();
+    // Coalesces the textChanged and cursorPositionChanged completion
+    // triggers into one refresh per event-loop turn.
+    void ScheduleLatexPopupRefresh();
     void HideOverlays();
+    // Geometry-only placement of the overlays: no source parsing, no resolve
+    // of the edited content.
     void PositionOverlays();
     // The LaTeX object being edited with the source box's current text: what
     // the live preview draws, so the source box is placed around it.
@@ -691,10 +706,12 @@ private:
     QListView* latexPopup_ = nullptr;
     QStringListModel* latexPopupModel_ = nullptr;
     std::vector<latex::CompletionItem> latexSuggestions_ {};
-    // Size of the last live source that parsed in this LaTeX edit.  Half-typed
+    // The formula parsed from the current source and its size.  Half-typed
     // source (e.g. a fresh "\frac{}{}") does not parse; the source box keeps
     // its place below the last drawable formula instead of jumping up.
+    latex::FormulaHandle latexPreviewFormula_ = nullptr;
     latex::FormulaMetrics latexPreviewMetrics_ {};
+    bool latexPopupRefreshScheduled_ = false;
     // The overlay the canvas is showing, refreshed atomically from the
     // controller.  EditOverlayActive() queries the controller instead of this
     // cache; the cache is only for placement and painting.
@@ -745,6 +762,9 @@ private:
     std::size_t lastPaintSurfaceBytes_ = 0;
     std::size_t peakPaintSurfaceBytes_ = 0;
     std::uint64_t lastTransientRepaintArea_ = 0;
+    std::uint64_t latexPreviewParses_ = 0;
+    std::uint64_t overlayPlacements_ = 0;
+    std::uint64_t latexPopupRefreshes_ = 0;
     // Pending-erase fade patch: re-rendered region of the page under the
     // erase cursor, keyed by the page's signature (which includes the pending
     // index lists) so drag samples blit instead of re-painting the page live.
