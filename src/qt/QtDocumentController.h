@@ -350,7 +350,11 @@ private:
         Stroke stroke {};
     };
 
-    void NotifySessionChanged(bool originating);
+    // `appliedAction` is the history step just applied (nullptr for a commit
+    // that moved no page or object) and `appliedUndo` its direction; the
+    // session's other views map their selections through it.
+    void NotifySessionChanged(bool originating, const HistoryAction* appliedAction = nullptr,
+        bool appliedUndo = false);
     void RebuildPdfBackground();
     [[nodiscard]] std::uint64_t NextObjectId() const;
     [[nodiscard]] Page* PageAt(std::size_t pageIndex);
@@ -366,8 +370,16 @@ private:
     // Commits (or, without an edit-content source, cancels) the live edit.
     void FinishOpenEdit();
     // Shared commit tail: dirty, one revision bump, the viewed page resynced to
-    // the document's and one broadcast.
-    void NoteCommitted();
+    // the document's and one broadcast.  `appliedAction`/`appliedUndo` describe
+    // the history step that produced the change (see NotifySessionChanged).
+    void NoteCommitted(const HistoryAction* appliedAction = nullptr, bool appliedUndo = false);
+    // Carries this view's selection across `action` as `undo` applies it: an
+    // object delta maps the selected indices per page, a page insert/remove/
+    // reorder maps the page keys, and a whole-page replacement or an action the
+    // mapping does not cover clears the affected page (or all pages) instead of
+    // leaving an index that now names another object.  Emits SelectionChanged
+    // only when the selection actually changed.
+    void ApplySelectionChange(const HistoryAction& action, bool undo);
     // Pushes `action`, drops the redo stack and runs the shared tail.
     void RecordCommit(HistoryAction action);
     // Captures the pre-gesture state of every selected object the gesture may

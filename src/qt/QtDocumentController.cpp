@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <numeric>
 #include <utility>
 #include <vector>
 
@@ -45,6 +47,191 @@ constexpr std::size_t kPdfBackgroundCapacity = 8;
 
 // Reference App::ExportPdf fallback scale for pages without a raster.
 constexpr float kPdfExportRenderScale = 4.0f;
+
+// One view's per-page object selection, keyed by the page's index.
+using SelectionMap = std::map<std::size_t, ui::PageSelection>;
+
+bool SortedUniqueIndices(const std::vector<std::size_t>& indices) {
+    return std::is_sorted(indices.begin(), indices.end())
+        && std::adjacent_find(indices.begin(), indices.end()) == indices.end();
+}
+
+// Maps one kind's selected object positions from the page state being left to
+// the state being entered.  `fromIndices` are the affected objects' positions
+// in the old state, `toIndices` their positions in the new one: an index on one
+// side only is removed or inserted, an index on both is updated in place.
+// Returns false when the pair cannot describe a positional mapping (mixed
+// insertions and removals, or a different update on each side), so the caller
+// clears the selection instead of leaving an index that names another object.
+bool MapObjectIndices(std::vector<std::size_t>& selected,
+    const std::vector<std::size_t>& fromIndices, const std::vector<std::size_t>& toIndices) {
+    if (!SortedUniqueIndices(fromIndices) || !SortedUniqueIndices(toIndices)) {
+        return false;
+    }
+    std::vector<std::size_t> removed;
+    std::vector<std::size_t> inserted;
+    std::size_t from = 0;
+    std::size_t to = 0;
+    while (from < fromIndices.size() || to < toIndices.size()) {
+        if (to == toIndices.size() || (from < fromIndices.size() && fromIndices[from] < toIndices[to])) {
+            removed.push_back(fromIndices[from]);
+            ++from;
+        } else if (from == fromIndices.size() || toIndices[to] < fromIndices[from]) {
+            inserted.push_back(toIndices[to]);
+            ++to;
+        } else {
+            // The same position on both sides is an in-place update.
+            ++from;
+            ++to;
+        }
+    }
+    if (!removed.empty() && !inserted.empty()) {
+        return false;
+    }
+    if (!removed.empty()) {
+        std::vector<std::size_t> kept;
+        kept.reserve(selected.size());
+        for (const std::size_t index : selected) {
+            if (std::binary_search(removed.begin(), removed.end(), index)) {
+                continue;
+            }
+            const std::size_t erasedBefore = static_cast<std::size_t>(
+                std::lower_bound(removed.begin(), removed.end(), index) - removed.begin());
+            kept.push_back(index - erasedBefore);
+        }
+        selected = std::move(kept);
+    } else if (!inserted.empty()) {
+        // Insertion indices are positions in the new state; each one at or
+        // before the mapped position pushes the old object past it.
+        for (std::size_t& index : selected) {
+            for (const std::size_t at : inserted) {
+                if (at <= index) {
+                    ++index;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// One object inserted or removed at `index`: every selected position at or
+// after it shifts by one.
+bool MapSingleObjectIndex(std::vector<std::size_t>& selected, std::size_t index, bool inserted) {
+    static const std::vector<std::size_t> kNone {};
+    const std::vector<std::size_t> at { index };
+    return inserted ? MapObjectIndices(selected, kNone, at)
+                    : MapObjectIndices(selected, at, kNone);
+}
+
+// Applies a ReplaceObjects page delta to one page's selection.  False when the
+// delta's index lists do not match its object lists or a kind cannot be mapped.
+bool MapPageSelection(ui::PageSelection& selection, const PageObjectSet& from, const PageObjectSet& to) {
+    if (from.strokeIndices.size() != from.strokes.size()
+        || from.imageIndices.size() != from.images.size()
+        || from.textIndices.size() != from.texts.size()
+        || from.latexIndices.size() != from.latexes.size()
+        || to.strokeIndices.size() != to.strokes.size()
+        || to.imageIndices.size() != to.images.size()
+        || to.textIndices.size() != to.texts.size()
+        || to.latexIndices.size() != to.latexes.size()) {
+        return false;
+    }
+    return MapObjectIndices(selection.strokes, from.strokeIndices, to.strokeIndices)
+        && MapObjectIndices(selection.images, from.imageIndices, to.imageIndices)
+        && MapObjectIndices(selection.texts, from.textIndices, to.textIndices)
+        && MapObjectIndices(selection.latexes, from.latexIndices, to.latexIndices);
+}
+
+// A mapped index must still name an object on the page it moved to.
+void DropOutOfRangeIndices(ui::PageSelection& selection, const Page& page) {
+    const auto drop = [](std::vector<std::size_t>& indices, std::size_t count) {
+        std::erase_if(indices, [count](std::size_t index) { return index >= count; });
+    };
+    drop(selection.strokes, page.strokes.size());
+    drop(selection.images, page.images.size());
+    drop(selection.texts, page.texts.size());
+    drop(selection.latexes, page.latexes.size());
+}
+
+// Same selection state?  The remap only ever moves or drops per-kind index
+// lists, so the PDF text payloads it never touches only need their sizes.
+bool SameSelection(const ui::PageSelection& a, const ui::PageSelection& b) {
+    return a.strokes == b.strokes && a.images == b.images && a.texts == b.texts
+        && a.latexes == b.latexes && a.pdfText.size() == b.pdfText.size();
+}
+
+bool SameSelectionMap(const SelectionMap& a, const SelectionMap& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (auto left = a.begin(), right = b.begin(); left != a.end(); ++left, ++right) {
+        if (left->first != right->first || !SameSelection(left->second, right->second)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Pages inserted at `positions` (in the new document) shift every selection at
+// or after each one up by the number of insertions before it.
+void InsertSelectionPages(SelectionMap& selection, const std::vector<std::size_t>& positions) {
+    SelectionMap remapped;
+    for (auto& entry : selection) {
+        std::size_t page = entry.first;
+        for (const std::size_t at : positions) {
+            if (at <= page) {
+                ++page;
+            } else {
+                break;
+            }
+        }
+        remapped[page] = std::move(entry.second);
+    }
+    selection = std::move(remapped);
+}
+
+// Pages at `positions` (in the old document) disappear: their selection dies
+// with them and every later one shifts down.
+void RemoveSelectionPages(SelectionMap& selection, const std::vector<std::size_t>& positions) {
+    SelectionMap remapped;
+    for (auto& entry : selection) {
+        if (std::binary_search(positions.begin(), positions.end(), entry.first)) {
+            continue;
+        }
+        const std::size_t removedBefore = static_cast<std::size_t>(
+            std::lower_bound(positions.begin(), positions.end(), entry.first) - positions.begin());
+        remapped[entry.first - removedBefore] = std::move(entry.second);
+    }
+    selection = std::move(remapped);
+}
+
+// `order[new] = old`; false when it is not a permutation of every page, which
+// leaves the selection untouched for the caller to clear.
+bool ReorderSelectionPages(SelectionMap& selection, const std::vector<std::size_t>& order) {
+    const std::size_t pageCount = order.size();
+    std::vector<std::size_t> newIndex(pageCount, 0U);
+    std::vector<bool> seen(pageCount, false);
+    for (std::size_t index = 0; index < pageCount; ++index) {
+        if (order[index] >= pageCount || seen[order[index]]) {
+            return false;
+        }
+        seen[order[index]] = true;
+        newIndex[order[index]] = index;
+    }
+    for (const auto& entry : selection) {
+        if (entry.first >= pageCount) {
+            return false;
+        }
+    }
+    SelectionMap remapped;
+    for (auto& entry : selection) {
+        remapped[newIndex[entry.first]] = std::move(entry.second);
+    }
+    selection = std::move(remapped);
+    return true;
+}
 
 // Same object-location rule as cnote::ApplyHistoryAction: an edit addresses its
 // object by id, so a page insert, a rotation or a remote commit that moved the
@@ -363,12 +550,15 @@ void QtDocumentController::RebuildPdfBackground() {
         *pdfBackend_, session_->document, kPdfBackgroundCapacity);
 }
 
-void QtDocumentController::NotifySessionChanged(bool originating) {
+void QtDocumentController::NotifySessionChanged(bool originating, const HistoryAction* appliedAction,
+    bool appliedUndo) {
     if (session_ == nullptr) {
         return;
     }
     ProjectChange change;
     change.kind = ProjectChange::Kind::Committed;
+    change.appliedAction = appliedAction;
+    change.appliedUndo = appliedUndo;
     for (QObject* owner : manager_.ViewsForSession(session_)) {
         if (auto* view = qobject_cast<QtDocumentController*>(owner); view != nullptr) {
             view->OnSessionChanged(change, view == this && originating);
@@ -449,6 +639,14 @@ void QtDocumentController::OnSessionChanged(const ProjectChange& change, bool or
         // last word on.  Drop it without writing anything back; never commit by
         // an index the other view may have shifted.
         AbortTransientState(false, false);
+        // The selection is this view's state too: carry it across the same
+        // object and page moves the committed action applied, and clear it where
+        // no exact mapping exists, instead of leaving indices that now name
+        // other objects.  A commit without a history action moved no page or
+        // object, so the selection still names the same content.
+        if (change.appliedAction != nullptr) {
+            ApplySelectionChange(*change.appliedAction, change.appliedUndo);
+        }
     }
     emit SessionChanged();
 }
@@ -463,7 +661,7 @@ void QtDocumentController::SetCurrentPageIndex(std::size_t index) {
     currentPage_ = index;
 }
 
-void QtDocumentController::NoteCommitted() {
+void QtDocumentController::NoteCommitted(const HistoryAction* appliedAction, bool appliedUndo) {
     if (session_ == nullptr) {
         return;
     }
@@ -473,7 +671,7 @@ void QtDocumentController::NoteCommitted() {
     // the edited page; the document keeps its index on the same page across
     // inserts and removals, so only resync to it here.
     SetCurrentPageIndex(session_->document.CurrentPageIndex());
-    NotifySessionChanged(true);
+    NotifySessionChanged(true, appliedAction, appliedUndo);
 }
 
 void QtDocumentController::RecordCommit(HistoryAction action) {
@@ -482,7 +680,162 @@ void QtDocumentController::RecordCommit(HistoryAction action) {
     }
     session_->undoActions.push_back(std::move(action));
     session_->redoActions.clear();
-    NoteCommitted();
+    // The operation that made this change already kept this view's selection in
+    // step with it; the other views map theirs through the recorded action.
+    NoteCommitted(&session_->undoActions.back(), false);
+}
+
+void QtDocumentController::ApplySelectionChange(const HistoryAction& action, bool undo) {
+    if (session_ == nullptr || selection_.empty()) {
+        return;
+    }
+    const SelectionMap before = selection_;
+    bool mapped = true;
+
+    // A mapped position must still name an object, and a selection on a page
+    // that no longer exists cannot name anything.
+    const auto validate = [this](std::size_t pageIndex) {
+        const auto entry = selection_.find(pageIndex);
+        if (entry == selection_.end()) {
+            return;
+        }
+        if (pageIndex >= session_->document.PageCount()) {
+            selection_.erase(entry);
+            return;
+        }
+        DropOutOfRangeIndices(entry->second, session_->document.PageAt(pageIndex));
+        if (entry->second.Empty()) {
+            selection_.erase(entry);
+        }
+    };
+
+    const auto mapSingle = [&](std::vector<std::size_t>& selected, std::size_t pageIndex, std::size_t index,
+                               bool inserted) {
+        if (selected.empty()) {
+            return;
+        }
+        if (!MapSingleObjectIndex(selected, index, inserted)) {
+            mapped = false;
+            return;
+        }
+        validate(pageIndex);
+    };
+
+    switch (action.type) {
+    case HistoryActionType::ReplaceObjects: {
+        if (action.pageIndices.size() != action.beforeObjects.size()
+            || action.pageIndices.size() != action.afterObjects.size()) {
+            mapped = false;
+            break;
+        }
+        for (std::size_t index = 0; index < action.pageIndices.size(); ++index) {
+            const auto entry = selection_.find(action.pageIndices[index]);
+            if (entry == selection_.end()) {
+                continue;
+            }
+            const PageObjectSet& from = undo ? action.afterObjects[index] : action.beforeObjects[index];
+            const PageObjectSet& to = undo ? action.beforeObjects[index] : action.afterObjects[index];
+            if (!MapPageSelection(entry->second, from, to)) {
+                mapped = false;
+                break;
+            }
+            validate(action.pageIndices[index]);
+        }
+        break;
+    }
+    case HistoryActionType::AddPages: {
+        // Forward the recorded pages appear; undo removes them again.
+        std::vector<std::size_t> positions(action.pages.size());
+        std::iota(positions.begin(), positions.end(), action.index);
+        if (undo) {
+            RemoveSelectionPages(selection_, positions);
+        } else {
+            InsertSelectionPages(selection_, positions);
+        }
+        break;
+    }
+    case HistoryActionType::RemovePages: {
+        // Forward the recorded pages disappear (their selections with them);
+        // undo puts them back at the same positions.
+        if (undo) {
+            InsertSelectionPages(selection_, action.pageIndices);
+        } else {
+            RemoveSelectionPages(selection_, action.pageIndices);
+        }
+        break;
+    }
+    case HistoryActionType::ReorderPages: {
+        if (!undo) {
+            mapped = ReorderSelectionPages(selection_, action.pageIndices);
+            break;
+        }
+        // order[new] = old, so the inverse puts each page back at its old index.
+        std::vector<std::size_t> inverse(action.pageIndices.size(), 0U);
+        for (std::size_t index = 0; index < action.pageIndices.size(); ++index) {
+            if (action.pageIndices[index] >= inverse.size()) {
+                mapped = false;
+                break;
+            }
+            inverse[action.pageIndices[index]] = index;
+        }
+        if (mapped) {
+            mapped = ReorderSelectionPages(selection_, inverse);
+        }
+        break;
+    }
+    case HistoryActionType::ReplacePages: {
+        // Whole-page replacement (rotation, page settings): the page's objects
+        // are not positionally comparable, so a selection on it must go rather
+        // than keep an index that may now name another object.
+        for (const std::size_t pageIndex : action.pageIndices) {
+            selection_.erase(pageIndex);
+        }
+        break;
+    }
+    case HistoryActionType::AddStroke:
+    case HistoryActionType::RemoveStroke: {
+        const bool inserted = action.type == HistoryActionType::AddStroke ? !undo : undo;
+        const auto entry = selection_.find(action.pageIndex);
+        if (entry != selection_.end()) {
+            mapSingle(entry->second.strokes, action.pageIndex, action.index, inserted);
+        }
+        break;
+    }
+    case HistoryActionType::AddText:
+    case HistoryActionType::RemoveText: {
+        const bool inserted = action.type == HistoryActionType::AddText ? !undo : undo;
+        const auto entry = selection_.find(action.pageIndex);
+        if (entry != selection_.end()) {
+            mapSingle(entry->second.texts, action.pageIndex, action.index, inserted);
+        }
+        break;
+    }
+    case HistoryActionType::AddLatex:
+    case HistoryActionType::RemoveLatex: {
+        const bool inserted = action.type == HistoryActionType::AddLatex ? !undo : undo;
+        const auto entry = selection_.find(action.pageIndex);
+        if (entry != selection_.end()) {
+            mapSingle(entry->second.latexes, action.pageIndex, action.index, inserted);
+        }
+        break;
+    }
+    case HistoryActionType::UpdateText:
+    case HistoryActionType::UpdateLatex:
+        // In-place update at the same position: every selected index still
+        // names the same object.
+        break;
+    default:
+        // An action this mapping does not know: fail safe.
+        mapped = false;
+        break;
+    }
+
+    if (!mapped) {
+        selection_.clear();
+    }
+    if (!SameSelectionMap(before, selection_)) {
+        emit SelectionChanged();
+    }
 }
 
 const Document& QtDocumentController::DocumentRef() const {
@@ -625,7 +978,11 @@ bool QtDocumentController::Undo() {
     }
 
     session_->redoActions.push_back(std::move(action));
-    NoteCommitted();
+    // An undo moves the object and page indices back exactly like the forward
+    // commit did, for this view too: keep every view's selection naming the
+    // same objects rather than the positions it left behind.
+    ApplySelectionChange(session_->redoActions.back(), true);
+    NoteCommitted(&session_->redoActions.back(), true);
     return true;
 }
 
@@ -643,7 +1000,8 @@ bool QtDocumentController::Redo() {
     }
 
     session_->undoActions.push_back(std::move(action));
-    NoteCommitted();
+    ApplySelectionChange(session_->undoActions.back(), false);
+    NoteCommitted(&session_->undoActions.back(), false);
     return true;
 }
 
@@ -858,6 +1216,9 @@ void QtDocumentController::CommitTextEdit(PageText edited) {
     }
 
     if (changed) {
+        // An empty commit removes an existing text: later indices shift down,
+        // so this view's own selection moves with them too.
+        ApplySelectionChange(action, false);
         RecordCommit(std::move(action));
     }
     emit EditStateChanged();
@@ -937,6 +1298,7 @@ void QtDocumentController::CommitLatexEdit(const QString& source) {
     }
 
     if (changed) {
+        ApplySelectionChange(action, false);
         RecordCommit(std::move(action));
     }
     emit EditStateChanged();
@@ -1749,25 +2111,6 @@ void EraseObjectsAt(std::vector<T>& objects, std::vector<std::size_t>& indices,
     objects.erase(objects.begin() + static_cast<std::ptrdiff_t>(write), objects.end());
 }
 
-// Remaps a page selection after an erase: an erased object leaves the
-// selection and every survivor moves down by the erased objects before it.
-void RemapErasedSelection(std::vector<std::size_t>& selected,
-    const std::vector<std::size_t>& erased, std::size_t objectCount) {
-    std::vector<std::size_t> kept;
-    kept.reserve(selected.size());
-    for (const std::size_t index : selected) {
-        if (index >= objectCount) {
-            continue;
-        }
-        const auto position = std::lower_bound(erased.begin(), erased.end(), index);
-        if (position != erased.end() && *position == index) {
-            continue;
-        }
-        kept.push_back(index - static_cast<std::size_t>(position - erased.begin()));
-    }
-    selected = std::move(kept);
-}
-
 }  // namespace
 
 void QtDocumentController::CommitErase(const std::vector<ui::ObjectRef>& targets) {
@@ -1797,10 +2140,6 @@ void QtDocumentController::CommitErase(const std::vector<ui::ObjectRef>& targets
         if (page == nullptr) {
             continue;
         }
-        const std::size_t strokeCount = page->strokes.size();
-        const std::size_t imageCount = page->images.size();
-        const std::size_t textCount = page->texts.size();
-        const std::size_t latexCount = page->latexes.size();
 
         PageObjectSet before {};
         // Reference order (App::EndErase): texts, latexes, images, strokes.
@@ -1812,21 +2151,6 @@ void QtDocumentController::CommitErase(const std::vector<ui::ObjectRef>& targets
             continue;
         }
 
-        // The erased objects leave the selection and the survivors' indices
-        // shift down with their objects.
-        ui::PageSelection remaining = SelectionFor(pageIndex);
-        const ui::PageSelection beforeSelection = remaining;
-        RemapErasedSelection(remaining.strokes, before.strokeIndices, strokeCount);
-        RemapErasedSelection(remaining.images, before.imageIndices, imageCount);
-        RemapErasedSelection(remaining.texts, before.textIndices, textCount);
-        RemapErasedSelection(remaining.latexes, before.latexIndices, latexCount);
-        if (remaining.strokes != beforeSelection.strokes
-            || remaining.images != beforeSelection.images
-            || remaining.texts != beforeSelection.texts
-            || remaining.latexes != beforeSelection.latexes) {
-            SelectObjects(pageIndex, std::move(remaining));
-        }
-
         session_->document.TouchPage(pageIndex);
         action.pageIndices.push_back(pageIndex);
         action.beforeObjects.push_back(std::move(before));
@@ -1835,6 +2159,9 @@ void QtDocumentController::CommitErase(const std::vector<ui::ObjectRef>& targets
     if (action.pageIndices.empty()) {
         return;
     }
+    // The erased objects leave the selection and the survivors' indices shift
+    // down with their objects, through the same mapping every other view uses.
+    ApplySelectionChange(action, false);
     // One record and one notification for the whole drag, even when it
     // crossed pages.
     RecordCommit(std::move(action));
@@ -1945,18 +2272,13 @@ std::size_t QtDocumentController::InsertPages(std::size_t index, std::size_t cou
     }
 
     // Selection indices are per-page positions: every selection at or after
-    // the insertion point shifts by the inserted count.
-    if (!selection_.empty()) {
-        std::map<std::size_t, ui::PageSelection> remapped;
-        for (auto& entry : selection_) {
-            remapped[entry.first >= insertIndex ? entry.first + count : entry.first] = std::move(entry.second);
-        }
-        selection_ = std::move(remapped);
-    }
+    // the insertion point shifts by the inserted count, through the same
+    // mapping every other view uses.
     HistoryAction action {};
     action.type = HistoryActionType::AddPages;
     action.pages = std::move(pages);
     action.index = insertIndex;
+    ApplySelectionChange(action, false);
     RecordCommit(std::move(action));
     return insertIndex;
 }
@@ -2010,26 +2332,13 @@ bool QtDocumentController::RemovePages(const std::vector<std::size_t>& pages) {
         document.RemovePage(*index);
     }
 
-    // Selection indices are per-page positions: a removed page's selection
-    // dies with it and every later one shifts down by the removed pages
-    // before it.
-    if (!selection_.empty()) {
-        std::map<std::size_t, ui::PageSelection> remapped;
-        for (auto& entry : selection_) {
-            if (std::binary_search(pages.begin(), pages.end(), entry.first)) {
-                continue;
-            }
-            const auto removedBefore = std::lower_bound(pages.begin(), pages.end(), entry.first) - pages.begin();
-            remapped[entry.first - static_cast<std::size_t>(removedBefore)] = std::move(entry.second);
-        }
-        selection_ = std::move(remapped);
-    }
-
     HistoryAction action {};
     action.type = HistoryActionType::RemovePages;
     action.pages = std::move(removed);
     action.pageIndices = pages;
-    emit SelectionChanged();
+    // A removed page's selection dies with it and every later one shifts down,
+    // through the same mapping every other view uses.
+    ApplySelectionChange(action, false);
     RecordCommit(std::move(action));
     return true;
 }
@@ -2047,18 +2356,11 @@ std::optional<std::size_t> QtDocumentController::PastePages(std::size_t index) {
     }
 
     // Same per-page index shift as InsertPages.
-    if (!selection_.empty()) {
-        std::map<std::size_t, ui::PageSelection> remapped;
-        for (auto& entry : selection_) {
-            remapped[entry.first >= insertIndex ? entry.first + pasted.size() : entry.first] = std::move(entry.second);
-        }
-        selection_ = std::move(remapped);
-    }
-
     HistoryAction action {};
     action.type = HistoryActionType::AddPages;
     action.pages = pasted;
     action.index = insertIndex;
+    ApplySelectionChange(action, false);
     RecordCommit(std::move(action));
     return insertIndex;
 }
@@ -2078,19 +2380,6 @@ std::optional<std::size_t> QtDocumentController::MovePages(const std::vector<std
         return std::nullopt;
     }
 
-    if (!selection_.empty()) {
-        std::vector<std::size_t> newIndex(pageCount, 0U);
-        for (std::size_t index = 0; index < pageCount; ++index) {
-            newIndex[order[index]] = index;
-        }
-        std::map<std::size_t, ui::PageSelection> remapped;
-        for (auto& entry : selection_) {
-            remapped[newIndex[entry.first]] = std::move(entry.second);
-        }
-        selection_ = std::move(remapped);
-        emit SelectionChanged();
-    }
-
     // The block lands after every unmoved page that sat before the slot.
     const std::size_t movedBeforeSlot = static_cast<std::size_t>(
         std::lower_bound(pages.begin(), pages.end(), slot) - pages.begin());
@@ -2099,6 +2388,9 @@ std::optional<std::size_t> QtDocumentController::MovePages(const std::vector<std
     HistoryAction action {};
     action.type = HistoryActionType::ReorderPages;
     action.pageIndices = std::move(order);
+    // Per-page selections follow their pages, through the same mapping every
+    // other view uses.
+    ApplySelectionChange(action, false);
     RecordCommit(std::move(action));
     return landed;
 }

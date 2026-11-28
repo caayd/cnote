@@ -1469,6 +1469,15 @@ void CanvasWidget::NotifyDocumentChanged() {
         transformSession_.reset();
         transientDirty_ = QRegion();
     }
+    // The gesture overlay and the transform session cache selection index
+    // lists and bounds captured at gesture begin.  A commit from another view
+    // aborts this view's gesture in the controller (and has already changed the
+    // page under it), so with no controller gesture left those indices can name
+    // different objects; drop the geometry instead of painting from it.
+    if (!controller_.GesturePageIndex().has_value()) {
+        EndGestureOverlay();
+        transformSession_.reset();
+    }
     SyncFocusedPage();
     update();
 }

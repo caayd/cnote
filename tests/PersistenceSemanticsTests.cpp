@@ -1238,6 +1238,12 @@ cnote::PageText MakeText(std::uint64_t id, std::u16string_view content) {
     return text;
 }
 
+cnote::Stroke MakeStrokeAt(float x, float y) {
+    cnote::Stroke stroke;
+    stroke.points = { { x, y }, { x + 10.0f, y + 10.0f } };
+    return stroke;
+}
+
 void EditSessionCommitsAndUndoKeepsTheObject() {
     cnote::AppManager manager;
     cnote::qt::QtDocumentController controller(manager);
@@ -1375,6 +1381,189 @@ void RemoteCommitCancelsTransientState() {
     Check(first.DocumentRef().PageAt(1).texts.size() == 1U
             && first.DocumentRef().PageAt(1).texts.front().content == u"keep",
         "the stale edit was never committed by index");
+}
+
+// One session, two views: every commit one view makes must leave the other
+// view's selection naming the same objects (or cleared where no exact mapping
+// exists), never the index positions of the objects it used to name.  The
+// committed object ids and marker coordinates prove the named objects, not just
+// that some index survived.
+void RemoteCommitCarriesTheOtherViewsSelection() {
+    cnote::AppManager manager;
+    cnote::qt::QtDocumentController first(manager);
+    cnote::qt::QtDocumentController second(manager);
+    auto session = std::make_shared<cnote::ProjectSession>();
+    first.AttachSession(session);
+    second.AttachSession(session);
+
+    std::size_t secondSelectionChanges = 0U;
+    QObject::connect(&second, &cnote::qt::QtDocumentController::SelectionChanged, &second,
+        [&secondSelectionChanges]() { ++secondSelectionChanges; });
+
+    // Three pages with distinct widths so a page key can be checked by content.
+    first.InsertPages(1, 1, cnote::ui::NewPageDraft { 600.0f, 500.0f, 0xFFFFFFFFU, {} });
+    first.InsertPages(2, 1, cnote::ui::NewPageDraft { 700.0f, 500.0f, 0xFFFFFFFFU, {} });
+    cnote::Document& document = session->document;
+    cnote::Page& page = document.PageAt(0);
+    page.strokes = { MakeStrokeAt(0.0f, 0.0f), MakeStrokeAt(10.0f, 10.0f), MakeStrokeAt(20.0f, 20.0f),
+        MakeStrokeAt(30.0f, 30.0f), MakeStrokeAt(40.0f, 40.0f) };
+    page.texts = { MakeText(100, u"zero"), MakeText(101, u"one"), MakeText(102, u"two") };
+    document.PageAt(1).strokes.push_back(MakeStrokeAt(0.0f, 1000.0f));
+    document.PageAt(2).strokes.push_back(MakeStrokeAt(0.0f, 2000.0f));
+
+    cnote::ui::PageSelection selection;
+    selection.strokes = { 1U, 3U };
+    selection.texts = { 2U };
+    second.SelectObjects(0, selection);
+    cnote::ui::PageSelection markerSelection;
+    markerSelection.strokes = { 0U };
+    second.SelectObjects(2, markerSelection);
+    cnote::ui::PageSelection firstSelection;
+    firstSelection.strokes = { 4U };
+    first.SelectObjects(0, firstSelection);
+    Check(secondSelectionChanges == 2U, "the second view's own selections announce themselves");
+
+    const auto selectedStrokeY = [&](std::size_t pageIndex, std::size_t selectionIndex) {
+        const cnote::ui::PageSelection& selected = second.SelectionFor(pageIndex);
+        return document.PageAt(pageIndex).strokes[selected.strokes[selectionIndex]].points.front().y;
+    };
+    const auto selectedTextId = [&](std::size_t pageIndex, std::size_t selectionIndex) {
+        const cnote::ui::PageSelection& selected = second.SelectionFor(pageIndex);
+        return document.PageAt(pageIndex).texts[selected.texts[selectionIndex]].id;
+    };
+
+    // Erase (a ReplaceObjects removal) from the first view.
+    first.CommitErase({ cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Stroke, 0U },
+        cnote::ui::ObjectRef { 0U, cnote::ui::ObjectKind::Text, 0U } });
+    Check(document.PageAt(0).strokes.size() == 4U && document.PageAt(0).texts.size() == 2U,
+        "the first view erases a stroke and a text");
+    Check(second.SelectionFor(0).strokes == std::vector<std::size_t> { 0U, 2U },
+        "the remote selection's stroke indices shift down with the erase");
+    Check(second.SelectionFor(0).texts == std::vector<std::size_t> { 1U },
+        "the remote selection's text index shifts down with the erase");
+    Check(selectedStrokeY(0, 0U) == 10.0f && selectedStrokeY(0, 1U) == 30.0f,
+        "the shifted stroke indices still name the originally selected strokes");
+    Check(selectedTextId(0, 0U) == 102U, "the shifted text index still names the originally selected text");
+    Check(second.SelectionFor(2).strokes == std::vector<std::size_t> { 0U },
+        "a page the erase did not touch keeps its selection");
+    Check(first.SelectionFor(0).strokes == std::vector<std::size_t> { 3U },
+        "the erasing view's own selection still shifts as before");
+    Check(secondSelectionChanges == 3U, "the remapped selection announces one change");
+
+    // Paste (a ReplaceObjects insertion appended at the end) from the first view.
+    cnote::SelectionClipboardData payload;
+    cnote::Stroke pastedStroke = MakeStrokeAt(200.0f, 200.0f);
+    payload.strokes.push_back(pastedStroke);
+    payload.minX = 200.0f;
+    payload.minY = 200.0f;
+    payload.maxX = 210.0f;
+    payload.maxY = 210.0f;
+    Check(first.PastePayload(0, cnote::Vec2 { 300.0f, 300.0f }, payload), "the first view pastes a stroke");
+    Check(second.SelectionFor(0).strokes == std::vector<std::size_t> { 0U, 2U },
+        "an appended paste leaves the remote selection on the same objects");
+    Check(selectedStrokeY(0, 0U) == 10.0f && selectedStrokeY(0, 1U) == 30.0f,
+        "the remote selection still names its strokes after the paste");
+    Check(secondSelectionChanges == 3U, "a selection the paste did not move needs no announcement");
+
+    // Delete from the first view: its stroke 1 is the second view's neighbor.
+    cnote::ui::PageSelection deleteSelection;
+    deleteSelection.strokes = { 1U };
+    first.SelectObjects(0, deleteSelection);
+    Check(first.RemoveSelection(), "the first view deletes a stroke");
+    Check(second.SelectionFor(0).strokes == std::vector<std::size_t> { 0U, 1U },
+        "the remote selection's survivor shifts into the deleted object's place");
+    Check(selectedStrokeY(0, 0U) == 10.0f && selectedStrokeY(0, 1U) == 30.0f,
+        "the surviving remote selection still names its strokes after the delete");
+    Check(selectedTextId(0, 0U) == 102U, "an untouched kind keeps its remote selection after the delete");
+    Check(secondSelectionChanges == 4U, "the delete announces the remote selection change");
+
+    // Undo and redo of that delete from the other view.
+    Check(first.Undo(), "the first view undoes its delete");
+    Check(second.SelectionFor(0).strokes == std::vector<std::size_t> { 0U, 2U },
+        "undo reinserts the object before the remote selection's survivor");
+    Check(selectedStrokeY(0, 1U) == 30.0f, "the remote selection still names its stroke after undo");
+    Check(first.Redo(), "the first view redoes its delete");
+    Check(second.SelectionFor(0).strokes == std::vector<std::size_t> { 0U, 1U },
+        "redo shifts the remote selection back with the object");
+    Check(selectedStrokeY(0, 1U) == 30.0f, "the remote selection still names its stroke after redo");
+
+    // Page reorder from the first view: both selected pages must follow theirs.
+    const std::size_t changesBeforeReorder = secondSelectionChanges;
+    Check(first.MovePages({ 0U }, 3U).has_value(), "the first view moves page 0 to the end");
+    Check(second.SelectionFor(0).Empty(), "the page-key remap leaves no selection on the old key");
+    Check(second.SelectionFor(2).strokes == std::vector<std::size_t> { 0U, 1U },
+        "the moved page's selection follows it to its new key");
+    Check(second.SelectionFor(2).texts == std::vector<std::size_t> { 1U },
+        "the moved page's text selection follows it too");
+    Check(selectedStrokeY(2, 0U) == 10.0f && selectedStrokeY(2, 1U) == 30.0f,
+        "the moved key still names the same objects");
+    Check(second.SelectionFor(1).strokes == std::vector<std::size_t> { 0U }
+            && document.PageAt(1).strokes[0].points.front().y == 2000.0f,
+        "the other selected page followed its own move");
+    Check(secondSelectionChanges == changesBeforeReorder + 1U,
+        "the page reorder announces one remote selection change");
+
+    Check(first.Undo(), "the page reorder undoes from the other view");
+    Check(second.SelectionFor(0).strokes == std::vector<std::size_t> { 0U, 1U }
+            && second.SelectionFor(2).strokes == std::vector<std::size_t> { 0U },
+        "undoing the reorder carries the remote selection keys back");
+    Check(selectedStrokeY(0, 0U) == 10.0f && selectedStrokeY(0, 1U) == 30.0f,
+        "the restored key still names the same objects");
+
+    // Page delete from the first view shifts the selected later page down.
+    Check(first.RemovePages({ 1U }), "the first view deletes an unselected page");
+    Check(second.SelectionFor(0).strokes == std::vector<std::size_t> { 0U, 1U },
+        "deleting an earlier page keeps the first page's selection");
+    Check(second.SelectionFor(1).strokes == std::vector<std::size_t> { 0U }
+            && document.PageAt(1).strokes[0].points.front().y == 2000.0f,
+        "the later selected page's key shifts down with its page");
+    Check(first.Undo(), "the page delete undoes from the other view");
+    Check(second.SelectionFor(2).strokes == std::vector<std::size_t> { 0U },
+        "undoing the page delete shifts the later selection back up");
+    Check(first.Redo(), "the page delete redoes from the other view");
+    Check(second.SelectionFor(1).strokes == std::vector<std::size_t> { 0U },
+        "redoing the page delete shifts the later selection down again");
+
+    // Deleting a page the other view has a selection on drops it; surviving
+    // later pages still move.
+    Check(first.RemovePages({ 0U }), "the first view deletes the selected page");
+    Check(second.SelectionFor(0).strokes == std::vector<std::size_t> { 0U }
+            && document.PageAt(0).strokes[0].points.front().y == 2000.0f,
+        "the deleted page's selection is gone and the survivor moved to its key");
+    Check(second.SelectionFor(0).texts.empty(), "the deleted page's text selection is gone too");
+
+    // A whole-page replacement cannot be remapped: clear rather than guess.
+    Check(first.RotatePage(0, 1), "the first view rotates the remaining page");
+    Check(second.SelectionFor(0).Empty(), "a whole-page change clears the remote selection");
+
+    const auto selectionIsInRange = [&]() {
+        for (std::size_t pageIndex = 0; pageIndex < document.PageCount(); ++pageIndex) {
+            const cnote::ui::PageSelection& selected = second.SelectionFor(pageIndex);
+            const cnote::Page& current = document.PageAt(pageIndex);
+            for (const std::size_t index : selected.strokes) {
+                if (index >= current.strokes.size()) {
+                    return false;
+                }
+            }
+            for (const std::size_t index : selected.images) {
+                if (index >= current.images.size()) {
+                    return false;
+                }
+            }
+            for (const std::size_t index : selected.texts) {
+                if (index >= current.texts.size()) {
+                    return false;
+                }
+            }
+            for (const std::size_t index : selected.latexes) {
+                if (index >= current.latexes.size()) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    Check(selectionIsInRange(), "no remote selection index ever points past its page");
 }
 
 void SaveToRefusesPdfContainer() {
@@ -1799,12 +1988,6 @@ void ObjectGestureHistoryDoesNotScaleWithPageSize() {
     std::printf("HISTORY-BYTES small-page=%zu large-page=%zu\n", small, large);
     Check(small > 0U, "repeated one-object moves retain their affected stroke");
     Check(large == small, "retained history bytes do not grow with the page's object count");
-}
-
-cnote::Stroke MakeStrokeAt(float x, float y) {
-    cnote::Stroke stroke;
-    stroke.points = { { x, y }, { x + 10.0f, y + 10.0f } };
-    return stroke;
 }
 
 // One erase drag crosses pages: the controller records a single ReplaceObjects
@@ -2327,6 +2510,7 @@ int main(int argc, char** argv) {
     EditSessionCommitsAndUndoKeepsTheObject();
     RotatedPageKeepsObjectBoxes();
     RemoteCommitCancelsTransientState();
+    RemoteCommitCarriesTheOtherViewsSelection();
     SaveToRefusesPdfContainer();
     SetCurrentPageIndexIsSerialized();
     PageClipboardActsOnSeveralPages();

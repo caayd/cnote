@@ -74,6 +74,14 @@ struct HistoryAction {
 struct ProjectChange {
     enum class Kind { Committed, Saved };
     Kind kind = Kind::Committed;
+    // For a Committed change: the history action that produced it (a commit or
+    // an undo/redo) and its direction, so a view that made no change of its own
+    // can carry its per-page object selection across the same page and object
+    // index moves.  Points into the session's undo/redo stack, which owns it for
+    // the synchronous broadcast.  Null when the commit moved no page or object
+    // (a settings or save-state change), so selections stay valid.
+    const HistoryAction* appliedAction = nullptr;
+    bool appliedUndo = false;
 };
 
 // Accessed exclusively on the application's UI thread. All attached views share
