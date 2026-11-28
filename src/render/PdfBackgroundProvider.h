@@ -5,6 +5,7 @@
 
 #include <QImage>
 #include <QRect>
+#include <QSize>
 
 namespace cnote::render {
 
@@ -33,12 +34,22 @@ public:
     // pixels of the full-page background), or null when the provider has no
     // bounded-region path.  Region renders keep a page surface or tile inside
     // the raster budget instead of materializing the whole background.
+    //
+    // `fullPagePixelSize` is the size that full-page background raster would
+    // have (the space `pixelRect` is measured in).  A miss crops a warm
+    // full-page raster when one exists; with that size the provider may also
+    // render the full page once into its cache when it fits the raster budget,
+    // so later patches are exact crops of what the page surface blitted.
+    // Without it (or above the budget) a miss renders just the requested
+    // region.  Implementations without a region path keep the base fallback.
     [[nodiscard]] virtual std::optional<QImage> PageBackgroundRegion(
-        std::int32_t sourceIndex, std::int32_t pageIndex, float rasterScale, const QRect& pixelRect) {
+        std::int32_t sourceIndex, std::int32_t pageIndex, float rasterScale, const QRect& pixelRect,
+        QSize fullPagePixelSize = {}) {
         static_cast<void>(sourceIndex);
         static_cast<void>(pageIndex);
         static_cast<void>(rasterScale);
         static_cast<void>(pixelRect);
+        static_cast<void>(fullPagePixelSize);
         return std::nullopt;
     }
 };

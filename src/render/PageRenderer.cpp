@@ -44,21 +44,30 @@ bool PaintPdfBackgroundRegion(QPainter& painter, const Page& page, const PageRen
     if (params.pdfBackground == nullptr || deviceRegion.isEmpty()) {
         return false;
     }
-    const qreal backgroundWidth = pageRect.width();
-    const qreal backgroundHeight = pageRect.height();
+    const qreal quarterTurns = static_cast<qreal>(page.rotationDegrees) / 90.0;
+    // The PDF raster keeps the source page's stored orientation; a quarter
+    // turn swaps the page's width and height before rotation is applied about
+    // the page centre.  Map into the raster's own space, not the rotated
+    // page rect's.
+    const bool swapAxis = std::abs(quarterTurns - std::round(quarterTurns)) < 1.0e-3
+        && (static_cast<int>(std::lround(quarterTurns)) & 1) != 0;
+    const qreal backgroundWidth = swapAxis ? pageRect.height() : pageRect.width();
+    const qreal backgroundHeight = swapAxis ? pageRect.width() : pageRect.height();
     if (backgroundWidth < 1.0 || backgroundHeight < 1.0) {
         return false;
     }
+    const QSize fullPagePixelSize(
+        std::max(1, static_cast<int>(std::lround(backgroundWidth))),
+        std::max(1, static_cast<int>(std::lround(backgroundHeight))));
 
-    // The painter origin is this raster's top-left (deviceRegion's top-left),
-    // so the region whose background is wanted lands here.  For a tile of a
-    // tiled page this is the whole visible page region: every tile requests the
-    // same background and draws its own slice, so split glyphs are not
-    // re-rasterized per tile.  (Pixels a tile covers outside that region are
-    // clipped by the canvas' visible bounds.)
+    // The painter is shifted so this raster's top-left is deviceRegion's
+    // top-left, but `pageRect` and the background raster are in page
+    // coordinates: map the wanted region in that same space.  (For a tile of
+    // a tiled page this is the whole visible page region: every tile requests
+    // the same background and draws its own slice, so split glyphs are not
+    // re-rasterized per tile.)
     const QRect backgroundRegion = params.pdfBackgroundRegion.value_or(deviceRegion);
-    const QRectF visible = QRectF(backgroundRegion).translated(
-        -deviceRegion.x(), -deviceRegion.y());
+    const QRectF visible(backgroundRegion);
     const QPointF center = pageRect.center();
     const qreal radians = static_cast<qreal>(page.rotationDegrees) * (3.14159265358979323846 / 180.0);
     const qreal sine = std::sin(-radians);
@@ -85,15 +94,14 @@ bool PaintPdfBackgroundRegion(QPainter& painter, const Page& page, const PageRen
     QRect sourceRect = QRectF(minX, minY, maxX - minX, maxY - minY)
         .toAlignedRect()
         .adjusted(-1, -1, 1, 1)
-        .intersected(QRect(0, 0,
-            std::max(1, static_cast<int>(std::lround(backgroundWidth))),
-            std::max(1, static_cast<int>(std::lround(backgroundHeight)))));
+        .intersected(QRect(QPoint(0, 0), fullPagePixelSize));
     if (sourceRect.isEmpty()) {
         return false;
     }
 
     const std::optional<QImage> region = params.pdfBackground->PageBackgroundRegion(
-        page.sourcePdfSourceIndex, page.sourcePdfPageIndex, std::max(0.01f, params.scale), sourceRect);
+        page.sourcePdfSourceIndex, page.sourcePdfPageIndex, std::max(0.01f, params.scale), sourceRect,
+        fullPagePixelSize);
     if (!region.has_value() || region->isNull()) {
         return false;
     }

@@ -26,6 +26,28 @@ QImage WrapOwnedBgraImage(RasterImage raster) {
         [](void* info) { delete static_cast<PixelBuffer*>(info); }, owner);
 }
 
+// Returns `rect` of `source` without copying its pixels: the returned view
+// keeps `source` alive through QImage's reference count, so the provider may
+// evict the cached raster after handing the patch out.  The view is read-only;
+// callers only paint it, and painting never detaches it.
+QImage CropShared(const QImage& source, const QRect& rect) {
+    if (source.isNull() || rect.isEmpty() || !source.rect().contains(rect)) {
+        return {};
+    }
+    if (rect == source.rect()) {
+        return source;
+    }
+    if (source.format() != QImage::Format_ARGB32) {
+        return source.copy(rect);
+    }
+    auto* owner = new QImage(source);
+    const uchar* base = owner->constBits()
+        + (static_cast<qsizetype>(rect.y()) * owner->bytesPerLine())
+        + (static_cast<qsizetype>(rect.x()) * 4);
+    return QImage(const_cast<uchar*>(base), rect.width(), rect.height(), owner->bytesPerLine(),
+        QImage::Format_ARGB32, [](void* info) { delete static_cast<QImage*>(info); }, owner);
+}
+
 }  // namespace
 
 PdfiumBackgroundProvider::PdfiumBackgroundProvider(const PdfiumBackend& backend, const Document& document,
@@ -111,13 +133,15 @@ QImage PdfiumBackgroundProvider::PageBackground(std::int32_t sourceIndex, std::i
     }
 
     ++renderCount_;
+    ++fullPageRenderCount_;
     QImage image = WrapOwnedBgraImage(std::move(*raster));
     Store(cache, key, image, EntryStatus::Ready);
     return image;
 }
 
 std::optional<QImage> PdfiumBackgroundProvider::PageBackgroundRegion(
-    std::int32_t sourceIndex, std::int32_t pageIndex, float rasterScale, const QRect& pixelRect) {
+    std::int32_t sourceIndex, std::int32_t pageIndex, float rasterScale, const QRect& pixelRect,
+    QSize fullPagePixelSize) {
     if (document_ == nullptr || sourceIndex < 0 || pageIndex < 0 || rasterScale <= 0.0f
         || pixelRect.isEmpty()) {
         return std::nullopt;
@@ -127,12 +151,72 @@ std::optional<QImage> PdfiumBackgroundProvider::PageBackgroundRegion(
         return std::nullopt;
     }
 
+    const int scaleMilli = static_cast<int>(std::lround(rasterScale * 1000.0f));
+
+    // A patch must be an exact crop of the pixels the page surface (or its
+    // tiles) already blitted.  A warm full-page raster is that source; a fresh
+    // PDFium excerpt with a shifted device origin re-rasterizes glyph
+    // anti-aliasing, which would leave a visible seam in an erase or move
+    // patch.
+    const Key fullKey {
+        document_,
+        source->pdfData.get(),
+        sourceIndex,
+        pageIndex,
+        scaleMilli,
+        QRect(),
+    };
+    QImage full;
+    if (Lookup(canvas_, fullKey, &full) && !full.isNull()) {
+        const QImage patch = CropShared(full, pixelRect);
+        if (!patch.isNull()) {
+            return patch;
+        }
+    }
+
+    // Tiled pages never keep a full-page raster (it does not fit the raster
+    // budget); every visible tile got its background from one region render of
+    // the visible page rect.  Serve patches inside that region from it so they
+    // match the tiles.  Newest entry first, matching the most recent blit.
+    for (auto entry = canvas_.entries.rbegin(); entry != canvas_.entries.rend(); ++entry) {
+        if (entry->status != EntryStatus::Ready || entry->image.isNull()
+            || entry->key.document != document_ || entry->key.pdfData != source->pdfData.get()
+            || entry->key.source != sourceIndex || entry->key.page != pageIndex
+            || entry->key.scaleMilli != scaleMilli || entry->key.region.isEmpty()) {
+            continue;
+        }
+        const QRect covered(entry->key.region.topLeft(), entry->image.size());
+        if (!covered.contains(pixelRect)) {
+            continue;
+        }
+        const QImage patch = CropShared(entry->image, pixelRect.translated(-covered.topLeft()));
+        if (!patch.isNull()) {
+            return patch;
+        }
+    }
+
+    // Cold, and a full-page background fits the raster budget: render it into
+    // the cache once and crop.  The page surface that follows is then served
+    // from exactly these pixels, so patches and the surrounding page agree.
+    // Above the budget (tiled pages) only the requested rect is rendered; a
+    // shifted PDFium excerpt can differ in glyph anti-aliasing from a
+    // full-page render (#56), which is the documented allowance for those
+    // pages.
+    if (!fullPagePixelSize.isEmpty()
+        && RasterFitsBudget(fullPagePixelSize.width(), fullPagePixelSize.height())) {
+        const QImage pageImage = PageBackground(sourceIndex, pageIndex, rasterScale);
+        const QImage patch = CropShared(pageImage, pixelRect);
+        if (!patch.isNull()) {
+            return patch;
+        }
+    }
+
     const Key key {
         document_,
         source->pdfData.get(),
         sourceIndex,
         pageIndex,
-        static_cast<int>(std::lround(rasterScale * 1000.0f)),
+        scaleMilli,
         pixelRect,
     };
     QImage cached;
@@ -152,6 +236,7 @@ std::optional<QImage> PdfiumBackgroundProvider::PageBackgroundRegion(
     }
 
     ++renderCount_;
+    ++regionRenderCount_;
     QImage image = WrapOwnedBgraImage(std::move(*raster));
     Store(canvas_, key, image, EntryStatus::Ready);
     return image;
