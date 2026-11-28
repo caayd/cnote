@@ -269,33 +269,36 @@ struct PrecisionTouchpad::State {
     // Fills touchInfo/typeInfo for this frame.  The history size is stable
     // across the messages of one gesture, so the buffers kept between messages
     // usually let a single query replace the old size-probe-plus-fill pair;
-    // only the first frame and a frame that outgrows them ask for the size.
+    // only the first frame, a frame that outgrows them, and the undocumented
+    // column case below ask for the size.
     bool QueryTouchFrame(UINT32 pointerId, UINT32& entriesCount, UINT32& pointerCount) {
-        const PrecisionTouchpadApi& loadedApi = api;
-        if (loadedApi.getPointerFrameTouchpadInfoHistory == nullptr) {
+        if (api.getPointerFrameTouchpadInfoHistory == nullptr) {
             return false;
         }
 
-        entriesCount = frameEntries;
-        pointerCount = framePointers;
-        if (entriesCount == 0U || pointerCount == 0U) {
+        if (frameEntries == 0U || framePointers == 0U) {
             // No cached size yet: ask for the required dimensions, then fill.
-            entriesCount = 0U;
-            pointerCount = 0U;
-            if (loadedApi.getPointerFrameTouchpadInfoHistory(
-                    pointerId, &entriesCount, &pointerCount, nullptr) == FALSE
-                || !ResizeTouchFrame(entriesCount, pointerCount)) {
+            if (!ProbeAndFillTouchFrame(pointerId, entriesCount, pointerCount)) {
                 return false;
             }
-            entriesCount = frameEntries;
-            pointerCount = framePointers;
+        } else if (!FillTouchFrame(pointerId, entriesCount, pointerCount)) {
+            if (GetLastError() == ERROR_NO_DATA) {
+                // The frame is gone: do not trust the cached size for the next one.
+                ResetTouchFrame();
+                return false;
+            }
+            // Too few columns is undocumented: a frame with more pointers than
+            // the cached buffer has columns can fail instead of reporting the
+            // needed totals through the counts.  That frame may carry a new
+            // contact's down, so probe the size and fill again rather than
+            // dropping it.
+            if (!ProbeAndFillTouchFrame(pointerId, entriesCount, pointerCount)) {
+                ResetTouchFrame();
+                return false;
+            }
         }
 
-        if (loadedApi.getPointerFrameTouchpadInfoHistory(
-                pointerId, &entriesCount, &pointerCount, touchInfo.data()) == FALSE
-            || entriesCount == 0U
-            || pointerCount == 0U) {
-            // The frame is gone: do not trust the cached size for the next one.
+        if (entriesCount == 0U || pointerCount == 0U) {
             ResetTouchFrame();
             return false;
         }
@@ -307,10 +310,7 @@ struct PrecisionTouchpad::State {
                 ResetTouchFrame();
                 return false;
             }
-            entriesCount = frameEntries;
-            pointerCount = framePointers;
-            if (loadedApi.getPointerFrameTouchpadInfoHistory(
-                    pointerId, &entriesCount, &pointerCount, touchInfo.data()) == FALSE
+            if (!FillTouchFrame(pointerId, entriesCount, pointerCount)
                 || entriesCount == 0U
                 || pointerCount != framePointers
                 || entriesCount > frameEntries) {
@@ -327,6 +327,26 @@ struct PrecisionTouchpad::State {
             typeInfo[index].touchInfo = touchInfo[index];
         }
         return true;
+    }
+
+    // One fill query against the cached buffers at their current size.
+    bool FillTouchFrame(UINT32 pointerId, UINT32& entriesCount, UINT32& pointerCount) {
+        entriesCount = frameEntries;
+        pointerCount = framePointers;
+        return api.getPointerFrameTouchpadInfoHistory(
+                   pointerId, &entriesCount, &pointerCount, touchInfo.data())
+            != FALSE;
+    }
+
+    // Sizes the buffers from the API's required totals, then fills once.
+    bool ProbeAndFillTouchFrame(UINT32 pointerId, UINT32& entriesCount, UINT32& pointerCount) {
+        entriesCount = 0U;
+        pointerCount = 0U;
+        if (api.getPointerFrameTouchpadInfoHistory(pointerId, &entriesCount, &pointerCount, nullptr) == FALSE
+            || !ResizeTouchFrame(entriesCount, pointerCount)) {
+            return false;
+        }
+        return FillTouchFrame(pointerId, entriesCount, pointerCount);
     }
 
     bool ResizeTouchFrame(UINT32 entriesCount, UINT32 pointerCount) {
