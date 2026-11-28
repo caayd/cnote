@@ -1,6 +1,6 @@
 #include "qt/QtDocumentController.h"
 
-#include <QSaveFile>
+#include <QPointer>
 
 #include <algorithm>
 #include <cmath>
@@ -8,8 +8,9 @@
 #include <vector>
 
 #include "PdfBackend.h"
-#include "Unicode.h"
 #include "ProjectFile.h"
+#include "ProjectSaveQueue.h"
+#include "Unicode.h"
 #include "document/HistoryReducer.h"
 #include "qt/QtDocumentIo.h"
 #include "render/PdfiumBackgroundProvider.h"
@@ -64,6 +65,41 @@ std::optional<std::size_t> FindLatexIndexById(const Page& page, std::uint64_t la
         }
     }
     return std::nullopt;
+}
+
+// Applies one committed write to its session and tells every view.  The path
+// and kind are properties of the destination, so a successful save records
+// them even when an edit landed during the write; dirty is cleared only when
+// the revision that reached the disk is still the current one.
+void ApplySaveOutcome(AppManager& manager, const std::shared_ptr<ProjectSession>& session,
+    const std::filesystem::path& destination, std::uint64_t revision,
+    const ProjectSaveResult& result) {
+    if (!result.success || session == nullptr) {
+        return;
+    }
+    session->document.SetFilePath(destination);
+    // The destination is a cnote project file now, so the document is one:
+    // a PDF-backed document turns into a project (an in-place save is safe
+    // from here on), and the save/close policy stops routing through Save As.
+    session->document.SetKind(DocumentKind::Project);
+    if (session->revision == revision) {
+        session->dirty = false;
+        manager.NotifySessionSaved(session);
+    } else {
+        // The file holds the saved revision, not the edit made while it was
+        // being written: stay dirty and keep autosave armed for the new one.
+        manager.UpdateAutoSaveTimer(session);
+    }
+
+    ProjectChange change;
+    change.kind = ProjectChange::Kind::Saved;
+    for (QObject* owner : manager.ViewsForSession(session)) {
+        if (auto* view = qobject_cast<QtDocumentController*>(owner); view != nullptr) {
+            // Saved mutates observable state (FilePath, dirty), so even the
+            // view that asked for the save needs the signal to refresh chrome.
+            view->OnSessionChanged(change, false);
+        }
+    }
 }
 
 }  // namespace
@@ -138,7 +174,8 @@ void QtDocumentController::ReattachForShow() {
     }
 }
 
-bool QtDocumentController::SaveTo(const std::filesystem::path& path, std::string* error) {
+bool QtDocumentController::RequestSave(const std::filesystem::path& path, std::string* error,
+    SaveCompletion onDone) {
     if (session_ == nullptr || path.empty()) {
         return false;
     }
@@ -167,58 +204,49 @@ bool QtDocumentController::SaveTo(const std::filesystem::path& path, std::string
         }
     }
 
-    // Serialize once and commit through QSaveFile (plan 6.6): a failure must
-    // never leave a truncated project behind, and dirty/FilePath only change
-    // after the destination is committed.
-    const std::vector<std::uint8_t> bytes = ProjectFile::Serialize(session_->document);
-    QSaveFile file(QString::fromStdU16String(path.u16string()));
-    file.setDirectWriteFallback(false);
-    if (!file.open(QIODevice::WriteOnly)) {
-        if (error != nullptr) {
-            *error = "cannot write " + PathToUtf8(path);
-        }
-        return false;
-    }
-    const qint64 expected = static_cast<qint64>(bytes.size());
-    const bool written = bytes.empty()
-        || file.write(reinterpret_cast<const char*>(bytes.data()), expected) == expected;
-    if (!written || !file.commit()) {
-        file.cancelWriting();
-        if (error != nullptr) {
-            *error = "cannot write " + PathToUtf8(path);
-        }
-        return false;
-    }
-
-    session_->document.SetFilePath(path);
-    // The destination is a cnote project file now, so the document is one:
-    // a PDF-backed document turns into a project (an in-place save is safe
-    // from here on), and the save/close policy stops routing through Save As.
-    session_->document.SetKind(DocumentKind::Project);
-    session_->dirty = false;
-    manager_.NotifySessionSaved(session_);
-    BroadcastChange(ProjectChange::Kind::Saved);
+    // The worker must never read the live document: take the immutable
+    // snapshot here, on the GUI thread.  Pages copy their objects and share
+    // rasters and embedded PDF bytes through PixelBuffer/PdfSource ownership.
+    std::shared_ptr<const Document> snapshot = std::make_shared<const Document>(session_->document);
+    const std::uint64_t revision = session_->revision;
+    const std::shared_ptr<ProjectSession> saved = session_;
+    const std::filesystem::path destination = path;
+    QPointer<QtDocumentController> view(this);
+    manager_.ProjectSaves().Enqueue(
+        { std::move(snapshot), destination },
+        [manager = &manager_, saved, destination, revision, view, onDone = std::move(onDone)](
+            const ProjectSaveResult& result) {
+            ApplySaveOutcome(*manager, saved, destination, revision, result);
+            if (result.success && !view.isNull()) {
+                ++view->savedChangeCount_;
+            }
+            if (onDone) {
+                SaveOutcome outcome;
+                outcome.success = result.success;
+                outcome.error = result.error;
+                outcome.path = destination;
+                outcome.revision = revision;
+                onDone(outcome);
+            }
+        });
     return true;
 }
 
-void QtDocumentController::BroadcastChange(ProjectChange::Kind kind) {
-    if (session_ == nullptr) {
-        return;
+bool QtDocumentController::SaveTo(const std::filesystem::path& path, std::string* error) {
+    // Wait for the destination to commit before returning: the last-view close
+    // and the persistence tests continue only once the file exists.
+    SaveOutcome outcome;
+    if (!RequestSave(path, error, [&outcome](const SaveOutcome& result) { outcome = result; })) {
+        return false;
     }
-    if (kind == ProjectChange::Kind::Saved) {
-        ++savedChangeCount_;
-    }
-    ProjectChange change;
-    change.kind = kind;
-    for (QObject* owner : manager_.ViewsForSession(session_)) {
-        if (auto* view = qobject_cast<QtDocumentController*>(owner); view != nullptr) {
-            view->OnSessionChanged(change, view == this);
+    manager_.ProjectSaves().WaitForIdle();
+    if (!outcome.success) {
+        if (error != nullptr && !outcome.error.empty()) {
+            *error = outcome.error;
         }
+        return false;
     }
-    // OnSessionChanged skips the originating view (it already knows), but the
-    // save mutates observable state (FilePath, dirty), so the window still
-    // needs the signal to refresh its chrome — title included.
-    emit SessionChanged();
+    return true;
 }
 
 bool QtDocumentController::ExportPdf(const std::filesystem::path& path, bool embedProject, std::string* error) {

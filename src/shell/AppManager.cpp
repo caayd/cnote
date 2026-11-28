@@ -1,5 +1,6 @@
 #include "shell/AppManager.h"
 
+#include "ProjectSaveQueue.h"
 #include "Unicode.h"
 #include "latex/LatexEngine.h"
 
@@ -36,7 +37,12 @@ bool ExtensionEquals(const std::filesystem::path& path, std::string_view extensi
 
 AppManager::AppManager(QObject* parent) : QObject(parent) {}
 
-AppManager::~AppManager() = default;
+AppManager::~AppManager() {
+    // A requested save must reach the disk even when the process quits without
+    // a window close (a capture run, a harness): the queue's destructor drains
+    // its jobs before the completing views are gone.
+    projectSaves_.reset();
+}
 
 bool AppManager::InitializeServices(const std::filesystem::path& latexResourceRoot, std::string* error) {
     if (servicesInitialized_) {
@@ -62,6 +68,13 @@ void AppManager::ShutdownServices() {
 
 void AppManager::SetAutoSaveHandler(AutoSaveHandler handler) {
     autoSaveHandler_ = std::move(handler);
+}
+
+ProjectSaveQueue& AppManager::ProjectSaves() {
+    if (!projectSaves_) {
+        projectSaves_ = std::make_unique<ProjectSaveQueue>();
+    }
+    return *projectSaves_;
 }
 
 void AppManager::RegisterView(QObject* owner, SessionView* view, std::shared_ptr<ProjectSession> session) {

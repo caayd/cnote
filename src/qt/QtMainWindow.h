@@ -209,6 +209,13 @@ private:
     // saved, explicitly discarded or retained instead of being dropped
     // silently. Returns false when the caller must not proceed.
     [[nodiscard]] bool RetainCurrentSession();
+    // Starts an off-thread save and returns; a write failure is reported from
+    // its completion, like the old inline save reported it after returning.
+    bool StartSave(const std::filesystem::path& destination, std::string* error);
+    // Commits the destination before returning, for the close decision: the
+    // window must not go away before its own save is on disk.
+    bool SaveSynchronously(const std::filesystem::path& destination);
+    bool SaveAsSynchronously();
     void RecordRecentPath(const std::filesystem::path& path);
     void OpenRecentPath(const std::filesystem::path& path);
     void CreateChrome();

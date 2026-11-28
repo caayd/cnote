@@ -403,6 +403,7 @@ endif()
 add_library(cnote_services
     # Project codecs and file loading.
     src/ProjectFile.cpp
+    src/ProjectSaveQueue.cpp
     src/document/LoadDocumentFile.cpp
     src/document/XpressCodec.cpp
     src/latex/LatexEngine.cpp

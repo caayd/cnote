@@ -18,6 +18,8 @@
 
 namespace cnote {
 
+class ProjectSaveQueue;
+
 // Per-view hooks the manager calls. The Qt view implements them; the manager
 // never touches widgets.
 class SessionView {
@@ -52,6 +54,12 @@ public:
     // clears dirty only on success.
     using AutoSaveHandler = std::function<void(const std::shared_ptr<ProjectSession>&, QObject*)>;
     void SetAutoSaveHandler(AutoSaveHandler handler);
+
+    // The process's one background project writer.  Every view and the
+    // autosave timer submit through it, so writes run in request order and off
+    // the GUI thread; the manager drains it before it is destroyed, so a quit
+    // cannot outrun a requested save.
+    [[nodiscard]] ProjectSaveQueue& ProjectSaves();
 
     void RegisterView(QObject* owner, SessionView* view, std::shared_ptr<ProjectSession> session);
     void UnregisterView(QObject* owner);
@@ -99,6 +107,7 @@ private:
 
     bool servicesInitialized_ = false;
     AutoSaveHandler autoSaveHandler_;
+    std::unique_ptr<ProjectSaveQueue> projectSaves_;
     std::vector<Entry> entries_;
     std::map<ProjectSession*, std::unique_ptr<QTimer>> timers_;
     std::vector<Page> clipboardPages_;

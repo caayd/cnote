@@ -27,6 +27,7 @@
 #include <QWindow>
 #include <qpa/qwindowsysteminterface.h>
 
+#include "ProjectSaveQueue.h"
 #include "Unicode.h"
 #include "document/SelectionClipboardQt.h"
 #include "settings/KeyBindingQt.h"
@@ -1438,28 +1439,58 @@ void QtMainWindow::OpenNewView() {
 }
 
 void QtMainWindow::Save() {
+    // FilePath/dirty only change when a queued write's completion runs, so
+    // settle any in-flight write before deciding between Save and Save As:
+    // Ctrl+S right after Save As must not reopen the file dialog.
+    manager_.ProjectSaves().WaitForIdle();
     // A PDF-backed document's FilePath is the PDF: an in-place save would
     // overwrite it, so it always goes through Save As.
     if (controller_.CanSaveInPlace() && controller_.HasSavedPath()) {
         std::string error;
-        if (!controller_.SaveTo(controller_.FilePath(), &error)) {
+        if (!StartSave(controller_.FilePath(), &error)) {
             ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
-        } else {
-            RecordRecentPath(controller_.FilePath());
+            UpdateChrome();
         }
-        UpdateChrome();
         return;
     }
     SaveAs();
 }
 
 bool QtMainWindow::SaveAs() {
+    manager_.ProjectSaves().WaitForIdle();
     const QString selected = AskFileName(this, true, QStringLiteral("Save As"), QStringLiteral("cnote project (*.cnote)"));
     if (selected.isEmpty()) {
         return false;
     }
     std::string error;
     const std::filesystem::path destination(selected.toStdString());
+    if (!StartSave(destination, &error)) {
+        ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
+        UpdateChrome();
+        return false;
+    }
+    return true;
+}
+
+bool QtMainWindow::StartSave(const std::filesystem::path& destination, std::string* error) {
+    QPointer<QtMainWindow> window(this);
+    return controller_.RequestSave(destination, error,
+        [window, destination](const QtDocumentController::SaveOutcome& outcome) {
+            if (window.isNull()) {
+                return;
+            }
+            if (!outcome.success) {
+                window->ReportError(
+                    QStringLiteral("Could not save: %1").arg(QString::fromStdString(outcome.error)));
+            } else {
+                window->RecordRecentPath(destination);
+            }
+            window->UpdateChrome();
+        });
+}
+
+bool QtMainWindow::SaveSynchronously(const std::filesystem::path& destination) {
+    std::string error;
     if (!controller_.SaveTo(destination, &error)) {
         ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
         UpdateChrome();
@@ -1468,6 +1499,14 @@ bool QtMainWindow::SaveAs() {
     RecordRecentPath(destination);
     UpdateChrome();
     return true;
+}
+
+bool QtMainWindow::SaveAsSynchronously() {
+    const QString selected = AskFileName(this, true, QStringLiteral("Save As"), QStringLiteral("cnote project (*.cnote)"));
+    if (selected.isEmpty()) {
+        return false;
+    }
+    return SaveSynchronously(std::filesystem::path(selected.toStdString()));
 }
 
 bool QtMainWindow::ExportPdf(bool embedProject) {
@@ -1563,6 +1602,10 @@ void QtMainWindow::closeEvent(QCloseEvent* event) {
 }
 
 bool QtMainWindow::RetainCurrentSession() {
+    // A Save As that is still queued already chose a destination: settle it
+    // before the close decision reads dirty/FilePath, or the last view would
+    // treat the document as untitled and prompt again.
+    manager_.ProjectSaves().WaitForIdle();
     if (!controller_.Dirty()) {
         return true;
     }
@@ -1573,15 +1616,11 @@ bool QtMainWindow::RetainCurrentSession() {
         return true;
     }
 
-    std::string error;
     if (controller_.CanSaveInPlace() && controller_.HasSavedPath()) {
         // Plan 4.5: the last view of a saved project saves in place; a failed
-        // save keeps the current document.
-        if (!controller_.SaveTo(controller_.FilePath(), &error)) {
-            ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
-            return false;
-        }
-        return true;
+        // save keeps the current document.  The wait also covers a write that
+        // was already in flight, so the window never closes ahead of it.
+        return SaveSynchronously(controller_.FilePath());
     }
 
     // Reference WM_CLOSE -> ConfirmCloseWithUnsavedChanges
@@ -1610,16 +1649,9 @@ bool QtMainWindow::RetainCurrentSession() {
     if (decision == CloseDecision::Discard) {
         return true;
     }
-    const bool saved = (controller_.CanSaveInPlace() && controller_.HasSavedPath())
-        ? controller_.SaveTo(controller_.FilePath(), &error)
-        : SaveAs();
-    if (!saved) {
-        if (!error.empty()) {
-            ReportError(QStringLiteral("Could not save: %1").arg(QString::fromStdString(error)));
-        }
-        return false;
-    }
-    return true;
+    return (controller_.CanSaveInPlace() && controller_.HasSavedPath())
+        ? SaveSynchronously(controller_.FilePath())
+        : SaveAsSynchronously();
 }
 
 void QtMainWindow::SetCloseDecisionProvider(std::function<CloseDecision()> provider) {

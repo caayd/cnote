@@ -486,7 +486,10 @@ Not verified, and not claimed as release-ready:
 - `.cnote` is the native project format for editable work; v14 files written
   by the former Win32 application stay readable, and new files remain v14 so
   they stay readable by it.
-- Auto-save applies to saved `.cnote` documents.
+- Auto-save applies to saved `.cnote` documents. Saves run on a background
+  writer - the window stays responsive while the project is serialized and its
+  destination replaced atomically - and closing the last view waits for a write
+  that is already in flight.
 - The product UI is Qt 6 Widgets (Core/Gui/Widgets, dynamically linked). The
   Win32/GDI/GDI+ frontend is deleted; the only remaining raw Win32 code is
   the precision-touchpad adapter, which loads `ninput.dll` dynamically.
