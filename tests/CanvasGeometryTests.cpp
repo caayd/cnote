@@ -48,6 +48,7 @@
 #include <QTextBlock>
 #include <QKeyEvent>
 #include "ui/CanvasWidget.h"
+#include "ui/PageDefaultsQt.h"
 
 namespace {
 
@@ -906,6 +907,104 @@ int main(int argc, char** argv) {
     QCoreApplication::processEvents();
 
 
+
+    // (i) Raster budget at max zoom and high DPR.  A page whose full raster
+    // exceeds the per-surface budget renders visible tiles (bounded bytes, and
+    // at most one paint's worth of them per frame so a zoom settle spreads
+    // across frames).  A nearby page that leaves the viewport stays cached, so
+    // scrolling back blits instead of re-rendering.
+    {
+        cnote::AppManager budgetManager;
+        cnote::qt::QtDocumentController budgetController(budgetManager);
+        budgetController.NewBlankDocument();
+        ui::CanvasWidget budgetCanvas(budgetController);
+        budgetCanvas.resize(1400, 1400);
+        budgetCanvas.SetTool(ui::Tool::Draw);
+        budgetCanvas.SetZoom(ui::CanvasWidget::kMaxZoom);
+        budgetCanvas.show();
+        budgetCanvas.CenterOnPage(0);
+        Pump(300);
+        budgetCanvas.repaint();
+        const std::size_t tiledCount = budgetCanvas.CachedTileCount();
+        const std::size_t tiledBytes = budgetCanvas.CachedSurfaceBytes();
+        const std::size_t lastPaintBytes = budgetCanvas.LastPaintSurfaceBytes();
+        std::printf("RASTER-BUDGET dpr=%.2f zoom=%.2f tiles=%zu bytes=%zu peak=%zu lastPaint=%zu peakPaint=%zu renders=%llu\n",
+            devicePixelRatio, static_cast<double>(ui::CanvasWidget::kMaxZoom),
+            tiledCount, tiledBytes, budgetCanvas.PeakSurfaceBytes(), lastPaintBytes,
+            budgetCanvas.PeakPaintSurfaceBytes(),
+            static_cast<unsigned long long>(budgetCanvas.SurfaceRenderCount()));
+        Check(tiledCount > 0U, "the max-zoom page renders as tiles above the surface budget");
+        Check(budgetCanvas.PeakPaintSurfaceBytes() <= cnote::render::kSurfaceRenderBytesPerPaint,
+            "every paint's raster bytes stay inside the per-paint budget");
+        Check(tiledBytes <= cnote::render::kCanvasSurfaceCacheBytes,
+            "the settled raster cache stays inside the canvas budget");
+        Check(budgetCanvas.PeakSurfaceBytes()
+                <= cnote::render::kCanvasSurfaceCacheBytes + cnote::render::kSurfaceRenderBytesPerPaint,
+            "peak raster bytes stay bounded at max zoom");
+        if (devicePixelRatio > 1.5) {
+            // The visible tiles need more bytes than one paint may render, so
+            // they only all exist because deferred frames filled in the rest.
+            Check(tiledBytes > cnote::render::kSurfaceRenderBytesPerPaint,
+                "the tile set spans more than one paint's budget (spread across frames)");
+        }
+
+        // Tiles draw the real page content at the right place: a red stroke
+        // committed at the page centre shows up in the grab.
+        const cnote::Page& page = budgetController.DocumentRef().PageAt(0);
+        cnote::StrokeStyle budgetStyle;
+        budgetStyle.color = 0xFFFF0000U;
+        budgetStyle.width = 8.0f;
+        budgetController.SetActiveStrokeStyle(budgetStyle);
+        const QPointF center = budgetCanvas.PageToScreen(0, { page.width * 0.5f, page.height * 0.5f });
+        SendMouse(budgetCanvas, QEvent::MouseButtonPress, center + QPointF(-20.0, 0.0),
+            Qt::LeftButton, Qt::LeftButton);
+        for (int step = 1; step <= 4; ++step) {
+            SendMouse(budgetCanvas, QEvent::MouseMove,
+                center + QPointF(-20.0 + (10.0 * step), 0.0), Qt::NoButton, Qt::LeftButton);
+        }
+        SendMouse(budgetCanvas, QEvent::MouseButtonRelease, center + QPointF(20.0, 0.0),
+            Qt::LeftButton, Qt::NoButton);
+        QCoreApplication::processEvents();
+        Pump(250);
+        budgetCanvas.repaint();
+        const InkBox tiledInk = RedInk(budgetCanvas.grab().toImage());
+        std::printf("RASTER-BUDGET tiledInk=%s\n", FormatBox(tiledInk).c_str());
+        Check(tiledInk.valid(), "the tiled surface paints committed ink at max zoom");
+        Check(budgetCanvas.PeakSurfaceBytes()
+                <= cnote::render::kCanvasSurfaceCacheBytes + cnote::render::kSurfaceRenderBytesPerPaint,
+            "committed-ink repaint keeps peak raster bytes bounded");
+    }
+    {
+        cnote::AppManager nearbyManager;
+        cnote::qt::QtDocumentController nearbyController(nearbyManager);
+        nearbyController.NewBlankDocument();
+        ui::CanvasWidget nearbyCanvas(nearbyController);
+        nearbyCanvas.resize(1200, 900);
+        nearbyCanvas.SetTool(ui::Tool::Select);
+        nearbyCanvas.show();
+        QCoreApplication::processEvents();
+        ui::NewPageDraft draft {};
+        Check(nearbyController.InsertPages(1, 1, draft) == 1U, "nearby-cache probe: second page appended");
+        nearbyCanvas.SetZoom(1.0f);
+        Pump(200);
+        nearbyCanvas.CenterOnPage(0);
+        nearbyCanvas.repaint();
+        nearbyCanvas.CenterOnPage(1);
+        Pump(20);
+        nearbyCanvas.repaint();
+        const std::uint64_t beforeReturn = nearbyCanvas.SurfaceRenderCount();
+        const std::size_t cachedBeforeReturn = nearbyCanvas.CachedSurfaceCount();
+        nearbyCanvas.CenterOnPage(0);
+        Pump(20);
+        nearbyCanvas.repaint();
+        std::printf("NEARBY-CACHE cachedPages=%zu rendersBefore=%llu rendersAfter=%llu bytes=%zu\n",
+            cachedBeforeReturn, static_cast<unsigned long long>(beforeReturn),
+            static_cast<unsigned long long>(nearbyCanvas.SurfaceRenderCount()),
+            nearbyCanvas.CachedSurfaceBytes());
+        Check(cachedBeforeReturn >= 2U, "the page that left the viewport stays cached");
+        Check(nearbyCanvas.SurfaceRenderCount() == beforeReturn,
+            "scrolling back to a nearby page reuses its cached raster");
+    }
 
     cnote::latex::Shutdown();
     std::printf(g_failures == 0 ? "ALL CANVAS GEOMETRY CHECKS PASSED\n" : "%d CANVAS GEOMETRY CHECK(S) FAILED\n", g_failures);

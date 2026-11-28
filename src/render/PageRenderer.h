@@ -8,9 +8,11 @@
 #include <QImage>
 #include <QPainterPath>
 #include <QPointF>
+#include <QRect>
 #include <QRectF>
 
 #include "Document.h"
+#include "render/RasterBudget.h"
 #include "selection/InkOutline.h"
 
 class QPainter;
@@ -92,6 +94,16 @@ struct PageRenderParams {
     // RenderPageSurfaceRegion to avoid building paths for objects that cannot
     // touch the rendered region.
     std::optional<QRectF> cullRect;
+    // Device-pixel rect of the full-page raster a region render covers, in the
+    // same top-down space as RenderPageSurface.  Set by the region renderers so
+    // a lazy PDF background is requested for just this region instead of
+    // allocating the whole page; not part of the surface signature.
+    std::optional<QRect> deviceRegion;
+    // Optional larger device-pixel rect (containing `deviceRegion`) whose PDF
+    // background is rendered once and sliced: every tile of a tiled page passes
+    // the same rect, so a glyph crossing a tile boundary comes from one PDFium
+    // render and the tiles cannot seam.  Defaults to `deviceRegion`.
+    std::optional<QRect> pdfBackgroundRegion;
 };
 
 // Draws the committed objects of one page in layer order: page/PDF background,
@@ -140,13 +152,41 @@ void PaintPageLatex(QPainter& painter, const PageLatex& latex, float scale, floa
 
 // Renders only `region` (page units) of a page into a premultiplied ARGB32
 // QImage sized region * scale * devicePixelRatio, for compositing over a
-// cached full-page surface.  Objects outside `region` are culled.
+// cached full-page surface.  Objects outside `region` are culled.  Empty when
+// the region cannot be mapped to a raster inside `budget`.
 [[nodiscard]] QImage RenderPageSurfaceRegion(
-    const Page& page, const PageRenderParams& params, const QRectF& region);
+    const Page& page, const PageRenderParams& params, const QRectF& region,
+    RasterBudget budget = RasterBudget {});
+
+// Device-pixel size of the full-page raster RenderPageSurface allocates for
+// these parameters (the same rounding RenderPageSurface uses).
+[[nodiscard]] QSize PageSurfacePixelSize(const Page& page, const PageRenderParams& params);
+
+// Device-pixel origin quantum for a region render that must be pixel-identical
+// to the full-page raster.  Qt derives a glyph's horizontal subpixel phase from
+// the painter translation relative to the text painter's scale, so a region
+// whose origin is not a multiple of the ratio's numerator re-rasterizes text
+// with a 1/64-pixel offset.  Tiles built by the canvas and by tests use this
+// alignment; origins that are multiples of it reproduce the full raster's text
+// exactly (and strokes/images are translation-invariant).
+[[nodiscard]] int RegionAlignment(const PageRenderParams& params);
+
+// Device-pixel size of one page tile: kPageTileSize rounded down to an integer
+// multiple of RegionAlignment (never below the alignment itself).
+[[nodiscard]] int PageTileSize(const PageRenderParams& params);
+
+// Renders only `deviceRect` (device pixels, top-down, in the full-page raster's
+// space) into a raster exactly that size.  A rect whose origin is a multiple of
+// RegionAlignment reproduces RenderPageSurface's pixels exactly, so tiling a
+// page and compositing the tiles is seamless.
+[[nodiscard]] QImage RenderPageSurfaceRegionPixels(
+    const Page& page, const PageRenderParams& params, const QRect& deviceRect,
+    RasterBudget budget = RasterBudget {});
 
 // Renders a page into a top-down premultiplied ARGB32 QImage sized
-// page.width * scale * devicePixelRatio.
-[[nodiscard]] QImage RenderPageSurface(const Page& page, const PageRenderParams& params);
+// page.width * scale * devicePixelRatio.  Empty when that size exceeds `budget`.
+[[nodiscard]] QImage RenderPageSurface(
+    const Page& page, const PageRenderParams& params, RasterBudget budget = RasterBudget {});
 
 // Cached page surface owned by the caller. EnsurePageSurface re-renders only
 // when the signature changes.
@@ -154,10 +194,17 @@ struct PageSurfaceCache {
     QImage image;
     std::uint64_t signature = 0;
     bool valid = false;
+    // Signature whose render was refused (over budget) or failed to allocate.
+    // Retrying it on every paint would stall the GUI thread for a surface that
+    // cannot exist until the signature changes, so it is skipped; the previous
+    // image (if any) stays usable.
+    std::uint64_t failedSignature = 0;
+    bool failed = false;
 };
 
 [[nodiscard]] std::uint64_t PageSurfaceSignature(const Page& page, const PageRenderParams& params);
-void EnsurePageSurface(PageSurfaceCache& cache, const Page& page, const PageRenderParams& params);
+void EnsurePageSurface(PageSurfaceCache& cache, const Page& page, const PageRenderParams& params,
+    RasterBudget budget = RasterBudget {});
 
 // Wraps top-down straight-alpha BGRA bytes (model/PDFium layout) as a
 // non-owning ARGB32 QImage view. The caller must keep `pixels` alive for as

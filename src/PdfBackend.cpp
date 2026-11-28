@@ -104,6 +104,22 @@ bool AppendEmbeddedCnoteProject(
         static_cast<unsigned long>(projectBytes.size())) != 0;
 }
 
+// Hard ceiling for one PDFium bitmap: the screen path keeps its page rasters
+// far below this, but export and stored-raster paths must still never hand
+// PDFium/QImage a dimension that overflows or cannot exist.
+constexpr int kMaxPdfBitmapDimension = 16384;
+
+// Rounds a page size at a raster scale, or 0 when the resulting bitmap must not
+// be allocated (non-finite, non-positive, past the hard ceiling, or out of the
+// int range - casting a huge double to int is undefined).
+int CheckedPdfPixelSize(float pageSize, float renderScale) {
+    const double value = static_cast<double>(pageSize) * static_cast<double>(renderScale);
+    if (!std::isfinite(value) || value < 1.0 || value > kMaxPdfBitmapDimension) {
+        return 0;
+    }
+    return static_cast<int>(std::lround(value));
+}
+
 std::optional<RasterImage> RenderPageBitmap(FPDF_PAGE pageHandle, float renderScale) {
     if (pageHandle == nullptr || renderScale <= 0.0f) {
         return std::nullopt;
@@ -111,8 +127,11 @@ std::optional<RasterImage> RenderPageBitmap(FPDF_PAGE pageHandle, float renderSc
 
     const float pageWidth = std::max(1.0f, FPDF_GetPageWidthF(pageHandle));
     const float pageHeight = std::max(1.0f, FPDF_GetPageHeightF(pageHandle));
-    const int bitmapWidth = std::max(1, static_cast<int>(std::lround(pageWidth * renderScale)));
-    const int bitmapHeight = std::max(1, static_cast<int>(std::lround(pageHeight * renderScale)));
+    const int bitmapWidth = CheckedPdfPixelSize(pageWidth, renderScale);
+    const int bitmapHeight = CheckedPdfPixelSize(pageHeight, renderScale);
+    if (bitmapWidth == 0 || bitmapHeight == 0) {
+        return std::nullopt;
+    }
 
     FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(bitmapWidth, bitmapHeight, FPDFBitmap_BGRA, nullptr, 0);
     if (bitmap == nullptr) {
@@ -372,8 +391,13 @@ struct PdfFileWriter {
 }  // namespace
 
 RasterImage CreateBlankRaster(float pageWidth, float pageHeight, float renderScale) {
-    const int bitmapWidth = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageWidth) * renderScale)));
-    const int bitmapHeight = std::max(1, static_cast<int>(std::lround(std::max(1.0f, pageHeight) * renderScale)));
+    const int bitmapWidth = CheckedPdfPixelSize(std::max(1.0f, pageWidth), renderScale);
+    const int bitmapHeight = CheckedPdfPixelSize(std::max(1.0f, pageHeight), renderScale);
+    if (bitmapWidth == 0 || bitmapHeight == 0) {
+        // Refused size: an empty raster makes the export path fail cleanly
+        // instead of allocating an impossible bitmap.
+        return {};
+    }
     const int stride = bitmapWidth * 4;
 
     RasterImage raster {};
@@ -563,6 +587,82 @@ std::optional<RasterImage> PdfiumBackend::RenderPage(
     }
 
     const auto raster = RenderPageBitmap(pageHandle, renderScale);
+
+    FPDF_ClosePage(pageHandle);
+    FPDF_CloseDocument(documentHandle);
+    return raster;
+}
+
+std::optional<RasterImage> PdfiumBackend::RenderPageRegion(
+    const std::shared_ptr<std::vector<std::uint8_t>>& pdfBytes,
+    std::size_t pageIndex,
+    float renderScale,
+    PdfPixelRect region) const {
+    if (!initialized_ || !pdfBytes || pdfBytes->empty() || renderScale <= 0.0f) {
+        return std::nullopt;
+    }
+
+    FPDF_DOCUMENT documentHandle = FPDF_LoadMemDocument64(pdfBytes->data(), pdfBytes->size(), nullptr);
+    if (documentHandle == nullptr) {
+        return std::nullopt;
+    }
+
+    const int pageCount = FPDF_GetPageCount(documentHandle);
+    if (pageCount <= 0 || pageIndex >= static_cast<std::size_t>(pageCount)) {
+        FPDF_CloseDocument(documentHandle);
+        return std::nullopt;
+    }
+
+    FPDF_PAGE pageHandle = FPDF_LoadPage(documentHandle, static_cast<int>(pageIndex));
+    if (pageHandle == nullptr) {
+        FPDF_CloseDocument(documentHandle);
+        return std::nullopt;
+    }
+
+    const float pageWidth = std::max(1.0f, FPDF_GetPageWidthF(pageHandle));
+    const float pageHeight = std::max(1.0f, FPDF_GetPageHeightF(pageHandle));
+    const int fullWidth = CheckedPdfPixelSize(pageWidth, renderScale);
+    const int fullHeight = CheckedPdfPixelSize(pageHeight, renderScale);
+    if (fullWidth == 0 || fullHeight == 0) {
+        FPDF_ClosePage(pageHandle);
+        FPDF_CloseDocument(documentHandle);
+        return std::nullopt;
+    }
+
+    // Clamp to the full-page raster RenderPage would produce; the excerpt is
+    // exactly that raster's pixels.
+    const int left = std::clamp(region.x, 0, fullWidth - 1);
+    const int top = std::clamp(region.y, 0, fullHeight - 1);
+    const int right = std::clamp(region.x + std::max(1, region.width), left + 1, fullWidth);
+    const int bottom = std::clamp(region.y + std::max(1, region.height), top + 1, fullHeight);
+    const int bitmapWidth = right - left;
+    const int bitmapHeight = bottom - top;
+
+    FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(bitmapWidth, bitmapHeight, FPDFBitmap_BGRA, nullptr, 0);
+    if (bitmap == nullptr) {
+        FPDF_ClosePage(pageHandle);
+        FPDF_CloseDocument(documentHandle);
+        return std::nullopt;
+    }
+
+    RasterImage raster {};
+    FPDFBitmap_FillRect(bitmap, 0, 0, bitmapWidth, bitmapHeight, 0xFFFFFFFF);
+    // Same call and same page -> bitmap mapping as the full RenderPage path,
+    // with the excerpt's integer device origin as the start position: PDFium
+    // then rasterizes each pixel exactly as the full-page render does, so
+    // bounded excerpts composite without seams.
+    FPDF_RenderPageBitmap(
+        bitmap, pageHandle, -left, -top, fullWidth, fullHeight, 0, FPDF_ANNOT);
+
+    raster.width = bitmapWidth;
+    raster.height = bitmapHeight;
+    raster.stride = FPDFBitmap_GetStride(bitmap);
+    raster.scale = renderScale;
+
+    const auto* source = static_cast<const std::uint8_t*>(FPDFBitmap_GetBuffer(bitmap));
+    const std::size_t totalBytes = static_cast<std::size_t>(raster.stride) * static_cast<std::size_t>(bitmapHeight);
+    raster.pixels = PixelBuffer(std::vector<std::uint8_t>(source, source + totalBytes));
+    FPDFBitmap_Destroy(bitmap);
 
     FPDF_ClosePage(pageHandle);
     FPDF_CloseDocument(documentHandle);

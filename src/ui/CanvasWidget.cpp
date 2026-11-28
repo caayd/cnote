@@ -550,40 +550,299 @@ render::PageRenderParams CanvasWidget::RenderParamsFor(const CanvasPageView& vie
     return params;
 }
 
-const render::PageSurfaceCache* CanvasWidget::FindSurface(
-    std::size_t pageIndex, float scale, float devicePixelRatio) const {
+CanvasWidget::SurfaceEntry* CanvasWidget::FindSurfaceEntry(
+    std::size_t pageIndex, float scale, float devicePixelRatio) {
     const auto page = surfaces_.find(pageIndex);
     if (page == surfaces_.end()) {
         return nullptr;
     }
     const std::uint64_t epoch = controller_.DocumentRef().PageEpoch(pageIndex);
-    for (const SurfaceEntry& entry : page->second.entries) {
+    for (SurfaceEntry& entry : page->second.entries) {
         if (entry.pageEpoch == epoch
-            && entry.scale == scale && entry.devicePixelRatio == devicePixelRatio && entry.cache.valid) {
-            return &entry.cache;
+            && entry.scale == scale && entry.devicePixelRatio == devicePixelRatio
+            && (entry.cache.valid || entry.tiled)) {
+            return &entry;
         }
     }
     return nullptr;
 }
 
-const render::PageSurfaceCache* CanvasWidget::NewestSurface(std::size_t pageIndex) const {
+CanvasWidget::SurfaceEntry* CanvasWidget::NewestFullSurfaceEntry(std::size_t pageIndex) {
     const auto page = surfaces_.find(pageIndex);
     if (page == surfaces_.end()) {
         return nullptr;
     }
     const std::uint64_t epoch = controller_.DocumentRef().PageEpoch(pageIndex);
-    for (const SurfaceEntry& entry : page->second.entries) {
-        if (entry.pageEpoch == epoch && entry.cache.valid && !entry.cache.image.isNull()) {
-            return &entry.cache;
+    for (SurfaceEntry& entry : page->second.entries) {
+        if (entry.pageEpoch == epoch && !entry.cache.image.isNull()) {
+            return &entry;
         }
     }
     return nullptr;
 }
 
-const render::PageSurfaceCache& CanvasWidget::EnsureSurface(const CanvasPageView& view, const Page& page) {
+bool CanvasWidget::PageSurfaceFits(const CanvasPageView& view, const Page& page) const {
+    const QSize size = render::PageSurfacePixelSize(page, RenderParamsFor(view));
+    return render::RasterFitsBudget(size.width(), size.height());
+}
+
+std::optional<QRect> CanvasWidget::VisiblePageDeviceRect(
+    const CanvasPageView& view, const Page& page, const QRect& clip) const {
+    if (!view.valid || view.rect.isEmpty()) {
+        return std::nullopt;
+    }
+    const QRectF visible = view.rect.intersected(QRectF(clip));
+    if (visible.isEmpty()) {
+        return std::nullopt;
+    }
+    // Full-page device size and view size can differ by one pixel because each
+    // rounds independently; scale the logical offsets by their ratio so the
+    // visible region lands on the same pixels the full surface covers.
+    const QSize pageSize = render::PageSurfacePixelSize(page, RenderParamsFor(view));
+    const double scaleX = static_cast<double>(pageSize.width()) / std::max(1.0, view.rect.width());
+    const double scaleY = static_cast<double>(pageSize.height()) / std::max(1.0, view.rect.height());
+    const QRect device(
+        static_cast<int>(std::floor((visible.left() - view.rect.left()) * scaleX)),
+        static_cast<int>(std::floor((visible.top() - view.rect.top()) * scaleY)),
+        static_cast<int>(std::ceil((visible.right() - visible.left()) * scaleX)),
+        static_cast<int>(std::ceil((visible.bottom() - visible.top()) * scaleY)));
+    const QRect clamped = device.intersected(QRect(QPoint(0, 0), pageSize));
+    if (clamped.isEmpty()) {
+        return std::nullopt;
+    }
+    return clamped;
+}
+
+int CanvasWidget::SurfaceTileSize(const CanvasPageView& view) const {
+    return render::PageTileSize(RenderParamsFor(view));
+}
+
+void CanvasWidget::EnsureVisibleTiles(SurfaceEntry& entry, const CanvasPageView& view, const Page& page,
+    const QRect& visibleDeviceRect, std::uint64_t signature, std::size_t& renderBudget, bool& deferred) {
+    if (entry.tileSignature != signature) {
+        // A committed change (or any signature input) invalidates every tile of
+        // the page; they are excerpts of the same content.
+        entry.tiles.clear();
+        entry.tileSignature = signature;
+    }
+    const QSize pageSize = render::PageSurfacePixelSize(page, RenderParamsFor(view));
+    const QRect visible = visibleDeviceRect.intersected(QRect(QPoint(0, 0), pageSize));
+    if (visible.isEmpty()) {
+        return;
+    }
+    render::PageRenderParams params = RenderParamsFor(view);
+    if (params.pdfBackground != nullptr) {
+        // One PDFium render of the visible page region feeds every tile, so a
+        // glyph split by a tile boundary is never re-rasterized with a
+        // different subpixel phase elsewhere.
+        params.pdfBackgroundRegion = visible;
+    }
+    const int tileSize = SurfaceTileSize(view);
+    const int firstColumn = visible.left() / tileSize;
+    const int lastColumn = visible.right() / tileSize;
+    const int firstRow = visible.top() / tileSize;
+    const int lastRow = visible.bottom() / tileSize;
+    for (int row = firstRow; row <= lastRow; ++row) {
+        for (int column = firstColumn; column <= lastColumn; ++column) {
+            const QRect tileRect(
+                column * tileSize, row * tileSize,
+                std::min(tileSize, pageSize.width() - (column * tileSize)),
+                std::min(tileSize, pageSize.height() - (row * tileSize)));
+            if (tileRect.isEmpty()) {
+                continue;
+            }
+            const auto existing = std::find_if(entry.tiles.begin(), entry.tiles.end(),
+                [&tileRect](const SurfaceEntry::Tile& tile) { return tile.deviceRect == tileRect; });
+            if (existing != entry.tiles.end()) {
+                // Present tiles are current; a null image records a refused or
+                // failed render so it is not retried every paint.
+                continue;
+            }
+            const std::size_t bytes = render::RasterBytes(tileRect.width(), tileRect.height());
+            if (bytes > renderBudget) {
+                deferred = true;
+                continue;
+            }
+            renderBudget -= bytes;
+            lastPaintSurfaceBytes_ += bytes;
+            QImage image = render::RenderPageSurfaceRegionPixels(page, params, tileRect);
+            ++surfaceRenders_;
+            entry.tiles.push_back(SurfaceEntry::Tile { tileRect, std::move(image) });
+        }
+    }
+    TrimEntryTiles(entry, visible);
+}
+
+void CanvasWidget::TrimEntryTiles(SurfaceEntry& entry, const QRect& visibleDeviceRect) {
+    // Keep the visible tiles (the viewport must stay covered) and only drop
+    // excerpts the user has panned away from when this page alone exceeds its
+    // share of the canvas budget.
+    std::size_t bytes = 0;
+    for (const SurfaceEntry::Tile& tile : entry.tiles) {
+        if (!tile.image.isNull()) {
+            bytes += static_cast<std::size_t>(tile.image.sizeInBytes());
+        }
+    }
+    const std::size_t pageTileBudget = render::kCanvasSurfaceCacheBytes * 3U / 4U;
+    while (bytes > pageTileBudget) {
+        auto farthest = entry.tiles.end();
+        double farthestDistance = -1.0;
+        for (auto tile = entry.tiles.begin(); tile != entry.tiles.end(); ++tile) {
+            if (tile->image.isNull() || tile->deviceRect.intersects(visibleDeviceRect)) {
+                continue;
+            }
+            const QPoint tileCenter = tile->deviceRect.center();
+            const QPoint visibleCenter = visibleDeviceRect.center();
+            const double dx = tileCenter.x() - visibleCenter.x();
+            const double dy = tileCenter.y() - visibleCenter.y();
+            const double distance = (dx * dx) + (dy * dy);
+            if (distance > farthestDistance) {
+                farthestDistance = distance;
+                farthest = tile;
+            }
+        }
+        if (farthest == entry.tiles.end()) {
+            break;
+        }
+        bytes -= static_cast<std::size_t>(farthest->image.sizeInBytes());
+        entry.tiles.erase(farthest);
+    }
+}
+
+// Blit rules (cached page rasters are 1:1 device-pixel copies, never resamples):
+//  - A full-page surface is sized scale * DPR device pixels and tagged with the
+//    DPR. When its tagged size equals the view's, it is drawn with the point
+//    overload at view.rect.topLeft() and SmoothPixmapTransform off, so the
+//    painter copies pixels 1:1. Drawing it into the target rect instead would
+//    resample the whole (up to ~8 MP) image every frame.
+//  - When the raster is not at this view's scale (a zoom-session snapshot, or a
+//    deferred replacement) it is drawn into view.rect and resampled: the DPR
+//    alone does not prove the raster's scale.
+//  - A tiled surface holds raw device-pixel excerpts whose origin is an integer
+//    pixel of the full-page raster. Each tile is drawn with an explicit logical
+//    rect of device size / DPR, keeping the copy 1:1; the tile origin adds to
+//    the same device-pixel fraction the full surface would have. If some tiles
+//    are still pending (deferred by the render budget), the newest full-scale
+//    snapshot is drawn underneath so no hole shows while they fill in.
+bool CanvasWidget::BlitSurface(QPainter& painter, const CanvasPageView& view, const SurfaceEntry& entry,
+    const QRect& clip) {
+    const qreal dpr = cachedDevicePixelRatio_ > 0.0 ? cachedDevicePixelRatio_ : 1.0;
+    if (!entry.cache.image.isNull()) {
+        const qreal rasterDpr = entry.cache.image.devicePixelRatio() > 0.0
+            ? entry.cache.image.devicePixelRatio()
+            : 1.0;
+        const bool rasterMatchesView = std::abs(rasterDpr - dpr) < 0.001
+            && std::abs((entry.cache.image.width() / rasterDpr) - view.rect.width()) < 1.0
+            && std::abs((entry.cache.image.height() / rasterDpr) - view.rect.height()) < 1.0;
+        if (rasterMatchesView) {
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+            painter.drawImage(view.rect.topLeft(), entry.cache.image);
+        } else {
+            painter.drawImage(view.rect, entry.cache.image);
+        }
+        return true;
+    }
+    if (entry.tiles.empty()) {
+        return false;
+    }
+
+    // Pending-tile backdrop: the newest full-scale snapshot, scaled into place.
+    const Page& blitPage = controller_.DocumentRef().PageAt(view.pageIndex);
+    const QSize pageSize = render::PageSurfacePixelSize(blitPage, RenderParamsFor(view));
+    const QRect visible = VisiblePageDeviceRect(view, blitPage, clip).value_or(QRect());
+    const int tileSize = SurfaceTileSize(view);
+    bool complete = !visible.isEmpty();
+    if (complete) {
+        const int firstColumn = visible.left() / tileSize;
+        const int lastColumn = visible.right() / tileSize;
+        const int firstRow = visible.top() / tileSize;
+        const int lastRow = visible.bottom() / tileSize;
+        for (int row = firstRow; row <= lastRow && complete; ++row) {
+            for (int column = firstColumn; column <= lastColumn && complete; ++column) {
+                const QRect tileRect(
+                    column * tileSize, row * tileSize,
+                    std::min(tileSize, pageSize.width() - (column * tileSize)),
+                    std::min(tileSize, pageSize.height() - (row * tileSize)));
+                const auto tile = std::find_if(entry.tiles.begin(), entry.tiles.end(),
+                    [&tileRect](const SurfaceEntry::Tile& candidate) { return candidate.deviceRect == tileRect; });
+                complete = tile != entry.tiles.end() && !tile->image.isNull();
+            }
+        }
+    }
+    if (!complete) {
+        if (SurfaceEntry* snapshot = NewestFullSurfaceEntry(view.pageIndex); snapshot != nullptr) {
+            painter.drawImage(view.rect, snapshot->cache.image);
+        }
+    }
+
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    for (const SurfaceEntry::Tile& tile : entry.tiles) {
+        if (tile.image.isNull()) {
+            continue;
+        }
+        painter.drawImage(
+            QRectF(
+                view.rect.left() + (tile.deviceRect.x() / dpr),
+                view.rect.top() + (tile.deviceRect.y() / dpr),
+                tile.image.width() / dpr,
+                tile.image.height() / dpr),
+            tile.image);
+    }
+    return true;
+}
+
+void CanvasWidget::EnsureGestureFallback(const CanvasPageView& view, const Page& page, const QRect& clip) {
+    const std::optional<QRect> visible = VisiblePageDeviceRect(view, page, clip);
+    if (!visible.has_value()) {
+        return;
+    }
+    const float dpr = cachedDevicePixelRatio_ > 0.0f ? cachedDevicePixelRatio_ : 1.0f;
+    if (!gesture_.fallback.image.isNull()
+        && gesture_.fallbackScale == view.scale
+        && gesture_.fallbackDevicePixelRatio == dpr
+        && gesture_.fallbackRegion == *visible) {
+        return;
+    }
+    render::PageRenderParams params = RenderParamsFor(view);
+    params.excluded = gesture_.excluded;
+    gesture_.fallbackRegion = *visible;
+    gesture_.fallbackScale = view.scale;
+    gesture_.fallbackDevicePixelRatio = dpr;
+    gesture_.fallback.image = render::RenderPageSurfaceRegionPixels(page, params, *visible);
+    gesture_.fallback.valid = !gesture_.fallback.image.isNull();
+    gesture_.fallback.signature = render::PageSurfaceSignature(page, params);
+    if (!gesture_.fallback.image.isNull()) {
+        // Raw device pixels: the paint path blits it in a logical rect of
+        // device size / DPR, like a tile.
+        gesture_.fallback.image.setDevicePixelRatio(1.0);
+    }
+    ++surfaceRenders_;
+}
+
+CanvasWidget::SurfaceEntry* CanvasWidget::EnsureSurfaceEntry(const CanvasPageView& view, const Page& page,
+    const QRect& clip, std::size_t& renderBudget, bool& deferred) {
     PageSurfaces& perPage = surfaces_[view.pageIndex];
-    const float devicePixelRatio = RenderParamsFor(view).devicePixelRatio;
+    const render::PageRenderParams params = RenderParamsFor(view);
+    const float devicePixelRatio = params.devicePixelRatio;
     const std::uint64_t epoch = controller_.DocumentRef().PageEpoch(view.pageIndex);
+    const bool fits = PageSurfaceFits(view, page);
+    const std::uint64_t signature = render::PageSurfaceSignature(page, params);
+
+    const auto prepareTiles = [&](SurfaceEntry& entry) {
+        if (!entry.tiled) {
+            // The page outgrew (or never fit) the full-surface budget: drop a
+            // stale full raster and tile instead.
+            entry.cache = render::PageSurfaceCache {};
+            entry.tiled = true;
+            entry.tiles.clear();
+            entry.tileSignature = 0;
+        }
+        const std::optional<QRect> visible = VisiblePageDeviceRect(view, page, clip);
+        if (!visible.has_value()) {
+            return;
+        }
+        EnsureVisibleTiles(entry, view, page, *visible, signature, renderBudget, deferred);
+    };
 
     for (SurfaceEntry& entry : perPage.entries) {
         // Entries keyed to a different page epoch came from before the page's
@@ -592,33 +851,102 @@ const render::PageSurfaceCache& CanvasWidget::EnsureSurface(const CanvasPageView
         // dead weight and never match, so drop them here.
         if (entry.pageEpoch != epoch) {
             entry.cache = render::PageSurfaceCache {};
+            entry.tiles.clear();
+            entry.tiled = false;
+            entry.tileSignature = 0;
             entry.pageEpoch = epoch;
         }
-        if (entry.scale == view.scale && entry.devicePixelRatio == devicePixelRatio) {
-            const std::uint64_t before = entry.cache.signature;
-            render::EnsurePageSurface(entry.cache, page, RenderParamsFor(view));
-            if (entry.cache.signature != before) {
-                ++surfaceRenders_;
-            }
-            // The surface is rendered at scale * DPR pixels; stamping the DPR
-            // lets the paint path blit it 1:1 in device pixels.
-            if (!entry.cache.image.isNull()) {
-                entry.cache.image.setDevicePixelRatio(devicePixelRatio);
-            }
-            return entry.cache;
+        if (entry.scale != view.scale || entry.devicePixelRatio != devicePixelRatio) {
+            continue;
+        }
+        if (!fits) {
+            prepareTiles(entry);
+            return &entry;
+        }
+        if (!entry.tiled && entry.cache.valid && entry.cache.signature == signature
+            && !entry.cache.image.isNull()) {
+            return &entry;
+        }
+        if (entry.cache.failed && entry.cache.failedSignature == signature) {
+            // Same inputs, known-impossible allocation: keep the usable prior
+            // raster (if any) instead of trying again on every paint.
+            return &entry;
+        }
+        const QSize size = render::PageSurfacePixelSize(page, params);
+        const std::size_t bytes = render::RasterBytes(size.width(), size.height());
+        if (bytes > renderBudget) {
+            deferred = true;
+            return &entry;
+        }
+        renderBudget -= bytes;
+        lastPaintSurfaceBytes_ += bytes;
+        if (entry.tiled) {
+            entry.tiled = false;
+            entry.tiles.clear();
+        }
+        const std::uint64_t before = entry.cache.signature;
+        render::EnsurePageSurface(entry.cache, page, params);
+        if (entry.cache.signature != before) {
+            ++surfaceRenders_;
+        }
+        // The surface is rendered at scale * DPR pixels; stamping the DPR
+        // lets the paint path blit it 1:1 in device pixels.
+        if (!entry.cache.image.isNull()) {
+            entry.cache.image.setDevicePixelRatio(devicePixelRatio);
+        }
+        return &entry;
+    }
+
+    // New scale/DPR entry.  Above the per-surface budget: tile the visible
+    // region.  A tiled entry needs at least one tile of render budget before it
+    // is worth creating.
+    if (!fits) {
+        const std::optional<QRect> visible = VisiblePageDeviceRect(view, page, clip);
+        if (!visible.has_value()) {
+            return nullptr;
+        }
+        const int tileSize = SurfaceTileSize(view);
+        const std::size_t tileBytes = render::RasterBytes(
+            std::min(tileSize, visible->width()),
+            std::min(tileSize, visible->height()));
+        if (tileBytes > renderBudget) {
+            deferred = true;
+            return nullptr;
+        }
+    } else {
+        const QSize size = render::PageSurfacePixelSize(page, params);
+        if (render::RasterBytes(size.width(), size.height()) > renderBudget) {
+            deferred = true;
+            return nullptr;
         }
     }
 
     ++surfaceScaleMisses_;
-    perPage.entries.insert(perPage.entries.begin(), SurfaceEntry { epoch, view.scale, devicePixelRatio, {} });
+    perPage.entries.insert(perPage.entries.begin(),
+        SurfaceEntry { epoch, view.scale, devicePixelRatio, {}, 0, false, {} });
     if (perPage.entries.size() > kScalesPerPage) {
         perPage.entries.resize(kScalesPerPage);
     }
-    render::EnsurePageSurface(perPage.entries.front().cache, page, RenderParamsFor(view));
-    if (!perPage.entries.front().cache.image.isNull()) {
-        perPage.entries.front().cache.image.setDevicePixelRatio(devicePixelRatio);
+    SurfaceEntry& entry = perPage.entries.front();
+    if (!fits) {
+        prepareTiles(entry);
+        return &entry;
     }
-    return perPage.entries.front().cache;
+    const QSize size = render::PageSurfacePixelSize(page, params);
+    const std::size_t bytes = std::min(renderBudget, render::RasterBytes(size.width(), size.height()));
+    renderBudget -= bytes;
+    lastPaintSurfaceBytes_ += bytes;
+    render::EnsurePageSurface(entry.cache, page, params);
+    ++surfaceRenders_;
+    if (!entry.cache.image.isNull()) {
+        entry.cache.image.setDevicePixelRatio(devicePixelRatio);
+    }
+    // If the allocation was refused (or failed) and no image exists, report
+    // nothing so the caller paints live instead of blitting an empty page.
+    if (entry.cache.image.isNull()) {
+        return nullptr;
+    }
+    return &entry;
 }
 
 void CanvasWidget::ResetStrokeLayer() {
@@ -1032,14 +1360,77 @@ QRect CanvasWidget::SelectionDirtyRect(std::size_t pageIndex) const {
         .intersected(rect());
 }
 
-void CanvasWidget::PruneSurfaces(const std::vector<std::size_t>& visiblePages) {
-    for (auto entry = surfaces_.begin(); entry != surfaces_.end();) {
-        if (std::find(visiblePages.begin(), visiblePages.end(), entry->first) == visiblePages.end()) {
-            entry = surfaces_.erase(entry);
-        } else {
-            ++entry;
+void CanvasWidget::TrimSurfaceCache(const std::vector<std::size_t>& visiblePages) {
+    // A page that left the viewport stays cached until the aggregate raster
+    // bytes pass the budget, so scrolling back to a nearby page blits instead
+    // of re-rendering.  Visible pages and their current-scale entries are kept;
+    // stale scale/DPR entries of visible pages only survive while a zoom
+    // session still uses them as snapshots.
+    if (!zoomSession_.has_value()) {
+        for (const std::size_t pageIndex : visiblePages) {
+            const auto page = surfaces_.find(pageIndex);
+            if (page == surfaces_.end()) {
+                continue;
+            }
+            const CanvasPageView view = CalculatePageView(pageIndex);
+            std::vector<SurfaceEntry>& entries = page->second.entries;
+            for (auto entry = entries.begin(); entry != entries.end();) {
+                if (std::abs(entry->scale - view.scale) > 0.0001f
+                    || std::abs(entry->devicePixelRatio - cachedDevicePixelRatio_) > 0.0001f) {
+                    entry = entries.erase(entry);
+                } else {
+                    ++entry;
+                }
+            }
         }
     }
+
+    const auto pageBytes = [](const PageSurfaces& page) {
+        std::size_t bytes = 0;
+        for (const SurfaceEntry& entry : page.entries) {
+            if (!entry.cache.image.isNull()) {
+                bytes += static_cast<std::size_t>(entry.cache.image.sizeInBytes());
+            }
+            for (const SurfaceEntry::Tile& tile : entry.tiles) {
+                if (!tile.image.isNull()) {
+                    bytes += static_cast<std::size_t>(tile.image.sizeInBytes());
+                }
+            }
+        }
+        return bytes;
+    };
+    const auto distanceToVisible = [&visiblePages](std::size_t pageIndex) {
+        std::size_t distance = std::numeric_limits<std::size_t>::max();
+        for (const std::size_t visible : visiblePages) {
+            distance = std::min(distance, pageIndex > visible ? pageIndex - visible : visible - pageIndex);
+        }
+        return distance;
+    };
+
+    std::size_t totalBytes = 0;
+    for (const auto& page : surfaces_) {
+        totalBytes += pageBytes(page.second);
+    }
+    while (totalBytes > render::kCanvasSurfaceCacheBytes) {
+        auto victim = surfaces_.end();
+        std::size_t victimDistance = 0;
+        for (auto page = surfaces_.begin(); page != surfaces_.end(); ++page) {
+            if (std::find(visiblePages.begin(), visiblePages.end(), page->first) != visiblePages.end()) {
+                continue;
+            }
+            const std::size_t distance = distanceToVisible(page->first);
+            if (victim == surfaces_.end() || distance > victimDistance) {
+                victim = page;
+                victimDistance = distance;
+            }
+        }
+        if (victim == surfaces_.end()) {
+            break;  // only visible pages remain; they must stay rendered
+        }
+        totalBytes -= pageBytes(victim->second);
+        surfaces_.erase(victim);
+    }
+    peakSurfaceBytes_ = std::max(peakSurfaceBytes_, CachedSurfaceBytes());
 }
 
 void CanvasWidget::NotifyDocumentChanged() {
@@ -1071,9 +1462,37 @@ std::size_t CanvasWidget::CachedSurfaceCount() const {
     return count;
 }
 
+std::size_t CanvasWidget::CachedSurfaceBytes() const {
+    std::size_t bytes = 0;
+    for (const auto& page : surfaces_) {
+        for (const SurfaceEntry& entry : page.second.entries) {
+            if (!entry.cache.image.isNull()) {
+                bytes += static_cast<std::size_t>(entry.cache.image.sizeInBytes());
+            }
+            for (const SurfaceEntry::Tile& tile : entry.tiles) {
+                if (!tile.image.isNull()) {
+                    bytes += static_cast<std::size_t>(tile.image.sizeInBytes());
+                }
+            }
+        }
+    }
+    return bytes;
+}
+
+std::size_t CanvasWidget::CachedTileCount() const {
+    std::size_t count = 0;
+    for (const auto& page : surfaces_) {
+        for (const SurfaceEntry& entry : page.second.entries) {
+            count += entry.tiles.size();
+        }
+    }
+    return count;
+}
+
 // --- painting --------------------------------------------------------------
 
 void CanvasWidget::paintEvent(QPaintEvent* event) {
+    lastPaintSurfaceBytes_ = 0;
     const float devicePixelRatio = static_cast<float>(devicePixelRatioF());
     if (cachedDevicePixelRatio_ != devicePixelRatio) {
         // Display/DPR change: raster caches are keyed by their effective scale.
@@ -1107,6 +1526,74 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     }
     std::size_t paintedPages = 0;
 
+    // Prepare the page rasters this paint blits, visible pages first (the
+    // current page, then the largest visible area) and inside one paint's
+    // raster-byte budget.  A zoom settle therefore replaces the visible pages
+    // across frames instead of re-rendering every one inside a single paint;
+    // a deferred page paints from its newest snapshot (or vector-live) and its
+    // rect is repainted on the next frame.
+    struct PendingSurface {
+        const CanvasPageView* view = nullptr;
+        qreal visibleArea = 0.0;
+    };
+    std::vector<PendingSurface> pendingSurfaces;
+    std::unordered_map<std::size_t, SurfaceEntry*> paintSurfaces;
+    const std::size_t currentPage = document.CurrentPageIndex();
+    for (const CanvasPageView& view : views) {
+        if (!view.valid || view.pageIndex >= document.PageCount()) {
+            continue;
+        }
+        const qreal padding = zoomSession_.has_value() ? 0.0 : 20.0;
+        if (view.rect.bottom() < clip.top() - padding || view.rect.top() > clip.bottom() + padding) {
+            continue;
+        }
+        if (!view.rect.intersects(clip)) {
+            continue;
+        }
+        // A move/transform gesture mutates its selected objects in place
+        // (translation/transform), which the committed-raster signature would
+        // see as changes; the gesture path blits the pre-gesture raster and
+        // paints the moved selection itself, so it must not re-render here.
+        const bool gestureOnPage = controller_.GesturePageIndex() == view.pageIndex
+            && gesture_.pageIndex == view.pageIndex
+            && !gesture_.only.Empty();
+        if (gestureOnPage) {
+            continue;
+        }
+        // Zoom sessions keep the previous scale's snapshot: rendering a new
+        // exact surface mid-gesture is what made a zoom step stall.
+        if (zoomSession_.has_value()
+            && controller_.PendingStrokePage() != view.pageIndex
+            && NewestFullSurfaceEntry(view.pageIndex) != nullptr) {
+            continue;
+        }
+        const QRectF visible = view.rect.intersected(clip);
+        pendingSurfaces.push_back(PendingSurface { &view, visible.width() * visible.height() });
+    }
+    std::sort(pendingSurfaces.begin(), pendingSurfaces.end(),
+        [currentPage](const PendingSurface& a, const PendingSurface& b) {
+            const bool aCurrent = a.view->pageIndex == currentPage;
+            const bool bCurrent = b.view->pageIndex == currentPage;
+            if (aCurrent != bCurrent) {
+                return aCurrent;
+            }
+            return a.visibleArea > b.visibleArea;
+        });
+    std::size_t renderBudget = render::kSurfaceRenderBytesPerPaint;
+    std::vector<QRect> deferredSurfaceRects;
+    for (const PendingSurface& pending : pendingSurfaces) {
+        const Page& page = document.PageAt(pending.view->pageIndex);
+        bool deferred = false;
+        SurfaceEntry* entry = EnsureSurfaceEntry(*pending.view, page, event->rect(), renderBudget, deferred);
+        if (entry != nullptr) {
+            paintSurfaces[pending.view->pageIndex] = entry;
+        }
+        if (deferred) {
+            deferredSurfaceRects.push_back(pending.view->rect.toAlignedRect().intersected(rect()));
+        }
+        peakSurfaceBytes_ = std::max(peakSurfaceBytes_, CachedSurfaceBytes());
+    }
+
     for (const CanvasPageView& view : views) {
         if (!view.valid || view.pageIndex >= document.PageCount()) {
             continue;
@@ -1136,29 +1623,24 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
         const bool gestureOnPage = controller_.GesturePageIndex() == view.pageIndex
             && gesture_.pageIndex == view.pageIndex
             && !gesture_.only.Empty();
-        const render::PageSurfaceCache* surface = nullptr;
-
+        // The pre-pass prepared this page's raster (a full surface or visible
+        // tiles); a page whose raster was deferred is repainted next frame.
+        SurfaceEntry* entry = nullptr;
+        if (const auto prepared = paintSurfaces.find(view.pageIndex); prepared != paintSurfaces.end()) {
+            entry = prepared->second;
+        }
+        bool gestureFallback = false;
         if (gestureOnPage && !pageHasPendingErase) {
-            surface = FindSurface(view.pageIndex, view.scale, cachedDevicePixelRatio_);
-            if (surface == nullptr) {
-                surface = NewestSurface(view.pageIndex);
-            }
-            if (surface == nullptr) {
-                // No committed raster to reuse: render the page once with the
-                // selection excluded so later moves cannot ghost.
-                render::PageRenderParams params = RenderParamsFor(view);
-                params.excluded = gesture_.excluded;
-                render::EnsurePageSurface(gesture_.fallback, page, params);
-                if (!gesture_.fallback.image.isNull()) {
-                    gesture_.fallback.image.setDevicePixelRatio(cachedDevicePixelRatio_);
-                }
-                surface = &gesture_.fallback;
+            if (entry == nullptr) {
+                entry = FindSurfaceEntry(view.pageIndex, view.scale, cachedDevicePixelRatio_);
             }
             if (gesture_.patch.isNull()
                 || gesture_.scale != view.scale
                 || gesture_.devicePixelRatio != cachedDevicePixelRatio_) {
                 render::PageRenderParams params = RenderParamsFor(view);
                 params.excluded = gesture_.excluded;
+                // Refused above the raster budget: the bounded fallback below
+                // covers the vacated region instead.
                 gesture_.patch = render::RenderPageSurfaceRegion(page, params, gesture_.patchRegion);
                 gesture_.scale = view.scale;
                 gesture_.devicePixelRatio = cachedDevicePixelRatio_;
@@ -1167,114 +1649,121 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                 }
                 ++surfaceRenders_;
             }
+            if (entry == nullptr || gesture_.patch.isNull()) {
+                // No committed raster (or no patch inside the budget) to
+                // reuse: render the visible region once with the selection
+                // excluded so later moves cannot ghost.
+                gestureFallback = true;
+                gesture_.patch = QImage();
+                EnsureGestureFallback(view, page, event->rect());
+            }
         } else if (pageHasPendingErase) {
             // The committed raster is still valid during an erase drag (marks
             // only fade; nothing is deleted yet).  Blit it and overlay the
             // re-rendered patch that carries the faded objects, instead of
             // re-painting the whole page vector-live every sample.
-            surface = FindSurface(view.pageIndex, view.scale, cachedDevicePixelRatio_);
-            if (surface == nullptr) {
-                surface = NewestSurface(view.pageIndex);
+            if (entry == nullptr) {
+                entry = FindSurfaceEntry(view.pageIndex, view.scale, cachedDevicePixelRatio_);
             }
-        } else if (!pageHasPendingErase) {
-            if (zoomSession_.has_value() && !liveStrokeOnPage) {
-                surface = FindSurface(view.pageIndex, view.scale, cachedDevicePixelRatio_);
-                if (surface == nullptr) {
-                    // Zoom snapshot: reuse the newest raster (drawn scaled) until the
-                    // session settles, instead of re-rendering the page mid-gesture.
-                    surface = NewestSurface(view.pageIndex);
-                }
-                if (surface == nullptr) {
-                    surface = &EnsureSurface(view, page);
-                }
-            } else {
-                surface = &EnsureSurface(view, page);
+            if (entry == nullptr) {
+                entry = NewestFullSurfaceEntry(view.pageIndex);
+            }
+        } else if (zoomSession_.has_value() && !liveStrokeOnPage) {
+            // Zoom snapshot: reuse the newest raster (drawn scaled) until the
+            // session settles, instead of re-rendering the page mid-gesture.
+            if (entry == nullptr) {
+                entry = FindSurfaceEntry(view.pageIndex, view.scale, cachedDevicePixelRatio_);
             }
         }
 
         painter.save();
         painter.setClipRect(view.rect);
-        if (pageHasPendingErase && surface != nullptr) {
-            // Same 1:1 blit logic as the cached path below.
-            const qreal rasterDpr = surface->image.devicePixelRatio() > 0.0
-                ? surface->image.devicePixelRatio()
-                : 1.0;
-            const bool rasterMatchesView = !surface->image.isNull()
-                && std::abs(rasterDpr - cachedDevicePixelRatio_) < 0.001
-                && std::abs((surface->image.width() / rasterDpr) - view.rect.width()) < 1.0
-                && std::abs((surface->image.height() / rasterDpr) - view.rect.height()) < 1.0;
-            if (rasterMatchesView) {
-                painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-                painter.drawImage(view.rect.topLeft(), surface->image);
-            } else {
-                painter.drawImage(view.rect, surface->image);
-            }
-            // Overlay the faded objects: one re-rendered patch keyed on the
-            // page signature (which covers the pending index lists), reused
-            // for every sample where the pending set is unchanged.
-            render::PageRenderParams params = RenderParamsFor(view);
-            params.pendingErase = pendingErase;
-            const std::uint64_t signature = render::PageSurfaceSignature(page, params);
-            if (erasePatch_.isNull() || erasePatchSignature_ != signature
-                || erasePatchPage_ != view.pageIndex) {
-                // RenderPageSurfaceRegion clamps to the page internally but
-                // does not report the clamped rect, so clip here first or the
-                // patch would land offset from its true position.
-                erasePatchRegion_ = PendingErasePageRegion(view.pageIndex)
-                    .intersected(QRectF(0.0, 0.0, page.width, page.height));
-                erasePatch_ = render::RenderPageSurfaceRegion(page, params, erasePatchRegion_);
-                if (!erasePatch_.isNull()) {
-                    erasePatch_.setDevicePixelRatio(cachedDevicePixelRatio_);
+        if (gestureOnPage && !pageHasPendingErase) {
+            const qreal dpr = cachedDevicePixelRatio_ > 0.0 ? cachedDevicePixelRatio_ : 1.0;
+            if (gestureFallback) {
+                if (!gesture_.fallback.image.isNull()) {
+                    // Raw device pixels: blit in a logical rect of device size /
+                    // DPR (the tile rule above), 1:1.
+                    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+                    painter.drawImage(
+                        QRectF(
+                            view.rect.left() + (gesture_.fallbackRegion.x() / dpr),
+                            view.rect.top() + (gesture_.fallbackRegion.y() / dpr),
+                            gesture_.fallback.image.width() / dpr,
+                            gesture_.fallback.image.height() / dpr),
+                        gesture_.fallback.image);
+                } else {
+                    render::PageRenderParams params = RenderParamsFor(view);
+                    params.excluded = gesture_.excluded;
+                    render::PaintPage(painter, page, view.rect.topLeft(), params);
                 }
-                erasePatchSignature_ = signature;
-                erasePatchPage_ = view.pageIndex;
-                ++surfaceRenders_;
-            }
-            if (!erasePatch_.isNull() && !erasePatchRegion_.isEmpty()) {
-                // The patch is rendered at scale * DPR in device pixels, so it
-                // blits 1:1 at its region's top-left (same as gesture_.patch).
-                painter.drawImage(
-                    QPointF(view.rect.left() + erasePatchRegion_.x() * view.scale,
-                        view.rect.top() + erasePatchRegion_.y() * view.scale),
-                    erasePatch_);
+            } else if (entry != nullptr && BlitSurface(painter, view, *entry, event->rect())) {
+                if (!gesture_.patch.isNull()) {
+                    // Cover the region the selection vacated: the committed
+                    // raster still shows it at its original position.  The
+                    // patch is rendered at scale * DPR in device pixels, so it
+                    // blits 1:1 at its region's top-left.
+                    painter.drawImage(
+                        QPointF(view.rect.left() + gesture_.patchRegion.x() * view.scale,
+                            view.rect.top() + gesture_.patchRegion.y() * view.scale),
+                        gesture_.patch);
+                }
+            } else {
+                render::PageRenderParams params = RenderParamsFor(view);
+                params.excluded = gesture_.excluded;
+                render::PaintPage(painter, page, view.rect.topLeft(), params);
             }
         } else if (pageHasPendingErase) {
-            render::PageRenderParams params = RenderParamsFor(view);
-            params.pendingErase = pendingErase;
-            render::PaintPage(painter, page, view.rect.topLeft(), params);
-        } else {
-            // The cached surface already has this scale * DPR resolution and carries
-            // its device pixel ratio, so blit it 1:1: drawing it into a target rect
-            // would resample the whole (up to ~8 MP) image every frame, which is what
-            // made dense-page panning and drawing crawl.  The device pixel ratio
-            // alone does not prove the raster is at this view's scale: during a zoom
-            // session FindSurface misses and the newest raster (a snapshot at the
-            // previous scale) is reused, and it must be resampled into view.rect or
-            // the page renders at the stale zoom for the whole gesture.
-            const qreal rasterDpr = surface->image.devicePixelRatio() > 0.0
-                ? surface->image.devicePixelRatio()
-                : 1.0;
-            const bool rasterMatchesView = !surface->image.isNull()
-                && std::abs(rasterDpr - cachedDevicePixelRatio_) < 0.001
-                && std::abs((surface->image.width() / rasterDpr) - view.rect.width()) < 1.0
-                && std::abs((surface->image.height() / rasterDpr) - view.rect.height()) < 1.0;
-            if (rasterMatchesView) {
-                painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-                painter.drawImage(view.rect.topLeft(), surface->image);
-            } else {
-                painter.drawImage(view.rect, surface->image);
+            bool erasePatchReady = false;
+            if (entry != nullptr && BlitSurface(painter, view, *entry, event->rect())) {
+                // Overlay the faded objects: one re-rendered patch keyed on the
+                // page signature (which covers the pending index lists), reused
+                // for every sample where the pending set is unchanged.
+                render::PageRenderParams params = RenderParamsFor(view);
+                params.pendingErase = pendingErase;
+                const std::uint64_t signature = render::PageSurfaceSignature(page, params);
+                if (erasePatch_.isNull() || erasePatchSignature_ != signature
+                    || erasePatchPage_ != view.pageIndex) {
+                    // RenderPageSurfaceRegion clamps to the page internally but
+                    // does not report the clamped rect, so clip here first or the
+                    // patch would land offset from its true position.
+                    erasePatchRegion_ = PendingErasePageRegion(view.pageIndex)
+                        .intersected(QRectF(0.0, 0.0, page.width, page.height));
+                    erasePatch_ = render::RenderPageSurfaceRegion(page, params, erasePatchRegion_);
+                    if (!erasePatch_.isNull()) {
+                        erasePatch_.setDevicePixelRatio(cachedDevicePixelRatio_);
+                    }
+                    erasePatchSignature_ = signature;
+                    erasePatchPage_ = view.pageIndex;
+                    ++surfaceRenders_;
+                }
+                erasePatchReady = !erasePatch_.isNull() && !erasePatchRegion_.isEmpty();
+                if (erasePatchReady) {
+                    // The patch is rendered at scale * DPR in device pixels, so it
+                    // blits 1:1 at its region's top-left (same as gesture_.patch).
+                    painter.drawImage(
+                        QPointF(view.rect.left() + erasePatchRegion_.x() * view.scale,
+                            view.rect.top() + erasePatchRegion_.y() * view.scale),
+                        erasePatch_);
+                }
             }
-        }
-
-        if (gestureOnPage && !pageHasPendingErase && !gesture_.patch.isNull()) {
-            // Cover the region the selection vacated: the committed raster
-            // still shows it at its original position.  The patch is rendered
-            // at scale * DPR in device pixels, so it blits 1:1 at its region's
-            // top-left.
-            painter.drawImage(
-                QPointF(view.rect.left() + gesture_.patchRegion.x() * view.scale,
-                    view.rect.top() + gesture_.patchRegion.y() * view.scale),
-                gesture_.patch);
+            if (!erasePatchReady) {
+                // No reusable raster, or the marked region's patch is above the
+                // raster budget: repaint the page vector-live with the fade.
+                render::PageRenderParams params = RenderParamsFor(view);
+                params.pendingErase = pendingErase;
+                render::PaintPage(painter, page, view.rect.topLeft(), params);
+            }
+        } else if (entry != nullptr && BlitSurface(painter, view, *entry, event->rect())) {
+            // Cached raster blitted 1:1 (full surface or visible tiles).
+        } else if (SurfaceEntry* snapshot = NewestFullSurfaceEntry(view.pageIndex); snapshot != nullptr) {
+            // No raster at this scale yet (deferred replacement or a zoom
+            // session's first frame): reuse the newest snapshot, resampled.
+            painter.drawImage(view.rect, snapshot->cache.image);
+        } else {
+            // Nothing cached at any scale: paint the page vector-live.  This is
+            // bounded memory; the pre-pass's deferred render replaces it.
+            render::PaintPage(painter, page, view.rect.topLeft(), RenderParamsFor(view));
         }
 
         if (gestureOnPage && !pageHasPendingErase) {
@@ -1372,6 +1861,7 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                         }
                         if (!valid) {
                             item.image = QImage();
+                            item.live = false;
                             continue;
                         }
                         item.originX = minX - margin;
@@ -1379,14 +1869,23 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                         item.width = (maxX - minX) + margin * 2.0f;
                         item.height = (maxY - minY) + margin * 2.0f;
                         list->push_back(item.index);
+                        // Check the raster size before allocating: an object
+                        // spanning the page at max zoom/DPR would otherwise ask
+                        // for an impossible image every gesture.
+                        const std::optional<QSize> rasterSize = render::CheckedRasterSize(
+                            static_cast<double>(item.width) * deviceScale,
+                            static_cast<double>(item.height) * deviceScale);
+                        if (!rasterSize.has_value()) {
+                            item.image = QImage();
+                            item.live = true;
+                            continue;
+                        }
+                        item.live = false;
                         render::PageRenderParams params = RenderParamsFor(view);
                         params.scale = deviceScale;
                         params.devicePixelRatio = 1.0f;
                         params.textPixelRatio = cachedDevicePixelRatio_;
-                        item.image = QImage(
-                            std::max(1, static_cast<int>(std::lround(item.width * deviceScale))),
-                            std::max(1, static_cast<int>(std::lround(item.height * deviceScale))),
-                            QImage::Format_ARGB32_Premultiplied);
+                        item.image = QImage(*rasterSize, QImage::Format_ARGB32_Premultiplied);
                         item.image.fill(Qt::transparent);
                         QPainter itemPainter(&item.image);
                         render::PaintPageSubset(itemPainter, page,
@@ -1400,6 +1899,27 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
                     ++surfaceRenders_;
                 }
                 for (const GestureItem& item : gesture_.items) {
+                    if (item.live) {
+                        // Above the raster budget: paint just this object live
+                        // on top (bounded memory, exact vector output).
+                        render::ExcludedIndices one;
+                        switch (item.kind) {
+                        case ObjectKind::Stroke:
+                            one.strokes.push_back(item.index);
+                            break;
+                        case ObjectKind::Image:
+                            one.images.push_back(item.index);
+                            break;
+                        case ObjectKind::Text:
+                            one.texts.push_back(item.index);
+                            break;
+                        case ObjectKind::Latex:
+                            one.latexes.push_back(item.index);
+                            break;
+                        }
+                        render::PaintPageSubset(painter, page, view.rect.topLeft(), RenderParamsFor(view), one);
+                        continue;
+                    }
                     if (item.image.isNull()) {
                         continue;
                     }
@@ -1507,10 +2027,16 @@ void CanvasWidget::paintEvent(QPaintEvent* event) {
     }
 
     lastPaintPageCount_ = paintedPages;
+    peakPaintSurfaceBytes_ = std::max(peakPaintSurfaceBytes_, lastPaintSurfaceBytes_);
     // The accumulated transient region was just consumed by this paint; the
     // next gesture samples start a fresh region.
     transientDirty_ = QRect();
-    PruneSurfaces(visiblePages);
+    TrimSurfaceCache(visiblePages);
+    for (const QRect& deferred : deferredSurfaceRects) {
+        // Spread zoom-settle (and above-budget tile) replacements across
+        // frames: repaint only the pages that still owe a raster.
+        update(deferred);
+    }
     // The erase drag's fading trail floats above the pages like the
     // selection chrome (Excalidraw: rgba(0, 0, 0, 0.2) on the light theme).
     if (const std::int64_t now = eraserTrailClock_.elapsed(); eraserTrail_.Visible(now)) {
