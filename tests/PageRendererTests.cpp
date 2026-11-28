@@ -783,6 +783,71 @@ int main(int argc, char** argv) {
             fullDpr.width(), fullDpr.height(), cnote::render::PageTileSize(dprParams), dprMismatches);
         Check(dprMismatches == 0, "tiles stay pixel-exact at a fractional device pixel ratio");
 
+        // Pending-erase fade tiles (PERF-016): the canvas blits the committed
+        // surface, then overlays one tile per marked object rendered with the
+        // pending index lists.  Arbitrary RegionAlignment-aligned rects around
+        // each object must composite to the exact full-page pending render.
+        const auto pendingTilesMatch = [&page](const cnote::render::PageRenderParams& baseParams,
+                                          const char* label) {
+            cnote::render::PageRenderParams pendingParams = baseParams;
+            pendingParams.pendingErase.images = { 0U };
+            pendingParams.pendingErase.texts = { 0U };
+            pendingParams.pendingErase.latexes = { 0U };
+            pendingParams.pendingErase.strokes = { 0U };
+            const QImage base = cnote::render::RenderPageSurface(page, baseParams);
+            const QImage expected = cnote::render::RenderPageSurface(page, pendingParams);
+            if (base.isNull() || expected.isNull() || base.size() != expected.size()) {
+                Check(false, std::string("pending tile parity: ") + label + " renders");
+                return;
+            }
+            const double deviceScale = static_cast<double>(baseParams.scale)
+                * static_cast<double>(baseParams.devicePixelRatio);
+            const int alignment = std::max(1, cnote::render::RegionAlignment(pendingParams));
+            const QSize pageSize = cnote::render::PageSurfacePixelSize(page, pendingParams);
+            const auto alignedRect = [&](double left, double top, double right, double bottom) {
+                const int x = static_cast<int>(std::floor(left * deviceScale));
+                const int y = static_cast<int>(std::floor(top * deviceScale));
+                const int alignedX = static_cast<int>(std::floor(static_cast<double>(x) / alignment)) * alignment;
+                const int alignedY = static_cast<int>(std::floor(static_cast<double>(y) / alignment)) * alignment;
+                return QRect(alignedX, alignedY,
+                    static_cast<int>(std::ceil(right * deviceScale)) - alignedX,
+                    static_cast<int>(std::ceil(bottom * deviceScale)) - alignedY)
+                    .intersected(QRect(QPoint(0, 0), pageSize));
+            };
+            // Conservative page-unit bounds of each fixture object: the image
+            // (10..50), the text box (10..190 x 60..125), the LaTeX baseline
+            // block and the stroke (y30, width 6).
+            const std::vector<QRect> rects {
+                alignedRect(0.0, 0.0, 60.0, 60.0),
+                alignedRect(0.0, 55.0, 200.0, 125.0),
+                alignedRect(0.0, 125.0, 200.0, 170.0),
+                alignedRect(0.0, 20.0, 70.0, 40.0),
+            };
+            QImage composed = base;
+            QPainter painter(&composed);
+            for (const QRect& rect : rects) {
+                const QImage tile = cnote::render::RenderPageSurfaceRegionPixels(page, pendingParams, rect);
+                if (tile.isNull() || tile.size() != rect.size()) {
+                    Check(false, std::string("pending tile parity: ") + label + " tile renders at its rect");
+                    continue;
+                }
+                painter.drawImage(rect.topLeft(), tile);
+            }
+            painter.end();
+            int mismatches = 0;
+            for (int y = 0; y < expected.height(); ++y) {
+                for (int x = 0; x < expected.width(); ++x) {
+                    mismatches += expected.pixel(x, y) == composed.pixel(x, y) ? 0 : 1;
+                }
+            }
+            std::printf("PENDING-TILE-PARITY %s rects=%zu mismatchedPixels=%d\n",
+                label, rects.size(), mismatches);
+            Check(mismatches == 0,
+                std::string("pending erase tiles composite to the exact faded page (") + label + ")");
+        };
+        pendingTilesMatch(tileParams, "scale=1 dpr=1");
+        pendingTilesMatch(dprParams, "scale=1.35 dpr=1.75");
+
         // Refusals: the full size is checked before allocating, and a refused
         // render keeps the prior raster instead of retrying every paint.
         cnote::render::RasterBudget tiny;

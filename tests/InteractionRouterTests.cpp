@@ -93,6 +93,10 @@ public:
     bool beginTransformSucceeds = true;
     std::vector<ui::ObjectRef> eraseTargets;
     std::vector<ui::ObjectRef> scratchOutTargets;
+    // The pending-erase membership the host would show, and the size of the
+    // last published addition (per-sample work: only new hits are published).
+    std::vector<ui::ObjectRef> pendingErase;
+    std::size_t lastPendingEraseAdded = 0;
     mutable int scratchOutQueries = 0;
     StrokeSampling lastSampling {};
     std::optional<float> beginPressure;
@@ -180,8 +184,21 @@ public:
     void CommitTransform() override { ops.push_back("CommitTransform"); }
     void CancelTransform() override { ops.push_back("CancelTransform"); }
 
-    void UpdatePendingErase(const std::vector<ui::ObjectRef>& pending) override {
-        ops.push_back("UpdatePendingErase(" + std::to_string(pending.size()) + ")");
+    void UpdatePendingErase(const std::vector<ui::ObjectRef>& added,
+        const std::vector<ui::ObjectRef>& removed) override {
+        for (const ui::ObjectRef& object : removed) {
+            const auto at = std::find(pendingErase.begin(), pendingErase.end(), object);
+            if (at != pendingErase.end()) {
+                pendingErase.erase(at);
+            }
+        }
+        for (const ui::ObjectRef& object : added) {
+            if (std::find(pendingErase.begin(), pendingErase.end(), object) == pendingErase.end()) {
+                pendingErase.push_back(object);
+            }
+        }
+        lastPendingEraseAdded = added.size();
+        ops.push_back("UpdatePendingErase(" + std::to_string(pendingErase.size()) + ")");
     }
     void CommitErase(const std::vector<ui::ObjectRef>& pending) override {
         ops.push_back("CommitErase(" + std::to_string(pending.size()) + ")");
@@ -703,11 +720,13 @@ void TestErasePendingSingleCommit() {
     router.HandlePointerPress(Press(50.0, 50.0));
     Check(router.ActiveInteraction() == ui::InteractionKind::Erase, "the eraser starts an erase drag");
     Check(host.HasOp("UpdatePendingErase(1)"), "the first mark is pending\n" + host.Dump());
+    Check(host.lastPendingEraseAdded == 1U, "the first sample publishes exactly one new target");
 
     host.Reset();
     host.eraseTargets = { ui::ObjectRef { 0U, ui::ObjectKind::Stroke, 7U } };
     router.HandlePointerMove(Move(60.0, 60.0));
     Check(host.HasOp("UpdatePendingErase(2)"), "a second object joins the pending set\n" + host.Dump());
+    Check(host.lastPendingEraseAdded == 1U, "a later sample publishes only the newly hit object");
 
     host.Reset();
     host.eraseTargets = { ui::ObjectRef { 0U, ui::ObjectKind::Stroke, 7U } };

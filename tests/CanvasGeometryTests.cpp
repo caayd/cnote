@@ -651,7 +651,7 @@ int main(int argc, char** argv) {
         const QPoint inkCenter((fullInk.x0 + fullInk.x1) / 2, (fullInk.y0 + fullInk.y1) / 2);
         const QRgb fullPixel = fullFrame.pixel(inkCenter);
 
-        canvas.UpdatePendingErase({ ui::ObjectRef { 0U, ui::ObjectKind::Stroke, 0U } });
+        canvas.UpdatePendingErase({ ui::ObjectRef { 0U, ui::ObjectKind::Stroke, 0U } }, {});
         const QImage fadedFrame = canvas.grab().toImage();
         const QRgb fadedPixel = fadedFrame.pixel(inkCenter);
         std::printf("PENDING-ERASE full=(%d,%d,%d) faded=(%d,%d,%d)\n",
@@ -662,8 +662,24 @@ int main(int argc, char** argv) {
               "the pending stroke fades to 0.5 opacity over the white page");
         Check(qGreen(fadedPixel) > qGreen(fullPixel) + 60,
               "the pending stroke is visibly lighter than the committed one");
+        // The fade patch is a per-object tile; it must cover the stroke's full
+        // ink, not just the pixels around the probe.
+        int fadedColumns = 0;
+        for (int x = fullInk.x0; x <= fullInk.x1; ++x) {
+            fadedColumns += qGreen(fadedFrame.pixel(x, inkCenter.y()))
+                    > qGreen(fullFrame.pixel(x, inkCenter.y())) + 20
+                ? 1 : 0;
+        }
+        Check(fadedColumns >= (fullInk.x1 - fullInk.x0 + 1) * 9 / 10,
+              "the fade patch covers the whole pending stroke");
+        Check(canvas.PendingEraseObjectCount() == 1U && canvas.PendingEraseTileCount() == 1U
+                && canvas.PendingEraseTileBytes() > 0U,
+            "one marked object keeps one fade tile");
 
-        canvas.UpdatePendingErase({});
+        canvas.UpdatePendingErase({}, { ui::ObjectRef { 0U, ui::ObjectKind::Stroke, 0U } });
+        Check(canvas.PendingEraseObjectCount() == 0U && canvas.PendingEraseTileCount() == 0U
+                && canvas.PendingEraseTileBytes() == 0U,
+            "clearing the pending mark releases the fade patch");
         const QImage restoredFrame = canvas.grab().toImage();
         const QRgb restoredPixel = restoredFrame.pixel(inkCenter);
         Check(qRed(restoredPixel) > 200 && qGreen(restoredPixel) < 60,
@@ -671,6 +687,165 @@ int main(int argc, char** argv) {
     }
     Check(controller.Undo(), "undo removes the pending-erase probe stroke");
     QCoreApplication::processEvents();
+
+    // (f1) The fade patch is diffed per newly marked object: adding a second,
+    // far-away mark renders only that object's tile, not the growing union, and
+    // committing releases the patch.
+    canvas.SetTool(ui::Tool::Draw);
+    canvas.SetZoom(1.0f);
+    Pump(160);
+    canvas.CenterOnPage(0);
+    Pump(20);
+    canvas.repaint();
+    {
+        const QPointF center(canvas.rect().center());
+        ui::InteractionModifiers modifiers = canvas.Router().Modifiers();
+        modifiers.straightLine = true;
+        canvas.SetInteractionModifiers(modifiers);
+        const auto drawLine = [&](const QPointF& from, const QPointF& to) {
+            SendMouse(canvas, QEvent::MouseButtonPress, from, Qt::LeftButton, Qt::LeftButton);
+            SendMouse(canvas, QEvent::MouseMove, to, Qt::NoButton, Qt::LeftButton);
+            SendMouse(canvas, QEvent::MouseButtonRelease, to, Qt::LeftButton, Qt::NoButton);
+            QCoreApplication::processEvents();
+        };
+        drawLine(center + QPointF(-110.0, -90.0), center + QPointF(110.0, -90.0));
+        drawLine(center + QPointF(-110.0, 90.0), center + QPointF(110.0, 90.0));
+        // A third stroke crosses the first: marking it must re-render the tile
+        // it overlaps so the two faded layers composite in stroke order.
+        drawLine(center + QPointF(0.0, -110.0), center + QPointF(0.0, 110.0));
+        modifiers.straightLine = false;
+        canvas.SetInteractionModifiers(modifiers);
+        canvas.repaint();
+        Check(controller.DocumentRef().PageAt(0).strokes.size() == 3U, "diff patch probe strokes committed");
+
+        const QImage unmarkedFrame = canvas.grab().toImage();
+        const ui::ObjectRef first { 0U, ui::ObjectKind::Stroke, 0U };
+        const ui::ObjectRef second { 0U, ui::ObjectKind::Stroke, 1U };
+        const ui::ObjectRef third { 0U, ui::ObjectKind::Stroke, 2U };
+        const std::uint64_t rendersBefore = canvas.PendingEraseRenderCount();
+        const std::uint64_t areaBefore = canvas.PendingEraseRenderArea();
+        canvas.UpdatePendingErase({ first }, {});
+        const std::uint64_t firstDirty = canvas.LastTransientRepaintArea();
+        const QImage firstFrame = canvas.grab().toImage();
+        const std::uint64_t firstRenders = canvas.PendingEraseRenderCount() - rendersBefore;
+        const std::uint64_t firstArea = canvas.PendingEraseRenderArea() - areaBefore;
+
+        canvas.UpdatePendingErase({ second }, {});
+        const std::uint64_t secondDirty = canvas.LastTransientRepaintArea();
+        const QImage secondFrame = canvas.grab().toImage();
+        const std::uint64_t secondRenders = canvas.PendingEraseRenderCount()
+            - rendersBefore - firstRenders;
+        const std::uint64_t secondArea = canvas.PendingEraseRenderArea() - areaBefore - firstArea;
+        std::printf("ERASE-DIFF first=%llu/%llu second=%llu/%llu dirty=%llu/%llu\n",
+            static_cast<unsigned long long>(firstRenders), static_cast<unsigned long long>(firstArea),
+            static_cast<unsigned long long>(secondRenders), static_cast<unsigned long long>(secondArea),
+            static_cast<unsigned long long>(firstDirty), static_cast<unsigned long long>(secondDirty));
+        Check(firstRenders == 1U && secondRenders == 1U,
+            "each newly marked object renders one fade tile");
+        Check(firstArea > 0U && secondArea > 0U && secondArea <= firstArea * 2U,
+            "a later mark renders only its own region, not the accumulated union");
+        Check(firstDirty > 0U && secondDirty > 0U && secondDirty <= firstDirty * 2U,
+            "disjoint marks keep sparse repaint damage instead of one bounding rect");
+        Check(canvas.PendingEraseTileCount() == 2U, "both marked objects keep their tiles");
+
+        // Locate each committed line's ink row away from the crossing stroke;
+        // the faded frames must show both at 0.5 opacity.
+        const int probeOffset = static_cast<int>(std::lround(55.0 * devicePixelRatio));
+        const int probeColumn = unmarkedFrame.width() / 2 + probeOffset;
+        const auto inkRowNear = [&](int fromY, int toY) {
+            for (int y = std::max(0, fromY); y < std::min(unmarkedFrame.height(), toY); ++y) {
+                const QRgb pixel = unmarkedFrame.pixel(probeColumn, y);
+                if (qRed(pixel) > 150 && qGreen(pixel) < 120 && qBlue(pixel) < 120) {
+                    return y;
+                }
+            }
+            return -1;
+        };
+        const int firstRow = inkRowNear(0, unmarkedFrame.height() / 2);
+        const int secondRow = inkRowNear(unmarkedFrame.height() / 2, unmarkedFrame.height());
+        Check(firstRow >= 0 && secondRow >= 0, "diff probe lines have ink");
+        const auto fadedAt = [](const QImage& image, int x, int y) {
+            const QRgb pixel = image.pixel(x, y);
+            return qRed(pixel) > 200 && qGreen(pixel) > 90 && qGreen(pixel) < 170;
+        };
+        if (firstRow >= 0 && secondRow >= 0) {
+            Check(fadedAt(firstFrame, probeColumn, firstRow),
+                "the first marked stroke is faded in the first diff frame");
+            Check(!fadedAt(firstFrame, probeColumn, secondRow),
+                "the unmarked second stroke is still full opacity in the first diff frame");
+            Check(fadedAt(secondFrame, probeColumn, firstRow)
+                    && fadedAt(secondFrame, probeColumn, secondRow),
+                "both marked strokes are faded after the second diff");
+        }
+
+        // Marking the crossing stroke invalidates the tile it overlaps; at the
+        // crossing the later stroke paints its 0.5 opacity over the earlier
+        // one's faded pixels (red at 0.5 over red at 0.5 over white).
+        canvas.UpdatePendingErase({ third }, {});
+        const QImage thirdFrame = canvas.grab().toImage();
+        std::printf("ERASE-TILES after crossing mark=%zu objects=%zu\n",
+            canvas.PendingEraseTileCount(), canvas.PendingEraseObjectCount());
+        Check(canvas.PendingEraseTileCount() >= 3U, "the crossing mark keeps its tile");
+        const int verticalColumn = unmarkedFrame.width() / 2;
+        const int middleRow = unmarkedFrame.height() / 2;
+        const auto anyNear = [](const QImage& image, int centerX, int y, bool (*predicate)(QRgb)) {
+            for (int x = centerX - 6; x <= centerX + 6; ++x) {
+                if (x >= 0 && x < image.width() && predicate(image.pixel(x, y))) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const auto fadedPixel = [](QRgb pixel) {
+            return qRed(pixel) > 200 && qGreen(pixel) > 90 && qGreen(pixel) < 170;
+        };
+        const auto doubleFadedPixel = [](QRgb pixel) {
+            return qRed(pixel) > 200 && qGreen(pixel) >= 40 && qGreen(pixel) <= 90;
+        };
+        Check(anyNear(thirdFrame, verticalColumn, middleRow, fadedPixel),
+            "the crossing stroke is faded");
+        if (firstRow >= 0) {
+            Check(anyNear(thirdFrame, verticalColumn, firstRow, doubleFadedPixel),
+                "overlapping faded tiles composite in stroke order at the crossing");
+        }
+
+        // Commit clears the patch and the marked objects vanish.
+        const std::uint64_t committedRenders = canvas.PendingEraseRenderCount();
+        canvas.CommitErase({ first, second, third });
+        Check(canvas.PendingEraseObjectCount() == 0U && canvas.PendingEraseTileCount() == 0U
+                && canvas.PendingEraseTileBytes() == 0U,
+            "committing the erase releases the fade patch");
+        Check(controller.DocumentRef().PageAt(0).strokes.empty(), "the commit erased every marked stroke");
+        canvas.grab().toImage();
+        Check(canvas.PendingEraseRenderCount() == committedRenders,
+            "a released patch renders nothing afterwards");
+        QCoreApplication::processEvents();
+    }
+
+    // (f1b) Session replacement releases pending marks and gesture buffers
+    // instead of painting refs into the old document (PERF-036).
+    {
+        cnote::qt::QtDocumentController sessionController(manager);
+        sessionController.NewBlankDocument();
+        cnote::Stroke sessionStroke;
+        sessionStroke.style.width = 3.0f;
+        sessionStroke.points = { { 100.0f, 100.0f }, { 200.0f, 100.0f } };
+        sessionController.Session()->document.PageAt(0).strokes.push_back(sessionStroke);
+        sessionController.Session()->document.TouchPage(0);
+        ui::CanvasWidget sessionCanvas(sessionController);
+        sessionCanvas.resize(800, 600);
+        sessionCanvas.NotifyDocumentChanged();
+        sessionCanvas.UpdatePendingErase({ ui::ObjectRef { 0U, ui::ObjectKind::Stroke, 0U } }, {});
+        sessionCanvas.grab().toImage();
+        Check(sessionCanvas.PendingEraseTileCount() == 1U, "session probe tile rendered");
+        sessionController.AttachSession(std::make_shared<cnote::ProjectSession>());
+        sessionCanvas.NotifyDocumentChanged();
+        Check(sessionCanvas.PendingEraseObjectCount() == 0U && sessionCanvas.PendingEraseTileCount() == 0U
+                && sessionCanvas.PendingEraseTileBytes() == 0U,
+            "a session replacement releases the fade patch");
+        Check(sessionCanvas.ActiveInteraction() == ui::InteractionKind::None,
+            "a session replacement ends the live interaction");
+    }
 
     // (f2) Eraser trail: an erase drag leaves a translucent gray comet behind
     // the pointer (Excalidraw's EraserTrail) that fades out after release and

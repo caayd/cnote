@@ -27,7 +27,9 @@ inline constexpr float kPendingEraseObjectOpacity = 0.5f;
 
 // Indices of committed objects marked by an in-progress erase drag; they paint
 // at kPendingEraseObjectOpacity instead of full opacity (the reference's
-// pendingErase*Indices_ sets, App.cpp:5572-5628).
+// pendingErase*Indices_ sets, App.cpp:5572-5628).  Each list is sorted
+// ascending: opacity membership is a binary search, and the order is part of
+// the surface signature.
 struct PendingEraseIndices {
     std::vector<std::size_t> images;
     std::vector<std::size_t> texts;
