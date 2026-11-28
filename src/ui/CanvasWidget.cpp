@@ -3891,13 +3891,12 @@ void CanvasWidget::CommitStroke() {
         for (SurfaceEntry& candidate : pageSurfaces->second.entries) {
             if (candidate.pageEpoch == epochBeforeCommit
                 && candidate.scale == view.scale && candidate.devicePixelRatio == devicePixelRatio
-                && candidate.cache.valid) {
+                && (candidate.cache.valid || candidate.tiled)) {
                 entry = &candidate;
                 break;
             }
         }
     }
-    render::PageSurfaceCache* cache = entry != nullptr ? &entry->cache : nullptr;
     // Same raster-resolution arithmetic as render::RenderPageSurface
     // (deviceScale = params.scale * params.devicePixelRatio, then page width *
     // deviceScale); a different float association rounds to 1124 vs 1123 on
@@ -3917,25 +3916,78 @@ void CanvasWidget::CommitStroke() {
     // DPR a second time and displaced/scaled the committed stroke (reported:
     // committed stroke lands away from the live preview at non-1 DPR, growing
     // with zoom).
-    if (hasPending && view.valid && cache != nullptr && !cache->image.isNull()
-        && cache->image.size() == QSize(
-            std::max(1, static_cast<int>(std::lround(pendingPage->width * deviceScale))),
-            std::max(1, static_cast<int>(std::lround(pendingPage->height * deviceScale))))) {
-        render::PageRenderParams params = RenderParamsFor(view);
-        QPainter painter(&cache->image);
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        render::PaintStrokePreview(painter, committed, params, 1.0f);
-        painter.end();
-        cache->signature = render::PageSurfaceSignature(*pendingPage, RenderParamsFor(view));
-        // EndStroke bumped the page epoch; re-stamp so the composited raster
-        // stays the entry for this page instead of being dropped on the next
-        // paint (a full re-render of a dense page would stall the stroke the
-        // user is already drawing).
-        entry->pageEpoch = document.PageEpoch(pageIndex);
-        update(view.rect.toAlignedRect());
-        NotifyViewportChanged();
-        return;
+    if (hasPending && view.valid && entry != nullptr) {
+        const render::PageRenderParams logicalParams = RenderParamsFor(view);
+        const std::uint64_t postCommitSignature =
+            render::PageSurfaceSignature(*pendingPage, logicalParams);
+        if (!entry->tiled && !entry->cache.image.isNull()
+            && entry->cache.image.size() == QSize(
+                std::max(1, static_cast<int>(std::lround(pendingPage->width * deviceScale))),
+                std::max(1, static_cast<int>(std::lround(pendingPage->height * deviceScale))))) {
+            QPainter painter(&entry->cache.image);
+            painter.setRenderHint(QPainter::Antialiasing, true);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            render::PaintStrokePreview(painter, committed, logicalParams, 1.0f);
+            painter.end();
+            entry->cache.signature = postCommitSignature;
+            // EndStroke bumped the page epoch; re-stamp so the composited
+            // raster stays the entry for this page instead of being dropped on
+            // the next paint (a full re-render of a dense page would stall the
+            // stroke the user is already drawing).
+            entry->pageEpoch = document.PageEpoch(pageIndex);
+            update(view.rect.toAlignedRect());
+            NotifyViewportChanged();
+            return;
+        }
+
+        // A tiled page (above the per-surface budget, so common at high zoom on
+        // HiDPI) composites into every cached tile the stroke's bounds touch,
+        // with the tile's integer device origin and the same device-space
+        // params its own render used.  Tiles the stroke misses stay valid.
+        float minX = 0.0f;
+        float minY = 0.0f;
+        float maxX = 0.0f;
+        float maxY = 0.0f;
+        if (entry->tiled && !entry->tiles.empty()
+            && StrokeBounds(committed, &minX, &minY, &maxX, &maxY)) {
+            // Smoothing can bow the rendered path slightly outside the raw
+            // bounds; over-including a tile only costs one composite.
+            const float margin = committed.style.width * 0.5f + 4.0f;
+            const QRectF deviceBounds(
+                static_cast<qreal>((minX - margin) * deviceScale),
+                static_cast<qreal>((minY - margin) * deviceScale),
+                static_cast<qreal>((maxX - minX + (margin * 2.0f)) * deviceScale),
+                static_cast<qreal>((maxY - minY + (margin * 2.0f)) * deviceScale));
+            render::PageRenderParams deviceParams = logicalParams;
+            deviceParams.scale = deviceScale;
+            deviceParams.devicePixelRatio = 1.0f;
+            if (logicalParams.textPixelRatio.has_value()) {
+                deviceParams.textPixelRatio = *logicalParams.textPixelRatio * devicePixelRatio;
+            }
+            bool usable = true;
+            for (SurfaceEntry::Tile& tile : entry->tiles) {
+                if (tile.image.isNull() || !QRectF(tile.deviceRect).intersects(deviceBounds)) {
+                    continue;
+                }
+                if (tile.image.size() != tile.deviceRect.size()) {
+                    usable = false;
+                    break;
+                }
+                QPainter tilePainter(&tile.image);
+                tilePainter.setRenderHint(QPainter::Antialiasing, true);
+                tilePainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+                tilePainter.translate(-tile.deviceRect.x(), -tile.deviceRect.y());
+                render::PaintStrokePreview(tilePainter, committed, deviceParams, 1.0f);
+                tilePainter.end();
+            }
+            if (usable) {
+                entry->tileSignature = postCommitSignature;
+                entry->pageEpoch = document.PageEpoch(pageIndex);
+                update(view.rect.toAlignedRect());
+                NotifyViewportChanged();
+                return;
+            }
+        }
     }
 
     const auto page = surfaces_.find(pageIndex);
